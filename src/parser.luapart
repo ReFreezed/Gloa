@@ -15,7 +15,27 @@
 
 --============================================================]]
 
-!local PRINT_NODE_BRACKETS = false
+!(
+local PRINT_NODE_BRACKETS = false
+
+local function ERROR_OR_RETURN(errCode)
+	__LUA("if state.soft then return nil end ")
+	__LUA(errCode,"")
+end
+
+local function SET_OR_RETURN(assignmentCode)
+	local preCode, sufCode = assignmentCode:match"^([^=]+)=(.*)$"
+	if not preCode then  error(assignmentCode)  end
+
+	__LUA("local __value__ = ",sufCode)
+	__LUA(" if not __value__ then return nil end ")
+	__LUA(preCode," = __value__")
+end
+
+local function DO_OR_RETURN(exprCode)
+	__LUA("if not (",exprCode,") then return nil end")
+end
+)
 
 
 
@@ -23,6 +43,7 @@ _G.!struct"ParseState"{
 	fileBuffers = {},
 	tokens      = {},
 	nextToken   = 1,
+	soft        = false, -- Enabling this will make parsing functions return nil on error instead of triggering an actual error.
 }
 
 
@@ -231,7 +252,7 @@ end
 function _G.parseIdentifier(state, parentNode)
 	local tokType, tokValue = consumeNextToken(state)
 	if tokType ~= !(TOKEN_TYPE_IDENTIFIER) then
-		errorParsingLast(state, "Expected an identifier.")
+		!ERROR_OR_RETURN `errorParsingLast(state, "Expected an identifier.")`
 	end
 
 	local ident = astNewNode(state, AstIdentifier, parentNode)
@@ -246,15 +267,15 @@ function _G.parseType(state, parentNode)
 	if isToken(tokType,tokValue, !(TOKEN_TYPE_KEYWORD),"typeOf") then
 		tokType, tokValue = consumeNextToken(state)
 		if not isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),"(") then
-			errorParsingAfterPrevious(state, "Expected '('.")
+			!ERROR_OR_RETURN `errorParsingAfterPrevious(state, "Expected '('.")`
 		end
 
-		local typeOf      = astNewNode(state, AstTypeOf, parentNode)
-		typeOf.expression = parseExpression(state, typeOf)
+		local typeOf                      = astNewNode(state, AstTypeOf, parentNode)
+		!SET_OR_RETURN `typeOf.expression = parseExpression(state, typeOf)`
 
 		tokType, tokValue = consumeNextToken(state)
 		if not isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),")") then
-			errorParsingAfterPrevious(state, "Expected ')'.")
+			!ERROR_OR_RETURN `errorParsingAfterPrevious(state, "Expected ')'.")`
 		end
 
 		return typeOf
@@ -262,12 +283,12 @@ function _G.parseType(state, parentNode)
 	elseif isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),"[") then
 		local tokType, tokValue = consumeNextToken(state)
 		if not isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),"]") then
-			errorParsingAfterPrevious(state, "Expected ']'.")
+			!ERROR_OR_RETURN `errorParsingAfterPrevious(state, "Expected ']'.")`
 		end
 
-		local literal       = astNewNode(state, AstLiteral, parentNode)
-		literal.literalType = !(LITERAL_TYPE_ARRAY)
-		literal.value       = parseType(state, literal) -- Not sure if it's good that literal.value can be an AstNode along other literals.
+		local literal                 = astNewNode(state, AstLiteral, parentNode)
+		literal.literalType           = !(LITERAL_TYPE_ARRAY)
+		!SET_OR_RETURN `literal.value = parseType(state, literal)` -- Not sure if it's good that literal.value can be an AstNode along other literals.
 
 		return literal
 	end
@@ -280,7 +301,7 @@ function _G.parseType(state, parentNode)
 		identType.isPlaceholder = not isBuiltinType
 		identType.typeName      = tokValue
 	else
-		errorParsingLast(state, "Expected a type.")
+		!ERROR_OR_RETURN `errorParsingLast(state, "Expected a type.")`
 	end
 
 	-- User type parameters.
@@ -290,14 +311,14 @@ function _G.parseType(state, parentNode)
 		consumeNextToken(state)
 
 		if isBuiltinType then
-			errorParsingLast(state, "Built-in types have no parameters.")
+			!ERROR_OR_RETURN `errorParsingLast(state, "Built-in types have no parameters.")`
 		end
 
-		identType.arguments = parseExpressionList(state, identType)
+		!SET_OR_RETURN `identType.arguments = parseExpressionList(state, identType)`
 
 		tokType, tokValue = consumeNextToken(state)
 		if not isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),")") then
-			errorParsingAfterPrevious(state, "Expected ')'.")
+			!ERROR_OR_RETURN `errorParsingAfterPrevious(state, "Expected ')'.")`
 		end
 	end
 
@@ -315,7 +336,7 @@ function _G.parseTable(state, parentNode)
 		local tokType, tokValue = peekNextToken(state)
 
 		if not tokType then
-			errorParsing(state, tableStartIndex, "Unfinished table.")
+			!ERROR_OR_RETURN `errorParsing(state, tableStartIndex, "Unfinished table.")`
 		elseif isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),"}") then
 			consumeNextToken(state)
 			break
@@ -328,16 +349,17 @@ function _G.parseTable(state, parentNode)
 		-- [k]=v
 		if isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),"[") then
 			consumeNextToken(state)
-			tableKey = parseExpression(state, tableNode)
+
+			!SET_OR_RETURN `tableKey = parseExpression(state, tableNode)`
 
 			tokType, tokValue = consumeNextToken(state)
 			if not isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),"]") then
-				errorParsingAfterPrevious(state, "Expected ']'.")
+				!ERROR_OR_RETURN `errorParsingAfterPrevious(state, "Expected ']'.")`
 			end
 
 			tokType, tokValue = consumeNextToken(state)
 			if not isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),"=") then
-				errorParsingAfterPrevious(state, "Expected '='.")
+				!ERROR_OR_RETURN `errorParsingAfterPrevious(state, "Expected '='.")`
 			end
 
 		-- k=v
@@ -365,13 +387,13 @@ function _G.parseTable(state, parentNode)
 			tableKey            = literal
 
 		else
-			errorParsingNext(state, "Expected a table field.")
+			!ERROR_OR_RETURN `errorParsingNext(state, "Expected a table field.")`
 		end
 
 		assert(tableKey)
 
-		tableField.key   = tableKey
-		tableField.value = parseExpression(state, tableNode)
+		tableField.key                   = tableKey
+		!SET_OR_RETURN `tableField.value = parseExpression(state, tableNode)`
 
 		table.insert(tableNode, tableField)
 
@@ -382,7 +404,7 @@ function _G.parseTable(state, parentNode)
 			-- void
 			-- Note: A trailing comma or semicolon at the end of the arg list is permitted.
 		else
-			errorParsingAfterPrevious(state, "Expected ','.")
+			!ERROR_OR_RETURN `errorParsingAfterPrevious(state, "Expected ','.")`
 		end
 	end
 
@@ -395,7 +417,7 @@ function _G.parseExpressionList(state, parentNode)
 	local exprList           = astNewNode(state, AstExpressionList, parentNode)
 
 	while true do
-		local expr = parseExpression(state, exprList)
+		!SET_OR_RETURN `local expr = parseExpression(state, exprList)`
 		table.insert(exprList, expr)
 
 		local tokType, tokValue = peekNextToken(state)
@@ -425,7 +447,7 @@ function _G.parseArguments(state, parentNode, isInput)
 			tokType, tokValue = consumeNextToken(state)
 
 			if tokType ~= !(TOKEN_TYPE_IDENTIFIER) then
-				errorParsingLast(state, "Expected an identifier.")
+				!ERROR_OR_RETURN `errorParsingLast(state, "Expected an identifier.")`
 			end
 
 			local arg = astNewNode(state, AstArgument, args)
@@ -440,15 +462,15 @@ function _G.parseArguments(state, parentNode, isInput)
 			elseif isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),",") then
 				-- Continue the loop.
 			else
-				errorParsingAfterPrevious(state, "Expected ':'.")
+				!ERROR_OR_RETURN `errorParsingAfterPrevious(state, "Expected ':'.")`
 			end
 		end
 
 		-- Type.
 		local tokIndex = state.nextToken
 		for _, arg in ipairs(argGroup) do
-			state.nextToken  = tokIndex
-			arg.argumentType = parseType(state, arg) -- @Speed: Parse once then just copy the first one.
+			state.nextToken                  = tokIndex
+			!SET_OR_RETURN `arg.argumentType = parseType(state, arg)` -- @Speed: Parse once then just copy the first one.
 		end
 
 		-- Default value.
@@ -459,8 +481,8 @@ function _G.parseArguments(state, parentNode, isInput)
 
 			local tokIndex = state.nextToken
 			for _, arg in ipairs(argGroup) do
-				state.nextToken  = tokIndex
-				arg.argumentType = parseExpression(state, arg) -- @Speed: Parse once then just copy the first one.
+				state.nextToken                  = tokIndex
+				!SET_OR_RETURN `arg.argumentType = parseExpression(state, arg)` -- @Speed: Parse once then just copy the first one.
 			end
 		end
 
@@ -499,7 +521,7 @@ function _G.parseDeclaration(state, parentNode)
 
 	local tokType, identName = consumeNextToken(state)
 	if tokType ~= !(TOKEN_TYPE_IDENTIFIER) then
-		errorParsingLast(state, "Expected identifier.")
+		!ERROR_OR_RETURN `errorParsingLast(state, "Expected identifier.")`
 	end
 
 	local decl   = astNewNode(state, AstDeclaration, parentNode)
@@ -522,12 +544,12 @@ function _G.parseDeclaration(state, parentNode)
 
 		-- Specified type.
 		else
-			decl.valueType = parseType(state, decl)
+			!SET_OR_RETURN `decl.valueType = parseType(state, decl)`
 		end
 
 	-- We must have = or : after the identifier, for specified or inferred type.
 	elseif not isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),"=") then
-		errorParsingAfterLast(state, "Expected ':' or '='.")
+		!ERROR_OR_RETURN `errorParsingAfterLast(state, "Expected ':' or '='.")`
 	end
 
 	local tokType, tokValue = peekNextToken(state)
@@ -535,8 +557,9 @@ function _G.parseDeclaration(state, parentNode)
 	-- The value.
 	if isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),"=",":") then
 		consumeNextToken(state)
-		decl.isConstant = tokValue == ":"
-		decl.value      = parseExpression(state, decl)
+
+		decl.isConstant            = tokValue == ":"
+		!SET_OR_RETURN `decl.value = parseExpression(state, decl)`
 	end
 
 	return decl
@@ -546,7 +569,7 @@ function _G.parseAssignment(state, parentNode)
 	local assignment = astNewNode(state, AstAssignment, parentNode)
 
 	while true do
-		local ident = parseIdentifier(state, parentNode)
+		!SET_OR_RETURN `local ident = parseIdentifier(state, parentNode)`
 		table.insert(assignment.variables, ident)
 
 		local tokType, tokValue = consumeNextToken(state, steps)
@@ -557,12 +580,12 @@ function _G.parseAssignment(state, parentNode)
 			assignment.operation = tokValue
 			break
 		else
-			errorParsingLast(state, "Expected '='.")
+			!ERROR_OR_RETURN `errorParsingLast(state, "Expected '='.")`
 		end
 	end
 
 	while true do
-		local expr = parseExpression(state, assignment)
+		!SET_OR_RETURN `local expr = parseExpression(state, assignment)`
 		table.insert(assignment.expressions, expr)
 
 		tokType, tokValue = peekNextToken(state, steps)
@@ -600,11 +623,14 @@ local function isAtAssignment(state)
 	end
 end
 
+-- Add the names to the 'names' array.
+-- success = parseNameList( state, parentNode, names )
 function _G.parseNameList(state, parentNode, names)
 	while true do
 		local ident = parseIdentifier(state, parentNode)
-		table.insert(names, ident)
+		if not ident then  return false  end
 
+		table.insert(names, ident)
 		local tokType, tokValue = peekNextToken(state)
 
 		if isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),",") then
@@ -614,6 +640,8 @@ function _G.parseNameList(state, parentNode, names)
 			break
 		end
 	end
+
+	return true
 end
 
 function _G.parseStatementInImperativeScope(state, block)
@@ -626,10 +654,10 @@ function _G.parseStatementInImperativeScope(state, block)
 	local tokType4, tokValue4 = peekNextToken(state, 4)
 
 	if isToken(tokType,tokValue, !(TOKEN_TYPE_KEYWORD),"local","global") then
-		statement.what = parseDeclaration(state, statement)
+		!SET_OR_RETURN `statement.what = parseDeclaration(state, statement)`
 
 	elseif isAtAssignment(state) then
-		statement.what = parseAssignment(state, statement)
+		!SET_OR_RETURN `statement.what = parseAssignment(state, statement)`
 
 	elseif tokType == !(TOKEN_TYPE_IDENTIFIER) and (
 			isToken(tokType2,tokValue2, !(TOKEN_TYPE_PUNCTUATION),"(")
@@ -637,7 +665,7 @@ function _G.parseStatementInImperativeScope(state, block)
 			-- or tokType2 == !(TOKEN_TYPE_STRING)
 		)
 	then
-		statement.what = parseCall(state, statement, false)
+		!SET_OR_RETURN `statement.what = parseCall(state, statement, false)`
 
 	elseif isToken(tokType,tokValue, !(TOKEN_TYPE_KEYWORD),"if") and (
 		isToken(tokType2,tokValue2, !(TOKEN_TYPE_DIRECTIVE),"complete")
@@ -647,15 +675,15 @@ function _G.parseStatementInImperativeScope(state, block)
 			and isToken(tokType4,tokValue4, !(TOKEN_TYPE_PUNCTUATION),"{")
 		)
 	) then
-		errorParsingNext(state, "@Incomplete: if x == {case...}")
+		!ERROR_OR_RETURN `errorParsingNext(state, "@Incomplete: if x == {case...}")`
 
 	elseif isToken(tokType,tokValue, !(TOKEN_TYPE_KEYWORD),"if") then
 		consumeNextToken(state)
 
-		local ifBranch      = astNewNode(state, AstIf, statement)
-		ifBranch.condition  = parseExpression(state, ifBranch)
-		ifBranch.branchTrue = parseBlockOrScopedStatementOrUnwrappedNonPolutingStatement(state, ifBranch)
-		statement.what      = ifBranch
+		local ifBranch                      = astNewNode(state, AstIf, statement)
+		!SET_OR_RETURN `ifBranch.condition  = parseExpression(state, ifBranch)`
+		!SET_OR_RETURN `ifBranch.branchTrue = parseBlockOrScopedStatementOrUnwrappedNonPolutingStatement(state, ifBranch)`
+		statement.what                      = ifBranch
 
 		while true do
 			tokType, tokValue = peekNextToken(state)
@@ -667,36 +695,36 @@ function _G.parseStatementInImperativeScope(state, block)
 				break
 			end
 
-			local ifBranchElse      = astNewNode(state, AstIf, statement)
-			ifBranchElse.condition  = parseExpression(state, ifBranchElse)
-			ifBranchElse.branchTrue = parseBlockOrScopedStatementOrUnwrappedNonPolutingStatement(state, ifBranchElse)
+			local ifBranchElse                      = astNewNode(state, AstIf, ifBranch)
+			!SET_OR_RETURN `ifBranchElse.condition  = parseExpression(state, ifBranchElse)`
+			!SET_OR_RETURN `ifBranchElse.branchTrue = parseBlockOrScopedStatementOrUnwrappedNonPolutingStatement(state, ifBranchElse)`
 
-			ifBranch.branchFalse    = ifBranchElse
-			ifBranch                = ifBranchElse
+			ifBranch.branchFalse = ifBranchElse
+			ifBranch             = ifBranchElse
 		end
 
 		if isToken(tokType,tokValue, !(TOKEN_TYPE_KEYWORD),"else") then
 			consumeNextToken(state)
-			ifBranch.branchFalse = parseBlockOrScopedStatementOrUnwrappedNonPolutingStatement(state, ifBranch)
+			!SET_OR_RETURN `ifBranch.branchFalse = parseBlockOrScopedStatementOrUnwrappedNonPolutingStatement(state, ifBranch)`
 		end
 
 	elseif isToken(tokType,tokValue, !(TOKEN_TYPE_KEYWORD),"while") then
 		consumeNextToken(state)
 
-		local whileLoop     = astNewNode(state, AstWhile, statement)
-		whileLoop.condition = parseExpression(state, whileLoop)
-		whileLoop.body      = parseBlockOrScopedStatementOrUnwrappedNonPolutingStatement(state, whileLoop)
-		statement.what      = whileLoop
+		local whileLoop                     = astNewNode(state, AstWhile, statement)
+		!SET_OR_RETURN `whileLoop.condition = parseExpression(state, whileLoop)`
+		!SET_OR_RETURN `whileLoop.body      = parseBlockOrScopedStatementOrUnwrappedNonPolutingStatement(state, whileLoop)`
+		statement.what                      = whileLoop
 
 	elseif isToken(tokType,tokValue, !(TOKEN_TYPE_KEYWORD),"for") then
 		consumeNextToken(state)
 
-		local forStartIndex            = state.nextToken
-		local forLoop                  = astNewNode(state, AstFor, statement)
+		local forStartIndex = state.nextToken
+		local forLoop       = astNewNode(state, AstFor, statement)
 
-		local exprListWeMayOrMayNotUse = parseExpressionList(state, forLoop)
-		tokType, tokValue              = peekNextToken(state)
+		!SET_OR_RETURN `local exprListWeMayOrMayNotUse = parseExpressionList(state, forLoop)`
 
+		tokType, tokValue = peekNextToken(state)
 		local twoParter
 
 		-- FOR_TYPE_ITERATOR  for v1, ... in iter [, state [, init ] ]
@@ -720,7 +748,7 @@ function _G.parseStatementInImperativeScope(state, block)
 			twoParter       = false
 		else
 			state.nextToken = forStartIndex
-			errorParsingNext(state, "Could not determine what kind of 'for' statement this is.")
+			!ERROR_OR_RETURN `errorParsingNext(state, "Could not determine what kind of 'for' statement this is.")`
 		end
 
 		if forLoop.forType == !(FOR_TYPE_NUMERIC) then
@@ -729,14 +757,15 @@ function _G.parseStatementInImperativeScope(state, block)
 			-- for i = start, end [, step ]
 			if twoParter then
 				state.nextToken = forStartIndex
-				parseNameList(state, forLoop, forLoop.names)
+				!DO_OR_RETURN `parseNameList(state, forLoop, forLoop.names)`
+
 				assert(#forLoop.names == 1)
 
 				tokType, tokValue = consumeNextToken(state) -- Should eat the '='.
 				assert(isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),"="))
 
-				paramStartIndex     = state.nextToken
-				forLoop.expressions = parseExpressionList(state, forLoop)
+				paramStartIndex                     = state.nextToken
+				!SET_OR_RETURN `forLoop.expressions = parseExpressionList(state, forLoop)`
 
 			-- for start, end [, step ]
 			else
@@ -750,37 +779,41 @@ function _G.parseStatementInImperativeScope(state, block)
 			end
 
 			if #forLoop.expressions < 2 then
-				errorParsingAfterLast(state, "Expected 2 or 3 parameters for the numeric 'for' loop.")
+				!ERROR_OR_RETURN `errorParsingAfterLast(state, "Expected 2 or 3 parameters for the numeric 'for' loop.")`
 
 			elseif #forLoop.expressions > 3 then
+				-- Navigate back to the actual error position.
 				state.nextToken = paramStartIndex
-
 				tokType, tokValue = parseExpression(state)
 				consumeNextToken(state) -- ','
 				tokType, tokValue = parseExpression(state)
 				consumeNextToken(state) -- ','
 				tokType, tokValue = parseExpression(state)
 
-				errorParsingNext(state, "Expected 2 or 3 parameters for the numeric 'for' loop.")
+				!ERROR_OR_RETURN `errorParsingNext(state, "Expected 2 or 3 parameters for the numeric 'for' loop.")`
 			end
 
 		elseif forLoop.forType == !(FOR_TYPE_SHORT) then
 			-- for v1, ... : obj
 			if twoParter then
 				state.nextToken = forStartIndex
-				parseNameList(state, forLoop, forLoop.names)
+				!DO_OR_RETURN `parseNameList(state, forLoop, forLoop.names)`
 
 				tokType, tokValue = consumeNextToken(state) -- Should eat the ':'.
 
 				local i = state.nextToken
 				assert(isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),":"))
 
-				forLoop.expressions = parseExpressionList(state, forLoop)
-				if #forLoop.expressions > 1 then
+				!SET_OR_RETURN `local exprList = parseExpressionList(state, forLoop)`
+
+				if #exprList > 1 then
+					-- Navigate back to the actual error position.
 					state.nextToken = i
 					parseExpression(state)
-					errorParsingNext(state, "Expected a single parameter for the short-form 'for' loop.")
+					!ERROR_OR_RETURN `errorParsingNext(state, "Expected a single parameter for the short-form 'for' loop.")`
 				end
+
+				forLoop.expressions = exprList
 
 				-- @Incomplete: Generate 'itIndex' name for arrays (and more?) if necessary (when types are figured out).
 
@@ -795,16 +828,16 @@ function _G.parseStatementInImperativeScope(state, block)
 		-- for v1, ... in iter [, state [, init ] ]
 		else
 			state.nextToken = forStartIndex
-			parseNameList(state, forLoop, forLoop.names)
+			!DO_OR_RETURN `parseNameList(state, forLoop, forLoop.names)`
 
 			tokType, tokValue = consumeNextToken(state) -- Should eat the 'in'.
 			assert(isToken(tokType,tokValue, !(TOKEN_TYPE_KEYWORD),"in"))
 
-			forLoop.expressions = parseExpressionList(state, forLoop)
+			!SET_OR_RETURN `forLoop.expressions = parseExpressionList(state, forLoop)`
 		end
 
-		forLoop.body   = parseBlockOrScopedStatementOrUnwrappedNonPolutingStatement(state, forLoop, true)
-		statement.what = forLoop
+		!SET_OR_RETURN `forLoop.body = parseBlockOrScopedStatementOrUnwrappedNonPolutingStatement(state, forLoop, true)`
+		statement.what               = forLoop
 
 	-- Table lookup ending in a function call.
 	-- Note: We must detect assignments before this!
@@ -815,14 +848,16 @@ function _G.parseStatementInImperativeScope(state, block)
 		)
 		or isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),"(")
 	then
-		local expr = parseExpression(state, statement)
+		!SET_OR_RETURN `local expr = parseExpression(state, statement)`
+
 		if not (expr.nodeType == !(nodeTypes.AstCall)) then
-			errorParsing(state, statementStartIndex, "Expected the statement to end in a function call.")
+			!ERROR_OR_RETURN `errorParsing(state, statementStartIndex, "Expected the statement to end in a function call.")`
 		end
+
 		statement.what = expr
 
 	else
-		errorParsingNext(state, "Unexpected token at the start of a new statement.")
+		!ERROR_OR_RETURN `errorParsingNext(state, "Unexpected token at the start of a new statement.")`
 	end
 
 	tokType, tokValue = peekNextToken(state)
@@ -843,17 +878,17 @@ function _G.parseBlock(state, parentNode)
 		local tokType, tokValue = peekNextToken(state)
 
 		if not tokType then
-			errorParsing(state, blockStartIndex, "Unfinished block.")
+			!ERROR_OR_RETURN `errorParsing(state, blockStartIndex, "Unfinished block.")`
 
 		elseif isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),"}") then
 			consumeNextToken(state)
 			break
 
 		elseif isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),";") then
-			errorParsingNext(state, "Statement is empty.")
+			!ERROR_OR_RETURN `errorParsingNext(state, "Statement is empty.")`
 
 		else
-			local statement = parseStatementInImperativeScope(state, block)
+			!SET_OR_RETURN `local statement = parseStatementInImperativeScope(state, block)`
 			table.insert(block, statement)
 		end
 	end
@@ -867,10 +902,10 @@ function _G.parseBlockOrScopedStatementOrUnwrappedNonPolutingStatement(state, pa
 
 	if isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),"{") then
 		consumeNextToken(state)
-		return parseBlock(state, parentNode)
+		return parseBlock(state, parentNode) -- May return nil.
 	end
 
-	local statement = parseStatementInImperativeScope(state, parentNode)
+	!SET_OR_RETURN `local statement = parseStatementInImperativeScope(state, parentNode)`
 
 	-- We only need to wrap declarations and 'for' bodies in a block (I think).
 	if requireBlock or statement.what.nodeType == !(nodeTypes.AstDeclaration) then
@@ -897,14 +932,14 @@ function _G.parseFileScope(state, path, parentNode)
 			break
 
 		elseif isToken(tokType,tokValue, !(TOKEN_TYPE_KEYWORD),"local","global") then
-			local decl = parseDeclaration(state, fileScope)
+			!SET_OR_RETURN `local decl = parseDeclaration(state, fileScope)`
 			table.insert(fileScope.declarations, decl)
 
 		elseif isToken(tokType,tokValue, !(TOKEN_TYPE_KEYWORD),"export","use","useLibrary") then
-			errorParsingNext(state, "@Incomplete: Handle '%s'.", tokValue)
+			!ERROR_OR_RETURN `errorParsingNext(state, "@Incomplete: Handle '%s'.", tokValue)`
 
 		else
-			errorParsingNext(state, "Expected file level declaration.")
+			!ERROR_OR_RETURN `errorParsingNext(state, "Expected file level declaration.")`
 		end
 	end
 
@@ -917,85 +952,50 @@ function _G.parseCall(state, parentNode, couldBeType, callee, isMethod)
 	assert(type(parentNode)  == "table")
 	assert(type(couldBeType) == "boolean")
 
-	callee   = callee   or parseIdentifier(state) -- We'll set the parent later.
+	if not callee then
+		!SET_OR_RETURN `callee = parseIdentifier(state)` -- We'll set the parent later.
+	end
+
 	isMethod = isMethod or false
 	local call
 
 	while true do
 		local tokType, tokValue = consumeNextToken(state)
+		if not isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),"(") then
+			!ERROR_OR_RETURN `errorParsingLast(state, "Expected '('.")`
+		end
 
-		-- foo()
-		if isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),"(") then
-			call = astNewNode(state, AstCall, parentNode)
+		call              = astNewNode(state, AstCall, parentNode)
+		tokType, tokValue = peekNextToken(state)
 
-			tokType, tokValue = peekNextToken(state)
+		if isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),")") then
+			consumeNextToken(state)
 
-			if isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),")") then
-				consumeNextToken(state)
-
-				-- Should struct arguments be able to have default values, allowing foo()
-				-- to possibly be a type?
-				couldBeType = false
-
-				-- We're likely to insert default values and iterate over this etc. so
-				-- it's best to not leave it nil.
-				call.arguments = astNewNode(state, AstExpressionList, call)
-
-			else
-				call.arguments = parseExpressionList(state, call)
-
-				tokType, tokValue = consumeNextToken(state)
-				if not isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),")") then
-					errorParsingAfterPrevious(state, "Expected ')' or ','.")
-				end
-			end
-
-			call.couldBeTypeWithParameters = couldBeType
-
-		--[[
-		-- foo{}
-		elseif isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),"{") then
-			assert(not isMethod)
-
-			call           = astNewNoA, d, statestCall, parentNode)
-			call.arguments = astNewNoA, d, statestExpressionList, call)
-
-			local tableNode = parseTable(state, call.arguments)
-			table.insert(call.arguments, tableNode)
-
+			-- Should struct arguments be able to have default values, allowing foo()
+			-- to possibly be a type?
 			couldBeType = false
 
-		-- foo""
-		elseif tokType == !(TOKEN_TYPE_STRING) then
-			assert(not isMethod)
-
-			call           = astNewNoA, d, statestCall, parentNode)
-			call.arguments = astNewNoA, d, statestExpressionList, call)
-
-			local literal       = astNewNoA, d, statestLiteral, call.arguments)
-			literal.literalType = !(LITERAL_TYPE_STRING)
-			literal.value       = tokValue
-			table.insert(call.arguments, literal)
-
-			couldBeType = false
-		]]
+			-- We're likely to insert default values and iterate over this etc. so
+			-- it's best to not leave it nil.
+			call.arguments = astNewNode(state, AstExpressionList, call)
 
 		else
-			errorParsingLast(state, "Expected '('.")
+			!SET_OR_RETURN `call.arguments = parseExpressionList(state, call)`
+
+			tokType, tokValue = consumeNextToken(state)
+			if not isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),")") then
+				!ERROR_OR_RETURN `errorParsingAfterPrevious(state, "Expected ')' or ','.")`
+			end
 		end
+
+		call.couldBeTypeWithParameters = couldBeType
 
 		callee.parent = call
 		call.callee   = callee
 		call.isMethod = isMethod
 
 		tokType, tokValue = peekNextToken(state)
-		if not (
-			isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),"(")
-			-- or isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),"{")
-			-- or tokType == !(TOKEN_TYPE_STRING)
-		) then
-			break
-		end
+		if not isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),"(") then  break  end
 
 		call.couldBeTypeWithParameters = false
 		callee   = call
@@ -1007,7 +1007,7 @@ end
 
 
 
--- parseExpression( state, parentNode [, minOperatorPrecedence ] )
+-- expression = parseExpression( state, parentNode [, minOperatorPrecedence ] )
 function _G.parseExpression(state, parentNode, minOpPrecedence)
 	-- @Robustness: Check that parents are set correctly everywhere in here.
 
@@ -1024,14 +1024,11 @@ function _G.parseExpression(state, parentNode, minOpPrecedence)
 	-- The difference is that here we may have a type.
 	--
 	if
-		tokType == !(TOKEN_TYPE_IDENTIFIER) and (
-			isToken(tokType2,tokValue2, !(TOKEN_TYPE_PUNCTUATION),"(")
-			-- or isToken(tokType2,tokValue2, !(TOKEN_TYPE_PUNCTUATION),"{")
-			-- or tokType2 == !(TOKEN_TYPE_STRING)
-		)
+		tokType == !(TOKEN_TYPE_IDENTIFIER)
+		and isToken(tokType2,tokValue2, !(TOKEN_TYPE_PUNCTUATION),"(")
 	then
 		putBackLastToken(state)
-		expr = parseCall(state, parentNode, true)
+		!SET_OR_RETURN `expr = parseCall(state, parentNode, true)`
 
 	-- Built-in type.
 	elseif isTokenBuiltinType(tokType, tokValue) then
@@ -1070,18 +1067,17 @@ function _G.parseExpression(state, parentNode, minOpPrecedence)
 
 	-- Table constructor.
 	elseif isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),"{") then
-		local tableNode = parseTable(state, parentNode)
-		expr            = tableNode
+		!SET_OR_RETURN `expr = parseTable(state, parentNode)`
 
 	-- Unary operation.
 	elseif
 		isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),"+","-","#") or
 		isToken(tokType,tokValue, !(TOKEN_TYPE_KEYWORD),"not")
 	then
-		local unaryOp      = astNewNode(state, AstUnary, parentNode)
-		unaryOp.operation  = tokValue
-		unaryOp.expression = parseExpression(state, unaryOp, OPERATOR_PRECEDENCE.unary)
-		expr               = unaryOp
+		local unaryOp                      = astNewNode(state, AstUnary, parentNode)
+		unaryOp.operation                  = tokValue
+		!SET_OR_RETURN `unaryOp.expression = parseExpression(state, unaryOp, OPERATOR_PRECEDENCE.unary)`
+		expr                               = unaryOp
 
 	-- Function signature (type) or lambda.
 	--
@@ -1112,11 +1108,11 @@ function _G.parseExpression(state, parentNode, minOpPrecedence)
 			consumeNextToken(state)
 
 		else
-			lambda.argumentsIn = parseArguments(state, lambda, true)
+			!SET_OR_RETURN `lambda.argumentsIn = parseArguments(state, lambda, true)`
 
 			tokType, tokValue = consumeNextToken(state)
 			if not isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),")") then
-				errorParsingAfterPrevious(state, "Expected ')'.")
+				!ERROR_OR_RETURN `errorParsingAfterPrevious(state, "Expected ')'.")`
 			end
 		end
 
@@ -1134,18 +1130,18 @@ function _G.parseExpression(state, parentNode, minOpPrecedence)
 
 				tokType, tokValue = peekNextToken(state)
 				if isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),",") then
-					errorParsingNext(state, "Argument list with 'void' cannot have other arguments.")
+					!ERROR_OR_RETURN `errorParsingNext(state, "Argument list with 'void' cannot have other arguments.")`
 				end
 
 			-- () -> (name:type, ...)
 			elseif isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),"(") then
 				consumeNextToken(state)
 
-				lambda.argumentsOut = parseArguments(state, lambda, false)
+				!SET_OR_RETURN `lambda.argumentsOut = parseArguments(state, lambda, false)`
 
 				tokType, tokValue = consumeNextToken(state)
 				if not isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),")") then
-					errorParsingAfterPrevious(state, "Expected ')'.")
+					!ERROR_OR_RETURN `errorParsingAfterPrevious(state, "Expected ')'.")`
 				end
 
 			-- () -> type, ...
@@ -1154,11 +1150,10 @@ function _G.parseExpression(state, parentNode, minOpPrecedence)
 				lambda.argumentsOut = args
 
 				while true do
-					local arg = astNewNode(state, AstArgument, args)
-					arg.argumentType = parseType(state, args)
+					local arg                        = astNewNode(state, AstArgument, args)
+					!SET_OR_RETURN `arg.argumentType = parseType(state, arg)`
 
 					tokType, tokValue = peekNextToken(state)
-
 					if isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),",") then
 						consumeNextToken(state)
 					else
@@ -1173,8 +1168,9 @@ function _G.parseExpression(state, parentNode, minOpPrecedence)
 
 		if isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),"{") then
 			consumeNextToken(state)
-			lambda.body = parseBlock(state, lambda)
-			expr        = lambda
+
+			!SET_OR_RETURN `lambda.body = parseBlock(state, lambda)`
+			expr                        = lambda
 
 		else
 			local identType             = astNewNode(state, AstType, parentNode)
@@ -1185,48 +1181,48 @@ function _G.parseExpression(state, parentNode, minOpPrecedence)
 
 	-- Parenthesis.
 	elseif isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),"(") then
-		expr              = parseExpression(state, parentNode)
+		!SET_OR_RETURN `expr = parseExpression(state, parentNode)`
+
 		tokType, tokValue = consumeNextToken(state)
 
 		if not isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),")") then
-			errorParsingAfterPrevious(state, "Expected ')'.")
+			!ERROR_OR_RETURN `errorParsingAfterPrevious(state, "Expected ')'.")`
 		end
 
 	-- Type.
 	elseif isToken(tokType,tokValue, !(TOKEN_TYPE_DIRECTIVE),"type") then
 		-- Note: parseType() does not recognize !type which is why you can't put
 		-- the directive anywhere a type is expected. Should we change this?
-		expr = parseType(state, parentNode)
+		!SET_OR_RETURN `expr = parseType(state, parentNode)`
 
-	elseif isToken(tokType,tokValue, !(TOKEN_TYPE_KEYWORD),"typeOf") then
+	elseif
+		isToken(tokType,tokValue, !(TOKEN_TYPE_KEYWORD),"typeOf") or
+		isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),"[")
+	then
 		putBackLastToken(state)
-		expr = parseType(state, parentNode)
-
-	elseif isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),"[") then
-		putBackLastToken(state)
-		expr = parseType(state, parentNode)
+		!SET_OR_RETURN `expr = parseType(state, parentNode)`
 
 	-- Cast.
 	elseif isToken(tokType,tokValue, !(TOKEN_TYPE_KEYWORD),"cast") then
 		tokType, tokValue = consumeNextToken(state)
 		if not isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),"(") then
-			errorParsingAfterPrevious(state, "Expected '('.")
+			!ERROR_OR_RETURN `errorParsingAfterPrevious(state, "Expected '('.")`
 		end
 
-		local cast      = astNewNode(state, AstCast, parentNode)
-		cast.targetType = parseType(state, cast)
+		local cast                      = astNewNode(state, AstCast, parentNode)
+		!SET_OR_RETURN `cast.targetType = parseType(state, cast)`
 
 		tokType, tokValue = consumeNextToken(state)
 		if not isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),")") then
-			errorParsingAfterPrevious(state, "Expected ')'.")
+			!ERROR_OR_RETURN `errorParsingAfterPrevious(state, "Expected ')'.")`
 		end
 
-		cast.expression = parseExpression(state, cast, math.huge) -- @Incomplete: Give casting an operator precedence.
-		expr            = cast
+		!SET_OR_RETURN `cast.expression = parseExpression(state, cast, math.huge)` -- @Incomplete: Give casting an operator precedence.
+		expr                            = cast
 
 	else
 		print(LITERAL_TYPE_TITLES[tokType], tokValue)
-		errorParsingLast(state, "Expected a value.")
+		!ERROR_OR_RETURN `errorParsingLast(state, "Expected a value.")`
 	end
 
 	-- Binary operations.
@@ -1252,14 +1248,12 @@ function _G.parseExpression(state, parentNode, minOpPrecedence)
 		) and OPERATOR_PRECEDENCE[tokValue] >= minOpPrecedence then
 			consumeNextToken(state)
 
-			local binOp     = astNewNode(state, AstBinary, parentNode)
-			binOp.operation = tokValue
-
-			binOp.left      = expr
-			binOp.right     = parseExpression(state, binOp, OPERATOR_PRECEDENCE[tokValue])
-
-			expr.parent     = binOp
-			expr            = binOp
+			local binOp                 = astNewNode(state, AstBinary, parentNode)
+			binOp.operation             = tokValue
+			binOp.left                  = expr
+			!SET_OR_RETURN `binOp.right = parseExpression(state, binOp, OPERATOR_PRECEDENCE[tokValue])`
+			expr.parent                 = binOp
+			expr                        = binOp
 
 		-- Table lookup or similar using '.'.
 		elseif
@@ -1273,7 +1267,7 @@ function _G.parseExpression(state, parentNode, minOpPrecedence)
 
 			tokType, tokValue = consumeNextToken(state)
 			if tokType ~= !(TOKEN_TYPE_IDENTIFIER) then
-				errorParsingLast(state, "Expected an identifier.")
+				!ERROR_OR_RETURN `errorParsingLast(state, "Expected an identifier.")`
 			end
 
 			local literal       = astNewNode(state, AstLiteral, binOp)
@@ -1295,15 +1289,14 @@ function _G.parseExpression(state, parentNode, minOpPrecedence)
 		then
 			consumeNextToken(state)
 
-			local binOp     = astNewNode(state, AstBinary, parentNode)
-			binOp.operation = tokValue
-
-			binOp.left      = expr
-			binOp.right     = parseExpression(state, binOp, OPERATOR_PRECEDENCE[tokValue])
+			local binOp                 = astNewNode(state, AstBinary, parentNode)
+			binOp.operation             = tokValue
+			binOp.left                  = expr
+			!SET_OR_RETURN `binOp.right = parseExpression(state, binOp, OPERATOR_PRECEDENCE[tokValue])`
 
 			tokType, tokValue = consumeNextToken(state)
 			if not isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION), "]") then
-				errorParsingLast(state, "Expected ']'.")
+				!ERROR_OR_RETURN `errorParsingLast(state, "Expected ']'.")`
 			end
 
 			expr.parent = binOp
@@ -1314,8 +1307,7 @@ function _G.parseExpression(state, parentNode, minOpPrecedence)
 			isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),"(")
 			and OPERATOR_PRECEDENCE.call >= minOpPrecedence
 		then
-			local call = parseCall(state, parentNode, false, expr, false)
-			expr       = call
+			!SET_OR_RETURN `expr = parseCall(state, parentNode, false, expr, false)`
 
 		-- Method call.
 		elseif
@@ -1328,16 +1320,14 @@ function _G.parseExpression(state, parentNode, minOpPrecedence)
 			tokType, tokValue = peekLastToken(state)
 
 			if not isToken(tokType,tokValue, !(TOKEN_TYPE_IDENTIFIER)) then
-				errorParsingNext(state, "Expected a method name before this.")
+				!ERROR_OR_RETURN `errorParsingNext(state, "Expected a method name before this.")`
 			elseif not thisCanBeMethodCall then
 				putBackLastToken(state)
-				errorParsingNext(state, "Expected an object to call a method on.")
+				!ERROR_OR_RETURN `errorParsingNext(state, "Expected an object to call a method on.")`
 			end
 
 			consumeNextToken(state)
-
-			local call = parseCall(state, parentNode, false, expr, true)
-			expr       = call
+			!SET_OR_RETURN `expr = parseCall(state, parentNode, false, expr, true)`
 
 		else
 			break

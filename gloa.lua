@@ -639,7 +639,7 @@ do  --[[============================================================
 
 
 
-_G.ParseState=function()return{fileBuffers={},nextToken=1,tokens={}}end
+_G.ParseState=function()return{fileBuffers={},nextToken=1,soft=false,tokens={}}end
 
 
 
@@ -729,7 +729,7 @@ end
 function _G.parseIdentifier(state, parentNode)
 	local tokType, tokValue = consumeNextToken(state)
 	if tokType ~= 2 then
-		errorParsingLast(state, "Expected an identifier.")
+		if state.soft then return nil end errorParsingLast(state, "Expected an identifier.")
 	end
 
 	local ident = astNewNode(state, AstIdentifier, parentNode)
@@ -744,15 +744,15 @@ function _G.parseType(state, parentNode)
 	if isToken(tokType,tokValue, 1,"typeOf") then
 		tokType, tokValue = consumeNextToken(state)
 		if not isToken(tokType,tokValue, 7,"(") then
-			errorParsingAfterPrevious(state, "Expected '('.")
+			if state.soft then return nil end errorParsingAfterPrevious(state, "Expected '('.")
 		end
 
-		local typeOf      = astNewNode(state, AstTypeOf, parentNode)
-		typeOf.expression = parseExpression(state, typeOf)
+		local typeOf                      = astNewNode(state, AstTypeOf, parentNode)
+		local __value__ =  parseExpression(state, typeOf) if not __value__ then return nil end typeOf.expression  = __value__
 
 		tokType, tokValue = consumeNextToken(state)
 		if not isToken(tokType,tokValue, 7,")") then
-			errorParsingAfterPrevious(state, "Expected ')'.")
+			if state.soft then return nil end errorParsingAfterPrevious(state, "Expected ')'.")
 		end
 
 		return typeOf
@@ -760,13 +760,12 @@ function _G.parseType(state, parentNode)
 	elseif isToken(tokType,tokValue, 7,"[") then
 		local tokType, tokValue = consumeNextToken(state)
 		if not isToken(tokType,tokValue, 7,"]") then
-			errorParsingAfterPrevious(state, "Expected ']'.")
+			if state.soft then return nil end errorParsingAfterPrevious(state, "Expected ']'.")
 		end
 
-		local literal       = astNewNode(state, AstLiteral, parentNode)
-		literal.literalType = 6
-		literal.value       = parseType(state, literal) -- Not sure if it's good that literal.value can be an AstNode along other literals.
-
+		local literal                 = astNewNode(state, AstLiteral, parentNode)
+		literal.literalType           = 6
+		local __value__ =  parseType(state, literal) if not __value__ then return nil end literal.value  = __value__
 		return literal
 	end
 
@@ -778,7 +777,7 @@ function _G.parseType(state, parentNode)
 		identType.isPlaceholder = not isBuiltinType
 		identType.typeName      = tokValue
 	else
-		errorParsingLast(state, "Expected a type.")
+		if state.soft then return nil end errorParsingLast(state, "Expected a type.")
 	end
 
 	-- User type parameters.
@@ -788,14 +787,14 @@ function _G.parseType(state, parentNode)
 		consumeNextToken(state)
 
 		if isBuiltinType then
-			errorParsingLast(state, "Built-in types have no parameters.")
+			if state.soft then return nil end errorParsingLast(state, "Built-in types have no parameters.")
 		end
 
-		identType.arguments = parseExpressionList(state, identType)
+		local __value__ =  parseExpressionList(state, identType) if not __value__ then return nil end identType.arguments  = __value__
 
 		tokType, tokValue = consumeNextToken(state)
 		if not isToken(tokType,tokValue, 7,")") then
-			errorParsingAfterPrevious(state, "Expected ')'.")
+			if state.soft then return nil end errorParsingAfterPrevious(state, "Expected ')'.")
 		end
 	end
 
@@ -813,7 +812,7 @@ function _G.parseTable(state, parentNode)
 		local tokType, tokValue = peekNextToken(state)
 
 		if not tokType then
-			errorParsing(state, tableStartIndex, "Unfinished table.")
+			if state.soft then return nil end errorParsing(state, tableStartIndex, "Unfinished table.")
 		elseif isToken(tokType,tokValue, 7,"}") then
 			consumeNextToken(state)
 			break
@@ -826,16 +825,17 @@ function _G.parseTable(state, parentNode)
 		-- [k]=v
 		if isToken(tokType,tokValue, 7,"[") then
 			consumeNextToken(state)
-			tableKey = parseExpression(state, tableNode)
+
+			local __value__ =  parseExpression(state, tableNode) if not __value__ then return nil end tableKey  = __value__
 
 			tokType, tokValue = consumeNextToken(state)
 			if not isToken(tokType,tokValue, 7,"]") then
-				errorParsingAfterPrevious(state, "Expected ']'.")
+				if state.soft then return nil end errorParsingAfterPrevious(state, "Expected ']'.")
 			end
 
 			tokType, tokValue = consumeNextToken(state)
 			if not isToken(tokType,tokValue, 7,"=") then
-				errorParsingAfterPrevious(state, "Expected '='.")
+				if state.soft then return nil end errorParsingAfterPrevious(state, "Expected '='.")
 			end
 
 		-- k=v
@@ -863,13 +863,13 @@ function _G.parseTable(state, parentNode)
 			tableKey            = literal
 
 		else
-			errorParsingNext(state, "Expected a table field.")
+			if state.soft then return nil end errorParsingNext(state, "Expected a table field.")
 		end
 
 		assert(tableKey)
 
-		tableField.key   = tableKey
-		tableField.value = parseExpression(state, tableNode)
+		tableField.key                   = tableKey
+		local __value__ =  parseExpression(state, tableNode) if not __value__ then return nil end tableField.value  = __value__
 
 		table.insert(tableNode, tableField)
 
@@ -880,7 +880,7 @@ function _G.parseTable(state, parentNode)
 			-- void
 			-- Note: A trailing comma or semicolon at the end of the arg list is permitted.
 		else
-			errorParsingAfterPrevious(state, "Expected ','.")
+			if state.soft then return nil end errorParsingAfterPrevious(state, "Expected ','.")
 		end
 	end
 
@@ -893,7 +893,7 @@ function _G.parseExpressionList(state, parentNode)
 	local exprList           = astNewNode(state, AstExpressionList, parentNode)
 
 	while true do
-		local expr = parseExpression(state, exprList)
+		local __value__ =  parseExpression(state, exprList) if not __value__ then return nil end local expr  = __value__
 		table.insert(exprList, expr)
 
 		local tokType, tokValue = peekNextToken(state)
@@ -923,7 +923,7 @@ function _G.parseArguments(state, parentNode, isInput)
 			tokType, tokValue = consumeNextToken(state)
 
 			if tokType ~= 2 then
-				errorParsingLast(state, "Expected an identifier.")
+				if state.soft then return nil end errorParsingLast(state, "Expected an identifier.")
 			end
 
 			local arg = astNewNode(state, AstArgument, args)
@@ -938,16 +938,15 @@ function _G.parseArguments(state, parentNode, isInput)
 			elseif isToken(tokType,tokValue, 7,",") then
 				-- Continue the loop.
 			else
-				errorParsingAfterPrevious(state, "Expected ':'.")
+				if state.soft then return nil end errorParsingAfterPrevious(state, "Expected ':'.")
 			end
 		end
 
 		-- Type.
 		local tokIndex = state.nextToken
 		for _, arg in ipairs(argGroup) do
-			state.nextToken  = tokIndex
-			arg.argumentType = parseType(state, arg) -- @Speed: Parse once then just copy the first one.
-		end
+			state.nextToken                  = tokIndex
+			local __value__ =  parseType(state, arg) if not __value__ then return nil end arg.argumentType  = __value__		end
 
 		-- Default value.
 		tokType, tokValue = peekNextToken(state)
@@ -957,9 +956,8 @@ function _G.parseArguments(state, parentNode, isInput)
 
 			local tokIndex = state.nextToken
 			for _, arg in ipairs(argGroup) do
-				state.nextToken  = tokIndex
-				arg.argumentType = parseExpression(state, arg) -- @Speed: Parse once then just copy the first one.
-			end
+				state.nextToken                  = tokIndex
+				local __value__ =  parseExpression(state, arg) if not __value__ then return nil end arg.argumentType  = __value__			end
 		end
 
 		-- @Incomplete: Set arg.isRequired.
@@ -997,7 +995,7 @@ function _G.parseDeclaration(state, parentNode)
 
 	local tokType, identName = consumeNextToken(state)
 	if tokType ~= 2 then
-		errorParsingLast(state, "Expected identifier.")
+		if state.soft then return nil end errorParsingLast(state, "Expected identifier.")
 	end
 
 	local decl   = astNewNode(state, AstDeclaration, parentNode)
@@ -1020,12 +1018,12 @@ function _G.parseDeclaration(state, parentNode)
 
 		-- Specified type.
 		else
-			decl.valueType = parseType(state, decl)
+			local __value__ =  parseType(state, decl) if not __value__ then return nil end decl.valueType  = __value__
 		end
 
 	-- We must have = or : after the identifier, for specified or inferred type.
 	elseif not isToken(tokType,tokValue, 7,"=") then
-		errorParsingAfterLast(state, "Expected ':' or '='.")
+		if state.soft then return nil end errorParsingAfterLast(state, "Expected ':' or '='.")
 	end
 
 	local tokType, tokValue = peekNextToken(state)
@@ -1033,8 +1031,9 @@ function _G.parseDeclaration(state, parentNode)
 	-- The value.
 	if isToken(tokType,tokValue, 7,"=",":") then
 		consumeNextToken(state)
-		decl.isConstant = tokValue == ":"
-		decl.value      = parseExpression(state, decl)
+
+		decl.isConstant            = tokValue == ":"
+		local __value__ =  parseExpression(state, decl) if not __value__ then return nil end decl.value  = __value__
 	end
 
 	return decl
@@ -1044,7 +1043,7 @@ function _G.parseAssignment(state, parentNode)
 	local assignment = astNewNode(state, AstAssignment, parentNode)
 
 	while true do
-		local ident = parseIdentifier(state, parentNode)
+		local __value__ =  parseIdentifier(state, parentNode) if not __value__ then return nil end local ident  = __value__
 		table.insert(assignment.variables, ident)
 
 		local tokType, tokValue = consumeNextToken(state, steps)
@@ -1055,12 +1054,12 @@ function _G.parseAssignment(state, parentNode)
 			assignment.operation = tokValue
 			break
 		else
-			errorParsingLast(state, "Expected '='.")
+			if state.soft then return nil end errorParsingLast(state, "Expected '='.")
 		end
 	end
 
 	while true do
-		local expr = parseExpression(state, assignment)
+		local __value__ =  parseExpression(state, assignment) if not __value__ then return nil end local expr  = __value__
 		table.insert(assignment.expressions, expr)
 
 		tokType, tokValue = peekNextToken(state, steps)
@@ -1098,11 +1097,14 @@ local function isAtAssignment(state)
 	end
 end
 
+-- Add the names to the 'names' array.
+-- success = parseNameList( state, parentNode, names )
 function _G.parseNameList(state, parentNode, names)
 	while true do
 		local ident = parseIdentifier(state, parentNode)
-		table.insert(names, ident)
+		if not ident then  return false  end
 
+		table.insert(names, ident)
 		local tokType, tokValue = peekNextToken(state)
 
 		if isToken(tokType,tokValue, 7,",") then
@@ -1112,6 +1114,8 @@ function _G.parseNameList(state, parentNode, names)
 			break
 		end
 	end
+
+	return true
 end
 
 function _G.parseStatementInImperativeScope(state, block)
@@ -1124,10 +1128,10 @@ function _G.parseStatementInImperativeScope(state, block)
 	local tokType4, tokValue4 = peekNextToken(state, 4)
 
 	if isToken(tokType,tokValue, 1,"local","global") then
-		statement.what = parseDeclaration(state, statement)
+		local __value__ =  parseDeclaration(state, statement) if not __value__ then return nil end statement.what  = __value__
 
 	elseif isAtAssignment(state) then
-		statement.what = parseAssignment(state, statement)
+		local __value__ =  parseAssignment(state, statement) if not __value__ then return nil end statement.what  = __value__
 
 	elseif tokType == 2 and (
 			isToken(tokType2,tokValue2, 7,"(")
@@ -1135,7 +1139,7 @@ function _G.parseStatementInImperativeScope(state, block)
 			-- or tokType2 == !(TOKEN_TYPE_STRING)
 		)
 	then
-		statement.what = parseCall(state, statement, false)
+		local __value__ =  parseCall(state, statement, false) if not __value__ then return nil end statement.what  = __value__
 
 	elseif isToken(tokType,tokValue, 1,"if") and (
 		isToken(tokType2,tokValue2, 3,"complete")
@@ -1145,15 +1149,15 @@ function _G.parseStatementInImperativeScope(state, block)
 			and isToken(tokType4,tokValue4, 7,"{")
 		)
 	) then
-		errorParsingNext(state, "@Incomplete: if x == {case...}")
+		if state.soft then return nil end errorParsingNext(state, "@Incomplete: if x == {case...}")
 
 	elseif isToken(tokType,tokValue, 1,"if") then
 		consumeNextToken(state)
 
-		local ifBranch      = astNewNode(state, AstIf, statement)
-		ifBranch.condition  = parseExpression(state, ifBranch)
-		ifBranch.branchTrue = parseBlockOrScopedStatementOrUnwrappedNonPolutingStatement(state, ifBranch)
-		statement.what      = ifBranch
+		local ifBranch                      = astNewNode(state, AstIf, statement)
+		local __value__ =  parseExpression(state, ifBranch) if not __value__ then return nil end ifBranch.condition   = __value__
+		local __value__ =  parseBlockOrScopedStatementOrUnwrappedNonPolutingStatement(state, ifBranch) if not __value__ then return nil end ifBranch.branchTrue  = __value__
+		statement.what                      = ifBranch
 
 		while true do
 			tokType, tokValue = peekNextToken(state)
@@ -1165,36 +1169,36 @@ function _G.parseStatementInImperativeScope(state, block)
 				break
 			end
 
-			local ifBranchElse      = astNewNode(state, AstIf, statement)
-			ifBranchElse.condition  = parseExpression(state, ifBranchElse)
-			ifBranchElse.branchTrue = parseBlockOrScopedStatementOrUnwrappedNonPolutingStatement(state, ifBranchElse)
+			local ifBranchElse                      = astNewNode(state, AstIf, ifBranch)
+			local __value__ =  parseExpression(state, ifBranchElse) if not __value__ then return nil end ifBranchElse.condition   = __value__
+			local __value__ =  parseBlockOrScopedStatementOrUnwrappedNonPolutingStatement(state, ifBranchElse) if not __value__ then return nil end ifBranchElse.branchTrue  = __value__
 
-			ifBranch.branchFalse    = ifBranchElse
-			ifBranch                = ifBranchElse
+			ifBranch.branchFalse = ifBranchElse
+			ifBranch             = ifBranchElse
 		end
 
 		if isToken(tokType,tokValue, 1,"else") then
 			consumeNextToken(state)
-			ifBranch.branchFalse = parseBlockOrScopedStatementOrUnwrappedNonPolutingStatement(state, ifBranch)
+			local __value__ =  parseBlockOrScopedStatementOrUnwrappedNonPolutingStatement(state, ifBranch) if not __value__ then return nil end ifBranch.branchFalse  = __value__
 		end
 
 	elseif isToken(tokType,tokValue, 1,"while") then
 		consumeNextToken(state)
 
-		local whileLoop     = astNewNode(state, AstWhile, statement)
-		whileLoop.condition = parseExpression(state, whileLoop)
-		whileLoop.body      = parseBlockOrScopedStatementOrUnwrappedNonPolutingStatement(state, whileLoop)
-		statement.what      = whileLoop
+		local whileLoop                     = astNewNode(state, AstWhile, statement)
+		local __value__ =  parseExpression(state, whileLoop) if not __value__ then return nil end whileLoop.condition  = __value__
+		local __value__ =  parseBlockOrScopedStatementOrUnwrappedNonPolutingStatement(state, whileLoop) if not __value__ then return nil end whileLoop.body       = __value__
+		statement.what                      = whileLoop
 
 	elseif isToken(tokType,tokValue, 1,"for") then
 		consumeNextToken(state)
 
-		local forStartIndex            = state.nextToken
-		local forLoop                  = astNewNode(state, AstFor, statement)
+		local forStartIndex = state.nextToken
+		local forLoop       = astNewNode(state, AstFor, statement)
 
-		local exprListWeMayOrMayNotUse = parseExpressionList(state, forLoop)
-		tokType, tokValue              = peekNextToken(state)
+		local __value__ =  parseExpressionList(state, forLoop) if not __value__ then return nil end local exprListWeMayOrMayNotUse  = __value__
 
+		tokType, tokValue = peekNextToken(state)
 		local twoParter
 
 		-- FOR_TYPE_ITERATOR  for v1, ... in iter [, state [, init ] ]
@@ -1218,7 +1222,7 @@ function _G.parseStatementInImperativeScope(state, block)
 			twoParter       = false
 		else
 			state.nextToken = forStartIndex
-			errorParsingNext(state, "Could not determine what kind of 'for' statement this is.")
+			if state.soft then return nil end errorParsingNext(state, "Could not determine what kind of 'for' statement this is.")
 		end
 
 		if forLoop.forType == 1 then
@@ -1227,14 +1231,15 @@ function _G.parseStatementInImperativeScope(state, block)
 			-- for i = start, end [, step ]
 			if twoParter then
 				state.nextToken = forStartIndex
-				parseNameList(state, forLoop, forLoop.names)
+				if not (parseNameList(state, forLoop, forLoop.names)) then return nil end
+
 				assert(#forLoop.names == 1)
 
 				tokType, tokValue = consumeNextToken(state) -- Should eat the '='.
 				assert(isToken(tokType,tokValue, 7,"="))
 
-				paramStartIndex     = state.nextToken
-				forLoop.expressions = parseExpressionList(state, forLoop)
+				paramStartIndex                     = state.nextToken
+				local __value__ =  parseExpressionList(state, forLoop) if not __value__ then return nil end forLoop.expressions  = __value__
 
 			-- for start, end [, step ]
 			else
@@ -1248,37 +1253,41 @@ function _G.parseStatementInImperativeScope(state, block)
 			end
 
 			if #forLoop.expressions < 2 then
-				errorParsingAfterLast(state, "Expected 2 or 3 parameters for the numeric 'for' loop.")
+				if state.soft then return nil end errorParsingAfterLast(state, "Expected 2 or 3 parameters for the numeric 'for' loop.")
 
 			elseif #forLoop.expressions > 3 then
+				-- Navigate back to the actual error position.
 				state.nextToken = paramStartIndex
-
 				tokType, tokValue = parseExpression(state)
 				consumeNextToken(state) -- ','
 				tokType, tokValue = parseExpression(state)
 				consumeNextToken(state) -- ','
 				tokType, tokValue = parseExpression(state)
 
-				errorParsingNext(state, "Expected 2 or 3 parameters for the numeric 'for' loop.")
+				if state.soft then return nil end errorParsingNext(state, "Expected 2 or 3 parameters for the numeric 'for' loop.")
 			end
 
 		elseif forLoop.forType == 2 then
 			-- for v1, ... : obj
 			if twoParter then
 				state.nextToken = forStartIndex
-				parseNameList(state, forLoop, forLoop.names)
+				if not (parseNameList(state, forLoop, forLoop.names)) then return nil end
 
 				tokType, tokValue = consumeNextToken(state) -- Should eat the ':'.
 
 				local i = state.nextToken
 				assert(isToken(tokType,tokValue, 7,":"))
 
-				forLoop.expressions = parseExpressionList(state, forLoop)
-				if #forLoop.expressions > 1 then
+				local __value__ =  parseExpressionList(state, forLoop) if not __value__ then return nil end local exprList  = __value__
+
+				if #exprList > 1 then
+					-- Navigate back to the actual error position.
 					state.nextToken = i
 					parseExpression(state)
-					errorParsingNext(state, "Expected a single parameter for the short-form 'for' loop.")
+					if state.soft then return nil end errorParsingNext(state, "Expected a single parameter for the short-form 'for' loop.")
 				end
+
+				forLoop.expressions = exprList
 
 				-- @Incomplete: Generate 'itIndex' name for arrays (and more?) if necessary (when types are figured out).
 
@@ -1293,16 +1302,16 @@ function _G.parseStatementInImperativeScope(state, block)
 		-- for v1, ... in iter [, state [, init ] ]
 		else
 			state.nextToken = forStartIndex
-			parseNameList(state, forLoop, forLoop.names)
+			if not (parseNameList(state, forLoop, forLoop.names)) then return nil end
 
 			tokType, tokValue = consumeNextToken(state) -- Should eat the 'in'.
 			assert(isToken(tokType,tokValue, 1,"in"))
 
-			forLoop.expressions = parseExpressionList(state, forLoop)
+			local __value__ =  parseExpressionList(state, forLoop) if not __value__ then return nil end forLoop.expressions  = __value__
 		end
 
-		forLoop.body   = parseBlockOrScopedStatementOrUnwrappedNonPolutingStatement(state, forLoop, true)
-		statement.what = forLoop
+		local __value__ =  parseBlockOrScopedStatementOrUnwrappedNonPolutingStatement(state, forLoop, true) if not __value__ then return nil end forLoop.body  = __value__
+		statement.what               = forLoop
 
 	-- Table lookup ending in a function call.
 	-- Note: We must detect assignments before this!
@@ -1313,14 +1322,16 @@ function _G.parseStatementInImperativeScope(state, block)
 		)
 		or isToken(tokType,tokValue, 7,"(")
 	then
-		local expr = parseExpression(state, statement)
+		local __value__ =  parseExpression(state, statement) if not __value__ then return nil end local expr  = __value__
+
 		if not (expr.nodeType == 16) then
-			errorParsing(state, statementStartIndex, "Expected the statement to end in a function call.")
+			if state.soft then return nil end errorParsing(state, statementStartIndex, "Expected the statement to end in a function call.")
 		end
+
 		statement.what = expr
 
 	else
-		errorParsingNext(state, "Unexpected token at the start of a new statement.")
+		if state.soft then return nil end errorParsingNext(state, "Unexpected token at the start of a new statement.")
 	end
 
 	tokType, tokValue = peekNextToken(state)
@@ -1341,17 +1352,17 @@ function _G.parseBlock(state, parentNode)
 		local tokType, tokValue = peekNextToken(state)
 
 		if not tokType then
-			errorParsing(state, blockStartIndex, "Unfinished block.")
+			if state.soft then return nil end errorParsing(state, blockStartIndex, "Unfinished block.")
 
 		elseif isToken(tokType,tokValue, 7,"}") then
 			consumeNextToken(state)
 			break
 
 		elseif isToken(tokType,tokValue, 7,";") then
-			errorParsingNext(state, "Statement is empty.")
+			if state.soft then return nil end errorParsingNext(state, "Statement is empty.")
 
 		else
-			local statement = parseStatementInImperativeScope(state, block)
+			local __value__ =  parseStatementInImperativeScope(state, block) if not __value__ then return nil end local statement  = __value__
 			table.insert(block, statement)
 		end
 	end
@@ -1365,10 +1376,10 @@ function _G.parseBlockOrScopedStatementOrUnwrappedNonPolutingStatement(state, pa
 
 	if isToken(tokType,tokValue, 7,"{") then
 		consumeNextToken(state)
-		return parseBlock(state, parentNode)
+		return parseBlock(state, parentNode) -- May return nil.
 	end
 
-	local statement = parseStatementInImperativeScope(state, parentNode)
+	local __value__ =  parseStatementInImperativeScope(state, parentNode) if not __value__ then return nil end local statement  = __value__
 
 	-- We only need to wrap declarations and 'for' bodies in a block (I think).
 	if requireBlock or statement.what.nodeType == 4 then
@@ -1395,14 +1406,14 @@ function _G.parseFileScope(state, path, parentNode)
 			break
 
 		elseif isToken(tokType,tokValue, 1,"local","global") then
-			local decl = parseDeclaration(state, fileScope)
+			local __value__ =  parseDeclaration(state, fileScope) if not __value__ then return nil end local decl  = __value__
 			table.insert(fileScope.declarations, decl)
 
 		elseif isToken(tokType,tokValue, 1,"export","use","useLibrary") then
-			errorParsingNext(state, "@Incomplete: Handle '%s'.", tokValue)
+			if state.soft then return nil end errorParsingNext(state, "@Incomplete: Handle '%s'.", tokValue)
 
 		else
-			errorParsingNext(state, "Expected file level declaration.")
+			if state.soft then return nil end errorParsingNext(state, "Expected file level declaration.")
 		end
 	end
 
@@ -1415,85 +1426,49 @@ function _G.parseCall(state, parentNode, couldBeType, callee, isMethod)
 	assert(type(parentNode)  == "table")
 	assert(type(couldBeType) == "boolean")
 
-	callee   = callee   or parseIdentifier(state) -- We'll set the parent later.
+	if not callee then
+		local __value__ =  parseIdentifier(state) if not __value__ then return nil end callee  = __value__	end
+
 	isMethod = isMethod or false
 	local call
 
 	while true do
 		local tokType, tokValue = consumeNextToken(state)
+		if not isToken(tokType,tokValue, 7,"(") then
+			if state.soft then return nil end errorParsingLast(state, "Expected '('.")
+		end
 
-		-- foo()
-		if isToken(tokType,tokValue, 7,"(") then
-			call = astNewNode(state, AstCall, parentNode)
+		call              = astNewNode(state, AstCall, parentNode)
+		tokType, tokValue = peekNextToken(state)
 
-			tokType, tokValue = peekNextToken(state)
+		if isToken(tokType,tokValue, 7,")") then
+			consumeNextToken(state)
 
-			if isToken(tokType,tokValue, 7,")") then
-				consumeNextToken(state)
-
-				-- Should struct arguments be able to have default values, allowing foo()
-				-- to possibly be a type?
-				couldBeType = false
-
-				-- We're likely to insert default values and iterate over this etc. so
-				-- it's best to not leave it nil.
-				call.arguments = astNewNode(state, AstExpressionList, call)
-
-			else
-				call.arguments = parseExpressionList(state, call)
-
-				tokType, tokValue = consumeNextToken(state)
-				if not isToken(tokType,tokValue, 7,")") then
-					errorParsingAfterPrevious(state, "Expected ')' or ','.")
-				end
-			end
-
-			call.couldBeTypeWithParameters = couldBeType
-
-		--[[
-		-- foo{}
-		elseif isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),"{") then
-			assert(not isMethod)
-
-			call           = astNewNoA, d, statestCall, parentNode)
-			call.arguments = astNewNoA, d, statestExpressionList, call)
-
-			local tableNode = parseTable(state, call.arguments)
-			table.insert(call.arguments, tableNode)
-
+			-- Should struct arguments be able to have default values, allowing foo()
+			-- to possibly be a type?
 			couldBeType = false
 
-		-- foo""
-		elseif tokType == !(TOKEN_TYPE_STRING) then
-			assert(not isMethod)
-
-			call           = astNewNoA, d, statestCall, parentNode)
-			call.arguments = astNewNoA, d, statestExpressionList, call)
-
-			local literal       = astNewNoA, d, statestLiteral, call.arguments)
-			literal.literalType = !(LITERAL_TYPE_STRING)
-			literal.value       = tokValue
-			table.insert(call.arguments, literal)
-
-			couldBeType = false
-		]]
+			-- We're likely to insert default values and iterate over this etc. so
+			-- it's best to not leave it nil.
+			call.arguments = astNewNode(state, AstExpressionList, call)
 
 		else
-			errorParsingLast(state, "Expected '('.")
+			local __value__ =  parseExpressionList(state, call) if not __value__ then return nil end call.arguments  = __value__
+
+			tokType, tokValue = consumeNextToken(state)
+			if not isToken(tokType,tokValue, 7,")") then
+				if state.soft then return nil end errorParsingAfterPrevious(state, "Expected ')' or ','.")
+			end
 		end
+
+		call.couldBeTypeWithParameters = couldBeType
 
 		callee.parent = call
 		call.callee   = callee
 		call.isMethod = isMethod
 
 		tokType, tokValue = peekNextToken(state)
-		if not (
-			isToken(tokType,tokValue, 7,"(")
-			-- or isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),"{")
-			-- or tokType == !(TOKEN_TYPE_STRING)
-		) then
-			break
-		end
+		if not isToken(tokType,tokValue, 7,"(") then  break  end
 
 		call.couldBeTypeWithParameters = false
 		callee   = call
@@ -1505,7 +1480,7 @@ end
 
 
 
--- parseExpression( state, parentNode [, minOperatorPrecedence ] )
+-- expression = parseExpression( state, parentNode [, minOperatorPrecedence ] )
 function _G.parseExpression(state, parentNode, minOpPrecedence)
 	-- @Robustness: Check that parents are set correctly everywhere in here.
 
@@ -1522,14 +1497,11 @@ function _G.parseExpression(state, parentNode, minOpPrecedence)
 	-- The difference is that here we may have a type.
 	--
 	if
-		tokType == 2 and (
-			isToken(tokType2,tokValue2, 7,"(")
-			-- or isToken(tokType2,tokValue2, !(TOKEN_TYPE_PUNCTUATION),"{")
-			-- or tokType2 == !(TOKEN_TYPE_STRING)
-		)
+		tokType == 2
+		and isToken(tokType2,tokValue2, 7,"(")
 	then
 		putBackLastToken(state)
-		expr = parseCall(state, parentNode, true)
+		local __value__ =  parseCall(state, parentNode, true) if not __value__ then return nil end expr  = __value__
 
 	-- Built-in type.
 	elseif isTokenBuiltinType(tokType, tokValue) then
@@ -1568,18 +1540,17 @@ function _G.parseExpression(state, parentNode, minOpPrecedence)
 
 	-- Table constructor.
 	elseif isToken(tokType,tokValue, 7,"{") then
-		local tableNode = parseTable(state, parentNode)
-		expr            = tableNode
+		local __value__ =  parseTable(state, parentNode) if not __value__ then return nil end expr  = __value__
 
 	-- Unary operation.
 	elseif
 		isToken(tokType,tokValue, 7,"+","-","#") or
 		isToken(tokType,tokValue, 1,"not")
 	then
-		local unaryOp      = astNewNode(state, AstUnary, parentNode)
-		unaryOp.operation  = tokValue
-		unaryOp.expression = parseExpression(state, unaryOp, OPERATOR_PRECEDENCE.unary)
-		expr               = unaryOp
+		local unaryOp                      = astNewNode(state, AstUnary, parentNode)
+		unaryOp.operation                  = tokValue
+		local __value__ =  parseExpression(state, unaryOp, OPERATOR_PRECEDENCE.unary) if not __value__ then return nil end unaryOp.expression  = __value__
+		expr                               = unaryOp
 
 	-- Function signature (type) or lambda.
 	--
@@ -1610,11 +1581,11 @@ function _G.parseExpression(state, parentNode, minOpPrecedence)
 			consumeNextToken(state)
 
 		else
-			lambda.argumentsIn = parseArguments(state, lambda, true)
+			local __value__ =  parseArguments(state, lambda, true) if not __value__ then return nil end lambda.argumentsIn  = __value__
 
 			tokType, tokValue = consumeNextToken(state)
 			if not isToken(tokType,tokValue, 7,")") then
-				errorParsingAfterPrevious(state, "Expected ')'.")
+				if state.soft then return nil end errorParsingAfterPrevious(state, "Expected ')'.")
 			end
 		end
 
@@ -1632,18 +1603,18 @@ function _G.parseExpression(state, parentNode, minOpPrecedence)
 
 				tokType, tokValue = peekNextToken(state)
 				if isToken(tokType,tokValue, 7,",") then
-					errorParsingNext(state, "Argument list with 'void' cannot have other arguments.")
+					if state.soft then return nil end errorParsingNext(state, "Argument list with 'void' cannot have other arguments.")
 				end
 
 			-- () -> (name:type, ...)
 			elseif isToken(tokType,tokValue, 7,"(") then
 				consumeNextToken(state)
 
-				lambda.argumentsOut = parseArguments(state, lambda, false)
+				local __value__ =  parseArguments(state, lambda, false) if not __value__ then return nil end lambda.argumentsOut  = __value__
 
 				tokType, tokValue = consumeNextToken(state)
 				if not isToken(tokType,tokValue, 7,")") then
-					errorParsingAfterPrevious(state, "Expected ')'.")
+					if state.soft then return nil end errorParsingAfterPrevious(state, "Expected ')'.")
 				end
 
 			-- () -> type, ...
@@ -1652,11 +1623,10 @@ function _G.parseExpression(state, parentNode, minOpPrecedence)
 				lambda.argumentsOut = args
 
 				while true do
-					local arg = astNewNode(state, AstArgument, args)
-					arg.argumentType = parseType(state, args)
+					local arg                        = astNewNode(state, AstArgument, args)
+					local __value__ =  parseType(state, arg) if not __value__ then return nil end arg.argumentType  = __value__
 
 					tokType, tokValue = peekNextToken(state)
-
 					if isToken(tokType,tokValue, 7,",") then
 						consumeNextToken(state)
 					else
@@ -1671,8 +1641,9 @@ function _G.parseExpression(state, parentNode, minOpPrecedence)
 
 		if isToken(tokType,tokValue, 7,"{") then
 			consumeNextToken(state)
-			lambda.body = parseBlock(state, lambda)
-			expr        = lambda
+
+			local __value__ =  parseBlock(state, lambda) if not __value__ then return nil end lambda.body  = __value__
+			expr                        = lambda
 
 		else
 			local identType             = astNewNode(state, AstType, parentNode)
@@ -1683,48 +1654,47 @@ function _G.parseExpression(state, parentNode, minOpPrecedence)
 
 	-- Parenthesis.
 	elseif isToken(tokType,tokValue, 7,"(") then
-		expr              = parseExpression(state, parentNode)
+		local __value__ =  parseExpression(state, parentNode) if not __value__ then return nil end expr  = __value__
+
 		tokType, tokValue = consumeNextToken(state)
 
 		if not isToken(tokType,tokValue, 7,")") then
-			errorParsingAfterPrevious(state, "Expected ')'.")
+			if state.soft then return nil end errorParsingAfterPrevious(state, "Expected ')'.")
 		end
 
 	-- Type.
 	elseif isToken(tokType,tokValue, 3,"type") then
 		-- Note: parseType() does not recognize !type which is why you can't put
 		-- the directive anywhere a type is expected. Should we change this?
-		expr = parseType(state, parentNode)
+		local __value__ =  parseType(state, parentNode) if not __value__ then return nil end expr  = __value__
 
-	elseif isToken(tokType,tokValue, 1,"typeOf") then
+	elseif
+		isToken(tokType,tokValue, 1,"typeOf") or
+		isToken(tokType,tokValue, 7,"[")
+	then
 		putBackLastToken(state)
-		expr = parseType(state, parentNode)
-
-	elseif isToken(tokType,tokValue, 7,"[") then
-		putBackLastToken(state)
-		expr = parseType(state, parentNode)
+		local __value__ =  parseType(state, parentNode) if not __value__ then return nil end expr  = __value__
 
 	-- Cast.
 	elseif isToken(tokType,tokValue, 1,"cast") then
 		tokType, tokValue = consumeNextToken(state)
 		if not isToken(tokType,tokValue, 7,"(") then
-			errorParsingAfterPrevious(state, "Expected '('.")
+			if state.soft then return nil end errorParsingAfterPrevious(state, "Expected '('.")
 		end
 
-		local cast      = astNewNode(state, AstCast, parentNode)
-		cast.targetType = parseType(state, cast)
+		local cast                      = astNewNode(state, AstCast, parentNode)
+		local __value__ =  parseType(state, cast) if not __value__ then return nil end cast.targetType  = __value__
 
 		tokType, tokValue = consumeNextToken(state)
 		if not isToken(tokType,tokValue, 7,")") then
-			errorParsingAfterPrevious(state, "Expected ')'.")
+			if state.soft then return nil end errorParsingAfterPrevious(state, "Expected ')'.")
 		end
 
-		cast.expression = parseExpression(state, cast, math.huge) -- @Incomplete: Give casting an operator precedence.
-		expr            = cast
+		local __value__ =  parseExpression(state, cast, math.huge) if not __value__ then return nil end cast.expression  = __value__		expr                            = cast
 
 	else
 		print(LITERAL_TYPE_TITLES[tokType], tokValue)
-		errorParsingLast(state, "Expected a value.")
+		if state.soft then return nil end errorParsingLast(state, "Expected a value.")
 	end
 
 	-- Binary operations.
@@ -1750,14 +1720,12 @@ function _G.parseExpression(state, parentNode, minOpPrecedence)
 		) and OPERATOR_PRECEDENCE[tokValue] >= minOpPrecedence then
 			consumeNextToken(state)
 
-			local binOp     = astNewNode(state, AstBinary, parentNode)
-			binOp.operation = tokValue
-
-			binOp.left      = expr
-			binOp.right     = parseExpression(state, binOp, OPERATOR_PRECEDENCE[tokValue])
-
-			expr.parent     = binOp
-			expr            = binOp
+			local binOp                 = astNewNode(state, AstBinary, parentNode)
+			binOp.operation             = tokValue
+			binOp.left                  = expr
+			local __value__ =  parseExpression(state, binOp, OPERATOR_PRECEDENCE[tokValue]) if not __value__ then return nil end binOp.right  = __value__
+			expr.parent                 = binOp
+			expr                        = binOp
 
 		-- Table lookup or similar using '.'.
 		elseif
@@ -1771,7 +1739,7 @@ function _G.parseExpression(state, parentNode, minOpPrecedence)
 
 			tokType, tokValue = consumeNextToken(state)
 			if tokType ~= 2 then
-				errorParsingLast(state, "Expected an identifier.")
+				if state.soft then return nil end errorParsingLast(state, "Expected an identifier.")
 			end
 
 			local literal       = astNewNode(state, AstLiteral, binOp)
@@ -1793,15 +1761,14 @@ function _G.parseExpression(state, parentNode, minOpPrecedence)
 		then
 			consumeNextToken(state)
 
-			local binOp     = astNewNode(state, AstBinary, parentNode)
-			binOp.operation = tokValue
-
-			binOp.left      = expr
-			binOp.right     = parseExpression(state, binOp, OPERATOR_PRECEDENCE[tokValue])
+			local binOp                 = astNewNode(state, AstBinary, parentNode)
+			binOp.operation             = tokValue
+			binOp.left                  = expr
+			local __value__ =  parseExpression(state, binOp, OPERATOR_PRECEDENCE[tokValue]) if not __value__ then return nil end binOp.right  = __value__
 
 			tokType, tokValue = consumeNextToken(state)
 			if not isToken(tokType,tokValue, 7, "]") then
-				errorParsingLast(state, "Expected ']'.")
+				if state.soft then return nil end errorParsingLast(state, "Expected ']'.")
 			end
 
 			expr.parent = binOp
@@ -1812,8 +1779,7 @@ function _G.parseExpression(state, parentNode, minOpPrecedence)
 			isToken(tokType,tokValue, 7,"(")
 			and OPERATOR_PRECEDENCE.call >= minOpPrecedence
 		then
-			local call = parseCall(state, parentNode, false, expr, false)
-			expr       = call
+			local __value__ =  parseCall(state, parentNode, false, expr, false) if not __value__ then return nil end expr  = __value__
 
 		-- Method call.
 		elseif
@@ -1826,16 +1792,14 @@ function _G.parseExpression(state, parentNode, minOpPrecedence)
 			tokType, tokValue = peekLastToken(state)
 
 			if not isToken(tokType,tokValue, 2) then
-				errorParsingNext(state, "Expected a method name before this.")
+				if state.soft then return nil end errorParsingNext(state, "Expected a method name before this.")
 			elseif not thisCanBeMethodCall then
 				putBackLastToken(state)
-				errorParsingNext(state, "Expected an object to call a method on.")
+				if state.soft then return nil end errorParsingNext(state, "Expected an object to call a method on.")
 			end
 
 			consumeNextToken(state)
-
-			local call = parseCall(state, parentNode, false, expr, true)
-			expr       = call
+			local __value__ =  parseCall(state, parentNode, false, expr, true) if not __value__ then return nil end expr  = __value__
 
 		else
 			break
@@ -2226,6 +2190,7 @@ args[1] = args[1] or "--help"
 
 local parseOptions   = true
 local pathsToCompile = {}
+local disableGc      = false
 local i              = 1
 
 while args[i] do
@@ -2243,12 +2208,20 @@ while args[i] do
 		print("@Incomplete: Help text.")
 		return
 
+	elseif arg == "--nogc" then
+		disableGc = true
+		i = i+1
+
 	else
 		errorLine(nil, "Unknown option '%s'.", arg)
 	end
 end
 
 print("Files: "..table.concat(pathsToCompile, ", "))
+if disableGc then
+	print("Garbage collection disabled")
+	collectgarbage("stop")
+end
 print()
 
 local duplicates = {}
@@ -2334,6 +2307,9 @@ end
 
 -- All done!
 printf("Compilation completed in %.3f seconds", os.clock()-compilationStartTime)
+if disableGc then
+	printf("Memory usage: %d bytes", collectgarbage("count")*1024)
+end
 
 print()
 printAst(topNode)
