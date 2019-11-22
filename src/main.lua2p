@@ -1,0 +1,290 @@
+--[[============================================================
+--=
+--=  Glóa - a language that compiles into Lua
+--=  by Marcus 'ReFreezed' Thunström
+--=
+--=  Language points:
+--=  - Strict types (as far as Lua allows).
+--=  - In file/declarative scopes, order of things doesn't matter.
+--=  - No name shadowing.
+--=
+--============================================================]]
+
+local compilationStartTime = os.clock()
+
+io.stdout:setvbuf("no") -- Note: This slows down printAst().
+io.stderr:setvbuf("no")
+
+
+
+!(
+do
+	_G.TOKEN_TYPE_KEYWORD     = 1
+	_G.TOKEN_TYPE_IDENTIFIER  = 2
+	_G.TOKEN_TYPE_DIRECTIVE   = 3
+	_G.TOKEN_TYPE_NUMBER      = 4
+	_G.TOKEN_TYPE_INTEGER     = 5
+	_G.TOKEN_TYPE_STRING      = 6
+	_G.TOKEN_TYPE_PUNCTUATION = 7
+
+	_G.TOKEN_TYPE_TITLES = {
+		[TOKEN_TYPE_KEYWORD]     = "keyword",
+		[TOKEN_TYPE_IDENTIFIER]  = "identifier",
+		[TOKEN_TYPE_DIRECTIVE]   = "directive",
+		[TOKEN_TYPE_NUMBER]      = "number",
+		[TOKEN_TYPE_INTEGER]     = "integer",
+		[TOKEN_TYPE_STRING]      = "string",
+		[TOKEN_TYPE_PUNCTUATION] = "punctuation",
+	}
+
+	_G.LITERAL_TYPE_NUMBER  = 1
+	_G.LITERAL_TYPE_INTEGER = 2
+	_G.LITERAL_TYPE_STRING  = 3
+	_G.LITERAL_TYPE_BOOLEAN = 4
+	_G.LITERAL_TYPE_NIL     = 5
+	_G.LITERAL_TYPE_ARRAY   = 6
+
+	_G.LITERAL_TYPE_TITLES = {
+		[LITERAL_TYPE_NUMBER]  = "number",
+		[LITERAL_TYPE_INTEGER] = "int",
+		[LITERAL_TYPE_STRING]  = "string",
+		[LITERAL_TYPE_BOOLEAN] = "bool",
+		[LITERAL_TYPE_NIL]     = "nil",
+		[LITERAL_TYPE_ARRAY]   = "array",
+	}
+
+	local n = 0
+	local function incN()  n=n+1 ; return n  end
+	local function N()             return n  end
+
+	_G.OPERATOR_PRECEDENCE = {
+		-- From lower to higher priority.
+		["or"]  = incN(),
+		["and"] = incN(),
+		["<"]   = incN(), [">"] = N(), ["<="] = N(), [">="] = N(), ["~="] = N(), ["=="] = N(),
+		[".."]  = incN(),
+		["+"]   = incN(), ["-"] = N(),
+		["*"]   = incN(), ["/"] = N(), ["//"] = N(), ["%"] = N(),
+		unary   = incN(),-- not, #, +(unary), -(unary)
+		["^"]   = incN(),
+		call    = incN(), -- (Unused)
+		["."]   = incN(),
+	}
+	--[[
+		The concatenation (..) and exponentiation (^) operators are right associative.
+		All other binary operators are left associative.
+
+		a+i < b/2+1       <-->  (a+i) < ((b/2)+1)
+		5+x^2*8           <-->  5+((x^2)*8)
+		a < y and y <= z  <-->  (a < y) and (y <= z)
+		-x^2              <-->  -(x^2)
+		x^y^z             <-->  x^(y^z)
+	]]
+
+	_G.NIL = {} -- Placeholder value representing nil values in structs in the metaprogram.
+
+	local structs = {}
+	local F       = string.format
+
+	-- !struct       "_Name[:Parent]" { field1=value1, ... }
+	-- local !struct "Name[:Parent]"  { field1=value1, ... }
+	-- _G.!struct    "Name[:Parent]"  { field1=value1, ... }
+	function _G.struct(nameAndMaybeParent) return function(fields)
+		local name, nameParent = nameAndMaybeParent:match"^([%w_]+):([%w_]+)()$"
+		name                   = name or nameAndMaybeParent
+
+		if structs[name] then
+			error(F("Duplicate struct '%s'.", name), 2)
+		end
+
+		local overrides   = fields._overrides
+		fields._overrides = nil
+
+		if nameParent then
+			local fieldsParent = structs[nameParent] or error(F("No struct '%s'.", nameParent), 2)
+
+			for k, v in pairs(fieldsParent) do
+				if fields[k] ~= nil then
+					error(F("Existing field in parent: %s.%s", nameParent, k), 2)
+				end
+				fields[k] = v
+			end
+
+			if overrides then
+				for k, v in pairs(overrides) do
+					if fieldsParent[k] == nil then
+						error(F("Non-existing field in parent: %s.%s", nameParent, k), 2)
+					end
+					assert((v ~= NIL),                         k)
+					assert((type(fieldsParent[k]) == type(v)), k)
+					fields[k] = v
+				end
+			end
+
+		elseif overrides then
+			error(F("No parent whose fields to override."), 2)
+		end
+
+		structs[name] = fields
+
+		if not name:find"^_" then
+			local fieldsToOutput = {}
+
+			for k, v in pairs(fields) do
+				if v ~= NIL then
+					fieldsToOutput[k] = v
+				end
+			end
+
+			__LUA("",name,"=function()")
+			__LUA("return")__VAL(fieldsToOutput)
+			__LUA("end")
+		end
+	end end
+end
+)
+
+_G.DIR_HERE            = debug.getinfo(1, "S").source:match"@?(.+)":gsub("/?[^/]+$", ""):gsub("^$", ".")
+
+_G.TOKEN_TYPE_TITLES   = !(TOKEN_TYPE_TITLES)
+_G.LITERAL_TYPE_TITLES = !(LITERAL_TYPE_TITLES)
+_G.OPERATOR_PRECEDENCE = !(OPERATOR_PRECEDENCE)
+
+
+
+!-- We want the resulting Glóa compiler to be a single file, so we use @insert instead of requiring modules here.
+do !(do) @insert "functions.luapart" !(end) end
+do !(do) @insert "lexer.luapart"     !(end) end
+do !(do) @insert "parser.luapart"    !(end) end
+
+
+
+print()
+print("-------- Glóa --------")
+print(os.date"%Y-%m-%d %H:%M:%S")
+
+
+
+-- Parse arguments.
+local args = {...}
+print("Args: "..table.concat(args, " "))
+
+args[1] = args[1] or "--help"
+
+local parseOptions   = true
+local pathsToCompile = {}
+local i              = 1
+
+while args[i] do
+	local arg = args[i]
+
+	if not (parseOptions and arg:find"^%-") then
+		table.insert(pathsToCompile, arg)
+		i = i+1
+
+	elseif arg == "--" then
+		parseOptions = false
+		i            = i+1
+
+	elseif arg == "--help" or arg == "-help" or arg == "-?" or arg == "/help" or arg == "/?" then
+		print("@Incomplete: Help text.")
+		return
+
+	else
+		errorLine(nil, "Unknown option '%s'.", arg)
+	end
+end
+
+print("Files: "..table.concat(pathsToCompile, ", "))
+print()
+
+local duplicates = {}
+for _, path in ipairs(pathsToCompile) do
+	if duplicates[path] then
+		errorLine(nil, "Duplicate path in arguments: %s", path)
+	end
+	duplicates[path] = true
+end
+
+if not pathsToCompile[1] then
+	errorLine(nil, "No files to compile.")
+end
+
+
+
+-- Tokenize file.
+-- @Incomplete: Handle multiple files to compile.
+if pathsToCompile[2] then
+	errorLine(nil, "Can only compile one file at a time right now. (%d files were given.)", #pathsToCompile)
+end
+
+local path = pathsToCompile[1]
+local s    = assert(getFileContents(path, true))
+
+print("Compiling "..path:gsub("^.*/", ""))
+
+s = s:gsub("\r\n?", "\n") -- Normalize line endings.  @Robustness: Handle the uncommon occurrence of \n\r.
+
+local tokens = tokenize(s, path)
+
+
+
+-- Quickly check for stray/unmatched brackets.
+-- Note: Sometimes an error message here isn't very helpful, so we sometimes continue with parsing despite getting an error here.
+
+local BRACKETS            = {["("]=")", ["{"]="}", ["["]="]"}
+local bracketTokenIndices = {}
+
+for i = 1, tokens.count do
+	if isToken(tokens.type[i],tokens.value[i], !(TOKEN_TYPE_PUNCTUATION),"(","{","[") then
+		table.insert(bracketTokenIndices, i)
+
+	elseif isToken(tokens.type[i],tokens.value[i], !(TOKEN_TYPE_PUNCTUATION),")","}","]") then
+		local iStart   = table.remove(bracketTokenIndices)
+		local expected = BRACKETS[tokens.value[iStart]]
+
+		if not iStart then
+			reportMessageInFile(s, path, tokens.position1[i], "Error", "BracketChecker", "Stray bracket.")
+			bracketTokenIndices[1] = nil
+			break
+
+		elseif tokens.value[i] ~= expected then
+			reportMessageInFile(s, path, tokens.position1[i],      "Error", "BracketChecker", "Expected '%s'.", expected)
+			reportMessageInFile(s, path, tokens.position1[iStart], "Info",  "BracketChecker", "... here is the unmatched bracket.")
+			exitFailure()
+			-- bracketTokenIndices[1] = nil
+			-- break
+		end
+	end
+end
+
+if bracketTokenIndices[1] then
+	local i = bracketTokenIndices[1]
+	errorInFile(s, path, tokens.position1[i], "BracketChecker", "Missing end bracket.", BRACKETS[tokens.value[i]])
+	-- reportMessageInFile(s, path, tokens.position1[i], "Error", "BracketChecker", "Missing end bracket.", BRACKETS[tokens.value[i]])
+end
+
+
+
+-- Parse!
+local state             = ParseState()
+state.fileBuffers[path] = s
+state.tokens            = tokens
+
+local topNode = parseFileScope(state, path)
+
+if peekNextToken(state) then
+	errorParsingNext(state, "Expected the end of the file.")
+end
+
+
+
+-- All done!
+printf("Compilation completed in %.3f seconds", os.clock()-compilationStartTime)
+
+print()
+printAst(topNode)
+
+exit()
+
+

@@ -1,0 +1,467 @@
+--[[============================================================
+--=
+--=  Lexer
+--=
+--=-------------------------------------------------------------
+--=
+--=  Glóa - a language that compiles into Lua
+--=  by Marcus 'ReFreezed' Thunström
+--=
+--==============================================================
+
+	tokenize
+	getToken, isToken, isTokenLiteral, isTokenBuiltinType
+
+--============================================================]]
+
+!(
+local NUM_HEX_FRAC_EXP = ("^( 0[Xx] ([%dA-Fa-f]*) %.([%dA-Fa-f]+) [Pp]([-+]?[%dA-Fa-f]+) )"):gsub(" +", "") -- float
+local NUM_HEX_FRAC     = ("^( 0[Xx] ([%dA-Fa-f]*) %.([%dA-Fa-f]+)                        )"):gsub(" +", "") -- float
+local NUM_HEX_EXP      = ("^( 0[Xx] ([%dA-Fa-f]+)                 [Pp]([-+]?[%dA-Fa-f]+) )"):gsub(" +", "") -- float
+local NUM_HEX          = ("^( 0[Xx]  [%dA-Fa-f]+                                         )"):gsub(" +", "") -- int
+local NUM_DEC_FRAC_EXP = ("^(        %d*          %.%d+           [Ee][-+]?%d+           )"):gsub(" +", "") -- float
+local NUM_DEC_FRAC     = ("^(        %d*          %.%d+                                  )"):gsub(" +", "") -- float
+local NUM_DEC_EXP      = ("^(        %d+                          [Ee][-+]?%d+           )"):gsub(" +", "") -- float
+local NUM_DEC          = ("^(        %d+                                                 )"):gsub(" +", "") -- int
+
+local BYTE_NL        = ("\n"):byte()
+local BYTE_CR        = ("\r"):byte()
+local BYTE_TAB       = ("\t"):byte()
+local BYTE_BACKSLASH = ("\\"):byte()
+
+local keywords = {
+	"and",
+	"break",
+	"case",
+	"cast",
+	"continue",
+	"defer",
+	"do",
+	"else",
+	"elseif", -- Unnecessary, but it's ok because Lua.
+	"enum",
+	"export",
+	"false",
+	"for",
+	"global",
+	"if",
+	"in",
+	"is", -- What's this for? Checking the type of an identifier? @Cleanup
+	"local",
+	"nil",
+	"not",
+	"or",
+	"return",
+	"struct",
+	"true",
+	"typeOf",
+	"use",
+	"useLibrary",
+	"while",
+	-- Reserved words.
+	"goto",
+	"repeat",
+	"until", -- Should we have do-while, do-until, repeat-until or none of these?
+	-- Built-in types.
+	"bool",
+	"int",
+	"number",
+	"string",
+	"table",
+	"type",
+	"void", -- Like nil represents the absence of a value, void represents the absence of a type.
+}
+for i, v in ipairs(keywords) do
+	keywords[v], keywords[i] = true, nil
+end
+
+local directiveWords = {
+	"bodyText",
+	"complete",
+	"if",
+	"must",
+	"run",
+	"through",
+	"type",
+}
+for i, v in ipairs(directiveWords) do
+	directiveWords[v], directiveWords[i] = true, nil
+end
+)
+
+local KEYWORDS        = !(keywords)
+local DIRECTIVE_WORDS = !(directiveWords)
+
+
+
+local !struct"Tokens"{ -- SOA
+	count     = 0,
+	type      = {}, -- One of TOKEN_TYPE_*.
+	value     = {}, -- Depends on the type.
+	file      = {},
+	position1 = {}, -- Start byte.
+	position2 = {}, -- End byte.
+	line1     = {}, -- Start line.
+	line2     = {}, -- End line.
+}
+
+function _G.tokenize(s, path)
+	local tokens = Tokens()
+
+	local tokTypes      = tokens.type
+	local tokValues     = tokens.value
+	local tokFiles      = tokens.file
+	local tokPositions1 = tokens.position1
+	local tokPositions2 = tokens.position2
+	local tokLines1     = tokens.line1
+	local tokLines2     = tokens.line2
+
+	local ptr = 1
+	local ln  = 1
+
+	while true do
+		-- Ignore whitespace.  @Incomplete: Count lines.
+		local i1, i2 = s:find("^%s+", ptr)
+		if i1 then  ptr = i2+1  end
+
+		if ptr > #s then  break  end
+
+		local tokenPos          = ptr
+		local tokType, tokValue = nil
+
+		-- Identifier/keyword.
+		if s:find("^[%a_\194-\244]", ptr) then
+			local i1 = ptr
+			local i2, _
+
+			for i = 1, math.huge do
+				if s:byte(ptr) <= 127 then
+					_, i2 = s:find("^[%w_]+", ptr)
+				else
+					_, i2 = s:find("^[\194-\244][\128-\191]*", ptr)
+				end
+
+				if i2 then
+					ptr = i2+1
+				else
+					break
+				end
+			end
+
+			local word = s:sub(i1, ptr-1)
+			tokType    = KEYWORDS[word] and !(TOKEN_TYPE_KEYWORD) or !(TOKEN_TYPE_IDENTIFIER)
+			tokValue   = word
+
+		-- Directives.
+		elseif s:find("^!%a", ptr) then
+			ptr = ptr+1
+
+			local i1, i2, word = s:find("^(%a+)", ptr)
+			if not DIRECTIVE_WORDS[word] then
+				errorInFile(s, path, ptr, "Tokenizer", "Unknown directive '%s'.", word)
+			end
+			ptr = i2+1
+
+			tokType  = !(TOKEN_TYPE_DIRECTIVE)
+			tokValue = word
+
+		-- Number (float/any).
+		elseif s:find("^%.?%d", ptr) then
+			local           lua52Hex, isInt, i1, i2, numStr = true,  false, s:find(!(NUM_HEX_FRAC_EXP), ptr)
+			if not i1 then  lua52Hex, isInt, i1, i2, numStr = true,  false, s:find(!(NUM_HEX_FRAC),     ptr)  end
+			if not i1 then  lua52Hex, isInt, i1, i2, numStr = true,  false, s:find(!(NUM_HEX_EXP),      ptr)  end
+			if not i1 then  lua52Hex, isInt, i1, i2, numStr = false, true,  s:find(!(NUM_HEX),          ptr)  end
+			if not i1 then  lua52Hex, isInt, i1, i2, numStr = false, false, s:find(!(NUM_DEC_FRAC_EXP), ptr)  end
+			if not i1 then  lua52Hex, isInt, i1, i2, numStr = false, false, s:find(!(NUM_DEC_FRAC),     ptr)  end
+			if not i1 then  lua52Hex, isInt, i1, i2, numStr = false, false, s:find(!(NUM_DEC_EXP),      ptr)  end
+			if not i1 then  lua52Hex, isInt, i1, i2, numStr = false, true,  s:find(!(NUM_DEC),          ptr)  end
+
+			if not numStr then
+				errorInFile(s, path, ptr, "Tokenizer", "Malformed number.")
+			end
+
+			local n = tonumber(numStr)
+
+			-- Support hexadecimal floats in Lua 5.1.
+			if not n and lua52Hex then
+				local               _, intStr, fracStr, expStr = numStr:match(!(NUM_HEX_FRAC_EXP))
+				if not intStr then  _, intStr, fracStr         = numStr:match(!(NUM_HEX_FRAC)) ; expStr  = "0"  end
+				if not intStr then  _, intStr,          expStr = numStr:match(!(NUM_HEX_EXP))  ; fracStr = ""   end
+				assert(intStr, numStr)
+
+				n = tonumber(intStr, 16) or 0 -- intStr may be "".
+
+				local fracValue = 1
+				for i = 1, #fracStr do
+					fracValue = fracValue / 16
+					n         = n + tonumber(fracStr:sub(i, i), 16) * fracValue
+				end
+
+				n = n * 2^expStr:gsub("^+", "")
+			end
+
+			if not n then
+				errorInFile(s, path, ptr, "Tokenizer", "Invalid number.")
+			end
+
+			ptr      = i2+1
+			tokType  = isInt and !(TOKEN_TYPE_INTEGER) or !(TOKEN_TYPE_NUMBER)
+			tokValue = n
+
+		-- String (short-form).
+		elseif s:find("^[\"']", ptr) then
+			local reprStart = ptr
+			local quoteByte = s:byte(ptr)
+			local bytes     = {} -- @Speed: Reuse this table for all strings.
+
+			ptr = ptr+1
+
+			while true do
+				local byte = s:byte(ptr)
+
+				if not byte then
+					errorInFile(s, path, reprStart, "Tokenizer", "Unfinished string.")
+
+				-- End of string.
+				elseif byte == quoteByte then
+					ptr = ptr+1
+					break
+
+				-- Escape sequence.
+				elseif byte == !(BYTE_BACKSLASH) then
+					ptr  = ptr+1
+					byte = s:byte(ptr)
+
+					!local getByte = string.byte
+
+					if not byte then
+						errorInFile(s, path, reprStart, "Tokenizer", "Unfinished string after escape character.")
+
+					-- \n or \ followed by a newline inserts a newline.
+					-- \r inserts a carriage return,
+					-- \t inserts a horizontal tab.
+					-- \\ inserts a backslash.
+					-- \" inserts a quotation mark.
+					-- \' inserts an apostrophe.
+					elseif byte == !(getByte"n") then
+						byte = !(BYTE_NL)
+						ptr  = ptr+1
+					elseif byte == !(getByte"r") then
+						byte = !(BYTE_CR)
+						ptr  = ptr+1
+					elseif byte == !(getByte"t") then
+						byte = !(BYTE_TAB)
+						ptr  = ptr+1
+					elseif
+						byte == !(BYTE_BACKSLASH) or byte == !(BYTE_NL) or
+						byte == !(getByte'"')     or byte == !(getByte"'")
+					then
+						-- Keep value of 'byte'.
+						ptr  = ptr+1
+
+					-- \ddd specifies a byte denoted by one to three decimal digits.
+					elseif s:find("^%d", ptr) then
+						local numStr = s:match("^%d%d?%d?", ptr)
+						byte         = tonumber(numStr)
+						if byte > 255 then
+							errorInFile(
+								s, path, ptr, "Tokenizer",
+								"Invalid escape sequence. (Decimal number '%d' does not fit inside a byte.)",
+								byte
+							)
+						end
+						ptr = ptr + #numStr
+
+					-- \xXX specifies a byte denoted by two hexadecimal digits.
+					elseif s:find("^x[%dA-Fa-f][%dA-Fa-f]", ptr) then
+						local hex = s:sub(ptr+1, ptr+2)
+						byte      = tonumber(hex, 16)
+						ptr       = ptr+3
+
+					-- \u{XXX} inserts the UTF-8 encoding of a Unicode codepoint denoted by a sequence of hexadecimal digits.
+					elseif s:find("^u{[%dA-Fa-f]+}", ptr) then
+						local hex = s:match("^[%dA-Fa-f]+", ptr+2)
+						local cp  = tonumber(hex, 16)
+						byte      = nil
+						ptr       = ptr + 3 + #hex
+
+						local cpStr = utf8Char(cp)
+						for i = 1, #cpStr do
+							table.insert(bytes, cpStr:byte(i))
+						end
+
+					-- \z skips the following span of whitespace characters.
+					elseif byte == !(getByte"z") then
+						local i1, i2 = s:find("^%s*", ptr+1)
+						byte = nil
+						ptr  = i2+1
+
+					else
+						errorInFile(s, path, ptr-1, "Tokenizer", "Invalid escape sequence.")
+					end
+
+					if byte then
+						table.insert(bytes, byte)
+					end
+
+				-- Illegal characters.
+				elseif byte == !(BYTE_NL) then
+					errorInFile(s, path, ptr, "Tokenizer", "Invalid string. (Line breaks must be escaped inside strings.)")
+
+				-- Any other character.
+				else
+					table.insert(bytes, byte)
+					ptr = ptr+1
+				end
+			end
+
+			tokType  = !(TOKEN_TYPE_STRING)
+			tokValue = string.char(unpack(bytes)) -- @Robustness: Make sure this works for very long strings.
+
+		-- String (long-form).
+		elseif s:find("^%[=*%[", ptr) then
+			local reprStart      = ptr
+			local longEqualSigns = s:match("^%[(=*)%[", ptr)
+
+			ptr = ptr + 2 + #longEqualSigns
+
+			local stringPos1 = ptr
+			if s:byte(stringPos1) == !(BYTE_NL) then
+				stringPos1 = stringPos1+1
+			end
+
+			local i1, i2 = s:find("%]"..longEqualSigns.."%]", ptr)
+			if not i1 then
+				errorInFile(s, path, reprStart, "Tokenizer", "Unfinished long string.")
+			end
+			ptr = i2+1
+
+			local stringPos2 = i1-1
+
+			tokType  = !(TOKEN_TYPE_STRING)
+			tokValue = s:sub(stringPos1, stringPos2)
+
+		-- Comment.
+		elseif s:find("^%-%-", ptr) then
+			local reprStart = ptr
+			ptr = ptr+2
+
+			local longEqualSigns = s:match("^%[(=*)%[", ptr)
+
+			-- Single line.
+			if not longEqualSigns then
+				local i = s:find("\n", ptr)
+				ptr     = (i or #s) + 1
+
+			-- Long-form.
+			else
+				ptr = ptr + 2 + #longEqualSigns
+
+				local i1, i2 = s:find("%]"..longEqualSigns.."%]", ptr)
+				if not i1 then
+					errorInFile(s, path, reprStart, "Tokenizer", "Unfinished long comment.")
+				end
+				ptr = i2+1
+			end
+
+			-- Don't set tokType - just ignore the comment!
+
+		-- Punctuation.
+		elseif
+			s:find("^//=",            ptr) or
+			s:find("^%.%.=",          ptr) or
+			s:find("^%.%.%.",         ptr)
+		then
+			tokType  = !(TOKEN_TYPE_PUNCTUATION)
+			tokValue = s:sub(ptr, ptr+2)
+			ptr      = ptr+3
+		elseif
+			s:find("^//",             ptr) or
+			s:find("^<<",             ptr) or
+			s:find("^>>",             ptr) or
+			s:find("^%->",            ptr) or
+			s:find("^%.%.",           ptr) or
+			s:find("^[-+*/%%^=~<>]=", ptr)
+		then
+			tokType  = !(TOKEN_TYPE_PUNCTUATION)
+			tokValue = s:sub(ptr, ptr+1)
+			ptr      = ptr+2
+		elseif
+			s:find("^[-+*/%%^#<>=(){}[%];:,.|$!]", ptr)
+		then
+			tokType  = !(TOKEN_TYPE_PUNCTUATION)
+			tokValue = s:sub(ptr, ptr)
+			ptr      = ptr+1
+
+		else
+			errorInFile(s, path, ptr, "Tokenizer", "Unknown character. (Byte: %d)", s:byte(ptr))
+		end
+
+		if tokType then
+			tokens.count = tokens.count+1
+
+			tokTypes[tokens.count]      = tokType
+			tokValues[tokens.count]     = tokValue
+			tokFiles[tokens.count]      = path
+			tokPositions1[tokens.count] = tokenPos
+			tokPositions2[tokens.count] = ptr-1
+			tokLines1[tokens.count]     = ln
+		end
+
+		-- ln = ln+countString(tokRepr, "\n", true) -- @Incomplete: Count lines.
+
+		if tokType then
+			tokLines2[tokens.count] = ln
+			--[[
+			printf("%5d %s%s |%s|",
+				#tokTypes,
+				TOKEN_TYPE_TITLES[tokType],
+				(" "):rep(11-#TOKEN_TYPE_TITLES[tokType]),
+				tostring(tokValue))
+			--]]
+		end
+	end
+
+	return tokens
+end
+
+
+
+-- tokenType, tokenValue = getToken( tokens, index )
+function _G.getToken(tokens, i)
+	return tokens.type[i], tokens.value[i]
+end
+
+-- bool = isToken( targetTokenType, targetTokenValue, tokType [, tokValue1, ... ] )
+function _G.isToken(targetTokType, targetTokValue, tokType, ...)
+	if targetTokType ~= tokType then  return false  end
+
+	local varargCount = select("#", ...)
+	if varargCount == 0 then  return true  end
+
+	for i = 1, varargCount do
+		if targetTokValue == select(i, ...) then  return true  end
+	end
+
+	return false
+end
+
+-- Note: Does not detect [] (array literals).
+function _G.isTokenLiteral(tokType, tokValue)
+	return
+		isAny(tokType, !(TOKEN_TYPE_NUMBER),!(TOKEN_TYPE_INTEGER),!(TOKEN_TYPE_STRING))
+		or isToken(tokType,tokValue, !(TOKEN_TYPE_KEYWORD),"true","false","nil")
+end
+
+function _G.isTokenBuiltinType(tokType, tokValue)
+	--
+	-- 'struct' and 'enum' are kinda built-in types, but it's probably necessary to detect those
+	-- explicitly everywhere since they cannot be the types of identifiers directly.
+	-- We also don't detect '[]' (array literals).
+	--
+	return
+		isToken(tokType,tokValue, !(TOKEN_TYPE_KEYWORD),"number","int","string","table","bool","type") or
+		isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),"*")
+end
+
+

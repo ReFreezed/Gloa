@@ -1,0 +1,204 @@
+--[[============================================================
+--=
+--=  General functions
+--=
+--=-------------------------------------------------------------
+--=
+--=  Glóa - a language that compiles into Lua
+--=  by Marcus 'ReFreezed' Thunström
+--=
+--==============================================================
+
+	errorInternal, errorLine, errorOnLine, errorInFile
+	exit, exitFailure
+	getFileContents
+	isAny
+	printf, printTraceback
+	reportMessageInFile
+	utf8Char
+
+--============================================================]]
+
+
+
+function math.clamp(n, nMin, nMax)
+	return math.min(math.max(n, nMin), nMax)
+end
+
+
+
+function _G.printf(s, ...)
+	print(s:format(...))
+end
+
+function _G.printTraceback(level)
+	print("stack traceback:")
+
+	for level = 1+(level or 1), math.huge do
+		local info = debug.getinfo(level, "nSl")
+		if not info then  break  end
+
+		-- print(level, "source   ", info.source)
+		-- print(level, "short_src", info.short_src)
+		-- print(level, "name     ", info.name)
+		-- print(level, "what     ", info.what)
+
+		local where = info.source:match"^@(.+)" or info.short_src
+		local lnStr = info.currentline > 0 and ":"..info.currentline or ""
+
+		local name
+			=  info.name --and (info.namewhat ~= "" and "in "..info.namewhat.." "..info.name or info.name)
+			or info.linedefined > 0 and where..":"..info.linedefined
+			or info.what == "main" and "main chunk"
+			or info.what == "tail" and "tail call"
+			or "?"
+
+		printf("\t%s%s  (%s)", where, lnStr, name)
+	end
+end
+
+
+
+-- errorInternal( [ level=1, ] formatString, ... )
+local function _errorInternal(level, s, ...)
+	printf("Error: "..s, ...)
+	printTraceback(1+level)
+	exitFailure()
+end
+function _G.errorInternal(levelOrS, ...)
+	if type(levelOrS) == "number" then
+		_errorInternal(1+levelOrS, ...)
+	else
+		_errorInternal(2, levelOrS, ...)
+	end
+end
+
+function _G.errorLine(agent, s, ...)
+	if agent then
+		printf("[%s] Error: "..s, agent, ...)
+	else
+		printf("Error: "..s, ...)
+	end
+	exitFailure()
+end
+
+function _G.errorOnLine(path, ln, agent, s, ...)
+	s = s:format(...)
+	if agent then
+		printf("Error @ %s:%d: [%s] %s\n", path, ln, agent, s)
+	else
+		printf("Error @ %s:%d: %s\n",      path, ln,        s)
+	end
+	exitFailure()
+end
+
+function _G.errorInFile(buffer, path, ptr, agent, s, ...)
+	reportMessageInFile(buffer, path, ptr, "Error", agent, s, ...)
+	exitFailure()
+end
+
+
+
+
+function _G.reportMessageInFile(buffer, path, ptr, label, agent, s, ...)
+	s = s:format(...)
+
+	ptr = math.clamp(ptr, 1, #buffer+1)
+	local pre = buffer:sub(1, ptr-1)
+
+	local lastLine1 = pre:reverse():match"^[^\n]*":reverse():gsub("\t", "    ")
+	local lastLine2 = buffer:match("^[^\n]*", ptr):gsub("\t", "    ")
+	local lastLine  = lastLine1..lastLine2
+
+	local _, nlCount = pre:gsub("\n", "%0")
+	local ln = nlCount+1
+
+	local len    = 0
+	local lenPtr = 1
+
+	while true do
+		if lenPtr > #lastLine1 then  break  end
+
+		local _, i2 = lastLine1:find("^[%z\1-\127\194-\244][\128-\191]*", lenPtr)
+
+		len    = len+1 -- The length isn't going to be perfect, depending on what Unicode characters are encountered.
+		lenPtr = i2+1
+	end
+
+	local col = 1+len
+
+	if agent then
+		printf(
+			"%s @ %s:%d: [%s] %s\n>\n> %s\n>%s^\n>",
+			label, path, ln, agent, s, lastLine, ("-"):rep(col)
+		)
+	else
+		printf(
+			"%s @ %s:%d: %s\n>\n> %s\n> %s^\n>",
+			label, path, ln,        s, lastLine, ("-"):rep(col-1)
+		)
+	end
+end
+
+
+
+function _G.exit(code)
+	-- @Incomplete: Close log file and whatnot.
+	os.exit(code or 0)
+end
+
+function _G.exitFailure()
+	exit(1)
+end
+
+
+
+-- contents, error = getFileContents( path [, isText=false ] )
+function _G.getFileContents(path, isText)
+	local file, err = io.open(path, (isText and "r" or "rb"))
+	if not file then  return nil, err  end
+
+	local s = file:read"*a"
+	file:close()
+	return s
+end
+
+
+
+do
+	local function _utf8Char(cp)
+		if cp < 128 then  return string.char(cp)  end
+
+		local suffix = cp%64
+		local c4     = 128+suffix
+		cp           = (cp-suffix)/64
+		if cp < 32 then  return string.char(192+cp, c4)  end
+
+		suffix   = cp%64
+		local c3 = 128+suffix
+		cp       = (cp-suffix)/64
+		if cp < 16 then  return string.char(224+cp, c3, c4)  end
+
+		suffix = cp%64
+		cp     = (cp-suffix)/64
+		return string.char(240+cp, 128+suffix, c3, c4)
+	end
+
+	local cache = {}
+
+	function _G.utf8Char(cp)
+		cache[cp] = cache[cp] or _utf8Char(cp)
+		return cache[cp]
+	end
+end
+
+
+
+function _G.isAny(v, ...)
+	for i = 1, select("#", ...) do
+		if v == select(i, ...) then  return true  end
+	end
+	return false
+end
+
+
