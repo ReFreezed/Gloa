@@ -1,3 +1,7 @@
+#!/bin/sh
+_=[[
+exec lua "$0" "$@"
+]]
 --[[============================================================
 --=
 --=  Glóa - a language that compiles into Lua
@@ -159,21 +163,19 @@ do !(do) @insert "parser.luapart"    !(end) end
 
 
 
-print()
-print("-------- Glóa --------")
-print(os.date"%Y-%m-%d %H:%M:%S")
-
-
-
 -- Parse arguments.
-local args = {...}
-print("Args: "..table.concat(args, " "))
+local function printHelpAndExit()
+	print("@Incomplete: Help text.")
+	exit(0)
+end
 
-args[1] = args[1] or "--help"
+local args = {...}
+if not args[1] then  printHelpAndExit()  end
 
 local parseOptions   = true
 local pathsToCompile = {}
 local disableGc      = false
+local silent         = false
 local i              = 1
 
 while args[i] do
@@ -188,11 +190,14 @@ while args[i] do
 		i            = i+1
 
 	elseif arg == "--help" or arg == "-help" or arg == "-?" or arg == "/help" or arg == "/?" then
-		print("@Incomplete: Help text.")
-		return
+		printHelpAndExit()
 
 	elseif arg == "--nogc" then
 		disableGc = true
+		i = i+1
+
+	elseif arg == "--silent" then
+		silent = true
 		i = i+1
 
 	else
@@ -200,12 +205,23 @@ while args[i] do
 	end
 end
 
-print("Files: "..table.concat(pathsToCompile, ", "))
-if disableGc then
-	print("Garbage collection disabled")
-	collectgarbage("stop")
-end
-print()
+
+
+!if DEBUG then
+	print(os.date"%Y-%m-%d %H:%M:%S")
+!else
+	if not silent then
+		print()
+		print("-------- Glóa --------")
+		print('Args:  "'..table.concat(args, '" "')..'"')
+		print("Files: "..table.concat(pathsToCompile, ", "))
+		print(os.date"Date:  %Y-%m-%d %H:%M:%S")
+		if disableGc then  print("Garbage collection disabled.")  end
+		print()
+	end
+!end
+
+if disableGc then  collectgarbage("stop")  end
 
 local duplicates = {}
 for _, path in ipairs(pathsToCompile) do
@@ -230,7 +246,7 @@ end
 local path = pathsToCompile[1]
 local s    = assert(getFileContents(path, true))
 
-print("Compiling "..path:gsub("^.*/", ""))
+if not silent then  print("Compiling "..path:gsub("^.*/", ""))  end
 
 s = s:gsub("\r\n?", "\n") -- Normalize line endings.  @Robustness: Handle the uncommon occurrence of \n\r.
 
@@ -289,13 +305,19 @@ end
 
 
 -- All done!
-printf("Compilation completed in %.3f seconds", os.clock()-compilationStartTime)
-if disableGc then
-	printf("Memory usage: %d bytes", collectgarbage("count")*1024)
-end
 
-print()
-printAst(topNode)
+!if DEBUG then
+	printf("Compilation completed in %.3f seconds", os.clock()-compilationStartTime)
+	printAst(topNode)
+!else
+	if not silent then
+		printf("Compilation completed in %.3f seconds", os.clock()-compilationStartTime)
+		if disableGc then
+			printf("Memory usage: %d bytes", collectgarbage("count")*1024)
+		end
+		print()
+	end
+!end
 
 exit()
 

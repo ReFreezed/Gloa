@@ -9,15 +9,34 @@
 --=
 --==============================================================
 
+	copyTable, copyArray, copyToArray, emptyArray, fillArray, reverseArray, flipArray
 	errorInternal, errorLine, errorOnLine, errorInFile
 	exit, exitFailure
+	F
+	formatNumber, formatBinary
+	generateRandomString
 	getFileContents
+	getLast, nextItem
+	indexOf, lastIndexOf
+	indexWith*, lastIndexWith*, itemWith*, lastItemWith*, nextItemWith*, previousItemWith*
 	isAny
+	iterate
+	pack
+	pairsSorted
 	printf, printTraceback
+	recycleTable, recycleTablesInArray, getRecycledTable, getRecycledTableCount
 	reportMessageInFile
+	setFields
+	sort, sortByColumn, sortNatural, naturalCompare
+	timeIt
+	trim, triml, trimr
 	utf8Char
 
 --============================================================]]
+
+
+
+_G.F = string.format
 
 
 
@@ -28,7 +47,7 @@ end
 
 
 function _G.printf(s, ...)
-	print(s:format(...))
+	print(F(s, ...))
 end
 
 function _G.printTraceback(level)
@@ -83,7 +102,7 @@ function _G.errorLine(agent, s, ...)
 end
 
 function _G.errorOnLine(path, ln, agent, s, ...)
-	s = s:format(...)
+	s = F(s, ...)
 	if agent then
 		printf("Error @ %s:%d: [%s] %s\n", path, ln, agent, s)
 	else
@@ -101,7 +120,7 @@ end
 
 
 function _G.reportMessageInFile(buffer, path, ptr, label, agent, s, ...)
-	s = s:format(...)
+	s = F(s, ...)
 
 	ptr = math.clamp(ptr, 1, #buffer+1)
 	local pre = buffer:sub(1, ptr-1)
@@ -199,6 +218,451 @@ function _G.isAny(v, ...)
 		if v == select(i, ...) then  return true  end
 	end
 	return false
+end
+
+
+
+function _G.indexOf(t, v)
+	for i = 1, #t do
+		if t[i] == v then  return i  end
+	end
+	return nil
+end
+
+function _G.lastIndexOf(t, v)
+	for i = #t, 1, -1 do
+		if t[i] == v then  return i  end
+	end
+	return nil
+end
+
+
+
+
+do
+	local select = select
+
+	local function _itemWith(t, i1, i2, iDir, ...)
+		local argCount = select("#", ...)
+		local item, isMatch, k, v
+
+		for i = i1, i2, iDir do
+			item    = t[i]
+			isMatch = true
+
+			for argIndex = 1, argCount, 2 do
+				k, v = select(argIndex, ...)
+
+				if item[k] ~= v then
+					isMatch = false
+					break
+				end
+			end
+
+			if isMatch then  return item, i  end
+		end
+
+		return nil, nil
+	end
+	local function _itemWith1(t, i1,i2,iDir, k,v)
+		local item
+		for i = i1, i2, iDir do
+			item = t[i]
+			if item[k] == v then  return item, i  end
+		end
+		return nil, nil
+	end
+	local function _itemWith2(t, i1,i2,iDir, k1,v1, k2,v2)
+		local item
+		for i = i1, i2, iDir do
+			item = t[i]
+			if item[k1] == v1 and item[k2] == v2 then  return item, i  end
+		end
+		return nil, nil
+	end
+	local function _itemWith3(t, i1,i2,iDir, k1,v1, k2,v2, k3,v3)
+		local item
+		for i = i1, i2, iDir do
+			item = t[i]
+			if item[k1] == v1 and item[k2] == v2 and item[k3] == v3 then  return item, i  end
+		end
+		return nil, nil
+	end
+
+	-- index = indexWith ( array, key1, value1, ... )
+	-- index = indexWith1( array, key,  value )
+	-- index = indexWith2( array, key1, value1, key2, value2 )
+	-- index = indexWith3( array, key1, value1, key2, value2, key3, value3 )
+	-- index = lastIndexWith ( array, key1, value1, ... )
+	-- index = lastIndexWith1( array, key,  value )
+	-- index = lastIndexWith2( array, key1, value1, key2, value2 )
+	-- index = lastIndexWith3( array, key1, value1, key2, value2, key3, value3 )
+	-- item, index = itemWith ( array, key1, value1, ... )
+	-- item, index = itemWith1( array, key,  value )
+	-- item, index = itemWith2( array, key1, value1, key2, value2 )
+	-- item, index = itemWith3( array, key1, value1, key2, value2, key3, value3 )
+	-- item, index = lastItemWith ( array, key1, value1, ... )
+	-- item, index = lastItemWith1( array, key,  value )
+	-- item, index = lastItemWith2( array, key1, value1, key2, value2 )
+	-- item, index = lastItemWith3( array, key1, value1, key2, value2, key3, value3 )
+	-- item, index = nextItemWith ( array, startIndex, key1, value1, ... )
+	-- item, index = nextItemWith1( array, startIndex, key,  value )
+	-- item, index = nextItemWith2( array, startIndex, key1, value1, key2, value2 )
+	-- item, index = nextItemWith3( array, startIndex, key1, value1, key2, value2, key3, value3 )
+	-- item, index = previousItemWith ( array, startIndex, key1, value1, ... )
+	-- item, index = previousItemWith1( array, startIndex, key,  value )
+	-- item, index = previousItemWith2( array, startIndex, key1, value1, key2, value2 )
+	-- item, index = previousItemWith3( array, startIndex, key1, value1, key2, value2, key3, value3 )
+	function _G.indexWith     (t, ...)  return select(2, _itemWith (t, 1, #t,  1, ...))  end
+	function _G.indexWith1    (t, ...)  return select(2, _itemWith1(t, 1, #t,  1, ...))  end
+	function _G.indexWith2    (t, ...)  return select(2, _itemWith2(t, 1, #t,  1, ...))  end
+	function _G.indexWith3    (t, ...)  return select(2, _itemWith3(t, 1, #t,  1, ...))  end
+	function _G.lastIndexWith (t, ...)  return select(2, _itemWith (t, #t, 1, -1, ...))  end
+	function _G.lastIndexWith1(t, ...)  return select(2, _itemWith1(t, #t, 1, -1, ...))  end
+	function _G.lastIndexWith2(t, ...)  return select(2, _itemWith2(t, #t, 1, -1, ...))  end
+	function _G.lastIndexWith3(t, ...)  return select(2, _itemWith3(t, #t, 1, -1, ...))  end
+	function _G.itemWith         (t, ...)     return _itemWith (t, 1, #t,  1, ...)  end
+	function _G.itemWith1        (t, ...)     return _itemWith1(t, 1, #t,  1, ...)  end
+	function _G.itemWith2        (t, ...)     return _itemWith2(t, 1, #t,  1, ...)  end
+	function _G.itemWith3        (t, ...)     return _itemWith3(t, 1, #t,  1, ...)  end
+	function _G.lastItemWith     (t, ...)     return _itemWith (t, #t, 1, -1, ...)  end
+	function _G.lastItemWith1    (t, ...)     return _itemWith1(t, #t, 1, -1, ...)  end
+	function _G.lastItemWith2    (t, ...)     return _itemWith2(t, #t, 1, -1, ...)  end
+	function _G.lastItemWith3    (t, ...)     return _itemWith3(t, #t, 1, -1, ...)  end
+	function _G.nextItemWith     (t, i, ...)  return _itemWith (t, i, #t,  1, ...)  end
+	function _G.nextItemWith1    (t, i, ...)  return _itemWith1(t, i, #t,  1, ...)  end
+	function _G.nextItemWith2    (t, i, ...)  return _itemWith2(t, i, #t,  1, ...)  end
+	function _G.nextItemWith3    (t, i, ...)  return _itemWith3(t, i, #t,  1, ...)  end
+	function _G.previousItemWith (t, i, ...)  return _itemWith (t, i,  1, -1, ...)  end
+	function _G.previousItemWith1(t, i, ...)  return _itemWith1(t, i,  1, -1, ...)  end
+	function _G.previousItemWith2(t, i, ...)  return _itemWith2(t, i,  1, -1, ...)  end
+	function _G.previousItemWith3(t, i, ...)  return _itemWith3(t, i,  1, -1, ...)  end
+end
+
+
+
+-- copy = copyTable( table [, deep=false ] )
+do
+	local function deepCopy(t, copy, tableCopies)
+		for k, v in pairs(t) do
+			if type(v) == "table" then
+				local vCopy = tableCopies[v]
+
+				if vCopy then
+					copy[k] = vCopy
+				else
+					vCopy          = {}
+					tableCopies[v] = vCopy
+					copy[k]        = deepCopy(v, vCopy, tableCopies)
+				end
+
+			else
+				copy[k] = v
+			end
+		end
+		return copy
+	end
+
+	function _G.copyTable(t, deep)
+		if deep then
+			return deepCopy(t, {}, {})
+		end
+
+		local copy = {}
+		for k, v in pairs(t) do  copy[k] = v  end
+
+		return copy
+	end
+end
+
+function _G.copyArray(t)
+	local copy = {}
+	for i = 1, #t, 2 do
+		-- Copying 2 elements on 2 rows at a time seems to be the fastest in LuaJIT.
+		copy[i  ] = t[i  ]
+		copy[i+1] = t[i+1]
+	end
+	return copy
+end
+
+-- copyToArray( fromArray, toArray [, fromIndex=1, toIndex=#from ] )
+function _G.copyToArray(from, to, i1, i2)
+	for i = (i1 or 1), (i2 or #from) do
+		to[i] = from[i]
+	end
+end
+
+-- emptyArray( array [, fromIndex=1 ] )
+function _G.emptyArray(t, i)
+	for i = (i or 1), #t do
+		t[i] = nil
+	end
+end
+
+function _G.fillArray(t, i1, i2, v)
+	for i = i1, i2 do  t[i] = v  end
+	return t
+end
+
+-- Modifies the array!
+function _G.reverseArray(t)
+	local len = #t
+	for i = 1, len/2 do
+		local i2 = len-i+1
+		t[i], t[i2] = t[i2], t[i]
+	end
+	return t
+end
+
+function _G.flipArray(t)
+	local flipped = {}
+	for i, v in ipairs(t) do
+		flipped[v] = i
+	end
+	return flipped
+end
+
+
+
+-- number:string = formatNumber( number )
+function _G.formatNumber(n)
+	return (F"%d"(n):reverse():gsub("%d%d%d", "%0,"):reverse():gsub("^,", ""))
+end
+
+-- hex:string, bits:string = formatBinary( data:string )
+do
+	local HEX_TO_BITS = {
+		["0"]="0000",["1"]="0001",["2"]="0010",["3"]="0011",
+		["4"]="0100",["5"]="0101",["6"]="0110",["7"]="0111",
+		["8"]="1000",["9"]="1001",["a"]="1010",["b"]="1011",
+		["c"]="1100",["d"]="1101",["e"]="1110",["f"]="1111",
+	}
+	function _G.formatBinary(s)
+		local hex = s:gsub(".", function(c)  return F("%02x", c:byte())  end)
+		local bitsStr = hex:gsub(".", HEX_TO_BITS)
+		return hex, bitsStr
+	end
+end
+
+
+
+function _G.generateRandomString(len)
+	local random = math.random
+	local buffer = {}
+
+	for i = 1, len do
+		buffer[i] = random(0, 255)
+	end
+
+	return string.char(unpack(buffer))
+end
+
+
+
+function _G.getLast(arr)
+	return arr[#arr]
+end
+
+-- nextValue = nextItem( array, currentValue [, steps=1 ] )
+-- Note: The values wrap.
+function _G.nextItem(t, v, steps)
+	local i = indexOf(t, v)
+	return i and t[(i-1+(steps or 1)) % #t + 1]
+end
+
+
+
+-- for index, item in ipairsr( array ) do
+do
+	local function iprev(t, i)
+		i = i-1
+		local v = t[i]
+		if v ~= nil then  return i, v  end
+	end
+	function _G.ipairsr(t)
+		return iprev, t, #t+1
+	end
+end
+
+
+
+-- for value1, ... in iterate( callback, argument1, ... ) do
+-- 'value1, ...' is whatever the callback yields.
+do
+	local coroutine_create = coroutine.create
+	local coroutine_resume = coroutine.resume
+	local coroutine_wrap   = coroutine.wrap
+	local coroutine_yield  = coroutine.yield
+
+	local function initiator(cb, ...)
+		coroutine_yield()
+		return cb(...)
+	end
+
+	local function iterator(co)
+		return select(2, assert(coroutine_resume(co)))
+	end
+
+	function _G.iterate(cb, ...)
+		if select("#", ...) <= 2 then
+			return coroutine_wrap(cb), ...
+		end
+
+		local co = coroutine_create(initiator)
+		assert(coroutine_resume(co, cb, ...))
+
+		return iterator, co
+	end
+end
+
+
+
+-- array = pack( ... )
+function _G.pack(...)
+	return {n=select("#", ...), ...}
+end
+
+
+
+-- for key, value, count in pairsSorted( table ) do
+do
+	local function yieldPairs(t)
+		for i, k in ipairs(sort(getKeys(t))) do
+			coroutine.yield(k, t[k], i)
+		end
+	end
+	function _G.pairsSorted(t)
+		return iterate(yieldPairs, t)
+	end
+end
+
+
+
+-- array = sort( array [, compareFunction ] )
+function _G.sort(t, comp)
+	table.sort(t, comp)
+	return t
+end
+
+-- sortByColumn( array, key [, compareFunction ] )
+function _G.sortByColumn(t, k, comp)
+	if comp then
+		table.sort(t, function(a, b)
+			return comp(a[k], b[k])
+		end)
+	else
+		table.sort(t, function(a, b)
+			return a[k] < b[k]
+		end)
+	end
+	return t
+end
+
+-- array = sortNatural( array [, attribute ] )
+function _G.sortNatural(t, k)
+	if k then
+		table.sort(t, function(a, b)
+			return naturalCompare(a[k], b[k])
+		end)
+	else
+		table.sort(t, naturalCompare)
+	end
+	return t
+end
+
+-- Sorts a string array containing numbers using a natural algorithm
+-- table.sort( array, naturalCompare )
+do
+	local function pad(numStr)
+		return F("%03d%s", #numStr, numStr)
+	end
+	function _G.naturalCompare(a, b)
+		return tostring(a):gsub("%d+", pad) < tostring(b):gsub("%d+", pad)
+	end
+end
+
+
+
+do
+	!local EXTRA_ERROR_CHECKING = false
+
+	local tables    = {}
+	local freeIndex = 1
+
+	!if EXTRA_ERROR_CHECKING then
+	local recycled  = {}
+	!end
+
+	function _G.recycleTable(t)
+		!if EXTRA_ERROR_CHECKING then
+			if recycled[t] then  error("Table is already recycled.", 2)  end
+			recycled[t] = true
+		!end
+
+		tables[freeIndex] = t
+		freeIndex         = freeIndex+1
+	end
+
+	function _G.recycleTablesInArray(ts)
+		for i = 1, #ts do
+			!if EXTRA_ERROR_CHECKING then
+				if recycled[ts[i]] then  error("At least one table is already recycled.", 2)  end
+				recycled[ts[i]] = true
+			!end
+
+			tables[freeIndex] = ts[i]
+			freeIndex         = freeIndex+1
+		end
+	end
+
+	function _G.getRecycledTable()
+		if freeIndex == 1 then  return nil  end
+
+		freeIndex = freeIndex-1
+		!if EXTRA_ERROR_CHECKING then
+			recycled[tables[freeIndex]] = nil
+		!end
+		return tables[freeIndex]
+	end
+
+	function _G.getRecycledTableCount()
+		return freeIndex-1
+	end
+end
+
+
+
+-- target = setFields( target, source )
+function _G.setFields(target, source)
+	for k, v in pairs(source) do
+		target[k] = v
+	end
+	return target
+end
+
+
+
+function _G.timeIt(f, count, ...)
+	collectgarbage()
+	local time = LT.getTime()
+	for i = 1, count do
+		f(...)
+	end
+	print(LT.getTime()-time)
+end
+
+
+
+function _G.trim(s)
+	return (s:gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+function _G.triml(s)
+	return (s:gsub("^%s+", ""))
+end
+
+function _G.trimr(s)
+	return (s:gsub("%s+$", ""))
 end
 
 

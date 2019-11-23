@@ -7,45 +7,53 @@ local buildStartTime = os.clock()
 io.stdout:setvbuf("no")
 io.stderr:setvbuf("no")
 
-print("Building Glóa...")
+local DIR_HERE    = debug.getinfo(1, "S").source:match"@?(.+)":gsub("/?[^/]+$", ""):gsub("^$", ".")
 
-local DIR_HERE = debug.getinfo(1, "S").source:match"@?(.+)":gsub("/?[^/]+$", ""):gsub("^$", ".")
+-- Read build arguments.
+local args        = {...}
+local pathGloaOut = DIR_HERE.."/../gloa.lua"
+local pathPp      = DIR_HERE.."/../lib/preprocess.lua" -- @Incomplete: Include LuaPreprocess in this repo.
+local debugMode   = false
+local silent      = false
+local i           = 1
 
-local pathPp = DIR_HERE.."/../lib/preprocess.lua" -- @Incomplete: Include LuaPreprocess in this repo.
+while args[i] do
+	local arg = args[i]
 
--- Load config file, if one exists.
-local file = io.open(DIR_HERE.."/../gloa.config", "r")
+	if     arg == "--ouput" then
+		pathGloaOut = args[i+1] or error("[GloaBuildArgs] Expected value after "..arg..".")
+		i           = i+2
 
-if file then
-	local ln = 0
+	elseif arg == "--pp" then
+		pathPp      = args[i+1] or error("[GloaBuildArgs] Expected value after "..arg..".")
+		i           = i+2
 
-	for line in file:lines() do
-		ln   = ln+1
-		line = line:gsub("^%s+", ""):gsub("%s+$", "")
+	elseif arg == "--debug" then
+		debugMode   = true
+		i           = i+1
 
-		if not (line == "" or line:find"^#") then
-			local k, v = line:match"^([%a_][%w_]*)%s*=%s*(.*)$"
+	elseif arg == "--silent" then
+		silent      = true
+		i           = i+1
 
-			if not k then
-				error("gloa.config:"..ln..": Bad line format.")
-
-			elseif k == "luaPreprocessPath" then
-				pathPp = v
-
-			else
-				error("gloa.config:"..ln..": Unknown key '"..k.."'.")
-			end
-		end
+	else
+		error("[GloaBuildArgs] Unknown argument: "..arg)
 	end
 end
 
 -- Build Glóa.
-local pp = assert(dofile(pathPp))
+if not silent then  print("Building Glóa...")  end
+
+local chunk, err = loadfile(pathPp)
+if not chunk then  error("Could not load LuaPreprocess from '"..pathPp.."'. ("..err..")")  end
+
+local pp                 = chunk()
+pp.metaEnvironment.DEBUG = debugMode
 
 pp.processFile{
 	pathIn          = DIR_HERE.."/main.lua2p",
-	pathOut         = DIR_HERE.."/../gloa.lua",
-	pathMeta        = DIR_HERE.."/../gloa.meta.lua",
+	pathOut         = pathGloaOut,
+	pathMeta        = pathGloaOut:gsub("%.%w+", ".meta%0"),
 
 	debug           = false,
 	addLineNumbers  = false,
@@ -53,7 +61,8 @@ pp.processFile{
 	backtickStrings = true,
 
 	onInsert = function(path)
-		print("Inserting "..path)
+		if not silent then  print("Inserting "..path)  end
+
 		return assert(pp.getFileContents(DIR_HERE.."/"..path))
 	end,
 
@@ -64,4 +73,6 @@ pp.processFile{
 }
 
 -- All done!
-print(("Build completed in %.3f seconds."):format(os.clock()-buildStartTime))
+if not silent then
+	print(("Build completed in %.3f seconds."):format(os.clock()-buildStartTime))
+end

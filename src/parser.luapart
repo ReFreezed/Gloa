@@ -74,6 +74,7 @@ end
 	nodeType = 0,
 	s        = 0, -- Serial number.
 	parent   = NIL,
+	token    = 1,
 }
 
 !structAst"_AstDeclarativeScope:_AstNode"{
@@ -108,9 +109,9 @@ local !structAst"AstType:_AstNode"{
 }
 
 local !structAst"AstAssignment:_AstNode"{
-	operation   = "",
-	variables   = {},
-	expressions = {},
+	operation = "",
+	targets   = NIL, -- AstExpressionList
+	values    = NIL, -- AstExpressionList
 }
 
 local !structAst"AstIf:_AstNode"{
@@ -168,6 +169,7 @@ local !structAst"AstTable:_AstExpression"{
 local !structAst"AstCall:_AstExpression"{
 	couldBeTypeWithParameters = false,
 	isMethod                  = false,
+	surroundedByParenthesis   = false,
 	callee                    = NIL, -- AstExpression
 	arguments                 = NIL, -- AstExpressionList
 }
@@ -223,14 +225,15 @@ local TOKEN_TYPE_TO_LITERAL_TYPE = !({
 do
 	local serialN = 0
 
-	function _G.astNewNode(DEBUG_state, AstNodeType, parentNode)
-		if not AstNodeType then  error("AstNodeType is nil.", 2)  end
+	function _G.astNewNode(state, AstNodeType, parentNode)
+		if not AstNodeType then  error("No AstNodeType specified.", 2)  end
 
 		serialN = serialN+1
 
 		local node  = AstNodeType()
 		node.s      = serialN
 		node.parent = parentNode
+		node.token  = state.nextToken-1 -- This ain't working too well. @FixMe
 
 		--[[
 		if
@@ -238,7 +241,7 @@ do
 			-- or serialN == 22
 			or parentNode and parentNode.s == 21
 		then
-			-- errorParsingLast(DEBUG_state, "DEBUG")
+			-- errorParsingLast(state, "DEBUG")
 			error("DEBUG")
 		end
 		--]]
@@ -565,62 +568,71 @@ function _G.parseDeclaration(state, parentNode)
 	return decl
 end
 
-function _G.parseAssignment(state, parentNode)
-	local assignment = astNewNode(state, AstAssignment, parentNode)
+local function isAtAssignment(state)
+	local startIndex = state.nextToken
 
-	while true do
-		!SET_OR_RETURN `local ident = parseIdentifier(state, parentNode)`
-		table.insert(assignment.variables, ident)
+	state.soft     = true
+	local exprList = parseExpressionList(state)
+	state.soft     = false
 
-		local tokType, tokValue = consumeNextToken(state, steps)
-
-		if isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),",") then
-			-- Continue the loop.
-		elseif isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),"=","+=","-=","*=","/=","//=","^=","%=","..=") then
-			assignment.operation = tokValue
-			break
-		else
-			!ERROR_OR_RETURN `errorParsingLast(state, "Expected '='.")`
-		end
+	if not exprList then
+		state.nextToken = startIndex
+		return false
 	end
 
-	while true do
-		!SET_OR_RETURN `local expr = parseExpression(state, assignment)`
-		table.insert(assignment.expressions, expr)
-
-		tokType, tokValue = peekNextToken(state, steps)
-
-		if isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),",") then
-			consumeNextToken(state)
-			-- Continue the loop.
-		else
-			break
-		end
+	local tokType, tokValue = consumeNextToken(state)
+	if not isTokenAssigning(tokType, tokValue) then
+		state.nextToken = startIndex
+		return false
 	end
 
-	return assignment
+	state.nextToken = startIndex
+	return true
 end
 
-local function isAtAssignment(state)
-	local steps = 1
+function _G.parseAssignment(state, parentNode)
+	local assignmentStartToken    = state.nextToken
+	local assignment              = astNewNode(state, AstAssignment, parentNode)
+	!SET_OR_RETURN `local targets = parseExpressionList(state, assignment)`
 
-	-- @Incomplete: Detect (expression1).key1, (expression2).key2 = ...
-
-	while true do
-		local tokType, tokValue = peekNextToken(state, steps)
-		if tokType ~= !(TOKEN_TYPE_IDENTIFIER) then  return false  end
-
-		steps             = steps+1
-		tokType, tokValue = peekNextToken(state, steps)
-
-		if isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),",") then
-			steps = steps+1
-			-- Continue the loop.
-			-- @Cleanup: Do we need to keep checking the following tokens? Can any other statement start with 'IDENT' ','
-		else
-			return isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),"=","+=","-=","*=","/=","//=","^=","%=","..=")
+	for i, expr in ipairs(targets) do
+		if not (
+			expr.nodeType == !(nodeTypes.AstIdentifier)
+			or (expr.nodeType == !(nodeTypes.AstBinary) and expr.operation == ".")
+		) then
+			-- Navigate back to the actual error position.
+			state.nextToken = assignmentStartToken
+			for i = 1, i-1 do
+				parseExpression(state)
+				consumeNextToken(state) -- ","
+			end
+			!ERROR_OR_RETURN `errorParsingNext(state, "Expected assignment expression to resolve into a variable or table field.")`
 		end
 	end
+
+	assignment.targets = targets
+
+	local tokType, tokValue = consumeNextToken(state)
+	assert(isTokenAssigning(tokType, tokValue)) -- isAtAssignment() should have determined this.
+	assignment.operation = tokValue
+
+	local valueListStartToken    = state.nextToken
+	!SET_OR_RETURN `local values = parseExpressionList(state, assignment)`
+
+	-- Quickly check if there are obviously too many values.
+	if #values > #targets then
+		-- Navigate back to the actual error position.
+		state.nextToken = valueListStartToken
+		parseExpression(state)
+		for i = 1, #targets-1 do
+			consumeNextToken(state) -- ","
+			parseExpression(state)
+		end
+		!ERROR_OR_RETURN `errorParsingNext(state, "There are more values than assignment targets.")`
+	end
+
+	assignment.values = values
+	return assignment
 end
 
 -- Add the names to the 'names' array.
@@ -1183,6 +1195,13 @@ function _G.parseExpression(state, parentNode, minOpPrecedence)
 	elseif isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),"(") then
 		!SET_OR_RETURN `expr = parseExpression(state, parentNode)`
 
+		if expr.nodeType == !(nodeTypes.AstCall) then
+			-- This is so we know whether to adjust the return values to one or not in certain situations.
+			-- Note: Functions with a return argument after the first one marked as #must cannot have their
+			-- return arguments adjusted to one.
+			expr.surroundedByParenthesis = true
+		end
+
 		tokType, tokValue = consumeNextToken(state)
 
 		if not isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),")") then
@@ -1258,12 +1277,12 @@ function _G.parseExpression(state, parentNode, minOpPrecedence)
 		-- Table lookup or similar using '.'.
 		elseif
 			isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),".")
-			and OPERATOR_PRECEDENCE[tokValue] > minOpPrecedence -- Note: Not using >= here.
+			and OPERATOR_PRECEDENCE["."] > minOpPrecedence -- Note: Not using >= here.
 		then
 			consumeNextToken(state)
 
 			local binOp     = astNewNode(state, AstBinary, parentNode)
-			binOp.operation = tokValue
+			binOp.operation = "."
 
 			tokType, tokValue = consumeNextToken(state)
 			if tokType ~= !(TOKEN_TYPE_IDENTIFIER) then
@@ -1290,7 +1309,7 @@ function _G.parseExpression(state, parentNode, minOpPrecedence)
 			consumeNextToken(state)
 
 			local binOp                 = astNewNode(state, AstBinary, parentNode)
-			binOp.operation             = tokValue
+			binOp.operation             = "."
 			binOp.left                  = expr
 			!SET_OR_RETURN `binOp.right = parseExpression(state, binOp, OPERATOR_PRECEDENCE[tokValue])`
 
@@ -1577,15 +1596,12 @@ do
 
 			elseif node.nodeType == !(nodeTypes.AstAssignment) then
 				local assignment = node
+				write(" (", assignment.operation, ")")
 				!!(BLOCK_START)
 				write("\n")
-				for i, identifier in ipairs(assignment.variables) do
-					printNode(identifier, indent+1, printed, "VAR"..i)
-				end
+				if assignment.targets then  printNode(assignment.targets, indent+1, printed)  end
 				write(indentStr, "\top ", assignment.operation, "\n")
-				for i, expr in ipairs(assignment.expressions) do
-					printNode(expr, indent+1, printed, "VAL"..i)
-				end
+				if assignment.values then  printNode(assignment.values, indent+1, printed)  end
 				!!(BLOCK_END)
 
 			elseif node.nodeType == !(nodeTypes.AstCast) then
