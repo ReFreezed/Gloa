@@ -114,15 +114,14 @@ local !structAst"AstCall:_AstExpression"{
 	arguments                 = {},  -- []AstExpression
 }
 local !structAst"AstArgument:_AstNode"{
-	-- @Incomplete: Use an AstDeclaration here.
-	name         = "",
-	argumentType = NIL, -- AstType
-	defaultValue = NIL,
-	autobake     = 0, -- 0=disabled, 1=enabled, 2=required  @Incomplete
+	name          = NIL, -- AstIdentifier
+	argumentTypes = {},  -- []AstType
+	defaultValue  = NIL,
+	autobake      = 0,   -- 0=disabled, 1=enabled, 2=required  @Incomplete
 
 	-- For an in arg, this indicates optionality.
 	-- For an out arg, if there's a !must then it must not be adjusted away by the caller.
-	isRequired   = false,
+	isRequired    = false,
 }
 local !structAst"AstArguments:_AstExpression"{ -- @Cleanup: Move this into an array in the parent (like expression lists).
 	-- [1]=argument1, ...
@@ -147,8 +146,8 @@ local !structAst"AstStatement:_AstNode"{ -- Needed? I think so?
 local !structAst"AstDeclaration:_AstNode"{
 	names      = {},
 	isLocal    = true,
-	valueType  = NIL, -- Nil means the type is inferred. (Should this be a number? @Speed)
-	values     = {},  -- Nil for the corresponding name means default value, which depends on valueType.
+	valueTypes = {},  -- No value here means the type is inferred.
+	values     = {},  -- Nil for the corresponding name means default value, which depends on the value type.
 	isConstant = false,
 	tags       = {},  -- @Incomplete
 }
@@ -315,6 +314,40 @@ function _G.parseType(state, parentNode)
 	return identType
 end
 
+-- success = parsePipeSeparatedTypes( state, parentNode, identifierTypes )
+function _G.parsePipeSeparatedTypes(state, parentNode, identTypes)
+	while true do
+		local identType = parseType(state, parentNode)
+		if not identType then  return false  end
+
+		table.insert(identTypes, identType)
+		local tokType, tokValue = peekNextToken(state)
+
+		if isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),"|") then
+			consumeNextToken(state)
+			tokType, tokValue = peekNextToken(state)
+
+			if isToken(tokType,tokValue, !(TOKEN_TYPE_KEYWORD),"nil") then
+				consumeNextToken(state)
+
+				local identType    = astNewNode(state, AstType, parentNode)
+				identType.typeName = "nil"
+
+				table.insert(identTypes, identType)
+				break
+
+			else
+				-- Continue the loop.
+			end
+
+		else
+			break
+		end
+	end
+
+	return true
+end
+
 function _G.parseTable(state, parentNode)
 	-- Note: We assume the '{' has been consumed already.
 
@@ -434,13 +467,15 @@ function _G.parseArguments(state, parentNode, isInput)
 
 		while true do
 			tokType, tokValue = consumeNextToken(state)
-
 			if tokType ~= !(TOKEN_TYPE_IDENTIFIER) then
 				!ERROR_OR_RETURN `errorParsingLast(state, "Expected an identifier.")`
 			end
 
-			local arg = astNewNode(state, AstArgument, args)
-			arg.name  = tokValue
+			local arg   = astNewNode(state, AstArgument,   args)
+			local ident = astNewNode(state, AstIdentifier, arg)
+			ident.name  = tokValue
+			arg.name    = ident
+
 			table.insert(args,     arg)
 			table.insert(argGroup, arg)
 
@@ -455,11 +490,11 @@ function _G.parseArguments(state, parentNode, isInput)
 			end
 		end
 
-		-- Type.
+		-- Type(s).
 		local tokIndex = state.nextToken
 		for _, arg in ipairs(argGroup) do
-			state.nextToken                  = tokIndex
-			!SET_OR_RETURN `arg.argumentType = parseType(state, arg)` -- @Speed: Parse once then just copy the first one.
+			state.nextToken = tokIndex
+			!DO_OR_RETURN `parsePipeSeparatedTypes(state, arg, arg.argumentTypes)` -- @Speed: Parse once then just copy the first one.
 		end
 
 		-- Default value.
@@ -467,11 +502,26 @@ function _G.parseArguments(state, parentNode, isInput)
 
 		if isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),"=") then
 			consumeNextToken(state)
+			if not isInput then
+				!ERROR_OR_RETURN `errorParsingLast(state, "Output arguments cannot have default values.")`
+			end
 
 			local tokIndex = state.nextToken
 			for _, arg in ipairs(argGroup) do
-				state.nextToken                  = tokIndex
-				!SET_OR_RETURN `arg.argumentType = parseExpression(state, arg)` -- @Speed: Parse once then just copy the first one.
+				state.nextToken            = tokIndex
+				!SET_OR_RETURN `local expr = parseExpression(state, arg)` -- @Speed: Parse once then just copy the first one.
+				arg.defaultValue           = expr
+
+				-- If the value is nil then we make sure 'nil' is one of the types.
+				if
+					expr.nodeType == !(nodeTypes.AstLiteral)
+					and expr.literalType == !(LITERAL_TYPE_NIL)
+					and not itemWith1(arg.argumentTypes, "typeName", "nil")
+				then
+					local identType    = astNewNode(state, AstType, arg)
+					identType.typeName = "nil"
+					table.insert(arg.argumentTypes, identType)
+				end
 			end
 		end
 
@@ -516,11 +566,14 @@ function _G.parseDeclaration(state, parentNode)
 
 	!DO_OR_RETURN `parseNameList(state, decl, decl.names)`
 
+	local typesStartToken = state.nextToken -- Dummy position, kinda.
 	tokType, tokValue = peekNextToken(state)
 
 	-- Type is specified and/or we have a constant.
 	if isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),":") then
 		consumeNextToken(state)
+
+		typesStartToken   = state.nextToken
 		tokType, tokValue = peekNextToken(state)
 
 		-- Inferred type.
@@ -528,11 +581,11 @@ function _G.parseDeclaration(state, parentNode)
 			-- void
 
 			-- @Robustness: Mark the declaration to have it's type inferred instead of just
-			-- leaving decl.valueType as nil? Or should we have an AstTypeInferred node?
+			-- leaving decl.valueTypes empty? Or should we have an AstTypeInferred node?
 
 		-- Specified type.
 		else
-			!SET_OR_RETURN `decl.valueType = parseType(state, decl)`
+			!DO_OR_RETURN `parsePipeSeparatedTypes(state, decl, decl.valueTypes)`
 		end
 
 	-- We must have = or : after the identifier, for specified or inferred type.
@@ -540,17 +593,29 @@ function _G.parseDeclaration(state, parentNode)
 		!ERROR_OR_RETURN `errorParsingAfterLast(state, "Expected ':' or '='.")`
 	end
 
-	tokType, tokValue = peekNextToken(state)
-
 	-- Values.
 	local valueListStartToken = state.nextToken -- Dummy position, kinda.
+	tokType, tokValue         = peekNextToken(state)
 
 	if isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),"=",":") then
 		consumeNextToken(state)
-		decl.isConstant = (tokValue == ":")
+
+		if tokValue == ":" then
+			decl.isConstant = true
+
+			if decl.valueTypes[2] then
+				-- Navigate back to the actual error position.
+				state.nextToken = typesStartToken
+				parseType(state)
+				!ERROR_OR_RETURN `errorParsingNext(state, "Constants can only be of one type.")`
+			end
+		end
 
 		valueListStartToken = state.nextToken
 		!DO_OR_RETURN `parseExpressionList(state, decl, decl.values)`
+
+	elseif decl.valueTypes[2] then
+		!ERROR_OR_RETURN `errorParsingAfterLast(state, "Initial values are required if multiple types are specified.")`
 	end
 
 	-- Quickly check if there are obviously too many values.
@@ -668,6 +733,9 @@ function _G.parseStatementInImperativeScope(state, block)
 
 	if isToken(tokType,tokValue, !(TOKEN_TYPE_KEYWORD),"local","global") then
 		!SET_OR_RETURN `statement.what = parseDeclaration(state, statement)`
+
+	elseif isToken(tokType,tokValue, !(TOKEN_TYPE_KEYWORD),"return") then
+		!ERROR_OR_RETURN `errorParsingNext(state, "@Incomplete: return")`
 
 	elseif isAtAssignment(state) then
 		!SET_OR_RETURN `statement.what = parseAssignment(state, statement)`
@@ -1155,8 +1223,8 @@ function _G.parseExpression(state, parentNode, minOpPrecedence)
 				lambda.argumentsOut = args
 
 				while true do
-					local arg                        = astNewNode(state, AstArgument, args)
-					!SET_OR_RETURN `arg.argumentType = parseType(state, arg)`
+					local arg = astNewNode(state, AstArgument, args)
+					!DO_OR_RETURN `parsePipeSeparatedTypes(state, arg, arg.argumentTypes)`
 
 					tokType, tokValue = peekNextToken(state)
 					if isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),",") then
@@ -1493,9 +1561,9 @@ do
 				if decl.isConstant then  write(" (const)")  end
 				!!(BLOCK_START)
 				write("\n")
-				printNodeList(decl.names, indent+1, printed, "NAME")
-				if decl.valueType then  printNode(decl.valueType,  indent+1, printed)         end
-				printNodeList(decl.values, indent+1, printed, "VAL")
+				printNodeList(decl.names,      indent+1, printed, "NAME")
+				printNodeList(decl.valueTypes, indent+1, printed, "TYPE")
+				printNodeList(decl.values,     indent+1, printed, "VAL")
 				!!(BLOCK_END)
 
 			elseif node.nodeType == !(nodeTypes.AstTable) then
@@ -1525,21 +1593,30 @@ do
 				!!(BLOCK_START)
 				write("\n")
 				if lambda.argumentsIn then
-					printNodeList(lambda.argumentsIn, indent+1, printed, "IN")
+					printNode(lambda.argumentsIn, indent+1, printed, "IN")
+					-- printNodeList(lambda.argumentsIn, indent+1, printed, "IN")
 				end
 				if lambda.argumentsOut then
-					printNodeList(lambda.argumentsOut, indent+1, printed, "OUT")
+					printNode(lambda.argumentsOut, indent+1, printed, "OUT")
+					-- printNodeList(lambda.argumentsOut, indent+1, printed, "OUT")
 				end
 				if lambda.body then  printNode(lambda.body, indent+1, printed)  end
 				!!(BLOCK_END)
 
-			elseif node.nodeType == !(nodeTypes.AstArgument) then
-				local arg = node
-				if arg.name ~= "" then  write(" (", arg.name, ")")  end
+			elseif node.nodeType == !(nodeTypes.AstArguments) then
+				local args = node
 				!!(BLOCK_START)
 				write("\n")
-				if arg.argumentType  then  printNode(arg.argumentType,  indent+1, printed)              end
-				if arg.defaultValue  then  printNode(arg.defaultValue,  indent+1, printed, "DEFAULT")   end
+				printNodeList(args, indent+1, printed)
+				!!(BLOCK_END)
+
+			elseif node.nodeType == !(nodeTypes.AstArgument) then
+				local arg = node
+				!!(BLOCK_START)
+				write("\n")
+				if arg.name then  printNode(arg.name, indent+1, printed)  end
+				printNodeList(arg.argumentTypes, indent+1, printed, "TYPE")
+				if arg.defaultValue  then  printNode(arg.defaultValue, indent+1, printed, "DEFAULT")  end
 				!!(BLOCK_END)
 
 			elseif node.nodeType == !(nodeTypes.AstBlock) then

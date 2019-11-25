@@ -1,0 +1,172 @@
+--[[============================================================
+--=
+--=  Preprocessor stuff and globals
+--=
+--=-------------------------------------------------------------
+--=
+--=  Glóa - a language that compiles into Lua
+--=  by Marcus 'ReFreezed' Thunström
+--=
+--==============================================================
+
+	Preprocessor:
+	- F
+	- struct
+
+--============================================================]]
+
+
+
+!(
+_G.TOKEN_TYPE_KEYWORD     = 1
+_G.TOKEN_TYPE_IDENTIFIER  = 2
+_G.TOKEN_TYPE_DIRECTIVE   = 3
+_G.TOKEN_TYPE_NUMBER      = 4
+_G.TOKEN_TYPE_INTEGER     = 5
+_G.TOKEN_TYPE_STRING      = 6
+_G.TOKEN_TYPE_PUNCTUATION = 7
+
+_G.TOKEN_TYPE_TITLES = {
+	[TOKEN_TYPE_KEYWORD]     = "keyword",
+	[TOKEN_TYPE_IDENTIFIER]  = "identifier",
+	[TOKEN_TYPE_DIRECTIVE]   = "directive",
+	[TOKEN_TYPE_NUMBER]      = "number",
+	[TOKEN_TYPE_INTEGER]     = "integer",
+	[TOKEN_TYPE_STRING]      = "string",
+	[TOKEN_TYPE_PUNCTUATION] = "punctuation",
+}
+
+_G.LITERAL_TYPE_NUMBER  = 1
+_G.LITERAL_TYPE_INTEGER = 2
+_G.LITERAL_TYPE_STRING  = 3
+_G.LITERAL_TYPE_BOOLEAN = 4
+_G.LITERAL_TYPE_NIL     = 5
+_G.LITERAL_TYPE_ARRAY   = 6
+
+_G.LITERAL_TYPE_TITLES = {
+	[LITERAL_TYPE_NUMBER]  = "number",
+	[LITERAL_TYPE_INTEGER] = "int",
+	[LITERAL_TYPE_STRING]  = "string",
+	[LITERAL_TYPE_BOOLEAN] = "bool",
+	[LITERAL_TYPE_NIL]     = "nil",
+	[LITERAL_TYPE_ARRAY]   = "array",
+}
+
+_G.FOR_TYPE_NUMERIC  = 1 -- for [ i = ] start, end [, step ]
+_G.FOR_TYPE_SHORT    = 2 -- for [ v1, ... : ] obj
+_G.FOR_TYPE_ITERATOR = 3 -- for v1, ... in iter [, state [, init ] ]
+
+_G.FOR_TYPE_TITLES = {
+	[FOR_TYPE_NUMERIC]  = "numeric",
+	[FOR_TYPE_SHORT]    = "short",
+	[FOR_TYPE_ITERATOR] = "iterator",
+}
+
+local n = 0
+local function incN()  n=n+1 ; return n  end
+local function N()             return n  end
+
+_G.OPERATOR_PRECEDENCE = {
+	-- From lower to higher priority.
+	["or"]  = incN(),
+	["and"] = incN(),
+	["<"]   = incN(), [">"] = N(), ["<="] = N(), [">="] = N(), ["~="] = N(), ["=="] = N(),
+	[".."]  = incN(),
+	["+"]   = incN(), ["-"] = N(),
+	["*"]   = incN(), ["/"] = N(), ["//"] = N(), ["%"] = N(),
+	unary   = incN(),-- not, #, +(unary), -(unary)
+	["^"]   = incN(),
+	call    = incN(), -- (Unused)
+	["."]   = incN(),
+}
+--[[
+	The concatenation (..) and exponentiation (^) operators are right associative.
+	All other binary operators are left associative.
+
+	a+i < b/2+1       <-->  (a+i) < ((b/2)+1)
+	5+x^2*8           <-->  5+((x^2)*8)
+	a < y and y <= z  <-->  (a < y) and (y <= z)
+	-x^2              <-->  -(x^2)
+	x^y^z             <-->  x^(y^z)
+]]
+
+_G.NIL = {} -- Placeholder value representing nil values in structs in the metaprogram.
+
+
+
+_G.F = string.format
+
+
+
+-- !struct       "_Name[:Parent]" { field1=value1, ... }
+-- local !struct "Name[:Parent]"  { field1=value1, ... }
+-- _G.!struct    "Name[:Parent]"  { field1=value1, ... }
+do
+	local structs = {}
+
+	function _G.struct(nameAndMaybeParent) return function(fields)
+		local name, nameParent = nameAndMaybeParent:match"^([%w_]+):([%w_]+)()$"
+		name                   = name or nameAndMaybeParent
+
+		if structs[name] then
+			error(F("Duplicate struct '%s'.", name), 2)
+		end
+
+		local overrides   = fields._overrides
+		fields._overrides = nil
+
+		if nameParent then
+			local fieldsParent = structs[nameParent] or error(F("No struct '%s'.", nameParent), 2)
+
+			for k, v in pairs(fieldsParent) do
+				if fields[k] ~= nil then
+					error(F("Existing field in parent: %s.%s", nameParent, k), 2)
+				end
+				fields[k] = v
+			end
+
+			if overrides then
+				for k, v in pairs(overrides) do
+					if fieldsParent[k] == nil then
+						error(F("Non-existing field in parent: %s.%s", nameParent, k), 2)
+					end
+					assert((v ~= NIL),                         k)
+					assert((type(fieldsParent[k]) == type(v)), k)
+					fields[k] = v
+				end
+			end
+
+		elseif overrides then
+			error(F("No parent whose fields to override."), 2)
+		end
+
+		structs[name] = fields
+
+		if not name:find"^_" then
+			local fieldsToOutput = {}
+
+			for k, v in pairs(fields) do
+				if v ~= NIL then
+					fieldsToOutput[k] = v
+				end
+			end
+
+			__LUA("",name,"=function()")
+			__LUA("return")__VAL(fieldsToOutput)
+			__LUA("end")
+		end
+	end end
+end
+)
+
+
+
+_G.DIR_HERE            = debug.getinfo(1, "S").source:match"@?(.+)":gsub("/?[^/]+$", ""):gsub("^$", ".")
+
+_G.OPERATOR_PRECEDENCE = !(OPERATOR_PRECEDENCE)
+
+_G.TOKEN_TYPE_TITLES   = !(TOKEN_TYPE_TITLES)
+_G.LITERAL_TYPE_TITLES = !(LITERAL_TYPE_TITLES)
+_G.FOR_TYPE_TITLES     = !(FOR_TYPE_TITLES)
+
+
