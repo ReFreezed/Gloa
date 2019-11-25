@@ -9,9 +9,11 @@
 --=
 --==============================================================
 
+	astFindParent
+	astNewNode
+	astPrint
 	errorParsing*
 	parse*
-	printAst
 
 --============================================================]]
 
@@ -27,9 +29,24 @@ local function SET_OR_RETURN(assignmentCode)
 	local preCode, sufCode = assignmentCode:match"^([^=]+)=(.*)$"
 	if not preCode then  error(assignmentCode)  end
 
-	__LUA("local __value__ = ",sufCode)
-	__LUA(" if not __value__ then return nil end ")
-	__LUA(preCode," = __value__")
+	-- local x = ...
+	if preCode:find"^%s*local%s" then
+		local var = preCode:match"^%s*local%s+([%w_]+)" or error(preCode)
+		__LUA(assignmentCode)
+		__LUA(" if not ",var," then return nil end ")
+
+	-- x = ...
+	elseif preCode:find"^%s*[%w_]+%s*$" then
+		local var = preCode:match"[%w_]+" or error(preCode)
+		__LUA(assignmentCode)
+		__LUA(" if not ",var," then return nil end ")
+
+	-- x.y = ...
+	else
+		__LUA("local __value__ =",sufCode)
+		__LUA(" if not __value__ then return nil end ")
+		__LUA(preCode,"= __value__")
+	end
 end
 
 local function DO_OR_RETURN(exprCode)
@@ -84,8 +101,7 @@ local !structAst"AstType:_AstNode"{
 	arguments         = NIL, -- []AstExpression (Is set for parameterized structs.)
 }
 
-!structAst"_AstExpression:_AstNode"{
-}
+!structAst"_AstExpression:_AstNode"{}
 local !structAst"AstIdentifier:_AstExpression"{
 	name          = "",
 	declarationId = 0,
@@ -158,8 +174,22 @@ local !structAst"AstAssignment:_AstNode"{
 	values    = {}, -- []AstExpression
 }
 
-!structAst"_AstControlStructure:_AstNode"{
+!structAst"_AstJump:_AstNode"{}
+local !structAst"AstReturn:_AstJump"{
+	values = {}, -- []AstExpression
 }
+local !structAst"AstBreak:_AstJump"{
+	loopName = NIL, -- AstIdentifier
+}
+local !structAst"AstContinue:_AstJump"{
+	loopName = NIL, -- AstIdentifier
+}
+
+local !structAst"AstDefer:_AstNode"{
+	body = NIL,
+}
+
+!structAst"_AstControlStructure:_AstNode"{}
 local !structAst"AstIf:_AstControlStructure"{
 	condition   = NIL,
 	branchTrue  = NIL,
@@ -212,6 +242,10 @@ do
 
 	function _G.astNewNode(state, AstNodeType, parentNode)
 		if not AstNodeType then  error("No AstNodeType specified.", 2)  end
+
+		if not parentNode and AstNodeType ~= AstFileScope then
+			error("No parent.", 2)
+		end
 
 		serialN = serialN+1
 
@@ -622,10 +656,10 @@ function _G.parseDeclaration(state, parentNode)
 	if #decl.values > #decl.names then
 		-- Navigate back to the actual error position.
 		state.nextToken = valueListStartToken
-		parseExpression(state)
+		parseExpression(state, decl)
 		for i = 1, #decl.names-1 do
 			consumeNextToken(state) -- ","
-			parseExpression(state)
+			parseExpression(state, decl)
 		end
 		!ERROR_OR_RETURN `errorParsingNext(state, "There are more values than names being declared.")`
 	end
@@ -633,11 +667,11 @@ function _G.parseDeclaration(state, parentNode)
 	return decl
 end
 
-local function isAtAssignment(state)
+local function isAtAssignment(state, parentNode)
 	local startIndex = state.nextToken
 
 	state.soft       = true
-	local exprListOk = parseExpressionList(state, nil, {})
+	local exprListOk = parseExpressionList(state, parentNode, {})
 	state.soft       = false
 
 	if not exprListOk then
@@ -669,7 +703,7 @@ function _G.parseAssignment(state, parentNode)
 			-- Navigate back to the actual error position.
 			state.nextToken = assignmentStartToken
 			for i = 1, i-1 do
-				parseExpression(state)
+				parseExpression(state, assignment)
 				consumeNextToken(state) -- ","
 			end
 			!ERROR_OR_RETURN `errorParsingNext(state, "Expected assignment expression to resolve into a variable or table field.")`
@@ -690,10 +724,10 @@ function _G.parseAssignment(state, parentNode)
 	if #assignment.values > #assignment.targets then
 		-- Navigate back to the actual error position.
 		state.nextToken = valueListStartToken
-		parseExpression(state)
+		parseExpression(state, assignment)
 		for i = 1, #assignment.targets-1 do
 			consumeNextToken(state) -- ","
-			parseExpression(state)
+			parseExpression(state, assignment)
 		end
 		!ERROR_OR_RETURN `errorParsingNext(state, "There are more values than assignment targets.")`
 	end
@@ -722,9 +756,9 @@ function _G.parseNameList(state, parentNode, names)
 	return true
 end
 
-function _G.parseStatementInImperativeScope(state, block)
+function _G.parseStatementInImperativeScope(state, parentNode)
 	local statementStartIndex = state.nextToken
-	local statement           = astNewNode(state, AstStatement, block)
+	local statement           = astNewNode(state, AstStatement, parentNode)
 
 	local tokType,  tokValue  = peekNextToken(state, 1)
 	local tokType2, tokValue2 = peekNextToken(state, 2)
@@ -735,18 +769,67 @@ function _G.parseStatementInImperativeScope(state, block)
 		!SET_OR_RETURN `statement.what = parseDeclaration(state, statement)`
 
 	elseif isToken(tokType,tokValue, !(TOKEN_TYPE_KEYWORD),"return") then
-		!ERROR_OR_RETURN `errorParsingNext(state, "@Incomplete: return")`
+		consumeNextToken(state)
 
-	elseif isAtAssignment(state) then
-		!SET_OR_RETURN `statement.what = parseAssignment(state, statement)`
+		local returnNode = astNewNode(state, AstReturn, statement)
 
-	elseif tokType == !(TOKEN_TYPE_IDENTIFIER) and (
-			isToken(tokType2,tokValue2, !(TOKEN_TYPE_PUNCTUATION),"(")
-			-- or isToken(tokType2,tokValue2, !(TOKEN_TYPE_PUNCTUATION),"{")
-			-- or tokType2 == !(TOKEN_TYPE_STRING)
-		)
-	then
-		!SET_OR_RETURN `statement.what = parseCall(state, statement, false)`
+		--
+		-- Note: Considering this following ambigous situation we have to check whether any values should be returned.
+		-- As a bonus we also figure if we're even inside a function, though I'm not sure this'll work when we have static code. @Robustness
+		--
+		--     if x return
+		--     func() -- Returned expression, or separate statement after 'if'?
+		--
+		local lambda = astFindParent(statement, !(nodeTypes.AstLambda))
+		if not lambda then
+			-- This shouldn't happen as parseStatementInImperativeScope() shouldn't be
+			-- called by parseFileScope(), which is the highest top-level thing.
+			!ERROR_OR_RETURN `errorParsingNext(state, "Not inside a function.")`
+		end
+
+		if lambda.argumentsOut and lambda.argumentsOut[1] then
+			!DO_OR_RETURN `parseExpressionList(state, returnNode, returnNode.values)`
+		end
+
+		statement.what = returnNode
+
+	elseif isToken(tokType,tokValue, !(TOKEN_TYPE_KEYWORD),"break","continue") then
+		consumeNextToken(state)
+
+		local keyword         = tokValue
+		local breakOrContinue = astNewNode(state, (keyword == "break" and AstBreak or AstContinue), statement)
+
+		tokType, tokValue = peekNextToken(state)
+
+		if tokType == !(TOKEN_TYPE_IDENTIFIER) then
+			local loop = astFindParent(breakOrContinue, !(nodeTypes.AstFor), !(nodeTypes.AstWhile))
+			if not loop then
+				!ERROR_OR_RETURN `errorParsingNext(state, "Not inside a loop.")`
+			end
+
+			repeat
+				if loop.nodeType == !(nodeTypes.AstFor) and itemWith1(loop.names, "name", tokValue) then
+					!SET_OR_RETURN `breakOrContinue.loopName = parseIdentifier(state, breakOrContinue)`
+					break
+				end
+
+				loop = astFindParent(loop, !(nodeTypes.AstFor), !(nodeTypes.AstWhile))
+			until not loop
+		end
+
+		statement.what = breakOrContinue
+
+	elseif isToken(tokType,tokValue, !(TOKEN_TYPE_KEYWORD),"do") then
+		consumeNextToken(state)
+		!SET_OR_RETURN `statement.what = parseBlockOrScopedStatementOrUnwrappedNonPolutingStatement(state, statement)`
+
+	elseif isToken(tokType,tokValue, !(TOKEN_TYPE_KEYWORD),"defer") then
+		consumeNextToken(state)
+
+		local defer                = astNewNode(state, AstDefer, statement)
+		!SET_OR_RETURN `defer.body = parseBlockOrScopedStatementOrUnwrappedNonPolutingStatement(state, defer)`
+
+		statement.what = defer
 
 	elseif isToken(tokType,tokValue, !(TOKEN_TYPE_KEYWORD),"if") and (
 		isToken(tokType2,tokValue2, !(TOKEN_TYPE_DIRECTIVE),"complete")
@@ -866,11 +949,11 @@ function _G.parseStatementInImperativeScope(state, block)
 			elseif #forLoop.expressions > 3 then
 				-- Navigate back to the actual error position.
 				state.nextToken = paramStartIndex
-				tokType, tokValue = parseExpression(state)
+				tokType, tokValue = parseExpression(state, forLoop)
 				consumeNextToken(state) -- ','
-				tokType, tokValue = parseExpression(state)
+				tokType, tokValue = parseExpression(state, forLoop)
 				consumeNextToken(state) -- ','
-				tokType, tokValue = parseExpression(state)
+				tokType, tokValue = parseExpression(state, forLoop)
 
 				!ERROR_OR_RETURN `errorParsingNext(state, "Expected 2 or 3 parameters for the numeric 'for' loop.")`
 			end
@@ -890,7 +973,7 @@ function _G.parseStatementInImperativeScope(state, block)
 				if forLoop.expressions[2] then
 					-- Navigate back to the actual error position.
 					state.nextToken = exprListStartIndex
-					parseExpression(state)
+					parseExpression(state, forLoop)
 					!ERROR_OR_RETURN `errorParsingNext(state, "Expected a single parameter for the short-form 'for' loop.")`
 				end
 
@@ -917,6 +1000,17 @@ function _G.parseStatementInImperativeScope(state, block)
 
 		!SET_OR_RETURN `forLoop.body = parseBlockOrScopedStatementOrUnwrappedNonPolutingStatement(state, forLoop, true)`
 		statement.what               = forLoop
+
+	elseif isAtAssignment(state, statement) then
+		!SET_OR_RETURN `statement.what = parseAssignment(state, statement)`
+
+	elseif tokType == !(TOKEN_TYPE_IDENTIFIER) and (
+			isToken(tokType2,tokValue2, !(TOKEN_TYPE_PUNCTUATION),"(")
+			-- or isToken(tokType2,tokValue2, !(TOKEN_TYPE_PUNCTUATION),"{")
+			-- or tokType2 == !(TOKEN_TYPE_STRING)
+		)
+	then
+		!SET_OR_RETURN `statement.what = parseCall(state, statement, false)`
 
 	-- Table lookup ending in a function call.
 	-- Note: We must detect assignments before this!
@@ -950,14 +1044,17 @@ end
 function _G.parseBlock(state, parentNode)
 	-- Note: We assume the '{' has been consumed already.
 
-	local blockStartIndex = state.nextToken
-	local block           = astNewNode(state, AstBlock, parentNode)
+	local blockStartToken     = state.nextToken
+	local block               = astNewNode(state, AstBlock, parentNode)
+
+	local statementStartToken = blockStartToken
+	local lastNodeType        = 0
 
 	while true do
 		local tokType, tokValue = peekNextToken(state)
 
 		if not tokType then
-			!ERROR_OR_RETURN `errorParsing(state, blockStartIndex, "Unfinished block.")`
+			!ERROR_OR_RETURN `errorParsing(state, blockStartToken, "Unfinished block.")`
 
 		elseif isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),"}") then
 			consumeNextToken(state)
@@ -967,8 +1064,21 @@ function _G.parseBlock(state, parentNode)
 			!ERROR_OR_RETURN `errorParsingNext(state, "Statement is empty.")`
 
 		else
+			if isAny(lastNodeType, !(nodeTypes.AstReturn),!(nodeTypes.AstBreak),!(nodeTypes.AstContinue)) then
+				local nodeTitle
+					=  lastNodeType == !(nodeTypes.AstReturn)   and "Return"
+					or lastNodeType == !(nodeTypes.AstBreak)    and "Break"
+					or lastNodeType == !(nodeTypes.AstContinue) and "Continue"
+					or assert(lastNodeType)
+
+				!ERROR_OR_RETURN `errorParsing(state, statementStartToken, "%s statements must be at the end of the scope.", nodeTitle)`
+			end
+
+			statementStartToken             = state.nextToken
 			!SET_OR_RETURN `local statement = parseStatementInImperativeScope(state, block)`
+
 			table.insert(block, statement)
+			lastNodeType = statement.what.nodeType
 		end
 	end
 
@@ -987,7 +1097,7 @@ function _G.parseBlockOrScopedStatementOrUnwrappedNonPolutingStatement(state, pa
 	!SET_OR_RETURN `local statement = parseStatementInImperativeScope(state, parentNode)`
 
 	-- We only need to wrap declarations and 'for' bodies in a block (I think).
-	if requireBlock or statement.what.nodeType == !(nodeTypes.AstDeclaration) then
+	if requireBlock or isAny(statement.what.nodeType, !(nodeTypes.AstDeclaration),!(nodeTypes.AstReturn),!(nodeTypes.AstBreak),!(nodeTypes.AstContinue)) then
 		local block = astNewNode(state, AstBlock, parentNode)
 		table.insert(block, statement)
 
@@ -1030,7 +1140,7 @@ function _G.parseCall(state, parentNode, couldBeType, callee, isMethod)
 	assert(type(couldBeType) == "boolean")
 
 	if not callee then
-		!SET_OR_RETURN `callee = parseIdentifier(state)` -- We'll set the parent later.
+		!SET_OR_RETURN `callee = parseIdentifier(state, parentNode)` -- We'll update the parent later.
 	end
 
 	isMethod = isMethod or false
@@ -1226,7 +1336,9 @@ function _G.parseExpression(state, parentNode, minOpPrecedence)
 					local arg = astNewNode(state, AstArgument, args)
 					!DO_OR_RETURN `parsePipeSeparatedTypes(state, arg, arg.argumentTypes)`
 
+					table.insert(args, arg)
 					tokType, tokValue = peekNextToken(state)
+
 					if isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),",") then
 						consumeNextToken(state)
 					else
@@ -1502,7 +1614,7 @@ end
 
 
 
--- printAst( node [, fileToPrintTo=io.stdout ] )
+-- astPrint( node [, fileToPrintTo=io.stdout ] )
 do
 	local file
 	local printNode -- Forward declaration.
@@ -1697,6 +1809,25 @@ do
 				if forLoop.body then  printNode(forLoop.body, indent+1, printed)  end
 				!!(BLOCK_END)
 
+			elseif node.nodeType == !(nodeTypes.AstReturn) then
+				local returnNode = node
+				!!(BLOCK_START)
+				write("\n")
+				printNodeList(returnNode.values, indent+1, printed)
+				!!(BLOCK_END)
+
+			elseif isAny(node.nodeType, !(nodeTypes.AstBreak), !(nodeTypes.AstContinue)) then
+				local breakOrContinue = node
+				if breakOrContinue.loopName then  write(" (", breakOrContinue.loopName.name, ")")  end
+				write("\n")
+
+			elseif node.nodeType == !(nodeTypes.AstDefer) then
+				local defer = node
+				!!(BLOCK_START)
+				write("\n")
+				if defer.body then  printNode(defer.body, indent+1, printed)  end
+				!!(BLOCK_END)
+
 			elseif node.nodeType == !(nodeTypes.AstLiteral) then
 				local literal = node
 
@@ -1756,9 +1887,21 @@ do
 		end
 	end
 
-	function _G.printAst(node, _file)
+	function _G.astPrint(node, _file)
 		file = _file or io.stdout
 		printNode(node, 0, {})
+	end
+end
+
+
+
+-- parent = astFindParent( node, nodeType1, ... )
+function _G.astFindParent(node, ...)
+	while true do
+		node = node.parent
+		if not node then  return nil  end
+
+		if isAny(node.nodeType, ...) then  return node  end
 	end
 end
 
