@@ -189,6 +189,11 @@ local !structAst"AstDefer:_AstNode"{
 	body = NIL,
 }
 
+local !structAst"AstImport:_AstNode"{
+	isLoad = false,
+	name   = "",
+}
+
 !structAst"_AstControlStructure:_AstNode"{}
 local !structAst"AstIf:_AstControlStructure"{
 	condition   = NIL,
@@ -211,7 +216,8 @@ local !structAst"AstBlock:_AstNode"{
 }
 
 !structAst"_AstDeclarativeScope:_AstNode"{
-	declarations = {},
+	declarations       = {},
+	includedNamespaces = {},
 }
 local !structAst"AstFileScope:_AstDeclarativeScope"{
 	path = "",
@@ -598,6 +604,7 @@ function _G.parseDeclaration(state, parentNode)
 	end
 	decl.isLocal = (tokValue == "local")
 
+	local nameListStartToken = state.nextToken
 	!DO_OR_RETURN `parseNameList(state, decl, decl.names)`
 
 	local typesStartToken = state.nextToken -- Dummy position, kinda.
@@ -631,22 +638,40 @@ function _G.parseDeclaration(state, parentNode)
 	local valueListStartToken = state.nextToken -- Dummy position, kinda.
 	tokType, tokValue         = peekNextToken(state)
 
-	if isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),"=",":") then
+	if isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),"=") then
+		consumeNextToken(state)
+		valueListStartToken = state.nextToken
+		!DO_OR_RETURN `parseExpressionList(state, decl, decl.values)`
+
+	elseif isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),":") then
 		consumeNextToken(state)
 
-		if tokValue == ":" then
-			decl.isConstant = true
+		decl.isConstant = true
 
-			if decl.valueTypes[2] then
-				-- Navigate back to the actual error position.
-				state.nextToken = typesStartToken
-				parseType(state)
-				!ERROR_OR_RETURN `errorParsingNext(state, "Constants can only be of one type.")`
-			end
+		if decl.valueTypes[2] then
+			-- Navigate back to the actual error position.
+			state.nextToken = typesStartToken
+			parseType(state)
+			!ERROR_OR_RETURN `errorParsingNext(state, "Constants can only be of one type.")`
 		end
 
 		valueListStartToken = state.nextToken
-		!DO_OR_RETURN `parseExpressionList(state, decl, decl.values)`
+		tokType, tokValue   = peekNextToken(state)
+
+		if isToken(tokType,tokValue, !(TOKEN_TYPE_DIRECTIVE),"import","load") then
+			if astFindParent(decl, !(nodeTypes.AstLambda)) then
+				!ERROR_OR_RETURN `errorParsingNext(state, "!%s must be in file scope.", tokValue)`
+			elseif decl.names[2] then
+				!ERROR_OR_RETURN `errorParsing(state, nameListStartToken+2, "!%s statements must have only one name.", tokValue)`
+			elseif decl.valueTypes[1] then
+				!ERROR_OR_RETURN `errorParsing(state, typesStartToken, "Namespaces don't have a type.")`
+			end
+			!SET_OR_RETURN `local import = parseImportOrLoad(state, decl)`
+			table.insert(decl.values, import)
+
+		else
+			!DO_OR_RETURN `parseExpressionList(state, decl, decl.values)`
+		end
 
 	elseif decl.valueTypes[2] then
 		!ERROR_OR_RETURN `errorParsingAfterLast(state, "Initial values are required if multiple types are specified.")`
@@ -765,8 +790,10 @@ function _G.parseStatementInImperativeScope(state, parentNode)
 	local tokType3, tokValue3 = peekNextToken(state, 3)
 	local tokType4, tokValue4 = peekNextToken(state, 4)
 
-	if isToken(tokType,tokValue, !(TOKEN_TYPE_KEYWORD),"local","global") then
+	if isToken(tokType,tokValue, !(TOKEN_TYPE_KEYWORD),"local") then
 		!SET_OR_RETURN `statement.what = parseDeclaration(state, statement)`
+	elseif isToken(tokType,tokValue, !(TOKEN_TYPE_KEYWORD),"global") then
+		!ERROR_OR_RETURN `errorParsingNext(state, "Globals can only be declared in file scope.")`
 
 	elseif isToken(tokType,tokValue, !(TOKEN_TYPE_KEYWORD),"return") then
 		consumeNextToken(state)
@@ -1001,6 +1028,9 @@ function _G.parseStatementInImperativeScope(state, parentNode)
 		!SET_OR_RETURN `forLoop.body = parseBlockOrScopedStatementOrUnwrappedNonPolutingStatement(state, forLoop, true)`
 		statement.what               = forLoop
 
+	elseif isToken(tokType,tokValue, !(TOKEN_TYPE_DIRECTIVE),"import","load") then
+		!ERROR_OR_RETURN `errorParsingNext(state, "!import/!load must be in file scope.")`
+
 	elseif isAtAssignment(state, statement) then
 		!SET_OR_RETURN `statement.what = parseAssignment(state, statement)`
 
@@ -1110,6 +1140,27 @@ function _G.parseBlockOrScopedStatementOrUnwrappedNonPolutingStatement(state, pa
 	return statement.what
 end
 
+function _G.parseImportOrLoad(state, parentNode)
+	local import = astNewNode(state, AstImport, parentNode)
+
+	local tokType, tokValue = consumeNextToken(state)
+	if isToken(tokType,tokValue, !(TOKEN_TYPE_DIRECTIVE),"import") then
+		-- void
+	elseif isToken(tokType,tokValue, !(TOKEN_TYPE_DIRECTIVE),"load") then
+		import.isLoad = true
+	else
+		!ERROR_OR_RETURN `errorParsingLast(state, "Expected '!load' or '!import'.")`
+	end
+
+	local tokType, tokValue = consumeNextToken(state)
+	if tokType ~= !(TOKEN_TYPE_STRING) then
+		!ERROR_OR_RETURN `errorParsingLast(state, "Expected a string.")`
+	end
+	import.name = tokValue
+
+	return import
+end
+
 function _G.parseFileScope(state, path, parentNode)
 	local fileScope = astNewNode(state, AstFileScope, parentNode)
 	fileScope.path  = path
@@ -1124,7 +1175,16 @@ function _G.parseFileScope(state, path, parentNode)
 			!SET_OR_RETURN `local decl = parseDeclaration(state, fileScope)`
 			table.insert(fileScope.declarations, decl)
 
-		elseif isToken(tokType,tokValue, !(TOKEN_TYPE_KEYWORD),"export","use","useLibrary") then
+		elseif isToken(tokType,tokValue, !(TOKEN_TYPE_DIRECTIVE),"import","load") then
+			!SET_OR_RETURN `local import = parseImportOrLoad(state, fileScope)`
+			table.insert(fileScope.includedNamespaces, import)
+
+			tokType, tokValue = peekNextToken(state)
+			if isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),";") then
+				consumeNextToken(state)
+			end
+
+		elseif isToken(tokType,tokValue, !(TOKEN_TYPE_KEYWORD),"export","use") then
 			!ERROR_OR_RETURN `errorParsingNext(state, "@Incomplete: Handle '%s'.", tokValue)`
 
 		else
@@ -1381,19 +1441,6 @@ function _G.parseExpression(state, parentNode, minOpPrecedence)
 			!ERROR_OR_RETURN `errorParsingAfterPrevious(state, "Expected ')'.")`
 		end
 
-	-- Type.
-	elseif isToken(tokType,tokValue, !(TOKEN_TYPE_DIRECTIVE),"type") then
-		-- Note: parseType() does not recognize !type which is why you can't put
-		-- the directive anywhere a type is expected. Should we change this?
-		!SET_OR_RETURN `expr = parseType(state, parentNode)`
-
-	elseif
-		isToken(tokType,tokValue, !(TOKEN_TYPE_KEYWORD),"typeOf") or
-		isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),"[")
-	then
-		putBackLastToken(state)
-		!SET_OR_RETURN `expr = parseType(state, parentNode)`
-
 	-- Cast.
 	elseif isToken(tokType,tokValue, !(TOKEN_TYPE_KEYWORD),"cast") then
 		tokType, tokValue = consumeNextToken(state)
@@ -1411,6 +1458,19 @@ function _G.parseExpression(state, parentNode, minOpPrecedence)
 
 		!SET_OR_RETURN `cast.expression = parseExpression(state, cast, math.huge)` -- @Incomplete: Give casting an operator precedence.
 		expr                            = cast
+
+	-- Type.
+	elseif isToken(tokType,tokValue, !(TOKEN_TYPE_DIRECTIVE),"type") then
+		-- Note: parseType() does not recognize !type which is why you can't put
+		-- the directive anywhere a type is expected. Should we change this?
+		!SET_OR_RETURN `expr = parseType(state, parentNode)`
+
+	elseif
+		isToken(tokType,tokValue, !(TOKEN_TYPE_KEYWORD),"typeOf") or
+		isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),"[")
+	then
+		putBackLastToken(state)
+		!SET_OR_RETURN `expr = parseType(state, parentNode)`
 
 	else
 		!ERROR_OR_RETURN `errorParsingLast(state, "Expected a value.")`
@@ -1670,7 +1730,13 @@ do
 
 			elseif node.nodeType == !(nodeTypes.AstDeclaration) then
 				local decl = node
-				if decl.isConstant then  write(" (const)")  end
+				if decl.isConstant and not decl.isLocal then
+					write(" (global const)")
+				elseif decl.isConstant then
+					write(" (const)")
+				elseif not decl.isLocal then
+					write(" (global)")
+				end
 				!!(BLOCK_START)
 				write("\n")
 				printNodeList(decl.names,      indent+1, printed, "NAME")
@@ -1828,6 +1894,10 @@ do
 				if defer.body then  printNode(defer.body, indent+1, printed)  end
 				!!(BLOCK_END)
 
+			elseif node.nodeType == !(nodeTypes.AstImport) then
+				local import = node
+				write(" (", (import.isLoad and "load " or "import "), import.name, ")\n")
+
 			elseif node.nodeType == !(nodeTypes.AstLiteral) then
 				local literal = node
 
@@ -1878,7 +1948,8 @@ do
 
 				!!(BLOCK_START)
 				write("\n")
-				printNodeList(node.declarations, indent+1, printed)
+				printNodeList(node.includedNamespaces, indent+1, printed)
+				printNodeList(node.declarations,       indent+1, printed)
 				!!(BLOCK_END)
 
 			else
