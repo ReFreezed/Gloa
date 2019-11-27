@@ -103,7 +103,13 @@ local !structAst"AstType:_AstNode"{
 
 !structAst"_AstExpression:_AstNode"{}
 local !structAst"AstIdentifier:_AstExpression"{
-	name          = "",
+	name = "",
+	-- Type phase:
+	declarationId = 0,
+}
+local !structAst"AstVararg:_AstExpression"{
+	surroundedByParenthesis = false,
+	-- Type phase:
 	declarationId = 0,
 }
 local !structAst"AstLiteral:_AstExpression"{
@@ -130,7 +136,7 @@ local !structAst"AstCall:_AstExpression"{
 	arguments                 = {},  -- []AstExpression
 }
 local !structAst"AstArgument:_AstNode"{
-	name          = NIL, -- AstIdentifier
+	name          = NIL, -- AstIdentifier|AstVararg
 	argumentTypes = {},  -- []AstType
 	defaultValue  = NIL,
 	autobake      = 0,   -- 0=disabled, 1=enabled, 2=required  @Incomplete
@@ -499,6 +505,7 @@ function _G.parseArguments(state, parentNode, isInput)
 	local argsStartIndex = state.nextToken
 	local args           = astNewNode(state, AstArguments, parentNode)
 
+	local gotVararg = false
 	local tokType, tokValue
 
 	while true do
@@ -507,14 +514,23 @@ function _G.parseArguments(state, parentNode, isInput)
 
 		while true do
 			tokType, tokValue = consumeNextToken(state)
-			if tokType ~= !(TOKEN_TYPE_IDENTIFIER) then
+			if not (tokType == !(TOKEN_TYPE_IDENTIFIER) or isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),"...")) then
 				!ERROR_OR_RETURN `errorParsingLast(state, "Expected an identifier.")`
 			end
 
-			local arg   = astNewNode(state, AstArgument,   args)
-			local ident = astNewNode(state, AstIdentifier, arg)
-			ident.name  = tokValue
-			arg.name    = ident
+			local arg = astNewNode(state, AstArgument,   args)
+			local nameNode
+
+			if tokType == !(TOKEN_TYPE_IDENTIFIER) then
+				local ident = astNewNode(state, AstIdentifier, arg)
+				ident.name  = tokValue
+				nameNode    = ident
+			else
+				gotVararg   = true
+				nameNode    = astNewNode(state, AstVararg, arg)
+			end
+
+			arg.name = nameNode
 
 			table.insert(args,     arg)
 			table.insert(argGroup, arg)
@@ -527,6 +543,10 @@ function _G.parseArguments(state, parentNode, isInput)
 				-- Continue the loop.
 			else
 				!ERROR_OR_RETURN `errorParsingAfterPrevious(state, "Expected ':'.")`
+			end
+
+			if gotVararg then
+				!ERROR_OR_RETURN `errorParsingLast(state, "Vararg must be the last argument.")`
 			end
 		end
 
@@ -579,6 +599,10 @@ function _G.parseArguments(state, parentNode, isInput)
 			-- Continue the loop.
 		else
 			break
+		end
+
+		if gotVararg then
+			!ERROR_OR_RETURN `errorParsingLast(state, "Vararg must be the last argument.")`
 		end
 	end
 
@@ -1308,6 +1332,10 @@ function _G.parseExpression(state, parentNode, minOpPrecedence)
 			expr                = literal
 		end
 
+	-- Vararg.
+	elseif isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),"...") then
+		expr = astNewNode(state, AstVararg, parentNode)
+
 	-- Table constructor.
 	elseif isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),"{") then
 		!SET_OR_RETURN `expr = parseTable(state, parentNode)`
@@ -1326,10 +1354,12 @@ function _G.parseExpression(state, parentNode, minOpPrecedence)
 	--
 	--     inArgs [-> outArgs] [body]
 	--
-	--     inArgs  = ( [ inName1:inType1, ... ] )
+	--     inArgs  = ( [ inArg1, ... ] )
+	--     inArg   = name1 [, ... ] : type [ = defaultValue ]
 	--     outArgs = void
-	--     outArgs = outType1 [, ... ]
-	--     outArgs = ( outName1:outType1 [, ... ] )
+	--     outArgs = type1 [, ... ]
+	--     outArgs = ( outArg1 [, ... ] )
+	--     outArg  = name1 [, ... ] : type
 	--     body    = { ... }
 	--
 	elseif
@@ -1337,7 +1367,10 @@ function _G.parseExpression(state, parentNode, minOpPrecedence)
 		and (
 			isToken(tokType2,tokValue2, !(TOKEN_TYPE_PUNCTUATION),")")
 			or (
-				isToken(tokType2,tokValue2, !(TOKEN_TYPE_IDENTIFIER))
+				(
+					isToken(tokType2,tokValue2, !(TOKEN_TYPE_IDENTIFIER))
+					or isToken(tokType2,tokValue2, !(TOKEN_TYPE_PUNCTUATION),"...")
+				)
 				and isToken(tokType3,tokValue3, !(TOKEN_TYPE_PUNCTUATION),":",",")
 			)
 		)
@@ -1428,7 +1461,7 @@ function _G.parseExpression(state, parentNode, minOpPrecedence)
 	elseif isToken(tokType,tokValue, !(TOKEN_TYPE_PUNCTUATION),"(") then
 		!SET_OR_RETURN `expr = parseExpression(state, parentNode)`
 
-		if expr.nodeType == !(nodeTypes.AstCall) then
+		if isAny(expr.nodeType, !(nodeTypes.AstCall), !(nodeTypes.AstVararg)) then
 			-- This is so we know whether to adjust the return values to one or not in certain situations.
 			-- Note: Functions with a return argument after the first one marked as #must cannot have their
 			-- return arguments adjusted to one.
@@ -1897,6 +1930,11 @@ do
 			elseif node.nodeType == !(nodeTypes.AstImport) then
 				local import = node
 				write(" (", (import.isLoad and "load " or "import "), import.name, ")\n")
+
+			elseif node.nodeType == !(nodeTypes.AstVararg) then
+				local vararg = node
+				if vararg.surroundedByParenthesis then  write(" (adjustTo1)")  end
+				write("\n")
 
 			elseif node.nodeType == !(nodeTypes.AstLiteral) then
 				local literal = node

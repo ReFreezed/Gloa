@@ -120,25 +120,59 @@ end
 
 
 function _G.reportMessageInFile(buffer, path, ptr, label, agent, s, ...)
-	s = F(s, ...)
+	!local BUFFER_LINES_TO_PRINT = 2
 
+	s   = F(s, ...)
 	ptr = math.clamp(ptr, 1, #buffer+1)
-	local pre = buffer:sub(1, ptr-1)
 
-	local lastLine1 = pre:reverse():match"^[^\n]*":reverse():gsub("\t", "    ")
-	local lastLine2 = buffer:match("^[^\n]*", ptr):gsub("\t", "    ")
-	local lastLine  = lastLine1..lastLine2
+	!for i = 1, BUFFER_LINES_TO_PRINT do
+		!local varThisPtr = "lineStart"..i
+		!local varPrevPtr = "lineStart"..i-1
 
-	local _, nlCount = pre:gsub("\n", "%0")
-	local ln = nlCount+1
+		!if i == 1 then
+			local !!(varThisPtr) = ptr
+		!else
+			local !!(varThisPtr) = !!(varPrevPtr)-1
+		!end
 
-	local len    = 0
-	local lenPtr = 1
+		while !!(varThisPtr) > 1 and buffer:byte(!!(varThisPtr)-1) ~= !(getByte"\n") do
+			!!(varThisPtr) = !!(varThisPtr)-1
+		end
+	!end
+
+	local lineEnd = ptr-1 -- We start at ptr-1 so that we may get lineEnd==lineStart1-1 in the end.
+	while lineEnd < #buffer and buffer:byte(lineEnd+1) ~= !(getByte"\n") do
+		lineEnd = lineEnd+1
+	end
+
+	local lastLinePre = buffer:sub(lineStart1, ptr-1):gsub("\t", "    ")
+
+	!for i = 1, BUFFER_LINES_TO_PRINT do
+		!local varThis    = "lastLine" ..i
+		!local varThisPtr = "lineStart"..i
+		!local varPrevPtr = "lineStart"..i-1
+
+		local !!(varThis) = ""
+
+		!if i == 1 then
+			!!(varThis) = buffer:sub(!!(varThisPtr), lineEnd         ):gsub("\t", "    ")
+		!else
+			if !!(varPrevPtr)-2 >= 1 then
+				!!(varThis) = buffer:sub(!!(varThisPtr), !!(varPrevPtr)-2):gsub("\t", "    ")
+			end
+		!end
+	!end
+
+	local _, nlCount  = buffer:sub(1, ptr-1):gsub("\n", "%0")
+	local ln          = nlCount+1
+
+	local len         = 0
+	local lenPtr      = 1
 
 	while true do
-		if lenPtr > #lastLine1 then  break  end
+		if lenPtr > #lastLinePre then  break  end
 
-		local _, i2 = lastLine1:find("^[%z\1-\127\194-\244][\128-\191]*", lenPtr)
+		local _, i2 = lastLinePre:find("^[%z\1-\127\194-\244][\128-\191]*", lenPtr)
 
 		len    = len+1 -- The length isn't going to be perfect, depending on what Unicode characters are encountered.
 		lenPtr = i2+1
@@ -147,16 +181,26 @@ function _G.reportMessageInFile(buffer, path, ptr, label, agent, s, ...)
 	local col = 1+len
 
 	if agent then
-		printf(
-			"%s @ %s:%d: [%s] %s\n>\n> %s\n>%s^\n>",
-			label, path, ln, agent, s, lastLine, ("-"):rep(col)
-		)
+		printf("%s @ %s:%d: [%s] %s", label, path, ln, agent, s)
 	else
-		printf(
-			"%s @ %s:%d: %s\n>\n> %s\n> %s^\n>",
-			label, path, ln,        s, lastLine, ("-"):rep(col-1)
-		)
+		printf("%s @ %s:%d: %s",      label, path, ln,        s)
 	end
+
+	print(">")
+
+	!for i = BUFFER_LINES_TO_PRINT, 1, -1 do
+		!local varThis = "lastLine"..i
+
+		!if i == 1 then
+			print("> "..!!(varThis))
+		!else
+			if !!(varThis) ~= "" then
+				print("> "..!!(varThis))
+			end
+		!end
+	!end
+
+	printf(">%s^\n>", ("-"):rep(col))
 end
 
 
