@@ -26,6 +26,7 @@ do !(do) @insert "preprocessorStuffAndGlobals.luapart" !(end) end
 do !(do) @insert "functions.luapart" !(end) end
 do !(do) @insert "lexer.luapart"     !(end) end
 do !(do) @insert "parser.luapart"    !(end) end
+do !(do) @insert "typer.luapart"     !(end) end
 
 
 
@@ -151,7 +152,7 @@ for i = 1, tokens.count do
 
 		elseif tokens.value[i] ~= expected then
 			reportMessageInFile(s, path, tokens.position1[i],      "Error", "BracketChecker", "Expected '%s'.", expected)
-			reportMessageInFile(s, path, tokens.position1[iStart], "Info",  "BracketChecker", "... here is the unmatched bracket.")
+			reportMessageInFile(s, path, tokens.position1[iStart], "Info",  "BracketChecker", "...here is the unmatched bracket.")
 			exitFailure()
 			-- bracketTokenIndices[1] = nil
 			-- break
@@ -167,7 +168,7 @@ end
 
 
 
--- Parse!
+-- Parse.
 local state             = ParseState()
 state.fileBuffers[path] = s
 state.tokens            = tokens
@@ -180,11 +181,42 @@ end
 
 
 
+-- [[ Infer types.
+local state             = TyperState()
+state.fileBuffers[path] = s
+state.tokens            = tokens
+
+for i = 1, math.huge do
+	state.progress = 0
+	state.waiting  = 0
+
+	inferFileScope(state, topNode)
+
+	if state.waiting == 0 then
+		break
+
+	elseif state.progress == 0 then
+		state.mustInfer = true
+		state.errorStep = state.waiting
+		inferFileScope(state, topNode) -- This should trigger an error somewhere.
+		errorInternal("Type inference loop is stuck. Also failed to report where the issue actually is. Oops...")
+	end
+
+	-- Guard against an infinite loop.
+	if i == 100 then
+		errorInternal("Type inference loop went on for too long. (waiting:%d, progress:%d)", state.waiting, state.progress)
+		exitFailure()
+	end
+end
+--]]
+
+
+
 -- All done!
 
 !if DEBUG then
 	printf("Compilation completed in %.3f seconds", os.clock()-compilationStartTime)
-	astPrint(topNode)--, io.stderr)
+	-- astPrint(topNode)--, io.stderr)
 !else
 	if not silent then
 		printf("Compilation completed in %.3f seconds", os.clock()-compilationStartTime)

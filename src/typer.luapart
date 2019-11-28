@@ -1,0 +1,429 @@
+--[[============================================================
+--=
+--=  Typer
+--=
+--=-------------------------------------------------------------
+--=
+--=  Glóa - a language that compiles into Lua
+--=  by Marcus 'ReFreezed' Thunström
+--=
+--==============================================================
+
+	typeError, typeMessage, errorUnhandledNodeType
+	inferType*
+
+--============================================================]]
+
+!(
+local function WAITING_OR_ERROR(errCode)
+	__LUA("if state.mustInfer then ")
+		__LUA("state.errorStep = state.errorStep-1 ")
+		__LUA("if state.errorStep <= 0 then ")
+			__LUA(errCode," ")
+		__LUA("end ")
+	__LUA("end ")
+	__LUA("state.waiting = state.waiting+1 ")
+end
+)
+
+
+
+_G.!struct"TyperState"{
+	fileBuffers = {},
+	tokens      = {},
+
+	progress    = 0,
+	waiting     = 0,
+
+	mustInfer   = false,
+	errorStep   = 0,
+}
+
+
+
+!(
+_G.typeInfoKinds    = {}
+local typeInfoN     = 0
+local typeInfoNames = {}
+
+local function structTypeInfo(nameAndParent)
+	return function(fields)
+		local name = nameAndParent:match"^[%w_]+"
+
+		if not name:find"^_" then
+			typeInfoN              = typeInfoN+1
+			fields._overrides      = fields._overrides or {}
+			fields._overrides.kind = typeInfoN
+
+			typeInfoKinds[name]      = typeInfoN
+			typeInfoNames[typeInfoN] = name
+		end
+
+		struct(nameAndParent)(fields)
+	end
+end
+)
+
+!struct"_TypeInfo"{
+	kind       = 0,
+	group      = 0,
+	id         = 0,
+	definition = NIL, -- AstTypeDefinition (This node has the scope.)
+}
+
+!structTypeInfo"_TypeInfoPrimitive:_TypeInfo"{
+	_overrides = {group=TYPEDEF_BUILTIN},
+}
+local !structTypeInfo"TypeInfoBool:_TypeInfoPrimitive"{}
+local !structTypeInfo"TypeInfoInt:_TypeInfoPrimitive"{}
+local !structTypeInfo"TypeInfoNil:_TypeInfoPrimitive"{}
+local !structTypeInfo"TypeInfoNumber:_TypeInfoPrimitive"{}
+local !structTypeInfo"TypeInfoString:_TypeInfoPrimitive"{}
+local !structTypeInfo"TypeInfoTable:_TypeInfoPrimitive"{}
+local !structTypeInfo"TypeInfoType:_TypeInfoPrimitive"{}
+local !structTypeInfo"TypeInfoAny:_TypeInfoPrimitive"{}
+
+local !structTypeInfo"TypeInfoFunction:_TypeInfo"{
+	_overrides       = {group=TYPEDEF_FUNCTION},
+	argumentInTypes  = {}, -- []TypeInfo
+	argumentOutTypes = {}, -- []TypeInfo
+	polymorphic      = false,
+	inline           = false,
+}
+
+local !struct"TypeInfoStructMember"{
+	name     = "",
+	typeInfo = NIL,
+}
+local !structTypeInfo"TypeInfoStruct:_TypeInfo"{
+	_overrides            = {group=TYPEDEF_STRUCT},
+	name                  = "",
+	members               = {},  -- []TypeInfoStructMember
+	polymorphSourceStruct = NIL, -- TypeInfoStruct
+}
+
+local !struct"TypeInfoEnumMember"{
+	name = "",
+}
+local !structTypeInfo"TypeInfoEnum:_TypeInfo"{
+	_overrides            = {group=TYPEDEF_ENUM},
+	name                  = "",
+	members               = {}, -- []TypeInfoEnumMember
+}
+
+local !structTypeInfo"TypeInfoCompound:_TypeInfo"{
+	_overrides = {group=TYPEDEF_BUILTIN},
+	-- [1]=typeInfo1, ...
+}
+
+local TYPEDEF_NAMES = !(typeInfoNames)
+
+
+
+-- typeInfo = newTypeInfo( TypeInfoCreator [, definition=internal ] )
+do
+	local lastTypeId = 0
+
+	function _G.newTypeInfo(TypeInfoCreator, defn)
+		if not TypeInfoCreator then  error("No TypeInfoCreator specified.", 2)  end
+
+		lastTypeId = lastTypeId+1
+
+		local typeInfo      = TypeInfoCreator()
+		typeInfo.id         = lastTypeId
+		typeInfo.definition = defn
+
+		--[[
+		if lastTypeId == 22 then
+			error("DEBUG")
+		end
+		--]]
+
+		return typeInfo
+	end
+end
+
+do
+	local builtinTypeInfos = {}
+
+	local BUILTIN_TYPE_STRUCTS = {
+		["bool"]   = TypeInfoBool,
+		["int"]    = TypeInfoInt,
+		["nil"]    = TypeInfoNil,
+		["number"] = TypeInfoNumber,
+		["string"] = TypeInfoString,
+		["table"]  = TypeInfoTable,
+		["type"]   = TypeInfoType,
+	}
+
+	function _G.getTypeInfoForBuiltinType(state, typeName)
+		local typeInfo = builtinTypeInfos[typeName]
+
+		if not typeInfo then
+			local TypeInfoCreator      = BUILTIN_TYPE_STRUCTS[typeName] or error(typeName)
+			typeInfo                   = newTypeInfo(TypeInfoCreator)
+			builtinTypeInfos[typeName] = typeInfo
+		end
+
+		return typeInfo
+	end
+
+	-- typeInfo, definition = getTypeInfo( state, identType )
+	-- The definition is nil for built-in types.
+	function _G.getTypeInfo(state, identType)
+		if not identType.isUserType then
+			return getTypeInfoForBuiltinType(state, "type"), nil
+		end
+
+		local defn     = findDefinition(state, identType, identType.typeName)
+		local typeInfo = defn and defn.typeInfo
+
+		if not typeInfo then  return nil  end
+
+		-- @Incomplete: Check stuff with typeInfo.group, I think is needed?
+		--[[
+		for _, typeData in ipairs(state.allTypes) do
+			if identType.typeName == typeData.name then
+				local typeInfo = typeData.typeInfo
+
+				if typeInfo.group == !(TYPEDEF_BUILTIN) then
+					assert(not identType.arguments) -- This should have been prevented during parsing. Builtin types don't have parameters.
+					return typeInfo
+
+				elseif typeInfo.group == !(TYPEDEF_STRUCT) then
+					error("@Incomplete: Handle group==TYPEDEF_STRUCT")
+
+				elseif typeInfo.group == !(TYPEDEF_ENUM) then
+					error("@Incomplete: Handle group==TYPEDEF_ENUM")
+
+				elseif typeInfo.group == !(TYPEDEF_FUNCTION) then
+					error("@Incomplete: Handle group==TYPEDEF_FUNCTION")
+
+				else
+					error(typeInfo.group)
+				end
+			end
+		end
+		]]
+
+		return typeInfo, defn
+	end
+end
+
+
+
+function _G.findDefinition(state, startNode, name)
+	local scope = startNode
+
+	while true do
+		scope = astFindParent(scope, !(nodeTypes.AstFileScope),!(nodeTypes.AstBlock),!(nodeTypes.AstStruct),!(nodeTypes.AstEnum),!(nodeTypes.AstFor))
+		if not scope then  return nil  end
+
+		assert(scope.definitions, scope.nodeType)
+
+		for _, defn in ipairs(scope.definitions) do
+			if defn.name.name == name then  return defn  end
+		end
+	end
+end
+
+function _G.defineInClosestScope(state, ident, typeInfo)
+	local defnExisting = findDefinition(state, ident, ident.name)
+
+	if defnExisting then
+		-- @Incomplete: We're not following imperative scope rules for name shadowing (if that's what happening here).
+		typeMessage(state, ident,             "Error", "'%s' has already been defined.", ident.name)
+		typeMessage(state, defnExisting.name, "Info",  "...it was defined here.")
+		exitFailure()
+	end
+
+	local scope = astFindParent(ident, !(nodeTypes.AstFileScope),!(nodeTypes.AstBlock),!(nodeTypes.AstStruct),!(nodeTypes.AstEnum)) -- Should we include AstFor here?
+	if not scope then
+		typeError(state, ident, "Could not find what scope '%s' is in.", ident.name)
+	end
+
+	local defn    = astNewNode(AstTypeDefinition, ident.token, scope)
+	defn.name     = ident
+	defn.typeInfo = typeInfo
+	table.insert(scope.definitions, defn)
+end
+
+
+
+local LITERAL_TYPE_TO_BUILTIN_TYPE_NAME = !({
+	[LITERAL_BOOLEAN] = "bool",
+	[LITERAL_INTEGER] = "int",
+	[LITERAL_NIL]     = "nil",
+	[LITERAL_NUMBER]  = "number",
+	[LITERAL_STRING]  = "string",
+})
+
+function _G.inferExpression(state, expr)
+	local typeInfo
+
+	if expr.nodeType == !(nodeTypes.AstType) then
+		local identType = expr
+		typeInfo        = getTypeInfo(state, identType)
+
+	elseif expr.nodeType == !(nodeTypes.AstLiteral) then
+		local literal  = expr
+		local typeName = LITERAL_TYPE_TO_BUILTIN_TYPE_NAME[literal.literalType]
+
+		if typeName then
+			typeInfo = getTypeInfoForBuiltinType(state, typeName)
+		else
+			errorUnhandledNodeType(expr)
+		end
+
+	elseif expr.nodeType == !(nodeTypes.AstIdentifier) then
+		local ident = expr
+		local defn  = findDefinition(state, ident, ident.name)
+
+		if defn then
+			typeInfo = defn.typeInfo
+		else
+			!WAITING_OR_ERROR `errorLine("Typer", "Undeclared identifier '%s'.", ident.name)`
+			return
+		end
+
+	else
+		errorUnhandledNodeType(expr)
+	end
+
+	assert(typeInfo)
+	expr.inferredType = typeInfo
+end
+
+function _G.inferDeclaration(state, decl)
+	-- @Incomplete: Check that the values (if there are any) are of the same type as the inferred type of the name.
+	--              Maybe we wait with inferring the type of the expressions if type(s) are specified.
+
+	-- Infer types of values.
+	for i, expr in ipairs(decl.values) do
+		if not expr.inferredType then
+			inferExpression(state, expr)
+		end
+	end
+
+	-- Infer types of names and declare them.
+	for i, ident in ipairs(decl.names) do
+		local typeInfo = nil
+
+		-- @Incomplete: Look out for imports/loads.
+		if not decl.inferredTypes[i] then
+			-- Specified compound type.
+			-- local x:int|string
+			if decl.types[2] then
+				error("@Incomplete: TypeInfoCompound")
+
+			-- Single specified type.
+			-- local x:int
+			elseif decl.types[1] then
+				local typeNode = decl.types[1]
+
+				if typeNode.nodeType == !(nodeTypes.AstType) then
+					local identType = typeNode
+					local defn
+					typeInfo, defn  = getTypeInfo(state, identType)
+
+					if not typeInfo then
+						!WAITING_OR_ERROR `typeError(state, identType, "Undeclared type '%s'.", identType.typeName)`
+
+					elseif typeInfo and typeInfo.kind ~= !(typeInfoKinds.TypeInfoType) then
+						typeMessage(state, identType, "Error", "'%s' is not a type. (It is '%s')", identType.typeName, getKindOfFriendlyTypeInfoName(typeInfo))
+
+						-- @Incomplete: Print the whole chain of definitions, if there's more than one ancestor.
+						if defn then
+							typeMessage(state, defn.name, "Info", "...here is '%s' declared.", identType.typeName)
+						end
+
+						exitFailure()
+					end
+
+				elseif typeNode.nodeType == !(nodeTypes.AstLiteral) then
+					local literal = typeNode
+					assert(literal.literalType == !(LITERAL_ARRAY))
+					errorUnhandledNodeType(typeNode) -- @Incomplete
+
+				elseif typeNode.nodeType == !(nodeTypes.AstTypeOf) then
+					local typeOf = expr
+					-- typeOf.expression
+					errorUnhandledNodeType(typeNode) -- @Incomplete
+
+				else
+					errorUnhandledNodeType(typeNode)
+				end
+
+			-- Infer types from initial values.
+			else
+				-- local x, y, z = expr, func()
+				if i > #decl.values then
+					error("@Incomplete: Handle initial assignment from (what hopefully is) a multi-value return.")
+
+				-- local x, y = expr1, expr2
+				else
+					local expr = decl.values[i]
+					typeInfo   = expr.inferredType
+
+					if not typeInfo then
+						!WAITING_OR_ERROR `typeError(state, expr, "Could not infer type of expression.")`
+					end
+				end
+			end
+
+			if typeInfo then
+				state.progress        = state.progress+1
+				decl.inferredTypes[i] = typeInfo
+				defineInClosestScope(state, ident, typeInfo)
+			end
+
+			--[[ DEBUG
+			if typeInfo then
+				print("DECLARE "..ident.name..":"..TYPEDEF_NAMES[typeInfo.kind])
+			else
+				print("DECLARE "..ident.name.." FAILED")
+			end
+			--]]
+		end
+	end
+end
+
+function _G.inferFileScope(state, fileScope)
+	for _, decl in ipairs(fileScope.declarations) do
+		inferDeclaration(state, decl)
+	end
+end
+
+
+
+-- typeError( typerState, node, formatString, ... )
+function _G.typeError(state, node, s, ...)
+	local tokens = state.tokens
+	local token  = node.token
+	local path   = tokens.file[token]      or errorInternal(2, "No tokens.")
+	local buffer = state.fileBuffers[path] or errorInternal("No file buffer for '%s'.", path)
+	errorInFile(buffer, path, tokens.position1[token], "Typer", s, ...)
+end
+
+-- typeMessage( typerState, node, label, formatString, ... )
+function _G.typeMessage(state, node, label, s, ...)
+	local tokens = state.tokens
+	local token  = node.token
+	local path   = tokens.file[token]      or errorInternal(2, "No tokens.")
+	local buffer = state.fileBuffers[path] or errorInternal("No file buffer for '%s'.", path)
+	reportMessageInFile(buffer, path, tokens.position1[token], label, "Typer", s, ...)
+end
+
+function _G.errorUnhandledNodeType(node)
+	astPrint(node)
+	errorInternal(2, "Incomplete: Unhandled node type '%s'.", (AST_NODE_TYPE_NAMES[node.nodeType] or node.nodeType))
+end
+
+
+
+function _G.getKindOfFriendlyTypeInfoName(typeInfo)
+	-- @Cleanup: This just ain't nice.
+	return TYPEDEF_NAMES[typeInfo.kind]:gsub("^TypeInfo", ""):lower()
+end
+
+

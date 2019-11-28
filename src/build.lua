@@ -6,8 +6,9 @@ local buildStartTime = os.clock()
 
 io.stdout:setvbuf("no")
 io.stderr:setvbuf("no")
+collectgarbage("stop") -- Slight speed boost.
 
-local DIR_HERE    = debug.getinfo(1, "S").source:match"@?(.+)":gsub("[/\\]?[^/\\]+$", ""):gsub("^$", ".")
+local DIR_HERE = debug.getinfo(1, "S").source:match"@?(.+)":gsub("[/\\]?[^/\\]+$", ""):gsub("^$", ".")
 
 -- Read build arguments.
 local args        = {...}
