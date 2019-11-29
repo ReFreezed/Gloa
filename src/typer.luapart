@@ -37,6 +37,8 @@ _G.!struct"TyperState"{
 
 	mustInfer   = false,
 	errorStep   = 0,
+
+	functionSignatureTypes = {},
 }
 
 
@@ -85,8 +87,8 @@ local !structTypeInfo"TypeInfoAny:_TypeInfoPrimitive"{}
 
 local !structTypeInfo"TypeInfoFunction:_TypeInfo"{
 	_overrides       = {group=TYPEDEF_FUNCTION},
-	argumentInTypes  = {}, -- []TypeInfo
-	argumentOutTypes = {}, -- []TypeInfo
+	argumentTypesIn  = {}, -- []TypeInfo
+	argumentTypesOut = {}, -- []TypeInfo
 	polymorphic      = false,
 	inline           = false,
 }
@@ -167,13 +169,48 @@ do
 
 		return typeInfo
 	end
+end
 
-	-- typeInfo, definition = getTypeInfo( state, identType )
-	-- The definition is nil for built-in types.
-	function _G.getTypeInfo(state, identType)
-		if not identType.isUserType then
-			return getTypeInfoForBuiltinType(state, "type"), nil
+-- typeInfo, definition = getTypeInfo( state, identType )
+-- Can return nil. The definition is always nil for built-in types.
+function _G.getTypeInfo(state, identType)
+	-- print(">>>>>>>>>") astPrint(identType) print("<<<<<<<<<")
+
+	if not identType.isUserType then
+		return getTypeInfoForBuiltinType(state, identType.typeName), nil
+
+	elseif identType.functionSignature then
+		local lambda = identType.functionSignature
+
+		for _, arg in ipairs(lambda.argumentsIn or EMPTY_TABLE) do
+			if not arg.declaration.inferredTypes[1] then  return nil  end
 		end
+		for _, arg in ipairs(lambda.argumentsOut or EMPTY_TABLE) do
+			if not arg.declaration.inferredTypes[1] then  return nil  end
+		end
+
+		-- Have we encountered an equal signature before?
+		for _, funcSigCached in ipairs(state.functionSignatureTypes) do
+			if doesLambdaHaveSignature(lambda, funcSigCached) then
+				return funcSigCached, nil
+			end
+		end
+
+		funcSig = newTypeInfo(TypeInfoFunction)
+
+		for i, arg in ipairs(lambda.argumentsIn or EMPTY_TABLE) do
+			funcSig.argumentTypesIn[i] = arg.declaration.inferredTypes[1]
+		end
+		for i, arg in ipairs(lambda.argumentsOut or EMPTY_TABLE) do
+			funcSig.argumentTypesOut[i] = arg.declaration.inferredTypes[1]
+		end
+
+		table.insert(state.functionSignatureTypes, funcSig)
+
+		return funcSig, nil
+
+	else
+		assert(identType.typeName ~= "")
 
 		local defn     = findDefinition(state, identType, identType.typeName)
 		local typeInfo = defn and defn.typeInfo
@@ -212,11 +249,35 @@ end
 
 
 
+function _G.doesLambdaHaveSignature(lambda, funcSig)
+	if #(lambda.argumentsIn  or EMPTY_TABLE) ~= #funcSig.argumentTypesIn  then  return false  end
+	if #(lambda.argumentsOut or EMPTY_TABLE) ~= #funcSig.argumentTypesOut then  return false  end
+
+	for i, arg in ipairs(lambda.argumentsIn or EMPTY_TABLE) do
+		if arg.declaration.inferredTypes[1] ~= funcSig.argumentTypesIn[i] then  return false  end
+	end
+	for i, arg in ipairs(lambda.argumentsOut or EMPTY_TABLE) do
+		if arg.declaration.inferredTypes[1] ~= funcSig.argumentTypesIn[i] then  return false  end
+	end
+
+	-- @Incomplete: Check for required input args.
+
+	return true
+end
+
+
+
+function _G.getClosestScope(node)
+	return astFindParent(node, !(nodeTypes.AstFileScope),!(nodeTypes.AstBlock),!(nodeTypes.AstStruct),!(nodeTypes.AstEnum),!(nodeTypes.AstFor),!(nodeTypes.AstLambda))
+end
+
+
+
 function _G.findDefinition(state, startNode, name)
 	local scope = startNode
 
 	while true do
-		scope = astFindParent(scope, !(nodeTypes.AstFileScope),!(nodeTypes.AstBlock),!(nodeTypes.AstStruct),!(nodeTypes.AstEnum),!(nodeTypes.AstFor))
+		scope = getClosestScope(scope)
 		if not scope then  return nil  end
 
 		assert(scope.definitions, scope.nodeType)
@@ -237,15 +298,44 @@ function _G.defineInClosestScope(state, ident, typeInfo)
 		exitFailure()
 	end
 
-	local scope = astFindParent(ident, !(nodeTypes.AstFileScope),!(nodeTypes.AstBlock),!(nodeTypes.AstStruct),!(nodeTypes.AstEnum)) -- Should we include AstFor here?
+	local scope = getClosestScope(ident)
 	if not scope then
 		typeError(state, ident, "Could not find what scope '%s' is in.", ident.name)
 	end
 
 	local defn    = astNewNode(AstTypeDefinition, ident.token, scope)
 	defn.name     = ident
+	defn.scope    = scope
 	defn.typeInfo = typeInfo
+
 	table.insert(scope.definitions, defn)
+end
+
+function _G.printDefinitionChain(state, defn, typeName)
+	!local MAX_CHAIN_LENGTH = 10
+
+	for i = 1, !(MAX_CHAIN_LENGTH) do
+		typeMessage(state, defn.name, "Info", "...here is '%s' defined.", typeName)
+
+		local placeDeclared = defn.name.placeDeclared
+		if not placeDeclared then  break  end
+
+		defn = nil
+
+		if placeDeclared.nodeType == !(nodeTypes.AstDeclaration) then
+			local decl      = placeDeclared
+			local i         = indexWith1(decl.names, "name", typeName)
+			local valueNode = decl.values[i]
+
+			if valueNode and valueNode.nodeType == !(nodeTypes.AstIdentifier) then
+				local ident = valueNode
+				typeName    = ident.name
+				defn        = findDefinition(state, ident, typeName)
+			end
+		end
+
+		if not defn then  break  end
+	end
 end
 
 
@@ -263,7 +353,17 @@ function _G.inferExpression(state, expr)
 
 	if expr.nodeType == !(nodeTypes.AstType) then
 		local identType = expr
-		typeInfo        = getTypeInfo(state, identType)
+
+		if identType.functionSignature and not identType.functionSignature.inferredType then
+			inferExpression(state, identType.functionSignature)
+		end
+
+		if not getTypeInfo(state, identType) then
+			!WAITING_OR_ERROR `typeError(state, identType, "No type '%s'.", identType.typeName)` -- @Incomplete: typeName is empty for lambdas.
+			return
+		end
+
+		typeInfo = getTypeInfoForBuiltinType(state, "type")
 
 	elseif expr.nodeType == !(nodeTypes.AstLiteral) then
 		local literal  = expr
@@ -282,9 +382,53 @@ function _G.inferExpression(state, expr)
 		if defn then
 			typeInfo = defn.typeInfo
 		else
-			!WAITING_OR_ERROR `errorLine("Typer", "Undeclared identifier '%s'.", ident.name)`
+			!WAITING_OR_ERROR `typeError(state, ident, "Undeclared identifier '%s'.", ident.name)`
 			return
 		end
+
+	elseif expr.nodeType == !(nodeTypes.AstLambda) then
+		local lambda          = expr
+		local argsAreInferred = true
+
+		-- Infer arguments.
+		!for argsVarI, argsVar in ipairs{`lambda.argumentsIn`,`lambda.argumentsOut`} do
+			local args = !!(argsVar)
+
+			for i, arg in ipairs(args or EMPTY_TABLE) do
+				local decl = arg.declaration
+
+				if not decl.inferredTypes[1] then
+					inferDeclaration(state, decl, !(argsVarI == 2))
+
+					if decl.inferredTypes[1] then
+						for i = i+1, #args do
+							local arg2 = args[i]
+							if arg2.group ~= arg.group then  break  end
+							arg2.declaration.inferredTypes[1] = decl.inferredTypes[1]
+						end
+					else
+						argsAreInferred = false
+					end
+				end
+			end
+		!end
+
+		if not argsAreInferred then
+			-- Should we have WAITING_OR_ERROR here?
+			return
+		end
+
+		typeInfo = newTypeInfo(TypeInfoFunction--[[, defn]])
+
+		for i, arg in ipairs(lambda.argumentsIn or EMPTY_TABLE) do
+			typeInfo.argumentTypesIn[i] = arg.declaration.inferredTypes[1]
+		end
+		for i, arg in ipairs(lambda.argumentsOut or EMPTY_TABLE) do
+			typeInfo.argumentTypesOut[i] = arg.declaration.inferredTypes[1]
+		end
+
+		-- @Incomplete: typeInfo.polymorphic
+		-- @Incomplete: typeInfo.inline
 
 	else
 		errorUnhandledNodeType(expr)
@@ -294,18 +438,19 @@ function _G.inferExpression(state, expr)
 	expr.inferredType = typeInfo
 end
 
-function _G.inferDeclaration(state, decl)
+-- inferDeclaration( state, declaration [, isOutArg=false ] )
+function _G.inferDeclaration(state, decl, isOutArg)
 	-- @Incomplete: Check that the values (if there are any) are of the same type as the inferred type of the name.
 	--              Maybe we wait with inferring the type of the expressions if type(s) are specified.
 
-	-- Infer types of values.
+	-- Infer values.
 	for i, expr in ipairs(decl.values) do
 		if not expr.inferredType then
 			inferExpression(state, expr)
 		end
 	end
 
-	-- Infer types of names and declare them.
+	-- Infer names and declare them.
 	for i, ident in ipairs(decl.names) do
 		local typeInfo = nil
 
@@ -321,34 +466,47 @@ function _G.inferDeclaration(state, decl)
 			elseif decl.types[1] then
 				local typeNode = decl.types[1]
 
+				-- local x:int
 				if typeNode.nodeType == !(nodeTypes.AstType) then
 					local identType = typeNode
-					local defn
-					typeInfo, defn  = getTypeInfo(state, identType)
+					local typeName  = identType.typeName
 
-					if not typeInfo then
-						!WAITING_OR_ERROR `typeError(state, identType, "Undeclared type '%s'.", identType.typeName)`
-
-					elseif typeInfo and typeInfo.kind ~= !(typeInfoKinds.TypeInfoType) then
-						typeMessage(state, identType, "Error", "'%s' is not a type. (It is '%s')", identType.typeName, getKindOfFriendlyTypeInfoName(typeInfo))
-
-						-- @Incomplete: Print the whole chain of definitions, if there's more than one ancestor.
-						if defn then
-							typeMessage(state, defn.name, "Info", "...here is '%s' declared.", identType.typeName)
-						end
-
-						exitFailure()
+					if not identType.inferredType then
+						inferExpression(state, identType)
 					end
 
+					if not identType.inferredType then
+						!WAITING_OR_ERROR `typeError(state, identType, "Undeclared type '%s'.", typeName)`
+
+					else
+						typeInfo, defn = getTypeInfo(state, identType)
+
+						if identType.isUserType and typeInfo.kind ~= !(typeInfoKinds.TypeInfoType) then -- Do we need to include TypeInfoStruct etc here?
+							typeMessage(state, identType, "Error", "'%s' is not a type. (It is '%s')", typeName, getKindOfFriendlyTypeInfoName(typeInfo))
+							printDefinitionChain(state, defn, typeName)
+							exitFailure()
+						end
+					end
+
+				-- local x:[]int
 				elseif typeNode.nodeType == !(nodeTypes.AstLiteral) then
 					local literal = typeNode
 					assert(literal.literalType == !(LITERAL_ARRAY))
 					errorUnhandledNodeType(typeNode) -- @Incomplete
 
+				-- local x:typeOf(y)
 				elseif typeNode.nodeType == !(nodeTypes.AstTypeOf) then
-					local typeOf = expr
-					-- typeOf.expression
-					errorUnhandledNodeType(typeNode) -- @Incomplete
+					local typeOf = typeNode
+					local expr   = typeOf.expression
+
+					inferExpression(state, expr)
+
+					typeInfo            = expr.inferredType
+					typeOf.inferredType = typeInfo
+
+					if not typeInfo then
+						-- !WAITING_OR_ERROR `typeError(state, expr, "Could not infer type of expression.")` -- Unhelpful...
+					end
 
 				else
 					errorUnhandledNodeType(typeNode)
@@ -366,7 +524,7 @@ function _G.inferDeclaration(state, decl)
 					typeInfo   = expr.inferredType
 
 					if not typeInfo then
-						!WAITING_OR_ERROR `typeError(state, expr, "Could not infer type of expression.")`
+						-- !WAITING_OR_ERROR `typeError(state, expr, "Could not infer type of expression.")` -- Unhelpful...
 					end
 				end
 			end
@@ -374,14 +532,17 @@ function _G.inferDeclaration(state, decl)
 			if typeInfo then
 				state.progress        = state.progress+1
 				decl.inferredTypes[i] = typeInfo
-				defineInClosestScope(state, ident, typeInfo)
+
+				if not isOutArg then
+					defineInClosestScope(state, ident, typeInfo)
+				end
 			end
 
-			--[[ DEBUG
+			-- [[ DEBUG
 			if typeInfo then
-				print("DECLARE "..ident.name..":"..TYPEDEF_NAMES[typeInfo.kind])
+				print("DECLARE "..ident.name..":"..getKindOfFriendlyTypeInfoName(typeInfo)..(isOutArg and " (isOutArg)" or ""))
 			else
-				print("DECLARE "..ident.name.." FAILED")
+				print("(declare failed "..ident.name..")")
 			end
 			--]]
 		end

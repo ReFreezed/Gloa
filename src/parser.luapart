@@ -93,19 +93,10 @@ end
 	parent   = NIL,
 	token    = 1,
 }
-
-local !structAst"AstType:_AstNode"{
-	isUserType        = false,
-	typeName          = "",
-	functionSignature = NIL, -- AstLambda without a body.
-	arguments         = NIL, -- []AstExpression (Is set for parameterized structs.)
-	-- Type phase:
-	typeInfo          = NIL,
-}
-
 _G.!structAst"AstTypeDefinition:_AstNode"{
 	-- Type phase:
-	name     = NIL, -- AstIdentifier
+	name     = NIL, -- AstIdentifier|AstVararg
+	scope    = NIL, -- AstFileScope|AstBlock|AstStruct|AstFor|AstLambda|AstEnum (This should be the same as the parent.)
 	typeInfo = NIL,
 }
 
@@ -116,7 +107,7 @@ _G.!structAst"AstTypeDefinition:_AstNode"{
 local !structAst"AstIdentifier:_AstExpression"{
 	name = "",
 	-- Type phase:
-	placeDeclared = NIL, -- AstDeclaration|AstLambda|AstFor (Is this @Depricated completely in favor of AstTypeDefinition/typeInfo.definition?)
+	placeDeclared = NIL, -- AstDeclaration|AstStruct|AstFor|AstLambda (Can/should this be moved to AstTypeDefinition?)
 }
 local !structAst"AstVararg:_AstExpression"{
 	surroundedByParenthesis = false,
@@ -124,6 +115,14 @@ local !structAst"AstVararg:_AstExpression"{
 local !structAst"AstLiteral:_AstExpression"{
 	literalType = 0,
 	value       = NIL, -- The value depends on what literalType is. Could be a number, string or whatever.
+}
+local !structAst"AstType:_AstExpression"{
+	isUserType        = false,
+	typeName          = "",
+	functionSignature = NIL, -- AstLambda without a body.
+	arguments         = NIL, -- []AstExpression (Is set for parameterized structs.)
+	-- Type phase:
+	typeInfo          = NIL,
 }
 local !structAst"AstUnary:_AstExpression"{
 	operation  = "",
@@ -145,14 +144,13 @@ local !structAst"AstCall:_AstExpression"{
 	arguments                 = {},  -- []AstExpression
 }
 local !structAst"AstArgument:_AstNode"{
-	name          = NIL, -- AstIdentifier|AstVararg
-	argumentTypes = {},  -- []AstType
-	defaultValue  = NIL,
-	autobake      = 0,   -- 0=disabled, 1=enabled, 2=required  @Incomplete
+	declaration = NIL, -- AstDeclaration
+	group       = 0,   -- Arguments in the same group have the same type. This is a small optimization for the typer.
+	autobake    = 0,   -- 0=disabled, 1=enabled, 2=required  @Incomplete
 
 	-- For an in arg, this indicates optionality.
 	-- For an out arg, if there's a !must then it must not be adjusted away by the caller.
-	isRequired    = false,
+	isRequired  = false,
 }
 local !structAst"AstArguments:_AstExpression"{ -- @Cleanup: Move this into an array in the parent (like expression lists).
 	-- [1]=argument1, ...
@@ -161,6 +159,8 @@ local !structAst"AstLambda:_AstExpression"{
 	argumentsIn  = NIL, -- AstArguments
 	argumentsOut = NIL, -- AstArguments
 	body         = NIL, -- AstBlock (If this is nil then the lambda is a function signature.)
+	-- Type phase:
+	definitions = {},  -- []AstTypeDefinition (Note that the body has it's own definitions.)
 }
 local !structAst"AstTypeOf:_AstExpression"{
 	expression = NIL,
@@ -175,14 +175,14 @@ local !structAst"AstStatement:_AstNode"{ -- Needed? I think so?
 }
 
 local !structAst"AstDeclaration:_AstNode"{
-	names      = {},  -- []AstIdentifier
+	names      = {},  -- [](AstIdentifier|AstVararg)
 	isLocal    = true,
-	types      = {},  -- No value here means the type is inferred.
+	types      = {},  -- No value here means the types are inferred.
 	values     = {},  -- Nil for the corresponding name means default value, which depends on the value type.
 	isConstant = false,
 	tags       = {},  -- @Incomplete
 	-- Type phase:
-	inferredTypes = {},  -- []TypeInfo
+	inferredTypes = {}, -- []TypeInfo (One for each name.)
 }
 
 local !structAst"AstAssignment:_AstNode"{
@@ -303,9 +303,11 @@ end
 
 
 -- identifier = parseIdentifier( state, parentNode [, placeDeclared ] )
+--
 -- placeDeclared should be set when they are declared, i.e. in declarations or
 -- function argument lists (loose identifiers should have it be nil as we figure
--- it out during type inference).
+-- it out during type inference (or maybe not?)).
+--
 function _G.parseIdentifier(state, parentNode, placeDeclared)
 	local tokType, tokValue, token = consumeNextToken(state)
 	if tokType ~= !(TOKEN_IDENTIFIER) then
@@ -532,7 +534,7 @@ function _G.parseArguments(state, parentNode, isInput, placeDeclared)
 	local gotVararg = false
 	local tokType, tokValue, token
 
-	while true do
+	for groupN = 1, math.huge do
 		-- Argument name(s).
 		local argGroup = {}
 
@@ -543,22 +545,27 @@ function _G.parseArguments(state, parentNode, isInput, placeDeclared)
 			end
 
 			local arg = astNewNode(AstArgument, token, args)
+			arg.group = groupN
+
+			table.insert(args,     arg)
+			table.insert(argGroup, arg)
+
+			local decl      = astNewNode(AstDeclaration, token, arg)
+			arg.declaration = decl
+
 			local nameNode
 
 			if tokType == !(TOKEN_IDENTIFIER) then
-				local ident         = astNewNode(AstIdentifier, token, arg)
+				local ident         = astNewNode(AstIdentifier, token, decl)
 				ident.name          = tokValue
 				ident.placeDeclared = placeDeclared
 				nameNode            = ident
 			else
 				gotVararg   = true
-				nameNode    = astNewNode(AstVararg, token, arg)
+				nameNode    = astNewNode(AstVararg, token, decl)
 			end
 
-			arg.name = nameNode
-
-			table.insert(args,     arg)
-			table.insert(argGroup, arg)
+			decl.names[1] = nameNode
 
 			tokType, tokValue = consumeNextToken(state)
 
@@ -579,7 +586,8 @@ function _G.parseArguments(state, parentNode, isInput, placeDeclared)
 		token = state.nextToken
 		for _, arg in ipairs(argGroup) do
 			state.nextToken = token
-			!DO_OR_RETURN `parsePipeSeparatedTypes(state, arg, arg.argumentTypes)` -- @Speed: Parse once then just copy the first one.
+			local decl      = arg.declaration
+			!DO_OR_RETURN `parsePipeSeparatedTypes(state, decl, decl.types)` -- @Speed: Parse once then just copy the first one.
 		end
 
 		-- Default value.
@@ -594,27 +602,28 @@ function _G.parseArguments(state, parentNode, isInput, placeDeclared)
 			token = state.nextToken
 			for i, arg in ipairs(argGroup) do
 				state.nextToken = token
+				local decl      = arg.declaration
 
-				!SET_OR_RETURN `local expr = parseExpression(state, arg)` -- @Speed: Parse once then just copy the first one.
-				arg.defaultValue           = expr
+				!SET_OR_RETURN `local expr = parseExpression(state, decl)` -- @Speed: Parse once then just copy the first one.
+				decl.values[1]             = expr
 
 				-- If the value is nil then we make sure 'nil' is one of the types.
 				if
 					i == 1
 					and expr.nodeType == !(nodeTypes.AstLiteral)
 					and expr.literalType == !(LITERAL_NIL)
-					and not itemWith1(arg.argumentTypes, "typeName", "nil")
+					and not itemWith1(decl.types, "typeName", "nil")
 				then
-					local identType    = astNewNode(AstType, expr.token, arg)
+					local identType    = astNewNode(AstType, expr.token, decl)
 					identType.typeName = "nil"
-					table.insert(arg.argumentTypes, identType)
+					table.insert(decl.types, identType)
 				end
 			end
 		end
 
 		-- @Incomplete: Set arg.isRequired.
 		-- if isInput then
-		-- 	arg.isRequired = (arg.defaultValue == nil)
+		-- 	arg.isRequired = (arg.declaration.values[1] == nil)
 		-- else
 		-- 	-- @Incomplete: Set arg.isRequired if there's a !must somewhere closeby.
 		-- end
@@ -1582,11 +1591,19 @@ function _G.parseExpression(state, parentNode, minOpPrecedence)
 				local args          = astNewNode(AstArguments, state.nextToken, lambda)
 				lambda.argumentsOut = args
 
-				while true do
+				for groupN = 1, math.huge do
 					local arg = astNewNode(AstArgument, state.nextToken, args)
-					!DO_OR_RETURN `parsePipeSeparatedTypes(state, arg, arg.argumentTypes)`
-
+					arg.group = groupN
 					table.insert(args, arg)
+
+					local decl      = astNewNode(AstDeclaration, arg.token, arg)
+					arg.declaration = decl
+					!DO_OR_RETURN `parsePipeSeparatedTypes(state, decl, decl.types)`
+
+					local ident   = astNewNode(AstIdentifier, decl.token, parentNode)
+					ident.name    = "__UNNAMED_"..groupN.."__"
+					decl.names[1] = ident
+
 					tokType, tokValue = peekNextToken(state)
 
 					if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),",") then
@@ -1608,7 +1625,7 @@ function _G.parseExpression(state, parentNode, minOpPrecedence)
 			expr                        = lambda
 
 		else
-			local identType             = astNewNode(AstType, lambda.token, parentNode)
+			local identType             = astNewNode(AstType, lambda.token, lambda)
 			identType.isUserType        = true
 			identType.functionSignature = lambda
 			expr                        = identType
@@ -1980,9 +1997,7 @@ do
 				local arg = node
 				!!(BLOCK_START)
 				write("\n")
-				if arg.name then  printNode(arg.name, indent+1, printed)  end
-				printNodeList(arg.argumentTypes, indent+1, printed, "TYPE")
-				if arg.defaultValue  then  printNode(arg.defaultValue, indent+1, printed, "DEFAULT")  end
+				if arg.declaration then  printNode(arg.declaration, indent+1, printed)  end
 				!!(BLOCK_END)
 
 			elseif node.nodeType == !(nodeTypes.AstBlock) then

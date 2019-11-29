@@ -55,6 +55,10 @@ local disableGc      = false
 local silent         = false
 local i              = 1
 
+!if DEBUG then
+local debug_onlyParse = false
+!end
+
 while args[i] do
 	local arg = args[i]
 
@@ -76,6 +80,12 @@ while args[i] do
 	elseif arg == "--silent" then
 		silent = true
 		i = i+1
+
+	!if DEBUG then
+	elseif arg == "--debug:onlyparse" then
+		debug_onlyParse = true
+		i = i+1
+	!end
 
 	else
 		errorLine(nil, "Unknown option '%s'.", arg)
@@ -182,33 +192,35 @@ end
 
 
 -- [[ Infer types.
-local state             = TyperState()
-state.fileBuffers[path] = s
-state.tokens            = tokens
+!ifDEBUG`if not debug_onlyParse then`
+	local state             = TyperState()
+	state.fileBuffers[path] = s
+	state.tokens            = tokens
 
-for i = 1, math.huge do
-	state.progress = 0
-	state.waiting  = 0
+	for i = 1, math.huge do
+		state.progress = 0
+		state.waiting  = 0
 
-	inferFileScope(state, topNode)
+		inferFileScope(state, topNode)
 
-	if state.waiting == 0 then
-		break
+		if state.waiting == 0 then
+			break
 
-	elseif state.progress == 0 then
-		state.mustInfer = true
-		state.errorStep = state.waiting
-		inferFileScope(state, topNode) -- This should trigger an error somewhere.
-		errorInternal("Type inference loop is stuck. Also failed to report where the issue actually is. Oops...")
+		elseif state.progress == 0 then
+			state.mustInfer = true
+			state.errorStep = state.waiting
+			inferFileScope(state, topNode) -- This should trigger an error somewhere.
+			errorInternal("Type inference loop is stuck. Also failed to report where the issue actually is. Oops...")
+		end
+
+		-- Guard against an infinite loop.
+		if i == 100 then
+			errorInternal("Type inference loop went on for too long. (waiting:%d, progress:%d)", state.waiting, state.progress)
+			exitFailure()
+		end
 	end
-
-	-- Guard against an infinite loop.
-	if i == 100 then
-		errorInternal("Type inference loop went on for too long. (waiting:%d, progress:%d)", state.waiting, state.progress)
-		exitFailure()
-	end
-end
---]]
+	--]]
+!ifDEBUG`end`
 
 
 
@@ -216,7 +228,9 @@ end
 
 !if DEBUG then
 	printf("Compilation completed in %.3f seconds", os.clock()-compilationStartTime)
-	-- astPrint(topNode)--, io.stderr)
+	if debug_onlyParse then
+		astPrint(topNode)--, io.stderr)
+	end
 !else
 	if not silent then
 		printf("Compilation completed in %.3f seconds", os.clock()-compilationStartTime)

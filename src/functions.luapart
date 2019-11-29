@@ -16,6 +16,7 @@
 	formatNumber, formatBinary
 	generateRandomString
 	getFileContents
+	getKeys
 	getLast, nextItem
 	indexOf, lastIndexOf
 	indexWith*, lastIndexWith*, itemWith*, lastItemWith*, nextItemWith*, previousItemWith*
@@ -23,7 +24,7 @@
 	iterate
 	pack
 	pairsSorted
-	printf, printTraceback
+	printf, printTraceback, printobj
 	recycleTable, recycleTablesInArray, getRecycledTable, getRecycledTableCount
 	reportMessageInFile
 	setFields
@@ -73,6 +74,81 @@ function _G.printTraceback(level)
 			or "?"
 
 		printf("\t%s%s  (%s)", where, lnStr, name)
+	end
+end
+
+-- printobj( ... )
+do
+	local out    = io.stdout
+	local _write = out.write
+	local function write(...)
+		_write(out, ...)
+	end
+
+	local _tostring = tostring
+	local function tostring(v)
+		return (_tostring(v):gsub("^table: 0x", ""))
+	end
+
+	local function compareKeys(a, b)
+		return naturalCompare(tostring(a), tostring(b))
+	end
+
+	local function _printobj(v, tables, isDepth1, depth)
+		local vType = type(v)
+
+		if vType == "table" then
+			if tables[v] then
+				write("0x", tostring(v))
+
+			else
+				write(tostring(v), (isDepth1 and "{" or "{ "))
+				tables[v] = true
+
+				local indices = {}
+				for i = 1, #v do  indices[i] = true  end
+
+				for _, k in ipairs(sort(getKeys(v), compareKeys)) do
+					if not indices[k] then
+						if isDepth1 then  write("\n\t")  end
+						write(tostring(k), (isDepth1 and " = " or "="))
+						_printobj(v[k], tables, false, depth+1)
+					end
+				end
+
+				for i = 1, #v do
+					if isDepth1 then  write("\n\t")  end
+					write(i, (isDepth1 and " = " or "="))
+					_printobj(v[i], tables, false, depth+1)
+				end
+
+				write(isDepth1 and "\n}" or "}")
+			end
+
+		elseif vType == "number" then
+			write(F("%g", v))
+
+		elseif vType == "string" then
+			if #v > 1000 then
+				write('"', v:sub(1, 1000):gsub("%z", "\\0"):gsub("\n", "\\n"), '..."')
+			else
+				write('"', v:gsub("%z", "\\0"):gsub("\n", "\\n"), '"')
+			end
+
+		else
+			write(tostring(v))
+		end
+
+		write(depth>2 and " " or "")
+	end
+
+	function _G.printobj(...)
+		for i = 1, select("#", ...) do
+			if i > 1 then  write("\t")  end
+
+			_printobj(select(i, ...), {}, true, 1)
+		end
+		write("\n")
 	end
 end
 
@@ -707,6 +783,14 @@ end
 
 function _G.trimr(s)
 	return (s:gsub("%s+$", ""))
+end
+
+
+
+function _G.getKeys(t)
+	local keys = {}
+	for k in pairs(t) do  table.insert(keys, k)  end
+	return keys
 end
 
 
