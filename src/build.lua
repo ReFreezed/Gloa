@@ -14,8 +14,9 @@ local DIR_HERE = debug.getinfo(1, "S").source:match"@?(.+)":gsub("[/\\]?[^/\\]+$
 local args        = {...}
 local pathGloaOut = DIR_HERE.."/../gloa.lua"
 local pathPp      = DIR_HERE.."/../lib/preprocess.lua" -- @Incomplete: Include LuaPreprocess in this repo.
-local debugMode   = false
 local silent      = false
+local debugMode   = false
+local debugger    = false
 local i           = 1
 
 while args[i] do
@@ -29,12 +30,16 @@ while args[i] do
 		pathPp      = args[i+1] or error("[GloaBuildArgs] Expected value after "..arg..".")
 		i           = i+2
 
+	elseif arg == "--silent" then
+		silent      = true
+		i           = i+1
+
 	elseif arg == "--debug" then
 		debugMode   = true
 		i           = i+1
 
-	elseif arg == "--silent" then
-		silent      = true
+	elseif arg == "--debugger" then
+		debugger    = true
 		i           = i+1
 
 	else
@@ -48,8 +53,9 @@ if not silent then  print("Building Glóa...")  end
 local chunk, err = loadfile(pathPp)
 if not chunk then  error("Could not load LuaPreprocess from '"..pathPp.."'. ("..err..")")  end
 
-local pp                 = chunk()
-pp.metaEnvironment.DEBUG = debugMode
+local pp                    = chunk()
+pp.metaEnvironment.DEBUG    = debugMode
+pp.metaEnvironment.DEBUGGER = debugMode and debugger
 
 pp.processFile{
 	pathIn          = DIR_HERE.."/main.lua2p",

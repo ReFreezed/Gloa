@@ -104,6 +104,7 @@ _G.!structAst"AstTypeDefinition:_AstNode"{
 	name     = NIL, -- AstIdentifier|AstVararg
 	scope    = NIL, -- AstFileScope|AstBlock|AstStruct|AstFor|AstLambda|AstEnum (This should be the same as the parent.)
 	typeInfo = NIL,
+	typeInfoForDeclaration = NIL, -- Type of value in type declarations. Is used when type aliases are specified as types.
 }
 
 !structAst"_AstExpression:_AstNode"{
@@ -125,7 +126,8 @@ local !structAst"AstLiteral:_AstExpression"{
 local !structAst"AstType:_AstExpression"{
 	isUserType        = false,
 	typeName          = "",
-	functionSignature = NIL, -- AstLambda without a body.
+	functionSignature = NIL, -- AstLambda without a body. This is used to create the actual function type.
+	arrayItemType     = NIL, -- AstType
 	arguments         = NIL, -- []AstExpression (Is set for parameterized structs.)
 	-- Type phase:
 	typeInfo          = NIL,
@@ -353,6 +355,8 @@ function _G.parseType(state, parentNode)
 		return typeOf
 
 	elseif isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"[") then
+		error("@Incomplete: Need to revise array types.") -- Array types are not array literals! What was I thinking?! (Table constructors can be used as "array literals".)
+
 		local tokType, tokValue = consumeNextToken(state)
 		if not isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"]") then
 			!ERROR_OR_RETURN `errorParsingAfterPrevious(state, "Expected ']'.")`
@@ -366,12 +370,12 @@ function _G.parseType(state, parentNode)
 	end
 
 	local isBuiltinType = isTokenBuiltinType(tokType, tokValue)
-	local identType
+	local typeNode
 
 	if isBuiltinType or tokType == !(TOKEN_IDENTIFIER) then
-		identType            = astNewNode(AstType, token, parentNode)
-		identType.isUserType = not isBuiltinType
-		identType.typeName   = tokValue
+		typeNode            = astNewNode(AstType, token, parentNode)
+		typeNode.isUserType = not isBuiltinType
+		typeNode.typeName   = tokValue
 	else
 		!ERROR_OR_RETURN `errorParsingLast(state, "Expected a type.")`
 	end
@@ -386,8 +390,8 @@ function _G.parseType(state, parentNode)
 			!ERROR_OR_RETURN `errorParsingLast(state, "Built-in types have no parameters.")`
 		end
 
-		identType.arguments = {}
-		!DO_OR_RETURN `parseExpressionList(state, identType, identType.arguments)`
+		typeNode.arguments = {}
+		!DO_OR_RETURN `parseExpressionList(state, typeNode, typeNode.arguments)`
 
 		tokType, tokValue = consumeNextToken(state)
 		if not isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),")") then
@@ -395,16 +399,16 @@ function _G.parseType(state, parentNode)
 		end
 	end
 
-	return identType
+	return typeNode
 end
 
 -- success = parsePipeSeparatedTypes( state, parentNode, identifierTypes )
-function _G.parsePipeSeparatedTypes(state, parentNode, identTypes)
+function _G.parsePipeSeparatedTypes(state, parentNode, typeNodes)
 	-- @Incomplete: Detect repeated types. (This may be more difficult than it seems. It's possibly a task for the typer.)
 	while true do
-		!SET_OR_RETURN_FALSE `local identType = parseType(state, parentNode)`
+		!SET_OR_RETURN_FALSE `local typeNode = parseType(state, parentNode)`
+		table.insert(typeNodes, typeNode)
 
-		table.insert(identTypes, identType)
 		local tokType, tokValue, token = peekNextToken(state)
 
 		if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"|") then
@@ -414,10 +418,10 @@ function _G.parsePipeSeparatedTypes(state, parentNode, identTypes)
 			if isToken(tokType,tokValue, !(TOKEN_KEYWORD),"nil") then
 				consumeNextToken(state)
 
-				local identType    = astNewNode(AstType, parentNode)
-				identType.typeName = "nil"
+				typeNode          = astNewNode(AstType, parentNode)
+				typeNode.typeName = "nil"
+				table.insert(typeNodes, typeNode)
 
-				table.insert(identTypes, identType)
 				break
 
 			else
@@ -636,9 +640,9 @@ function _G.parseArguments(state, parentNode, isInput, placeDeclared)
 					and expr.literalType == !(LITERAL_NIL)
 					and not itemWith1(decl.types, "typeName", "nil")
 				then
-					local identType    = astNewNode(AstType, expr.token, decl)
-					identType.typeName = "nil"
-					table.insert(decl.types, identType)
+					local typeNode    = astNewNode(AstType, expr.token, decl)
+					typeNode.typeName = "nil"
+					table.insert(decl.types, typeNode)
 				end
 			end
 		end
@@ -1536,9 +1540,9 @@ function _G.parseExpression(state, parentNode, minOpPrecedence)
 
 	-- Built-in type.
 	elseif isTokenBuiltinType(tokType, tokValue) then
-		local identType    = astNewNode(AstType, exprStartToken, parentNode)
-		identType.typeName = tokValue
-		expr               = identType
+		local typeNode    = astNewNode(AstType, exprStartToken, parentNode)
+		typeNode.typeName = tokValue
+		expr              = typeNode
 
 		-- @Incomplete: Check if there's a '(' after this and give error early.
 
@@ -1696,10 +1700,10 @@ function _G.parseExpression(state, parentNode, minOpPrecedence)
 			expr                        = lambda
 
 		else
-			local identType             = astNewNode(AstType, lambda.token, lambda)
-			identType.isUserType        = true
-			identType.functionSignature = lambda
-			expr                        = identType
+			local typeNode             = astNewNode(AstType, lambda.token, lambda)
+			typeNode.isUserType        = true
+			typeNode.functionSignature = lambda
+			expr                       = typeNode
 		end
 
 	-- Parenthesis.
@@ -2098,14 +2102,14 @@ do
 				!!(BLOCK_END)
 
 			elseif node.nodeType == !(nodeTypes.AstType) then
-				local identType = node
-				if identType.typeName ~= "" then  write(" (", identType.typeName, ")")  end
+				local typeNode = node
+				if typeNode.typeName ~= "" then  write(" (", typeNode.typeName, ")")  end
 				!!(BLOCK_START)
 				write("\n")
-				if identType.functionSignature then
-					printNode(identType.functionSignature, indent+1, printed)
-				elseif identType.arguments then
-					printNodeList(identType.arguments, indent+1, printed, "ARG")
+				if typeNode.functionSignature then
+					printNode(typeNode.functionSignature, indent+1, printed)
+				elseif typeNode.arguments then
+					printNodeList(typeNode.arguments, indent+1, printed, "ARG")
 				end
 				!!(BLOCK_END)
 
@@ -2200,7 +2204,7 @@ do
 			elseif node.nodeType == !(nodeTypes.AstLiteral) then
 				local literal = node
 
-				if literal.literalType == !(LITERAL_ARRAY) then
+				if literal.literalType == !(LITERAL_ARRAY) then -- @Depricated
 					write(" (array)")
 					!!(BLOCK_START)
 					write("\n")

@@ -1,0 +1,326 @@
+-- Simple debugger functionality.
+`
+if not debug.gethook() then
+	local CONSOLE_WIDTH                = 150
+	local BASE_LEVEL                   = 2
+	local HOOKS                        = "lcr" -- l=line c=call r=return
+
+	local ANSI_RESET                   = "\27[0m"
+	local ANSI_BOLD                    = "\27[1m"
+	local ANSI_FAINT                   = "\27[2m"
+	local ANSI_UNDERLINE               = "\27[4m"
+	local ANSI_REVERSED                = "\27[7m"
+	local ANSI_CROSSED_OUT             = "\27[9m"
+	local ANSI_NORMAL                  = "\27[22m" -- Normal color or intensity.
+	local ANSI_NOT_ITALIC              = "\27[23m"
+	local ANSI_NOT_UNDERLINE           = "\27[24m"
+	local ANSI_NOT_INVERSED            = "\27[27m"
+	local ANSI_NOT_CROSSED_OUT         = "\27[29m"
+	local ANSI_BLACK                   = "\27[30m"
+	local ANSI_RED                     = "\27[31m"
+	local ANSI_GREEN                   = "\27[32m"
+	local ANSI_YELLOW                  = "\27[33m"
+	local ANSI_BLUE                    = "\27[34m"
+	local ANSI_MAGENTA                 = "\27[35m"
+	local ANSI_CYAN                    = "\27[36m"
+	local ANSI_WHITE                   = "\27[37m"
+	local ANSI_BRIGHT_BLACK            = "\27[30;1m"
+	local ANSI_BRIGHT_RED              = "\27[31;1m"
+	local ANSI_BRIGHT_GREEN            = "\27[32;1m"
+	local ANSI_BRIGHT_YELLOW           = "\27[33;1m"
+	local ANSI_BRIGHT_BLUE             = "\27[34;1m"
+	local ANSI_BRIGHT_MAGENTA          = "\27[35;1m"
+	local ANSI_BRIGHT_CYAN             = "\27[36;1m"
+	local ANSI_BRIGHT_WHITE            = "\27[37;1m"
+	local ANSI_BG_BLACK                = "\27[40m"
+	local ANSI_BG_RED                  = "\27[41m"
+	local ANSI_BG_GREEN                = "\27[42m"
+	local ANSI_BG_YELLOW               = "\27[43m"
+	local ANSI_BG_BLUE                 = "\27[44m"
+	local ANSI_BG_MAGENTA              = "\27[45m"
+	local ANSI_BG_CYAN                 = "\27[46m"
+	local ANSI_BG_WHITE                = "\27[47m"
+	local ANSI_BG_BRIGHT_BLACK         = "\27[40;1m"
+	local ANSI_BG_BRIGHT_RED           = "\27[41;1m"
+	local ANSI_BG_BRIGHT_GREEN         = "\27[42;1m"
+	local ANSI_BG_BRIGHT_YELLOW        = "\27[43;1m"
+	local ANSI_BG_BRIGHT_BLUE          = "\27[44;1m"
+	local ANSI_BG_BRIGHT_MAGENTA       = "\27[45;1m"
+	local ANSI_BG_BRIGHT_CYAN          = "\27[46;1m"
+	local ANSI_BG_BRIGHT_WHITE         = "\27[47;1m"
+	local ANSI_FRAMED                  = "\27[51m"
+	local ANSI_ENCIRCLED               = "\27[52m"
+	local ANSI_OVERLINED               = "\27[53m"
+	local ANSI_NOT_FRAMED_OR_ENCIRCLED = "\27[54m"
+	local ANSI_NOT_OVERLINED           = "\27[55m"
+	local ANSI_UP                      = "\27[1A"
+	local ANSI_DOWN                    = "\27[1B"
+	local ANSI_FORWARD                 = "\27[1C"
+	local ANSI_BACK                    = "\27[1D"
+	local ANSI_NEXT_LINE               = "\27[1E"
+	local ANSI_PREVIOUS_LINE           = "\27[1F"
+	local ANSI_ERASE_REST_OF_LINE      = "\27[0K"
+
+	local function printNamesAndValues(names, values)
+		if not names[1] then
+			io.stdout:write("(none)\n")
+			return
+		end
+
+		for i, name in ipairs(names) do
+			local v = values[i]
+			local vStr
+
+			if type(v) == "table" then
+				local t = {}
+				for k, item in pairsSorted(v) do
+					local kStr    = type(l)    == "table" and tostring(l)   :upper():gsub("table: ", "0x") or tostring(k):sub(1, 50)
+					local itemStr = type(item) == "table" and tostring(item):upper():gsub("table: ", "0x") or tostring(item):sub(1, 50)
+					table.insert(t, kStr.."="..itemStr)
+				end
+				vStr = "{ "..table.concat(t, ", ").." }"
+			else
+				vStr = tostring(v)
+			end
+
+			if #vStr > 100 then
+				vStr = vStr:sub(1, 96).." ..."
+			end
+			vStr = vStr:gsub("[%z\1-\31\128-\255]", "?")
+
+			io.stdout:write(i, ". ", ANSI_GREEN, name, ANSI_RESET, " ", vStr, "\n")
+		end
+	end
+
+	local function findValueOrNameMatches(target)
+		local namesMatching = {}
+		local matchName     = nil
+		local matchValue    = nil
+		local names, values = getLocals(1+BASE_LEVEL)
+
+		for i, name0 in ipairs(names) do
+			local name = name0:lower()
+
+			if name == target then
+				return name0, values[i], namesMatching
+			elseif name:find(target, 1, true) then
+				table.insert(namesMatching, name0)
+				matchName  = name0
+				matchValue = values[i]
+			end
+		end
+
+		for level = 1+BASE_LEVEL, math.huge do
+			local infoWithFunc  = debug.getinfo(level, "f")
+			local func          = infoWithFunc and infoWithFunc.func
+
+			if not func then  break  end
+
+			names, values = getUpvalues(func)
+
+			for i, name0 in ipairs(names) do
+				local name = name0:lower()
+
+				if name == target then
+					return name0, values[i], namesMatching
+				elseif name:find(target, 1, true) then
+					table.insert(namesMatching, name0)
+					matchName  = name0
+					matchValue = values[i]
+				end
+			end
+		end
+
+		for name0, _v in pairs(_G) do
+			local name = name0:lower()
+
+			if name == target then
+				return name0, _v, namesMatching
+			elseif name:find(target, 1, true) then
+				table.insert(namesMatching, name0)
+				matchName  = name0
+				matchValue = _v
+			end
+		end
+
+		if #namesMatching==1 then
+			return matchName, matchValue, namesMatching
+		else
+			return "", nil, namesMatching
+		end
+	end
+
+	local function printLocation(stack, lines, event, lnCurrent, ln1, ln2, lnColumnWidth)
+		io.stdout:write("Stack:\n")
+		for level = #stack, 1, -1 do
+			local entry = stack[level]
+			io.stdout:write(level, ". ", entry.where, "\n")
+		end
+		io.stdout:write("\n")
+
+		io.stdout:write("Event: ", event, "\n\n")
+		io.stdout:write(ANSI_BOLD, ANSI_WHITE, ANSI_BG_BLUE)
+
+		for ln = ln1, ln2 do
+			local lnStr      = tostring(ln)
+			local alignment  = (" "):rep(lnColumnWidth-#lnStr)
+			local lineMaxLen = math.max((CONSOLE_WIDTH-1)-(#lnStr+3), 0)
+			local line       = (lines[ln] or ""):sub(1, lineMaxLen)
+
+			io.stdout:write(ln == lnCurrent and ANSI_BG_CYAN or ANSI_BG_BLUE)
+
+			io.stdout:write(lnStr, ":  ", alignment, line)
+			io.stdout:write(ANSI_ERASE_REST_OF_LINE)
+
+			if ln < ln2 then  io.stdout:write("\n")  end
+		end
+
+		io.stdout:write(ANSI_RESET, "\n")
+	end
+
+	local info  = debug.getinfo(1, "Sl")    or error("getinfo")
+	local path  = info.source:match"^@(.+)" or error(info.source)
+	local lines = {}
+
+	for line in io.lines(path) do
+		table.insert(lines, (line:gsub("\t", "    ")))
+	end
+
+	collectgarbage() -- In case it was stopped.
+
+	local lnLast           = 0
+	local ignoreStackDepth = math.huge
+	local runUntilLn       = 0
+
+	debug.sethook(function(event)
+		local info = debug.getinfo(BASE_LEVEL, "Sl") or error("getinfo")
+
+		local ln  = info.currentline
+		local ln1 = ln-8
+		local ln2 = ln+8
+
+		if ln == -1 or (ln == lnLast) then  return  end
+
+		if runUntilLn > 0 and ln ~= runUntilLn then
+			return
+		else
+			runUntilLn = 0
+		end
+
+		local stack = getStack(BASE_LEVEL)
+		-- if getLast(stack).where == "[C]  (?)" then
+		-- 	stack[#stack] = nil
+		-- end
+
+		if #stack >= ignoreStackDepth then
+			return
+		else
+			ignoreStackDepth = math.huge
+		end
+
+		local lnColumnWidth = #tostring(ln2)
+
+		io.stdout:write(("\n"):rep(5))
+		printLocation(stack, lines, event, ln, ln1, ln2, lnColumnWidth)
+
+		while true do
+			io.stdout:write("\n(R)esume  (N)extLine Step(I)n Step(O)ut RunUntil(G)  (L)ocals (U)pvalues  (V)iewSource  (Q)uit\n")
+
+			local input = io.stdin:read"*l"
+
+			if input == "" then
+				printLocation(stack, lines, event, ln, ln1, ln2, lnColumnWidth)
+
+			elseif input == "r" then
+				debug.sethook()
+				break
+
+			elseif input == "n" then
+				ignoreStackDepth = #stack+1
+				break
+			elseif input == "i" then
+				break
+			elseif input == "o" then
+				ignoreStackDepth = #stack
+				break
+			elseif input:find"^g *%d+$" then
+				runUntilLn = tonumber(input:match"%d+") or 1
+				break
+
+			elseif input == "l" or input:find"^l *%d" then
+				local level         = BASE_LEVEL + (tonumber(input:match"%d+") or 1) - 1
+				local names, values = getLocals(level)
+
+				io.stdout:write("\nLocals:\n")
+				printNamesAndValues(names, values)
+
+			elseif input == "u" or input:find"^u *%d" then
+				local level         = BASE_LEVEL + (tonumber(input:match"%d+") or 1) - 1
+				local infoWithFunc  = debug.getinfo(level, "f")
+				local func          = infoWithFunc and infoWithFunc.func
+
+				io.stdout:write("\nUpvalues:\n")
+
+				if func then
+					local names, values = getUpvalues(func)
+					printNamesAndValues(names, values)
+				else
+					io.stdout:write(ANSI_BRIGHT_RED, "Error: No function at level ", level, ".\n", ANSI_RESET)
+				end
+
+			elseif input == "v" then
+				os.execute(F([[subl "%s":%d]], path, ln))
+
+			elseif input == "q" then
+				os.exit(99)
+
+			elseif input:find"^=" or #input >= 2 then
+				local targetPath = input:gsub("^=", "")
+				local target     = targetPath:match("[^.]+"):lower()
+
+				local foundName, v, names = findValueOrNameMatches(target)
+
+				if foundName ~= "" and #targetPath > #target then
+					-- @Incomplete: Case-insensitivity.
+					for part in targetPath:sub(#target+2):gmatch("[%w_]+") do
+						if type(v) == "table" then
+							part = part:find"^%d+$" and tonumber(part) or part
+							v    = v[part]
+						else
+							foundName = ""
+							break
+						end
+					end
+				end
+
+				io.stdout:write("\n")
+
+				if foundName ~= "" then
+					io.stdout:write(ANSI_GREEN, foundName, targetPath:sub(#target+1), ANSI_RESET, " ")
+					printobj(v) -- @Incomplete: Limit how much is printed for tables.
+
+				elseif names[1] then
+					table.sort(names, function(a, b)
+						return a:lower() < b:lower()
+					end)
+
+					io.stdout:write("Matches:\n")
+					io.stdout:write(ANSI_GREEN)
+					for _, name in ipairs(names) do
+						io.stdout:write(name, "\n")
+					end
+					io.stdout:write(ANSI_RESET)
+
+				else
+					io.stdout:write(ANSI_BRIGHT_RED, "Error: Did not find '", targetPath, "'.\n", ANSI_RESET)
+				end
+
+			else
+				io.stdout:write("???\n")
+			end
+		end
+
+		lnLast = ln
+	end, HOOKS)
+end
+`
