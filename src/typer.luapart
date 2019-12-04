@@ -172,7 +172,7 @@ do
 		["void"]   = TypeInfoVoid, -- Only used for calls that return nothing.
 	}
 
-	function _G.getTypeInfoForBuiltinType(state, typeName)
+	function _G.getTypeInfoForBuiltinType(typeName)
 		local typeInfo = builtinTypeInfos[typeName]
 
 		if not typeInfo then
@@ -222,7 +222,7 @@ function _G.getTypeInfoFromTypeNode(state, typeNode)
 	-- print(">>>>>>>>>") astPrint(typeNode) print("<<<<<<<<<")
 
 	if not typeNode.isUserType then
-		return getTypeInfoForBuiltinType(state, typeNode.typeName), nil
+		return getTypeInfoForBuiltinType(typeNode.typeName), nil
 
 	elseif typeNode.functionSignature then
 		local lambda  = typeNode.functionSignature
@@ -406,16 +406,16 @@ function _G.inferExpression(state, expr)
 
 		-- We successfully got information about what type the type node represents,
 		-- so we can now say that the type of the expression itself is indeed a real type.
-		typeInfo = getTypeInfoForBuiltinType(state, "type")
+		typeInfo = getTypeInfoForBuiltinType"type"
 
 	elseif expr.nodeType == !(nodeTypes.AstLiteral) then
 		local literal  = expr
 		local typeName = LITERAL_TYPE_TO_BUILTIN_TYPE_NAME[literal.literalType]
 
 		if typeName then
-			typeInfo = getTypeInfoForBuiltinType(state, typeName)
+			typeInfo = getTypeInfoForBuiltinType(typeName)
 		else
-			errorUnhandledNodeType(expr)
+			errorUnhandledNodeType(literal)
 		end
 
 	elseif expr.nodeType == !(nodeTypes.AstIdentifier) then
@@ -506,7 +506,7 @@ function _G.inferExpression(state, expr)
 		--
 		typeInfo
 			=  call.callee.nodeType == !(nodeTypes.AstIdentifier) and calleeTypeInfo            -- E.g. 'func(5)'
-			or (calleeTypeInfo.argumentTypesOut[1] or getTypeInfoForBuiltinType(state, "void")) -- E.g. 'getFunc()(5)' or '(x and func1 or func2)(5)'
+			or (calleeTypeInfo.argumentTypesOut[1] or getTypeInfoForBuiltinType"void") -- E.g. 'getFunc()(5)' or '(x and func1 or func2)(5)'
 
 	elseif expr.nodeType == !(nodeTypes.AstStruct) then
 		local struct        = expr
@@ -556,15 +556,15 @@ function _G.inferExpression(state, expr)
 
 		local enumMemberInfo
 		if enum.memberType then
-			enumMemberInfo = getTypeInfoForBuiltinType(state, enum.memberType.typeName)
+			enumMemberInfo = getTypeInfoForBuiltinType(enum.memberType.typeName)
 		else
 			enumMemberInfo = enum.declarations[1].inferredTypes[1]
 			if not isAny(enumMemberInfo,
-				getTypeInfoForBuiltinType(state, "int"),
-				getTypeInfoForBuiltinType(state, "string"),
-				getTypeInfoForBuiltinType(state, "type"),
-				getTypeInfoForBuiltinType(state, "bool"),
-				getTypeInfoForBuiltinType(state, "number")
+				getTypeInfoForBuiltinType"int",
+				getTypeInfoForBuiltinType"string",
+				getTypeInfoForBuiltinType"type",
+				getTypeInfoForBuiltinType"bool",
+				getTypeInfoForBuiltinType"number"
 			) then
 				typeError(state, enum, "Supported enum member types are: int, string, type, bool, number")
 			end
@@ -590,6 +590,146 @@ function _G.inferExpression(state, expr)
 
 		table.insert(state.allTypeInfos, enumInfo)
 		typeInfo = enumInfo
+
+	elseif expr.nodeType == !(nodeTypes.AstUnary) then
+		local unary = expr
+
+		if not unary.expression.inferredType then
+			inferExpression(state, unary.expression)
+			if not unary.expression.inferredType then  return  end
+		end
+
+		if isAny(unary.operation, "+","-") then
+			if not isAny(unary.expression.inferredType,
+				getTypeInfoForBuiltinType"int",
+				getTypeInfoForBuiltinType"number"
+			) then
+				typeError(state, unary.expression,
+					"Unary operation: Expected a number or int. (Got %s)",
+					getFriendlyTypeInfoName(unary.expression.inferredType)
+				)
+			end
+
+		elseif unary.operation == "#" then
+			errorInternal("@Incomplete: Handle unary '#'.")
+
+		elseif unary.operation == "not" then
+			if unary.expression.inferredType ~= getTypeInfoForBuiltinType"bool" then
+				typeError(state, unary.expression,
+					"Unary operation: Expected a bool. (Got %s)",
+					getFriendlyTypeInfoName(unary.expression.inferredType)
+				)
+			end
+
+		else
+			errorUnhandledNodeType(unary)
+		end
+
+		typeInfo = unary.expression.inferredType
+
+	elseif expr.nodeType == !(nodeTypes.AstBinary) then
+		local binary = expr
+
+		if not binary.left .inferredType then  inferExpression(state, binary.left )  end
+		if not binary.right.inferredType then  inferExpression(state, binary.right)  end
+
+		if not (binary.left.inferredType and binary.right.inferredType) then  return  end
+
+		-- @Cleanup: Define isTypeCompatibleWith(typeToCheck, otherType) or something.
+		-- For now, both sides need to be the same exact type.
+		if binary.left.inferredType ~= binary.right.inferredType then
+			typeError(state, binary,
+				"Binary operation: Operands are different types. (Left is %s, right is %s)",
+				getFriendlyTypeInfoName(binary.left.inferredType),
+				getFriendlyTypeInfoName(binary.right.inferredType)
+			)
+		end
+
+		-- Numeric operation.
+		if isAny(binary.operation, "+","-","*","/","//","^","%") then
+			if not isAny(binary.left.inferredType,
+				getTypeInfoForBuiltinType"int",
+				getTypeInfoForBuiltinType"number"
+			) then
+				typeError(state, binary.left,
+					"Binary operation: Expected a number or int. (Got %s)",
+					getFriendlyTypeInfoName(binary.left.inferredType)
+				)
+			end
+
+			if isAny(binary.operation, "/") then -- Result in number.
+				typeInfo = getTypeInfoForBuiltinType"number"
+			elseif isAny(binary.operation, "//") then -- Result in int.
+				typeInfo = getTypeInfoForBuiltinType"int"
+			else -- Keep type.
+				typeInfo = binary.left.inferredType
+			end
+
+		-- Comparison.
+		elseif isAny(binary.operation, "<",">","<=",">=") then
+			if not isAny(binary.left.inferredType,
+				getTypeInfoForBuiltinType"int",
+				getTypeInfoForBuiltinType"number",
+				getTypeInfoForBuiltinType"string"
+			) then
+				typeError(state, binary.left,
+					"Binary operation: Expected a number, int or string. (Got %s)",
+					getFriendlyTypeInfoName(binary.left.inferredType)
+				)
+			end
+
+			typeInfo = getTypeInfoForBuiltinType"bool"
+
+		-- Equality.
+		elseif isAny(binary.operation, "==","~=") then
+			typeInfo = getTypeInfoForBuiltinType"bool"
+
+		-- Boolean operation.
+		elseif isAny(binary.operation, "and","or") then
+			if binary.left.inferredType ~= getTypeInfoForBuiltinType"bool" then
+				typeError(state, binary.left, "Binary operation: Expected a bool. (Got %s)", getFriendlyTypeInfoName(binary.left.inferredType))
+			end
+			typeInfo = getTypeInfoForBuiltinType"bool"
+
+		-- String concatination.
+		elseif isAny(binary.operation, "..") then
+			if binary.left.inferredType ~= getTypeInfoForBuiltinType"string" then
+				typeError(state, binary.left, "Binary operation: Expected a string. (Got %s)", getFriendlyTypeInfoName(binary.left.inferredType))
+			end
+			typeInfo = getTypeInfoForBuiltinType"string"
+
+		-- Lookup, or similar.
+		elseif isAny(binary.operation, ".") then
+			errorInternal("@Incomplete: Handle '.' operator.")
+
+		else
+			errorUnhandledNodeType(binary)
+		end
+
+	elseif expr.nodeType == !(nodeTypes.AstCast) then
+		local cast = expr
+
+		if not cast.targetType.inferredType then  inferExpression(state, cast.targetType)  end
+		if not cast.expression.inferredType then  inferExpression(state, cast.expression)  end
+
+		if not (cast.targetType.inferredType and cast.expression.inferredType) then  return  end
+
+		local castTypeInfo = getTypeInfoFromTypeNode(state, cast.targetType)
+		assert(castTypeInfo)
+
+		if isAny(castTypeInfo, getTypeInfoForBuiltinType"number",getTypeInfoForBuiltinType"int") then
+			if not isAny(cast.expression.inferredType, getTypeInfoForBuiltinType"number",getTypeInfoForBuiltinType"int") then
+				typeError(state, cast.expression,
+					"Cannot cast from %s to %s.",
+					getFriendlyTypeInfoName(cast.expression.inferredType),
+					getFriendlyTypeInfoName(castTypeInfo)
+				)
+			end
+		else
+			errorUnhandledNodeType(cast)
+		end
+
+		typeInfo = castTypeInfo
 
 	else
 		errorUnhandledNodeType(expr)
@@ -711,7 +851,7 @@ local function inferDeclarationAssignmentValue(state, assignment, ident, i, type
 
 			if not typeNode.isUserType then
 				typeInfoForDecl = getTypeInfoFromTypeNode(state, typeNode)
-				-- typeInfoForDecl = getTypeInfoForBuiltinType(state, typeNode.typeName) -- This is the same as the above line but more direct, right? @Cleanup
+				-- typeInfoForDecl = getTypeInfoForBuiltinType(typeNode.typeName) -- This is the same as the above line but more direct, right? @Cleanup
 
 			elseif typeNode.functionSignature then
 				typeInfoForDecl = getTypeInfoFromTypeNode(state, typeNode)
@@ -740,10 +880,10 @@ local function inferDeclarationAssignmentValue(state, assignment, ident, i, type
 
 		elseif expr.nodeType == !(nodeTypes.AstStruct) then
 			typeInfoForDecl = typeInfo
-			typeInfo        = getTypeInfoForBuiltinType(state, "type")
+			typeInfo        = getTypeInfoForBuiltinType"type"
 		elseif expr.nodeType == !(nodeTypes.AstEnum) then
 			typeInfoForDecl = typeInfo
-			typeInfo        = getTypeInfoForBuiltinType(state, "type")
+			typeInfo        = getTypeInfoForBuiltinType"type"
 
 		-- else
 		-- 	print(AST_NODE_TYPE_NAMES[expr.nodeType])
