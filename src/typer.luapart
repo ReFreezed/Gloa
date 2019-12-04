@@ -121,8 +121,9 @@ local !struct"TypeInfoEnumMember"{
 	name = "",
 }
 local !structTypeInfo"TypeInfoEnum:_TypeInfo"{
-	name    = "",
-	members = {}, -- []TypeInfoEnumMember
+	name     = "",
+	typeInfo = NIL, -- Must be one of these primitive types: int, string, type, bool or number.
+	members  = {},  -- []TypeInfoEnumMember
 }
 
 local !structTypeInfo"TypeInfoCompound:_TypeInfo"{
@@ -335,9 +336,16 @@ function _G.defineInClosestScope(state, ident, typeInfo, typeInfoForDecl)
 	defn.typeInfo = typeInfo
 	defn.typeInfoForDeclaration = typeInfoForDecl -- May be nil.
 
-	if typeInfoForDecl and typeInfoForDecl.tag == !(typeTags.TypeInfoStruct) then
+	if not typeInfoForDecl then
+		-- void
+
+	elseif typeInfoForDecl.tag == !(typeTags.TypeInfoStruct) then
 		local structInfo = typeInfoForDecl
 		structInfo.name  = ident.name
+
+	elseif typeInfoForDecl.tag == !(typeTags.TypeInfoEnum) then
+		local enumInfo = typeInfoForDecl
+		enumInfo.name  = ident.name
 	end
 
 	table.insert(scope.definitions, defn)
@@ -381,6 +389,8 @@ local LITERAL_TYPE_TO_BUILTIN_TYPE_NAME = !({
 })
 
 function _G.inferExpression(state, expr)
+	assert(not expr.inferredType)
+
 	local typeInfo
 
 	if expr.nodeType == !(nodeTypes.AstType) then
@@ -473,7 +483,7 @@ function _G.inferExpression(state, expr)
 			if not call.callee.inferredType then
 				allIsInferred = false
 			elseif call.callee.inferredType.tag ~= !(typeTags.TypeInfoFunction) then -- @Incomplete: Allow parameterized structs.
-				typeError(state, call, "The object being called is not a function. (It is '%s')", getFriendlyTypeInfoName(call.callee.inferredType))
+				typeError(state, call, "The object being called is not a function. (It is %s)", getFriendlyTypeInfoName(call.callee.inferredType))
 			end
 		end
 
@@ -521,11 +531,65 @@ function _G.inferExpression(state, expr)
 			structInfo.members[i] = member
 		end
 
-		-- @Incomplete: Fill in structInfo.name (if needed?).
 		-- @Incomplete: Struct arguments.
 
 		table.insert(state.allTypeInfos, structInfo)
 		typeInfo = structInfo
+
+	elseif expr.nodeType == !(nodeTypes.AstEnum) then
+		local enum          = expr
+		local allIsInferred = true
+
+		for _, decl in ipairs(enum.declarations) do
+			if not decl.inferredTypes[1] then
+				inferDeclaration(state, decl)
+				-- Note: Enum member declarations only have one name.
+				allIsInferred = (allIsInferred and decl.inferredTypes[1] ~= nil)
+			end
+		end
+
+		if not allIsInferred then  return  end
+
+		assert(enum.declarations[1], "Enums must have members.") -- This should have been caught during parsing.
+
+		local enumInfo = newTypeInfo(TypeInfoEnum)
+
+		local enumMemberInfo
+		if enum.memberType then
+			enumMemberInfo = getTypeInfoForBuiltinType(state, enum.memberType.typeName)
+		else
+			enumMemberInfo = enum.declarations[1].inferredTypes[1]
+			if not isAny(enumMemberInfo,
+				getTypeInfoForBuiltinType(state, "int"),
+				getTypeInfoForBuiltinType(state, "string"),
+				getTypeInfoForBuiltinType(state, "type"),
+				getTypeInfoForBuiltinType(state, "bool"),
+				getTypeInfoForBuiltinType(state, "number")
+			) then
+				typeError(state, enum, "Supported enum member types are: int, string, type, bool, number")
+			end
+		end
+
+		for i, decl in ipairs(enum.declarations) do
+			local valExpr = decl.assignment.values[1]
+
+			if valExpr.inferredType ~= enumMemberInfo then
+				-- @Cleanup: Define isTypeCompatibleWith(typeToCheck, otherType) or something.
+				typeError(state, valExpr,
+					"Incorrect value type for '%s'. (Expected %s, got %s)",
+					decl.names[1].name,
+					getFriendlyTypeInfoName(enumMemberInfo),
+					getFriendlyTypeInfoName(valExpr.inferredType)
+				)
+			end
+
+			local member        = TypeInfoEnumMember()
+			member.name         = decl.names[1].name
+			enumInfo.members[i] = member
+		end
+
+		table.insert(state.allTypeInfos, enumInfo)
+		typeInfo = enumInfo
 
 	else
 		errorUnhandledNodeType(expr)
@@ -600,7 +664,7 @@ local function inferDeclarationAssignmentValue(state, assignment, ident, i, type
 			inferExpression(state, expr)
 
 			if typeInfoExpected and expr.inferredType ~= typeInfoExpected then
-				-- @Incomplete: Define isTypeCompatibleWith(typeToCheck, otherType) or something, if necessary.
+				-- @Cleanup: Define isTypeCompatibleWith(typeToCheck, otherType) or something.
 				if expr.inferredType.tag ~= typeInfoExpected.tag then
 					typeError(
 						state, assignment.values[math.min(i, lastIndex)],
@@ -674,7 +738,10 @@ local function inferDeclarationAssignmentValue(state, assignment, ident, i, type
 			local call = expr
 			-- Should we do the same as for AstIdentifier here above? I think so. @Incomplete
 
-		elseif expr.nodeType == !(nodeTypes.AstStruct) or expr.nodeType == !(nodeTypes.AstEnum) then
+		elseif expr.nodeType == !(nodeTypes.AstStruct) then
+			typeInfoForDecl = typeInfo
+			typeInfo        = getTypeInfoForBuiltinType(state, "type")
+		elseif expr.nodeType == !(nodeTypes.AstEnum) then
 			typeInfoForDecl = typeInfo
 			typeInfo        = getTypeInfoForBuiltinType(state, "type")
 
@@ -726,7 +793,7 @@ function _G.inferDeclaration(state, decl, isOutArg)
 							typeInfo = defn.typeInfoForDeclaration
 
 							if not typeInfo then
-								typeMessage(state, typeNode, "Error", "'%s' is not a type. (It is '%s')", typeName, getFriendlyTypeInfoName(defn.typeInfo))
+								typeMessage(state, typeNode, "Error", "'%s' is not a type. (It is %s)", typeName, getFriendlyTypeInfoName(defn.typeInfo))
 								printDefinitionChain(state, defn, typeName)
 								exitFailure()
 							end
@@ -834,6 +901,10 @@ function _G.getFriendlyTypeInfoName(typeInfo)
 	if typeInfo.tag == !(typeTags.TypeInfoStruct) then
 		local structInfo = typeInfo
 		if structInfo.name ~= "" then  return structInfo.name  end
+
+	elseif typeInfo.tag == !(typeTags.TypeInfoEnum) then
+		local enumInfo = typeInfo
+		if enumInfo.name ~= "" then  return enumInfo.name  end
 
 	elseif typeInfo.tag == !(typeTags.TypeInfoFunction) then
 		-- @Incomplete: Return function signature.
