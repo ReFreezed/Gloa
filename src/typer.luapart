@@ -81,6 +81,7 @@ local !structTypeInfo"TypeInfoNumber:_TypeInfo"{}
 local !structTypeInfo"TypeInfoString:_TypeInfo"{}
 local !structTypeInfo"TypeInfoTable:_TypeInfo"{}
 local !structTypeInfo"TypeInfoType:_TypeInfo"{}
+local !structTypeInfo"TypeInfoVoid:_TypeInfo"{}
 
 !!local SIMPLE_TYPE_TAG = {
 	-- These small type infos don't have any extra information.
@@ -167,6 +168,7 @@ do
 		["string"] = TypeInfoString,
 		["table"]  = TypeInfoTable,
 		["type"]   = TypeInfoType, -- The result of e.g. typeOf(int) or typeOf(typeOf(myVariable)).
+		["void"]   = TypeInfoVoid, -- Only used for calls that return nothing.
 	}
 
 	function _G.getTypeInfoForBuiltinType(state, typeName)
@@ -471,7 +473,7 @@ function _G.inferExpression(state, expr)
 			if not call.callee.inferredType then
 				allIsInferred = false
 			elseif call.callee.inferredType.tag ~= !(typeTags.TypeInfoFunction) then -- @Incomplete: Allow parameterized structs.
-				typeError(state, call.callee, "This is not a function.")
+				typeError(state, call, "The object being called is not a function. (It is '%s')", getFriendlyTypeInfoName(call.callee.inferredType))
 			end
 		end
 
@@ -484,7 +486,17 @@ function _G.inferExpression(state, expr)
 
 		if not allIsInferred then  return  end
 
-		typeInfo = call.callee.inferredType -- Note: We've already assured we're calling a function.  @Incomplete: Handle parameterized structs.
+		-- Note: We've already assured we're calling a function.  @Incomplete: Handle parameterized structs.
+		local calleeTypeInfo = call.callee.inferredType
+
+		-- I'm not sure this is 100% correct way of doing the thing, but it works for now!
+		--
+		-- @Cleanup @Robustness: Maybe parse 'func()' as "get the value of 'func', then call the value"
+		-- instead of having it as a single operation? Not sure if it'll improve things here though...
+		--
+		typeInfo
+			=  call.callee.nodeType == !(nodeTypes.AstIdentifier) and calleeTypeInfo            -- E.g. 'func(5)'
+			or (calleeTypeInfo.argumentTypesOut[1] or getTypeInfoForBuiltinType(state, "void")) -- E.g. 'getFunc()(5)' or '(x and func1 or func2)(5)'
 
 	elseif expr.nodeType == !(nodeTypes.AstStruct) then
 		local struct        = expr
@@ -557,11 +569,17 @@ local function inferDeclarationAssignmentValue(state, assignment, ident, i, type
 		-- @Speed: Only do the following once per name. (Moving this to :OncePerValue doesn't
 		-- work if argIndex > 1 because call.inferredType is already set at that point.)
 		local typeInfoForCall = call.inferredType
-		assert(typeInfoForCall.tag == !(typeTags.TypeInfoFunction))
+		if typeInfoForCall.tag == !(typeTags.TypeInfoFunction) then
+			-- void
+		elseif typeInfoForCall.tag == !(typeTags.TypeInfoVoid) then
+			typeError(state, call, "Called function does not return anything.") -- Only function calls can be void at the moment. 2019-12-04
+		else
+			typeError(state, call, "Trying to call a '%s'.", getFriendlyTypeInfoName(typeInfoForCall))
+		end
 
 		local typeInfoForOutArg = typeInfoForCall.argumentTypesOut[argIndex]
 		if not typeInfoForOutArg then
-			typeError(state, call, "Call does not return anything for '%s' (output argument #%d).", ident.name, argIndex)
+			typeError(state, call, "Function does not return anything for '%s' (output argument #%d).", ident.name, argIndex)
 		end
 
 		if typeInfoExpected and typeInfoForOutArg ~= typeInfoExpected then
@@ -601,7 +619,7 @@ local function inferDeclarationAssignmentValue(state, assignment, ident, i, type
 
 				elseif typeInfoExpected.tag == !(typeTags.TypeInfoFunction) then
 					-- @Incomplete: Print the type signature.
-					typeError(state, assignment.values[math.min(i, lastIndex)], "Function signature is different from the type in declaration.")
+					typeError(state, assignment.values[math.min(i, lastIndex)], "Function signature is different from the type in the declaration.")
 
 				elseif typeInfoExpected.tag == !(typeTags.TypeInfoStruct) then
 					typeError(

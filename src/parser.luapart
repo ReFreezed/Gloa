@@ -316,7 +316,7 @@ end
 
 
 
--- identifier = parseIdentifier( state, parentNode [, placeDeclared ] )
+-- identifier = parseIdentifier( parseState, parentNode [, placeDeclared ] )
 --
 -- placeDeclared should be set when they are declared, i.e. in declarations or
 -- function argument lists (loose identifiers should have it be nil as we figure
@@ -367,6 +367,14 @@ function _G.parseType(state, parentNode)
 		!SET_OR_RETURN `literal.value = parseType(state, literal)` -- Not sure if it's good that literal.value can be an AstNode along other literals.
 
 		return literal
+
+	elseif isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"(") then
+		local typeNode      = astNewNode(AstType, token, parentNode)
+		typeNode.isUserType = true
+
+		!SET_OR_RETURN `typeNode.functionSignature = parseLambda(state, typeNode, false)`
+
+		return typeNode
 	end
 
 	local isBuiltinType = isTokenBuiltinType(tokType, tokValue)
@@ -403,7 +411,7 @@ function _G.parseType(state, parentNode)
 	return typeNode
 end
 
--- success = parsePipeSeparatedTypes( state, parentNode, identifierTypes )
+-- success = parsePipeSeparatedTypes( parseState, parentNode, identifierTypes )
 function _G.parsePipeSeparatedTypes(state, parentNode, typeNodes)
 	-- @Incomplete: Detect repeated types. (This may be more difficult than it seems. It's possibly a task for the typer.)
 	while true do
@@ -524,7 +532,7 @@ function _G.parseTable(state, parentNode)
 end
 
 -- Parse comma-separated expressions. Used for function calls and struct parameters.
--- success = parseExpressionList( state, parentNode, expressions )
+-- success = parseExpressionList( parseState, parentNode, expressions )
 function _G.parseExpressionList(state, parentNode, expressions)
 	while true do
 		!SET_OR_RETURN_FALSE `local expr = parseExpression(state, parentNode)`
@@ -543,7 +551,7 @@ function _G.parseExpressionList(state, parentNode, expressions)
 	return true
 end
 
--- parseArguments( state, parentNode, isInput, placeDeclared )
+-- parseArguments( parseState, parentNode, isInput, placeDeclared )
 -- placeDeclared = AstLambda|AstStruct
 function _G.parseArguments(state, parentNode, isInput, placeDeclared)
 	local args       = astNewNode(AstArguments, state.nextToken, parentNode)
@@ -558,7 +566,7 @@ function _G.parseArguments(state, parentNode, isInput, placeDeclared)
 		while true do
 			tokType, tokValue, token = consumeNextToken(state)
 			if not (tokType == !(TOKEN_IDENTIFIER) or isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"...")) then
-				!ERROR_OR_RETURN `errorParsingLast(state, "Expected an identifier.")`
+				!ERROR_OR_RETURN `errorParsingLast(state, "Argument list: Expected an identifier.")`
 			end
 
 			local arg = astNewNode(AstArgument, token, args)
@@ -672,6 +680,35 @@ function _G.parseArguments(state, parentNode, isInput, placeDeclared)
 	return args
 end
 
+function _G.parseNamelessArguments(state, parentNode, placeDeclared)
+	local args = astNewNode(AstArguments, state.nextToken, parentNode)
+
+	for groupN = 1, math.huge do
+		local arg = astNewNode(AstArgument, state.nextToken, args)
+		arg.group = groupN
+		table.insert(args, arg)
+
+		local decl      = astNewNode(AstDeclaration, arg.token, arg)
+		arg.declaration = decl
+		!DO_OR_RETURN `parsePipeSeparatedTypes(state, decl, decl.types)`
+
+		local ident         = astNewNode(AstIdentifier, decl.token, decl)
+		ident.name          = "__UNNAMED_"..groupN.."__"
+		ident.placeDeclared = placeDeclared
+		decl.names[1]       = ident
+
+		tokType, tokValue = peekNextToken(state)
+
+		if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),",") then
+			consumeNextToken(state)
+		else
+			break
+		end
+	end
+
+	return args
+end
+
 function _G.parseStruct(state, parentNode)
 	local struct            = astNewNode(AstStruct, state.nextToken-1, parentNode) -- The token should be the 'struct' keyword.
 	local tokType, tokValue = consumeNextToken(state)
@@ -776,7 +813,7 @@ function _G.parseEnum(state, parentNode)
 	return enum
 end
 
--- declaration = parseDeclaration( state, parentNode [, declarationType=DECLARATION_NORMAL ] )
+-- declaration = parseDeclaration( parseState, parentNode [, declarationType=DECLARATION_NORMAL ] )
 function _G.parseDeclaration(state, parentNode, declType)
 	--[[
 	local a = 0         -- Variable, inferred type.
@@ -990,7 +1027,7 @@ function _G.parseAssignment(state, parentNode)
 end
 
 -- Add the names to the 'names' array.
--- success = parseNameList( state, parentNode, names [, placeDeclared ] )
+-- success = parseNameList( parseState, parentNode, names [, placeDeclared ] )
 function _G.parseNameList(state, parentNode, names, placeDeclared)
 	local takenNames = {}
 
@@ -1341,7 +1378,7 @@ function _G.parseBlock(state, parentNode)
 	return block
 end
 
--- node = parseBlockOrScopedStatementOrUnwrappedNonPolutingStatement( state, parentNode [, requireBlock=false ] )
+-- node = parseBlockOrScopedStatementOrUnwrappedNonPolutingStatement( parseState, parentNode [, requireBlock=false ] )
 function _G.parseBlockOrScopedStatementOrUnwrappedNonPolutingStatement(state, parentNode, requireBlock)
 	local tokType, tokValue = peekNextToken(state)
 
@@ -1461,7 +1498,7 @@ function _G.parseFileScope(state, path, parentNode)
 	return fileScope
 end
 
--- call = parseCall( state, parentNode, couldBeType [, callee=theFollowingIdentifier, isMethod=false ] )
+-- call = parseCall( parseState, parentNode, couldBeType [, callee=theFollowingIdentifier, isMethod=false ] )
 function _G.parseCall(state, parentNode, couldBeType, callee, isMethod)
 	assert(type(couldBeType) == "boolean")
 
@@ -1514,9 +1551,97 @@ function _G.parseCall(state, parentNode, couldBeType, callee, isMethod)
 	return call
 end
 
+-- parseLambda( parseState, parentNode [, allowBody=false ] )
+function _G.parseLambda(state, parentNode, allowBody)
+	-- Note: We assume the initial '(' has been consumed already.
+
+	local lambda = astNewNode(AstLambda, state.nextToken-1, parentNode)
+
+	-- In args.
+	local tokType, tokValue = peekNextToken(state)
+
+	if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),")") then
+		consumeNextToken(state)
+
+	else
+		!SET_OR_RETURN `lambda.argumentsIn = parseArguments(state, lambda, true, lambda)`
+
+		tokType, tokValue = consumeNextToken(state)
+		if not isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),")") then
+			!ERROR_OR_RETURN `errorParsingAfterPrevious(state, "Expected ')'.")`
+		end
+	end
+
+	-- Out args.
+	tokType, tokValue = peekNextToken(state)
+
+	if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"->") then
+		consumeNextToken(state)
+		local argsOutStartToken = state.nextToken
+
+		tokType, tokValue = peekNextToken(state)
+
+		-- (...) -> void
+		if isToken(tokType,tokValue, !(TOKEN_KEYWORD),"void") then
+			consumeNextToken(state)
+
+			-- The following error detection erroneously matches some valid situations, e.g.:
+			-- local funcSig, Bool :: ()->void, bool
+
+			--[[
+			tokType, tokValue = peekNextToken(state)
+			if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),",") then
+				!ERROR_OR_RETURN `errorParsingNext(state, "Argument list with 'void' cannot have other arguments.")`
+			end
+			--]]
+
+		-- (...) -> (name:type, ...)
+		elseif isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"(") then
+			consumeNextToken(state)
+			tokType, tokValue = peekNextToken(state)
+
+			-- '()' is the same as 'void'.
+			if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),")") then
+				consumeNextToken(state)
+
+			else
+				!SET_OR_RETURN `lambda.argumentsOut = parseArguments(state, lambda, false, lambda)`
+
+				tokType, tokValue = consumeNextToken(state)
+				if not isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),")") then
+					!ERROR_OR_RETURN `errorParsingAfterPrevious(state, "Expected ')'.")`
+				end
+			end
+
+			-- If the return type is a function signature, i.e. () -> () -> ...
+			tokType, tokValue = peekNextToken(state)
+			if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"->") then
+				state.nextToken = argsOutStartToken
+				!SET_OR_RETURN `lambda.argumentsOut = parseNamelessArguments(state, lambda, lambda)` -- Replace any argumentsOut we just parsed.
+			end
+
+		-- (...) -> type, ...
+		else
+			!SET_OR_RETURN `lambda.argumentsOut = parseNamelessArguments(state, lambda, lambda)`
+		end
+	end
+
+	-- Body.
+	if allowBody then
+		tokType, tokValue = peekNextToken(state)
+
+		if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"{") then
+			consumeNextToken(state)
+			!SET_OR_RETURN `lambda.body = parseBlock(state, lambda)`
+		end
+	end
+
+	return lambda
+end
 
 
--- expression = parseExpression( state, parentNode [, minOperatorPrecedence ] )
+
+-- expression = parseExpression( parseState, parentNode [, minOperatorPrecedence ] )
 function _G.parseExpression(state, parentNode, minOpPrecedence)
 	-- @Robustness: Check that parents are set correctly everywhere in here.
 
@@ -1617,95 +1742,15 @@ function _G.parseExpression(state, parentNode, minOpPrecedence)
 			)
 		)
 	then
-		local lambda = astNewNode(AstLambda, exprStartToken, parentNode)
+		!SET_OR_RETURN `local lambda = parseLambda(state, parentNode, true)`
 
-		-- In args.
-		tokType, tokValue = peekNextToken(state)
-
-		if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),")") then
-			consumeNextToken(state)
-
+		if lambda.body then
+			expr = lambda
 		else
-			!SET_OR_RETURN `lambda.argumentsIn = parseArguments(state, lambda, true, lambda)`
-
-			tokType, tokValue = consumeNextToken(state)
-			if not isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),")") then
-				!ERROR_OR_RETURN `errorParsingAfterPrevious(state, "Expected ')'.")`
-			end
-		end
-
-		-- Out args.
-		tokType, tokValue = peekNextToken(state)
-
-		if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"->") then
-			consumeNextToken(state)
-
-			tokType, tokValue = peekNextToken(state)
-
-			-- () -> void
-			if isToken(tokType,tokValue, !(TOKEN_KEYWORD),"void") then
-				consumeNextToken(state)
-
-				tokType, tokValue = peekNextToken(state)
-				if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),",") then
-					!ERROR_OR_RETURN `errorParsingNext(state, "Argument list with 'void' cannot have other arguments.")`
-				end
-
-			-- () -> (name:type, ...)
-			elseif isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"(") then
-				consumeNextToken(state)
-
-				!SET_OR_RETURN `lambda.argumentsOut = parseArguments(state, lambda, false, lambda)`
-
-				tokType, tokValue = consumeNextToken(state)
-				if not isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),")") then
-					!ERROR_OR_RETURN `errorParsingAfterPrevious(state, "Expected ')'.")`
-				end
-
-				-- @Incomplete: Detect if the return type is a function signature: () -> () -> ...
-
-			-- () -> type, ...
-			else
-				local args          = astNewNode(AstArguments, state.nextToken, lambda)
-				lambda.argumentsOut = args
-
-				for groupN = 1, math.huge do
-					local arg = astNewNode(AstArgument, state.nextToken, args)
-					arg.group = groupN
-					table.insert(args, arg)
-
-					local decl      = astNewNode(AstDeclaration, arg.token, arg)
-					arg.declaration = decl
-					!DO_OR_RETURN `parsePipeSeparatedTypes(state, decl, decl.types)`
-
-					local ident   = astNewNode(AstIdentifier, decl.token, parentNode)
-					ident.name    = "__UNNAMED_"..groupN.."__"
-					decl.names[1] = ident
-
-					tokType, tokValue = peekNextToken(state)
-
-					if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),",") then
-						consumeNextToken(state)
-					else
-						break
-					end
-				end
-			end
-		end
-
-		-- Body.
-		tokType, tokValue = peekNextToken(state)
-
-		if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"{") then
-			consumeNextToken(state)
-
-			!SET_OR_RETURN `lambda.body = parseBlock(state, lambda)`
-			expr                        = lambda
-
-		else
-			local typeNode             = astNewNode(AstType, lambda.token, lambda)
+			local typeNode             = astNewNode(AstType, lambda.token, parentNode)
 			typeNode.isUserType        = true
 			typeNode.functionSignature = lambda
+			lambda.parent              = typeNode
 			expr                       = typeNode
 		end
 
@@ -1894,7 +1939,7 @@ function _G.consumeNextToken(state)
 	return tokType, tokValue, i
 end
 
--- tokenType, tokenValue = peekNextToken( state [, steps=1 ] )
+-- tokenType, tokenValue = peekNextToken( parseState [, steps=1 ] )
 function _G.peekNextToken(state, steps)
 	steps   = steps or 1
 	local i = state.nextToken+steps-1
