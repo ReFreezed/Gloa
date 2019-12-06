@@ -642,7 +642,27 @@ function _G.inferExpression(state, expr)
 		end
 		assert(effectiveCalleeTypeInfo.tag == !(typeTags.TypeInfoFunction)) -- @Incomplete: Handle parameterized structs.
 
-		-- @Incomplete: Check that the function we call can take the arguments we give it.
+		-- @Incomplete: Check for optional arguments.
+		if #call.arguments < #effectiveCalleeTypeInfo.argumentTypesIn then
+			typeError(state, call, "Missing arguments.")
+		elseif #call.arguments > #effectiveCalleeTypeInfo.argumentTypesIn then
+			typeError(state, call.arguments[#effectiveCalleeTypeInfo.argumentTypesIn+1], "Too many arguments.")
+		end
+
+		for i, argExpr in ipairs(call.arguments) do
+			local typeInfoWanted = effectiveCalleeTypeInfo.argumentTypesIn[i]
+			if argExpr.inferredType ~= typeInfoWanted then
+				-- @Cleanup: Define isTypeCompatibleWith(typeToCheck, otherType) or something.
+				-- @UX: Tell the name of the argument. (Probably only possible for constants, and maybe not all. Not sure!)
+				typeError(
+					state, argExpr,
+					"Wrong type for argument #%d. (Wanted %s, got %s)",
+					i,
+					getFriendlyTypeInfoName(typeInfoWanted),
+					getFriendlyTypeInfoName(argExpr.inferredType)
+				)
+			end
+		end
 
 		typeInfo = getTypeInfoForList(state, effectiveCalleeTypeInfo.argumentTypesOut)
 
@@ -714,7 +734,7 @@ function _G.inferExpression(state, expr)
 			if valExpr.inferredType ~= enumMemberInfo then
 				-- @Cleanup: Define isTypeCompatibleWith(typeToCheck, otherType) or something.
 				typeError(state, valExpr,
-					"Incorrect value type for '%s'. (Expected %s, got %s)",
+					"Incorrect value type for '%s'. (Wanted %s, got %s)",
 					decl.names[1].name,
 					getFriendlyTypeInfoName(enumMemberInfo),
 					getFriendlyTypeInfoName(valExpr.inferredType)
@@ -967,7 +987,7 @@ local function inferAssignmentValue(state, assignment, ident, i, typeInfoExpecte
 				elseif typeInfoExpected.tag == !(typeTags.TypeInfoFunction) then
 					typeError(
 						state, valExpr,
-						"%s: Function signature is different from the type. (Expected %s, got %s)",
+						"%s: Function signature is different from the type. (Wanted %s, got %s)",
 						(isDecl and "Declaration" or "Assignment"),
 						getFriendlyTypeInfoName(typeInfoExpected),
 						getFriendlyTypeInfoName(expr.inferredType)
@@ -1216,7 +1236,7 @@ function _G.inferStatement(state, statement)
 
 		local lastValueExpr = getLast(returnNode.values)
 
-		local lastIsListToExpand
+		local lastValueIsListToUnpack
 			=   lastValueExpr ~= nil
 			and lastValueExpr.nodeType == !(nodeTypes.AstCall)
 			and not lastValueExpr.surroundedByParenthesis
@@ -1224,7 +1244,7 @@ function _G.inferStatement(state, statement)
 
 		local returnValueCount = #returnNode.values
 
-		if lastIsListToExpand then
+		if lastValueIsListToUnpack then
 			local listSig    = lastValueExpr.inferredType
 			returnValueCount = returnValueCount - 1 + #listSig
 		end
@@ -1238,7 +1258,7 @@ function _G.inferStatement(state, statement)
 			typeError(state, returnNode, "Too few values to return. (Expected %d, got %d)", #argTypesOut, returnValueCount)
 
 		-- Too many values.
-		elseif not lastIsListToExpand then
+		elseif not lastValueIsListToUnpack then
 			typeError(state, returnNode.values[#argTypesOut+1], "Too many values to return. (Expected %d, got %d)", #argTypesOut, returnValueCount)
 		else
 			local callOutArgCount = #returnNode.values-1
@@ -1246,7 +1266,7 @@ function _G.inferStatement(state, statement)
 			typeError(state, lastValueExpr, "Too many values returned from call. (Expected %d, got %d)", #argTypesOut-callOutArgCount, #listSig)
 		end
 
-		if lastIsListToExpand then
+		if lastValueIsListToUnpack then
 			local listSig = lastValueExpr.inferredType
 
 			for i = #returnNode.values, returnValueCount do
@@ -1256,7 +1276,7 @@ function _G.inferStatement(state, statement)
 				if typeInfo ~= argTypesOut[i] then
 					-- @Cleanup: Define isTypeCompatibleWith(typeToCheck, otherType) or something.
 					typeError(state, lastValueExpr,
-						"Returned value #%d from call is of incorrect type. (Expected %s, got %s)",
+						"Returned value #%d from call is of incorrect type. (Wanted %s, got %s)",
 						callOutArgIndex,
 						getFriendlyTypeInfoName(argTypesOut[i]),
 						getFriendlyTypeInfoName(typeInfo)
@@ -1265,7 +1285,7 @@ function _G.inferStatement(state, statement)
 			end
 		end
 
-		for i = 1, #returnNode.values - (lastIsListToExpand and 1 or 0) do
+		for i = 1, #returnNode.values - (lastValueIsListToUnpack and 1 or 0) do
 			local expr     = returnNode.values[i]
 			local typeInfo = expr.inferredType
 
@@ -1282,7 +1302,8 @@ function _G.inferStatement(state, statement)
 			if typeInfo ~= argTypesOut[i] then
 				-- @Cleanup: Define isTypeCompatibleWith(typeToCheck, otherType) or something.
 				typeError(state, expr,
-					"Returned value from call is of incorrect type. (Expected %s, got %s)",
+					"Returned value #%d is of incorrect type. (Wanted %s, got %s)",
+					i,
 					getFriendlyTypeInfoName(argTypesOut[i]),
 					getFriendlyTypeInfoName(typeInfo)
 				)
