@@ -9,10 +9,10 @@
 --=
 --==============================================================
 
-	astFindParent
+	astFindParent, astFindCommonParent, astHasParent
 	astNewNode
-	astPrint
-	errorParsing*
+	astPrint, astPrintTree
+	errorParsing*, errorUnhandledNodeType
 	parse*
 
 --============================================================]]
@@ -99,7 +99,7 @@ end
 	parent   = NIL,
 	token    = 1,
 }
-_G.!structAst"AstTypeDefinition:_AstNode"{
+_G.!structAst"AstTypeDefinition:_AstNode"{ -- Created during type phase.
 	-- Type phase:
 	name     = NIL, -- AstIdentifier|AstVararg
 	scope    = NIL, -- AstFileScope|AstBlock|AstStruct|AstFor|AstLambda|AstEnum (This should be the same as the parent.)
@@ -141,8 +141,9 @@ local !structAst"AstBinary:_AstExpression"{
 	left      = NIL,
 	right     = NIL,
 }
+local !struct"TableField"{ key=NIL, value=NIL }
 local !structAst"AstTable:_AstExpression"{
-	-- [1]=field1, ...
+	-- [1]=tableField1, ...
 }
 local !structAst"AstCall:_AstExpression"{
 	couldBeTypeWithParameters = false,
@@ -175,7 +176,7 @@ local !structAst"AstTypeOf:_AstExpression"{
 }
 local !structAst"AstCast:_AstExpression"{
 	targetType = NIL, -- AstType
-	expression = NIL,
+	expression = NIL, -- AstExpression
 }
 
 local !structAst"AstStatement:_AstNode"{ -- Needed? I think so?
@@ -256,21 +257,17 @@ local !structAst"AstStruct:_AstDeclarativeScope"{
 local !structAst"AstEnum:_AstDeclarativeScope"{ -- Should this be a DeclarativeScope?
 	memberType = NIL, -- AstType
 }
-local !structAst"AstBlock:_AstDeclarativeScope"{
-	-- [1]=statement1, ...
-}
 local !structAst"AstFileScope:_AstDeclarativeScope"{
 	path = "",
 }
 
-_G.AST_NODE_TYPE_NAMES = !(nodeTypeNames)
-
-
-
-local !struct"TableField"{
-	key   = NIL,
-	value = NIL,
+local !structAst"AstBlock:_AstNode"{
+	-- [1]=statement1, ...
+	-- Type phase:
+	definitions = {}, -- []AstTypeDefinition
 }
+
+_G.AST_NODE_TYPE_NAMES = !(nodeTypeNames)
 
 
 
@@ -287,10 +284,10 @@ do
 	local serialN = 0
 
 	function _G.astNewNode(AstNodeType, token, parentNode)
-		if not AstNodeType then  error("No AstNodeType specified.", 2)  end
+		if not AstNodeType then  errorInternal(2, "No AstNodeType specified.")  end
 
 		if not parentNode and AstNodeType ~= AstFileScope then
-			error("No parent.", 2)
+			errorInternal(2, "No parent.")
 		end
 
 		serialN = serialN+1
@@ -306,7 +303,7 @@ do
 			-- or serialN == 22
 			or parentNode and parentNode.s == 21
 		then
-			error("DEBUG")
+			errorInternal("DEBUG")
 		end
 		--]]
 
@@ -355,7 +352,7 @@ function _G.parseType(state, parentNode)
 		return typeOf
 
 	elseif isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"[") then
-		error("@Incomplete: Need to revise array types.") -- Array types are not array literals! What was I thinking?! (Table constructors can be used as "array literals".)
+		errorInternal("@Incomplete: Need to revise array types.") -- Array types are not array literals! What was I thinking?! (Table constructors can be used as "array literals".)
 
 		local tokType, tokValue = consumeNextToken(state)
 		if not isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"]") then
@@ -1367,11 +1364,6 @@ function _G.parseBlock(state, parentNode)
 
 			table.insert(block, statement)
 			lastNodeType = statement.what.nodeType
-
-			if lastNodeType == !(nodeTypes.AstDeclaration) then
-				local decl = statement.what
-				table.insert(block.declarations, decl) -- Is this declarations array that useful?
-			end
 		end
 	end
 
@@ -1393,11 +1385,6 @@ function _G.parseBlockOrScopedStatementOrUnwrappedNonPolutingStatement(state, pa
 	if requireBlock or isAny(statement.what.nodeType, !(nodeTypes.AstDeclaration),!(nodeTypes.AstReturn),!(nodeTypes.AstBreak),!(nodeTypes.AstContinue)) then
 		local block = astNewNode(AstBlock, statement.token, parentNode)
 		table.insert(block, statement)
-
-		if statement.what.nodeType == !(nodeTypes.AstDeclaration) then
-			local decl = statement.what
-			table.insert(block.declarations, decl) -- Is this declarations array that useful?
-		end
 
 		statement.parent = block
 		return block
@@ -2012,9 +1999,17 @@ function _G.errorParsingAfterLast(state, ...)
 	errorParsingAfter(state, state.nextToken-1, ...)
 end
 
+function _G.errorUnhandledNodeType(node)
+	!if DEBUG then
+		astPrintTree(node)
+	!end
+	errorInternal(2, "Incomplete: Unhandled node type '%s'.", (AST_NODE_TYPE_NAMES[node.nodeType] or node.nodeType))
+end
 
 
--- astPrint( node [, fileToPrintTo=io.stdout ] )
+
+-- astPrint    ( node [, fileToPrintTo=io.stdout ] )
+-- astPrintTree( node [, fileToPrintTo=io.stdout ] )
 do
 	local file
 	local printNode -- Forward declaration.
@@ -2023,17 +2018,19 @@ do
 		file:write(...)
 	end
 
-	local function printNodeList(list, indent, printed, keyPrefix)
+	local function printNodeList(list, indent, printed, printChildren, keyPrefix)
 		for i, node in ipairs(list) do
-			printNode(node, indent, printed, (keyPrefix and keyPrefix..i))
+			printNode(node, indent, printed, printChildren, (keyPrefix and keyPrefix..i))
 		end
 	end
 
-	function printNode(node, indent, printed, keyName)
-		!local BLOCK_START = PRINT_NODE_BRACKETS and `write(" {")`             or ``
-		!local BLOCK_END   = PRINT_NODE_BRACKETS and `write(indentStr, "}\n")` or ``
+	function printNode(node, indent, printed, printChildren, keyName)
+		!local CHILD_PRINT_START = "if not printChildren then write('\\n') else write('" .. (PRINT_NODE_BRACKETS and " {" or "") .. "\\n')"
+		!local CHILD_PRINT_END   = (PRINT_NODE_BRACKETS and "write(indentStr, '}\\n') " or "") .. "end"
 
 		local indentStr = ("\t"):rep(indent)
+
+		assert(node.s)
 
 		write(indentStr)
 		if keyName then  write(keyName, " ")  end
@@ -2053,20 +2050,18 @@ do
 			elseif node.nodeType == !(nodeTypes.AstBinary) then
 				local binOp = node
 				write(" (", binOp.operation, ")")
-				!!(BLOCK_START)
-				write("\n")
-				if binOp.left  then  printNode(binOp.left,  indent+1, printed)  end
+				!!(CHILD_PRINT_START)
+				if binOp.left  then  printNode(binOp.left,  indent+1, printed, printChildren)  end
 				write(indentStr, "\top ", binOp.operation, "\n")
-				if binOp.right then  printNode(binOp.right, indent+1, printed)  end
-				!!(BLOCK_END)
+				if binOp.right then  printNode(binOp.right, indent+1, printed, printChildren)  end
+				!!(CHILD_PRINT_END)
 
 			elseif node.nodeType == !(nodeTypes.AstUnary) then
 				local unaryOp = node
 				write(" (", unaryOp.operation, ")")
-				!!(BLOCK_START)
-				write("\n")
-				if unaryOp.expression then  printNode(unaryOp.expression, indent+1, printed)  end
-				!!(BLOCK_END)
+				!!(CHILD_PRINT_START)
+				if unaryOp.expression then  printNode(unaryOp.expression, indent+1, printed, printChildren)  end
+				!!(CHILD_PRINT_END)
 
 			elseif node.nodeType == !(nodeTypes.AstDeclaration) then
 				local decl = node
@@ -2077,22 +2072,20 @@ do
 				elseif not decl.isLocal then
 					write(" (global)")
 				end
-				!!(BLOCK_START)
-				write("\n")
-				printNodeList(decl.names,  indent+1, printed, "NAME")
-				printNodeList(decl.types,  indent+1, printed, "TYPE")
-				if decl.assignment then  printNode(decl.assignment, indent+1, printed)  end
-				!!(BLOCK_END)
+				!!(CHILD_PRINT_START)
+				printNodeList(decl.names,  indent+1, printed, printChildren, "NAME")
+				printNodeList(decl.types,  indent+1, printed, printChildren, "TYPE")
+				if decl.assignment then  printNode(decl.assignment, indent+1, printed, printChildren)  end
+				!!(CHILD_PRINT_END)
 
 			elseif node.nodeType == !(nodeTypes.AstTable) then
 				local tableNode = node
-				!!(BLOCK_START)
-				write("\n")
+				!!(CHILD_PRINT_START)
 				for i, tableField in ipairs(tableNode) do
-					if tableField.key   then  printNode(tableField.key,   indent+1, printed, i.."K")  end
-					if tableField.value then  printNode(tableField.value, indent+1, printed, i.."V")  end
+					if tableField.key   then  printNode(tableField.key,   indent+1, printed, printChildren, i.."K")  end
+					if tableField.value then  printNode(tableField.value, indent+1, printed, printChildren, i.."V")  end
 				end
-				!!(BLOCK_END)
+				!!(CHILD_PRINT_END)
 
 			elseif node.nodeType == !(nodeTypes.AstCall) then
 				local call = node
@@ -2100,130 +2093,116 @@ do
 				if call.couldBeTypeWithParameters then  write(" (couldBeType)")    end
 				if call.isMethod                  then  write(" (method)")         end
 				if call.surroundedByParenthesis   then  write(" (adjustArgsTo1)")  end
-				!!(BLOCK_START)
-				write("\n")
-				if call.callee then  printNode(call.callee, indent+1, printed)  end
-				printNodeList(call.arguments, indent+1, printed, "ARG")
-				!!(BLOCK_END)
+				!!(CHILD_PRINT_START)
+				if call.callee then  printNode(call.callee, indent+1, printed, printChildren)  end
+				printNodeList(call.arguments, indent+1, printed, printChildren, "ARG")
+				!!(CHILD_PRINT_END)
 
 			elseif node.nodeType == !(nodeTypes.AstLambda) then
 				local lambda = node
-				!!(BLOCK_START)
-				write("\n")
+				!!(CHILD_PRINT_START)
 				if lambda.argumentsIn then
-					printNode(lambda.argumentsIn, indent+1, printed, "IN")
-					-- printNodeList(lambda.argumentsIn, indent+1, printed, "IN")
+					printNode(lambda.argumentsIn, indent+1, printed, printChildren, "IN")
+					-- printNodeList(lambda.argumentsIn, indent+1, printed, printChildren, "IN")
 				end
 				if lambda.argumentsOut then
-					printNode(lambda.argumentsOut, indent+1, printed, "OUT")
-					-- printNodeList(lambda.argumentsOut, indent+1, printed, "OUT")
+					printNode(lambda.argumentsOut, indent+1, printed, printChildren, "OUT")
+					-- printNodeList(lambda.argumentsOut, indent+1, printed, printChildren, "OUT")
 				end
-				if lambda.body then  printNode(lambda.body, indent+1, printed)  end
-				!!(BLOCK_END)
+				if lambda.body then  printNode(lambda.body, indent+1, printed, printChildren)  end
+				!!(CHILD_PRINT_END)
 
 			elseif node.nodeType == !(nodeTypes.AstArguments) then
 				local args = node
-				!!(BLOCK_START)
-				write("\n")
-				printNodeList(args, indent+1, printed)
-				!!(BLOCK_END)
+				!!(CHILD_PRINT_START)
+				printNodeList(args, indent+1, printed, printChildren)
+				!!(CHILD_PRINT_END)
 
 			elseif node.nodeType == !(nodeTypes.AstArgument) then
 				local arg = node
-				!!(BLOCK_START)
-				write("\n")
-				if arg.declaration then  printNode(arg.declaration, indent+1, printed)  end
-				!!(BLOCK_END)
+				!!(CHILD_PRINT_START)
+				if arg.declaration then  printNode(arg.declaration, indent+1, printed, printChildren)  end
+				!!(CHILD_PRINT_END)
 
 			elseif node.nodeType == !(nodeTypes.AstBlock) then
 				-- @Incomplete: We don't print blocks.declarations as they already exist among the statements.
 				local block = node
-				!!(BLOCK_START)
-				write("\n")
-				printNodeList(block, indent+1, printed)
-				!!(BLOCK_END)
+				!!(CHILD_PRINT_START)
+				printNodeList(block, indent+1, printed, printChildren)
+				!!(CHILD_PRINT_END)
 
 			elseif node.nodeType == !(nodeTypes.AstStatement) then
 				local statement = node
-				!!(BLOCK_START)
-				write("\n")
-				if statement.what then  printNode(statement.what, indent+1, printed)  end
-				!!(BLOCK_END)
+				!!(CHILD_PRINT_START)
+				if statement.what then  printNode(statement.what, indent+1, printed, printChildren)  end
+				!!(CHILD_PRINT_END)
 
 			elseif node.nodeType == !(nodeTypes.AstType) then
 				local typeNode = node
 				if typeNode.typeName ~= "" then  write(" (", typeNode.typeName, ")")  end
-				!!(BLOCK_START)
-				write("\n")
+				!!(CHILD_PRINT_START)
 				if typeNode.functionSignature then
-					printNode(typeNode.functionSignature, indent+1, printed)
+					printNode(typeNode.functionSignature, indent+1, printed, printChildren)
 				elseif typeNode.arguments then
-					printNodeList(typeNode.arguments, indent+1, printed, "ARG")
+					printNodeList(typeNode.arguments, indent+1, printed, printChildren, "ARG")
 				end
-				!!(BLOCK_END)
+				!!(CHILD_PRINT_END)
 
 			elseif node.nodeType == !(nodeTypes.AstTypeOf) then
 				local typeOf = node
-				!!(BLOCK_START)
-				write("\n")
-				if typeOf.expression then  printNode(typeOf.expression, indent+1, printed)  end
-				!!(BLOCK_END)
+				!!(CHILD_PRINT_START)
+				if typeOf.expression then  printNode(typeOf.expression, indent+1, printed, printChildren)  end
+				!!(CHILD_PRINT_END)
 
 			elseif node.nodeType == !(nodeTypes.AstAssignment) then
 				local assignment = node
 				write(" (", assignment.operation, ")")
-				!!(BLOCK_START)
-				write("\n")
+				!!(CHILD_PRINT_START)
 				if assignment.parent and assignment.parent.nodeType == !(nodeTypes.AstDeclaration) and printed[assignment.targets[1]] then
 					write(indentStr, "\t(targets)\n")
 				else
-					printNodeList(assignment.targets, indent+1, printed)
+					printNodeList(assignment.targets, indent+1, printed, printChildren)
 				end
 				write(indentStr, "\top ", assignment.operation, "\n")
-				printNodeList(assignment.values, indent+1, printed)
-				!!(BLOCK_END)
+				printNodeList(assignment.values, indent+1, printed, printChildren)
+				!!(CHILD_PRINT_END)
 
 			elseif node.nodeType == !(nodeTypes.AstCast) then
 				local cast = node
-				!!(BLOCK_START)
-				write("\n")
-				if cast.targetType then  printNode(cast.targetType, indent+1, printed)  end
-				if cast.expression then  printNode(cast.expression, indent+1, printed)  end
-				!!(BLOCK_END)
+				!!(CHILD_PRINT_START)
+				if cast.targetType then  printNode(cast.targetType, indent+1, printed, printChildren)  end
+				if cast.expression then  printNode(cast.expression, indent+1, printed, printChildren)  end
+				!!(CHILD_PRINT_END)
 
 			elseif node.nodeType == !(nodeTypes.AstIf) then
 				local ifBranch = node
-				!!(BLOCK_START)
-				write("\n")
-				if ifBranch.condition   then  printNode(ifBranch.condition,   indent+1, printed)           end
-				if ifBranch.branchTrue  then  printNode(ifBranch.branchTrue,  indent+1, printed, "TRUE")   end
-				if ifBranch.branchFalse then  printNode(ifBranch.branchFalse, indent+1, printed, "FALSE")  end
-				!!(BLOCK_END)
+				!!(CHILD_PRINT_START)
+				if ifBranch.condition   then  printNode(ifBranch.condition,   indent+1, printed, printChildren)           end
+				if ifBranch.branchTrue  then  printNode(ifBranch.branchTrue,  indent+1, printed, printChildren, "TRUE")   end
+				if ifBranch.branchFalse then  printNode(ifBranch.branchFalse, indent+1, printed, printChildren, "FALSE")  end
+				!!(CHILD_PRINT_END)
 
 			elseif node.nodeType == !(nodeTypes.AstWhile) then
 				local whileLoop = node
-				!!(BLOCK_START)
-				write("\n")
-				if whileLoop.condition then  printNode(whileLoop.condition, indent+1, printed)  end
-				if whileLoop.body      then  printNode(whileLoop.body,      indent+1, printed)  end
-				!!(BLOCK_END)
+				!!(CHILD_PRINT_START)
+				if whileLoop.condition then  printNode(whileLoop.condition, indent+1, printed, printChildren)  end
+				if whileLoop.body      then  printNode(whileLoop.body,      indent+1, printed, printChildren)  end
+				!!(CHILD_PRINT_END)
 
 			elseif node.nodeType == !(nodeTypes.AstFor) then
 				local forLoop = node
 				write(" (", FOR_TITLES[forLoop.forType], ")")
-				!!(BLOCK_START)
-				write("\n")
-				printNodeList(forLoop.names,       indent+1, printed, "NAME")
-				printNodeList(forLoop.expressions, indent+1, printed, "EXPR")
-				if forLoop.body then  printNode(forLoop.body, indent+1, printed)  end
-				!!(BLOCK_END)
+				!!(CHILD_PRINT_START)
+				printNodeList(forLoop.names,       indent+1, printed, printChildren, "NAME")
+				printNodeList(forLoop.expressions, indent+1, printed, printChildren, "EXPR")
+				if forLoop.body then  printNode(forLoop.body, indent+1, printed, printChildren)  end
+				!!(CHILD_PRINT_END)
 
 			elseif node.nodeType == !(nodeTypes.AstReturn) then
 				local returnNode = node
-				!!(BLOCK_START)
-				write("\n")
-				printNodeList(returnNode.values, indent+1, printed)
-				!!(BLOCK_END)
+				!!(CHILD_PRINT_START)
+				printNodeList(returnNode.values, indent+1, printed, printChildren)
+				!!(CHILD_PRINT_END)
 
 			elseif isAny(node.nodeType, !(nodeTypes.AstBreak), !(nodeTypes.AstContinue)) then
 				local breakOrContinue = node
@@ -2232,33 +2211,38 @@ do
 
 			elseif node.nodeType == !(nodeTypes.AstDefer) then
 				local defer = node
-				!!(BLOCK_START)
-				write("\n")
-				if defer.body then  printNode(defer.body, indent+1, printed)  end
-				!!(BLOCK_END)
+				!!(CHILD_PRINT_START)
+				if defer.body then  printNode(defer.body, indent+1, printed, printChildren)  end
+				!!(CHILD_PRINT_END)
 
 			elseif node.nodeType == !(nodeTypes.AstImport) then
 				local import = node
 				write(" (", (import.isLoad and "load " or "import "), import.importName, ")")
-				!!(BLOCK_START)
-				write("\n")
-				if import.name then  printNode(import.name, indent+1, printed)  end
-				!!(BLOCK_END)
+				!!(CHILD_PRINT_START)
+				if import.name then  printNode(import.name, indent+1, printed, printChildren)  end
+				!!(CHILD_PRINT_END)
 
 			elseif node.nodeType == !(nodeTypes.AstVararg) then
 				local vararg = node
 				if vararg.surroundedByParenthesis then  write(" (adjustTo1)")  end
 				write("\n")
 
+			elseif node.nodeType == !(nodeTypes.AstTypeDefinition) then
+				local defn = node
+				write(" (")
+				write(defn.name.name)
+				write(", ", getFriendlyTypeInfoName(defn.typeInfo))
+				if defn.typeInfoForDeclaration then  write(", ", getFriendlyTypeInfoName(defn.typeInfoForDeclaration))  end
+				write(")\n")
+
 			elseif node.nodeType == !(nodeTypes.AstLiteral) then
 				local literal = node
 
 				if literal.literalType == !(LITERAL_ARRAY) then -- @Depricated
 					write(" (array)")
-					!!(BLOCK_START)
-					write("\n")
-					printNode(literal.value, indent+1, printed)
-					!!(BLOCK_END)
+					!!(CHILD_PRINT_START)
+					printNode(literal.value, indent+1, printed, printChildren)
+					!!(CHILD_PRINT_END)
 
 				else
 					write(" (")
@@ -2298,14 +2282,13 @@ do
 					write(" (", fileScope.path, ")")
 				end
 
-				!!(BLOCK_START)
-				write("\n")
+				!!(CHILD_PRINT_START)
 				if node.nodeType == !(nodeTypes.AstStruct) and node.arguments then
-					printNodeList(node.arguments, indent+1, printed)
+					printNodeList(node.arguments, indent+1, printed, printChildren)
 				end
-				printNodeList(node.includedNamespaces, indent+1, printed)
-				printNodeList(node.declarations,       indent+1, printed)
-				!!(BLOCK_END)
+				printNodeList(node.includedNamespaces, indent+1, printed, printChildren)
+				printNodeList(node.declarations,       indent+1, printed, printChildren)
+				!!(CHILD_PRINT_END)
 
 			else
 				write("\n")
@@ -2313,21 +2296,134 @@ do
 		end
 	end
 
+	function _G.astPrintTree(node, _file)
+		file = _file or io.stdout
+		printNode(node, 0, {}, true)
+	end
+
 	function _G.astPrint(node, _file)
 		file = _file or io.stdout
-		printNode(node, 0, {})
+		printNode(node, 0, {}, false)
 	end
 end
 
 
 
--- parent = astFindParent( node, nodeType1, ... )
+-- parent, childClosestToParent = astFindParent( node, nodeType1, ... )
 function _G.astFindParent(node, ...)
+	local lastNode = node
+
 	while true do
 		node = node.parent
-		if not node then  return nil  end
+		if not node                  then  return nil,  nil       end
+		if isAny(node.nodeType, ...) then  return node, lastNode  end
 
-		if isAny(node.nodeType, ...) then  return node  end
+		lastNode = node
+	end
+end
+
+function _G.astFindCommonParent(node1, node2)
+	while true do
+		node1 = node1.parent
+		if not node1                  then  return nil    end
+		if astHasParent(node2, node1) then  return node1  end
+	end
+end
+
+function _G.astHasParent(node, parent)
+	while true do
+		node = node.parent
+		if not node       then  return false  end
+		if node == parent then  return true   end
+	end
+end
+
+
+
+-- astVisitAllNodes( topNode, callback )
+-- [ controlValue = ] callback( node )  -- Not return anything is the same as returning !(VISIT_CONTINUE).
+-- controlValue = !(VISIT_CONTINUE|VISIT_BREAK|VISIT_IGNORE_CHILDREN)
+do
+	-- break = visit( node, callback )
+	local function visit(node, cb)
+		!(
+		local function visitIfNotNil(var) return function(fieldNames)
+			for _, fieldName in ipairs(fieldNames) do
+				__LUA("if ",var,".",fieldName," then  if visit(",var,".",fieldName,", cb) then return true end  end ")
+			end
+		end end
+		local function visitList(var) return function(fieldNames)
+			for _, fieldName in ipairs(fieldNames) do
+				if fieldName == "" then
+					__LUA("for _, item in ipairs(",var,              ") do  if visit(item, cb) then return true end  end ")
+				else
+					__LUA("for _, item in ipairs(",var,".",fieldName,") do  if visit(item, cb) then return true end  end ")
+				end
+			end
+		end end
+		)
+
+		local controlValue = cb(node)
+		if controlValue == !(VISIT_BREAK) then
+			return true
+		elseif controlValue == !(VISIT_IGNORE_CHILDREN) then
+			return false
+		end
+
+		if node.nodeType == !(nodeTypes.AstTypeDefinition)  then  -- void
+		elseif node.nodeType == !(nodeTypes.AstIdentifier)  then  -- void
+		elseif node.nodeType == !(nodeTypes.AstVararg)      then  -- void
+		elseif node.nodeType == !(nodeTypes.AstLiteral)     then  -- void
+		elseif node.nodeType == !(nodeTypes.AstType)        then
+			!visitIfNotNil"node"{"functionSignature","arrayItemType"}
+			if node.arguments then
+				!visitList"node"{"arguments"}
+			end
+		elseif node.nodeType == !(nodeTypes.AstUnary)       then  !visitIfNotNil"node"{"expression"}
+		elseif node.nodeType == !(nodeTypes.AstBinary)      then  !visitIfNotNil"node"{"left","right"}
+		elseif node.nodeType == !(nodeTypes.AstTable)       then
+			for _, tableField in ipairs(node) do
+				!visitIfNotNil"tableField"{"key","value"}
+			end
+		elseif node.nodeType == !(nodeTypes.AstCall)        then  !visitIfNotNil"node"{"callee"} ; visitList"node"{"arguments"}
+		elseif node.nodeType == !(nodeTypes.AstArgument)    then  !visitIfNotNil"node"{"declaration"}
+		elseif node.nodeType == !(nodeTypes.AstArguments)   then  !visitList"node"{""}
+		elseif node.nodeType == !(nodeTypes.AstLambda)      then  !visitIfNotNil"node"{"argumentsIn","argumentsOut","body"}
+		elseif node.nodeType == !(nodeTypes.AstTypeOf)      then  !visitIfNotNil"node"{"expression"}
+		elseif node.nodeType == !(nodeTypes.AstCast)        then  !visitIfNotNil"node"{"targetType","expression"}
+		elseif node.nodeType == !(nodeTypes.AstStatement)   then  !visitIfNotNil"node"{"what"}
+		elseif node.nodeType == !(nodeTypes.AstDeclaration) then
+			!visitList"node"{"names","types","notes"}
+			if node.assignment then
+				controlValue = cb(node.assignment)
+				if controlValue == !(VISIT_BREAK) then
+					return true
+				elseif controlValue ~= !(VISIT_IGNORE_CHILDREN) then
+					!visitList"node.assignment"{"values"} -- Don't visit the targets as those have already been visited.  @Cleanup @Robustness: Separate the two?
+				end
+			end
+		elseif node.nodeType == !(nodeTypes.AstAssignment)  then  !visitList"node"{"targets","values"}
+		elseif node.nodeType == !(nodeTypes.AstReturn)      then  !visitList"node"{"values"}
+		elseif node.nodeType == !(nodeTypes.AstBreak)       then  !visitIfNotNil"node"{"loopName"}
+		elseif node.nodeType == !(nodeTypes.AstContinue)    then  !visitIfNotNil"node"{"loopName"}
+		elseif node.nodeType == !(nodeTypes.AstDefer)       then  !visitIfNotNil"node"{"body"}
+		elseif node.nodeType == !(nodeTypes.AstImport)      then  !visitIfNotNil"node"{"name"}
+		elseif node.nodeType == !(nodeTypes.AstIf)          then  !visitIfNotNil"node"{"condition","branchTrue","branchFalse"}
+		elseif node.nodeType == !(nodeTypes.AstWhile)       then  !visitIfNotNil"node"{"condition","body"}
+		elseif node.nodeType == !(nodeTypes.AstFor)         then  !visitList"node"{"names","expressions"} ; visitIfNotNil"node"{"body"}
+		elseif node.nodeType == !(nodeTypes.AstStruct)      then  !visitList"node"{"declarations","includedNamespaces"} ; visitIfNotNil"node"{"arguments"}
+		elseif node.nodeType == !(nodeTypes.AstEnum)        then  !visitList"node"{"declarations","includedNamespaces"} ; visitIfNotNil"node"{"memberType"}
+		elseif node.nodeType == !(nodeTypes.AstFileScope)   then  !visitList"node"{"declarations","includedNamespaces"}
+		elseif node.nodeType == !(nodeTypes.AstBlock)       then  !visitList"node"{""}
+		else
+			errorUnhandledNodeType(node)
+		end
+
+		return false
+	end
+
+	function _G.astVisitAllNodes(node, cb)
+		visit(node, cb)
 	end
 end
 

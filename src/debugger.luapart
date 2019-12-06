@@ -61,6 +61,33 @@ if not debug.gethook() then
 	local ANSI_PREVIOUS_LINE           = "\27[1F"
 	local ANSI_ERASE_REST_OF_LINE      = "\27[0K"
 
+	local function compareKeys(k1, k2)
+		return tostring(k1) < tostring(k2)
+	end
+
+	local function valueToString(v)
+		local vStr
+
+		if type(v) == "table" then
+			local t = {}
+			for k, item in pairsSorted(v, compareKeys) do
+				local kStr    = type(k)    == "table" and tostring(k)   :gsub("^table: ", ""):lower() or tostring(k):sub(1, 50)
+				local itemStr = type(item) == "table" and tostring(item):gsub("^table: ", ""):lower() or tostring(item):sub(1, 50)
+				table.insert(t, kStr.."="..itemStr)
+			end
+			vStr = tostring(v):gsub("^table: ", ""):lower().."{ "..table.concat(t, ", ").." }"
+		else
+			vStr = tostring(v)
+		end
+
+		if #vStr > 100 then
+			vStr = vStr:sub(1, 96).." ..."
+		end
+		vStr = vStr:gsub("[%z\1-\31\128-\255]", "?")
+
+		return vStr
+	end
+
 	local function printNamesAndValues(names, values)
 		if not names[1] then
 			io.stdout:write("(none)\n")
@@ -68,27 +95,7 @@ if not debug.gethook() then
 		end
 
 		for i, name in ipairs(names) do
-			local v = values[i]
-			local vStr
-
-			if type(v) == "table" then
-				local t = {}
-				for k, item in pairsSorted(v) do
-					local kStr    = type(l)    == "table" and tostring(l)   :upper():gsub("table: ", "0x") or tostring(k):sub(1, 50)
-					local itemStr = type(item) == "table" and tostring(item):upper():gsub("table: ", "0x") or tostring(item):sub(1, 50)
-					table.insert(t, kStr.."="..itemStr)
-				end
-				vStr = "{ "..table.concat(t, ", ").." }"
-			else
-				vStr = tostring(v)
-			end
-
-			if #vStr > 100 then
-				vStr = vStr:sub(1, 96).." ..."
-			end
-			vStr = vStr:gsub("[%z\1-\31\128-\255]", "?")
-
-			io.stdout:write(i, ". ", ANSI_GREEN, name, ANSI_RESET, " ", vStr, "\n")
+			io.stdout:write(i, ". ", ANSI_GREEN, name, ANSI_RESET, " ", valueToString(values[i]), "\n")
 		end
 	end
 
@@ -247,14 +254,14 @@ if not debug.gethook() then
 				runUntilLn = tonumber(input:match"%d+") or 1
 				break
 
-			elseif input == "l" or input:find"^l *%d" then
+			elseif input == "l" or input:find"^l *%d+$" then
 				local level         = BASE_LEVEL + (tonumber(input:match"%d+") or 1) - 1
 				local names, values = getLocals(level)
 
 				io.stdout:write("\nLocals:\n")
 				printNamesAndValues(names, values)
 
-			elseif input == "u" or input:find"^u *%d" then
+			elseif input == "u" or input:find"^u *%d+$" then
 				local level         = BASE_LEVEL + (tonumber(input:match"%d+") or 1) - 1
 				local infoWithFunc  = debug.getinfo(level, "f")
 				local func          = infoWithFunc and infoWithFunc.func
@@ -268,14 +275,33 @@ if not debug.gethook() then
 					io.stdout:write(ANSI_BRIGHT_RED, "Error: No function at level ", level, ".\n", ANSI_RESET)
 				end
 
-			elseif input == "v" then
-				os.execute(F([[subl "%s":%d]], path, ln))
+			elseif input == "v" or input:find"^v *%d+$" then
+				local level = BASE_LEVEL + (tonumber(input:match"%d+") or 1) - 1
+				local info  = debug.getinfo(level, "l")
+				if info then
+					os.execute(F([[subl "%s":%d]], path, info.currentline))
+				else
+					io.stdout:write(ANSI_BRIGHT_RED, "Error: No level '", level, "'.\n", ANSI_RESET)
+				end
 
 			elseif input == "q" then
 				os.exit(99)
 
 			elseif input:find"^=" or #input >= 2 then
 				local targetPath = input:gsub("^=", "")
+				local targetType = ""
+
+				if targetPath:find"^ast +" then
+					local i1, i2 = targetPath:find"^ast +"
+					targetPath   = targetPath:sub(i2+1)
+					targetType   = "ast"
+
+				elseif targetPath:find"^type +" then
+					local i1, i2 = targetPath:find"^type +"
+					targetPath   = targetPath:sub(i2+1)
+					targetType   = "type"
+				end
+
 				local target     = targetPath:match("[^.]+"):lower()
 
 				local foundName, v, names = findValueOrNameMatches(target)
@@ -297,7 +323,23 @@ if not debug.gethook() then
 
 				if foundName ~= "" then
 					io.stdout:write(ANSI_GREEN, foundName, targetPath:sub(#target+1), ANSI_RESET, " ")
-					printobj(v) -- @Incomplete: Limit how much is printed for tables.
+
+					if targetType == "type" and type(v) == "table" then
+						print(getFriendlyTypeInfoName(v))
+
+					elseif targetType == "ast" and type(v) == "table" then
+						astPrintTree(v)
+
+					elseif type(v) == "table" then
+						io.stdout:write(tostring(v):gsub("^table: ", ""):lower(), "{\n")
+						for k, item in pairsSorted(v, compareKeys) do
+							io.stdout:write("  ", "  ", tostring(k), " = ", valueToString(item), "\n")
+						end
+						io.stdout:write("}\n")
+
+					else
+						io.stdout:write(valueToString(v), "\n")
+					end
 
 				elseif names[1] then
 					table.sort(names, function(a, b)

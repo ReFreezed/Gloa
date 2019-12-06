@@ -9,9 +9,10 @@
 --=
 --==============================================================
 
-	typeError, typeMessage, errorUnhandledNodeType
-	inferType*
+	getClosestScope, isScope
 	getTypeInfo*
+	inferType*
+	typeError, typeMessage
 
 --============================================================]]
 
@@ -23,23 +24,28 @@ local function WAITING_OR_ERROR(errCode)
 			__LUA(errCode," ")
 		__LUA("end ")
 	__LUA("end ")
-	__LUA("state.waiting = state.waiting+1 ")
+	__LUA("state.waiting = state.waiting+1")
+end
+
+local function WAITING_SILENT()
+	__LUA("state.waitingSilent = state.waitingSilent+1")
 end
 )
 
 
 
 _G.!struct"TyperState"{
-	fileBuffers  = {},
-	tokens       = {},
+	fileBuffers   = {},
+	tokens        = {},
 
-	progress     = 0,
-	waiting      = 0,
+	progress      = 0,
+	waiting       = 0,
+	waitingSilent = 0,
 
-	mustInfer    = false,
-	errorStep    = 0,
+	mustInfer     = false,
+	errorStep     = 0,
 
-	allTypeInfos = {},
+	allTypeInfos  = {},
 }
 
 
@@ -100,8 +106,8 @@ local !structTypeInfo"TypeInfoArray:_TypeInfo"{
 }
 
 local !structTypeInfo"TypeInfoFunction:_TypeInfo"{ -- AKA function signature.
-	argumentTypesIn  = {}, -- []TypeInfo
-	argumentTypesOut = {}, -- []TypeInfo
+	argumentTypesIn  = {}, -- []TypeInfo  @Cleanup: Use TypeInfoList here.
+	argumentTypesOut = {}, -- []TypeInfo  @Cleanup: Use TypeInfoList here.
 	polymorphic      = false,
 	inline           = false,
 }
@@ -112,7 +118,7 @@ local !struct"TypeInfoStructMember"{
 }
 local !structTypeInfo"TypeInfoStruct:_TypeInfo"{
 	name                  = "",  -- Filled in during definition.
-	arguments             = {},  -- @Incomplete: Polymorphism.
+	arguments             = {},  -- []TypeInfo  @Incomplete: Polymorphism.  @Cleanup: Use TypeInfoList here.
 	members               = {},  -- []TypeInfoStructMember
 	polymorphSourceStruct = NIL, -- TypeInfoStruct  @Incomplete: Polymorphism.
 }
@@ -127,6 +133,10 @@ local !structTypeInfo"TypeInfoEnum:_TypeInfo"{
 }
 
 local !structTypeInfo"TypeInfoCompound:_TypeInfo"{
+	-- [1]=typeInfo1, ...
+}
+
+local !structTypeInfo"TypeInfoList:_TypeInfo"{ -- Special type used for returns from calls (both when sending and receiving).
 	-- [1]=typeInfo1, ...
 }
 
@@ -195,10 +205,8 @@ function _G.getTypeInfoForLambda(state, lambda)
 
 	-- Have we encountered an equal signature before?
 	for _, typeInfoCached in ipairs(state.allTypeInfos) do
-		if typeInfoCached.tag == !(typeTags.TypeInfoFunction) then
-			if doesLambdaHaveSignature(lambda, typeInfoCached) then
-				return typeInfoCached
-			end
+		if typeInfoCached.tag == !(typeTags.TypeInfoFunction) and doesLambdaHaveSignature(lambda, typeInfoCached) then
+			return typeInfoCached
 		end
 	end
 
@@ -215,11 +223,36 @@ function _G.getTypeInfoForLambda(state, lambda)
 	return funcSig
 end
 
+function _G.doesTypeListHaveSignature(typeList, listSig)
+	if #typeList ~= #listSig then  return false   end
+
+	for i = 1, #typeList do
+		if typeList[i] ~= listSig[i] then  return false  end
+	end
+
+	return true
+end
+
+function _G.getTypeInfoForList(state, typeList)
+	-- Have we encountered an equal signature before?
+	for _, typeInfoCached in ipairs(state.allTypeInfos) do
+		if typeInfoCached.tag == !(typeTags.TypeInfoList) and doesTypeListHaveSignature(typeList, typeInfoCached) then
+			return typeInfoCached
+		end
+	end
+
+	local listSig = newTypeInfo(TypeInfoList)
+	copyToArray(typeList, listSig)
+	table.insert(state.allTypeInfos, listSig)
+
+	return listSig
+end
+
 -- typeInfo, definition = getTypeInfoFromTypeNode( state, typeNode )
 -- Can return nil. The definition is always nil for built-in types and things without names.
 -- Note: We're not inferring the type here! We're returning the type that the type node represets (i.e. the *value* of the type node).
 function _G.getTypeInfoFromTypeNode(state, typeNode)
-	-- print(">>>>>>>>>") astPrint(typeNode) print("<<<<<<<<<")
+	-- print(">>>>>>>>>") astPrintTree(typeNode) print("<<<<<<<<<")
 
 	if not typeNode.isUserType then
 		return getTypeInfoForBuiltinType(typeNode.typeName), nil
@@ -249,7 +282,7 @@ function _G.getTypeInfoFromTypeNode(state, typeNode)
 		elseif typeInfo.tag == !(typeTags.TypeInfoStruct) then
 			local structInfo = typeInfo
 			if structInfo.arguments[1] then
-				error("@Incomplete")
+				errorInternal("@Incomplete: Struct arguments.")
 			else
 				if typeNode.arguments then
 					typeError(state, typeNode.arguments[1], "Parameters for structs are not supported yet.")
@@ -290,36 +323,122 @@ end
 
 
 
+-- scope, childClosestToScope = getClosestScope( node )
 function _G.getClosestScope(node)
-	return astFindParent(node, !(nodeTypes.AstFileScope),!(nodeTypes.AstBlock),!(nodeTypes.AstStruct),!(nodeTypes.AstEnum),!(nodeTypes.AstFor),!(nodeTypes.AstLambda))
+	return astFindParent(node, !(nodeTypes.AstFileScope),!(nodeTypes.AstLambda),!(nodeTypes.AstBlock),!(nodeTypes.AstStruct),!(nodeTypes.AstEnum),!(nodeTypes.AstFor))
+end
+
+function _G.isScope(node)
+	return isAny(node.nodeType, !(nodeTypes.AstFileScope),!(nodeTypes.AstLambda),!(nodeTypes.AstBlock),!(nodeTypes.AstStruct),!(nodeTypes.AstEnum),!(nodeTypes.AstFor))
+end
+function _G.isScopeDeclarative(scope)
+	return isAny(scope.nodeType, !(nodeTypes.AstFileScope),!(nodeTypes.AstLambda),!(nodeTypes.AstStruct),!(nodeTypes.AstEnum))
+end
+function _G.isScopeImperative(scope)
+	return isAny(scope.nodeType, !(nodeTypes.AstBlock),!(nodeTypes.AstFor))
 end
 
 
 
 function _G.findDefinition(state, startNode, name)
 	-- @Incomplete: Check that the defined value is constant everywhere a type is expected.
-	local scope = startNode
+	local scope      = startNode
+	local lastParent = startNode
 
 	while true do
-		scope = getClosestScope(scope)
-		if not scope then  return nil  end
+		--[[
+		repeat
+			lastParent = scope
+			scope      = scope.parent
+			if not scope then  return nil  end
+		until isScope(scope)
 
 		assert(scope.definitions, scope.nodeType)
 
 		for _, defn in ipairs(scope.definitions) do
 			if defn.name.name == name then  return defn  end
 		end
+
+		???
+		--]]
+
+		-- [[
+		scope = getClosestScope(scope)
+		if not scope then  return nil  end
+
+		assert(scope.definitions, scope.nodeType)
+
+		for _, defn in ipairs(scope.definitions) do
+			if defn.name.name == name and isDefinitionVisibleToNode(defn, startNode) then
+				return defn
+			end
+		end
+		--]]
+	end
+end
+
+function _G.isDefinitionVisibleToNode(defn, node)
+	local nodeScope, nodeScopeChild = getClosestScope(node)
+	local placeDeclared             = defn.name.placeDeclared or errorInternal()
+
+	local commonParent = astFindCommonParent(defn, node) or errorInternal()
+	local commonScope  = isScope(commonParent) and commonParent or getClosestScope(commonParent) or errorInternal()
+
+	while true do
+		-- astPrint(nodeScope)
+
+		-- Declarative scope.
+		if isScopeDeclarative(nodeScope) then
+			if indexOf(nodeScope.definitions, defn) then  return true  end
+
+		-- Imperative scope.
+		elseif nodeScope.nodeType == !(nodeTypes.AstBlock) then
+			local block = nodeScope
+			local i     = indexOf(block, nodeScopeChild) or errorInternal()
+
+			for i = 1, i-1 do
+				local statement = block[i]
+				if astHasParent(placeDeclared, statement) then  return true  end
+			end
+
+		elseif nodeScope.nodeType == !(nodeTypes.AstFor) then
+			errorInternal("@Incomplete: AstFor")
+
+		else
+			errorUnhandledNodeType(nodeScope)
+		end
+
+		if nodeScope == commonScope then  return false  end
+
+		local nextScope, nextScopeChild = getClosestScope(nodeScope)
+		if not nextScope then  return false  end
+
+		if nodeScope.nodeType == !(nodeTypes.AstLambda) then
+			while isScopeImperative(nextScope) do
+				nextScope, nextScopeChild = getClosestScope(nodeScope) -- We should hit a fileScope eventually (which is declarative).
+				if not nextScope then  return false  end
+			end
+		end
+
+		nodeScope      = nextScope
+		nodeScopeChild = nextScopeChild
 	end
 end
 
 -- defineInClosestScope( state, ident, typeInfo [, typeInfoForDeclaration ] )
 function _G.defineInClosestScope(state, ident, typeInfo, typeInfoForDecl)
-	-- @Incomplete: (Sometimes) add hints in all parent scopes about this definition so we can detect name shadowing.
+	-- @Incomplete: (Sometimes) add hints in all parent scopes about this definition so we (quickly?) can detect name shadowing.
+
+	assert(typeInfo.tag ~= !(typeTags.TypeInfoList))
+	if typeInfoForDecl then
+		assert(typeInfoForDecl.tag ~= !(typeTags.TypeInfoList))
+	end
 
 	local defnExisting = findDefinition(state, ident, ident.name)
 
 	if defnExisting then
 		-- @Incomplete: We're not following imperative scope rules for name shadowing (if that's what happening here).
+		print()
 		typeMessage(state, ident,             "Error", "'%s' has already been defined.", ident.name)
 		typeMessage(state, defnExisting.name, "Info",  "...it was defined here.")
 		exitFailure()
@@ -473,17 +592,34 @@ function _G.inferExpression(state, expr)
 		typeInfo = funcSig
 
 	elseif expr.nodeType == !(nodeTypes.AstCall) then
-		-- @Incomplete: Check that the callee can take the args we give it.
-		local call          = expr
-		local allIsInferred = true
+		local call           = expr
+		local allIsInferred  = true
+		local calleeTypeInfo = call.callee.inferredType
 
-		if not call.callee.inferredType then
+		if not calleeTypeInfo then
 			inferExpression(state, call.callee)
+			calleeTypeInfo = call.callee.inferredType
 
-			if not call.callee.inferredType then
+			if not calleeTypeInfo then
 				allIsInferred = false
-			elseif call.callee.inferredType.tag ~= !(typeTags.TypeInfoFunction) then -- @Incomplete: Allow parameterized structs.
-				typeError(state, call, "The object being called is not a function. (It is %s)", getFriendlyTypeInfoName(call.callee.inferredType))
+
+			elseif calleeTypeInfo.tag == !(typeTags.TypeInfoList) then
+				local listSig   = calleeTypeInfo
+				local typeInfo1 = listSig[1]
+				if not typeInfo1 then
+					typeError(state, call, "Trying to call void.")
+				elseif typeInfo1.tag == !(typeTags.TypeInfoFunction) then
+					-- void
+				else
+					typeError(state, call, "The object being called is not a function. (It is %s)", getFriendlyTypeInfoName(typeInfo1))
+				end
+
+			elseif calleeTypeInfo.tag == !(typeTags.TypeInfoFunction) then
+				-- void
+
+			else
+				-- @Incomplete: Allow parameterized structs.
+				typeError(state, call, "The object being called is not a function. (It is %s)", getFriendlyTypeInfoName(calleeTypeInfo))
 			end
 		end
 
@@ -496,17 +632,19 @@ function _G.inferExpression(state, expr)
 
 		if not allIsInferred then  return  end
 
-		-- Note: We've already assured we're calling a function.  @Incomplete: Handle parameterized structs.
-		local calleeTypeInfo = call.callee.inferredType
+		local effectiveCalleeTypeInfo
 
-		-- I'm not sure this is 100% correct way of doing the thing, but it works for now!
-		--
-		-- @Cleanup @Robustness: Maybe parse 'func()' as "get the value of 'func', then call the value"
-		-- instead of having it as a single operation? Not sure if it'll improve things here though...
-		--
-		typeInfo
-			=  call.callee.nodeType == !(nodeTypes.AstIdentifier) and calleeTypeInfo            -- E.g. 'func(5)'
-			or (calleeTypeInfo.argumentTypesOut[1] or getTypeInfoForBuiltinType"void") -- E.g. 'getFunc()(5)' or '(x and func1 or func2)(5)'
+		if calleeTypeInfo.tag == !(typeTags.TypeInfoList) then
+			local listSig           = calleeTypeInfo
+			effectiveCalleeTypeInfo = listSig[1]
+		else
+			effectiveCalleeTypeInfo = calleeTypeInfo
+		end
+		assert(effectiveCalleeTypeInfo.tag == !(typeTags.TypeInfoFunction)) -- @Incomplete: Handle parameterized structs.
+
+		-- @Incomplete: Check that the function we call can take the arguments we give it.
+
+		typeInfo = getTypeInfoForList(state, effectiveCalleeTypeInfo.argumentTypesOut)
 
 	elseif expr.nodeType == !(nodeTypes.AstStruct) then
 		local struct        = expr
@@ -611,7 +749,7 @@ function _G.inferExpression(state, expr)
 			end
 
 		elseif unary.operation == "#" then
-			errorInternal("@Incomplete: Handle unary '#'.")
+			errorInternal("@Incomplete: Length operator.")
 
 		elseif unary.operation == "not" then
 			if unary.expression.inferredType ~= getTypeInfoForBuiltinType"bool" then
@@ -719,7 +857,8 @@ function _G.inferExpression(state, expr)
 
 		if isAny(castTypeInfo, getTypeInfoForBuiltinType"number",getTypeInfoForBuiltinType"int") then
 			if not isAny(cast.expression.inferredType, getTypeInfoForBuiltinType"number",getTypeInfoForBuiltinType"int") then
-				typeError(state, cast.expression,
+				typeError(
+					state, cast.expression,
 					"Cannot cast from %s to %s.",
 					getFriendlyTypeInfoName(cast.expression.inferredType),
 					getFriendlyTypeInfoName(castTypeInfo)
@@ -739,8 +878,8 @@ function _G.inferExpression(state, expr)
 	expr.inferredType = typeInfo
 end
 
--- typeInfo, typeInfoForDeclaration = inferDeclarationAssignmentValue( state, assignment, identifier, assignmentTargetIndex [, expectedTypeInfo=any ] )
-local function inferDeclarationAssignmentValue(state, assignment, ident, i, typeInfoExpected)
+-- typeInfo, typeInfoForDeclaration = inferAssignmentValue( state, assignment, identifier, assignmentTargetIndex, expectedTypeInfo=any, isDeclaration )
+local function inferAssignmentValue(state, assignment, ident, i, typeInfoExpected, isDecl)
 	local expr      = assignment.values[i]
 	local lastIndex = #assignment.values
 
@@ -772,27 +911,34 @@ local function inferDeclarationAssignmentValue(state, assignment, ident, i, type
 
 		-- @Speed: Only do the following once per name. (Moving this to :OncePerValue doesn't
 		-- work if argIndex > 1 because call.inferredType is already set at that point.)
+
 		local typeInfoForCall = call.inferredType
-		if typeInfoForCall.tag == !(typeTags.TypeInfoFunction) then
-			-- void
+		local listSig
+
+		if typeInfoForCall.tag == !(typeTags.TypeInfoList) then
+			listSig = typeInfoForCall
 		elseif typeInfoForCall.tag == !(typeTags.TypeInfoVoid) then
 			typeError(state, call, "Called function does not return anything.") -- Only function calls can be void at the moment. 2019-12-04
 		else
-			typeError(state, call, "Trying to call a '%s'.", getFriendlyTypeInfoName(typeInfoForCall))
+			typeError(state, call, "Trying to call %s object.", getFriendlyTypeInfoName(typeInfoForCall))
 		end
 
-		local typeInfoForOutArg = typeInfoForCall.argumentTypesOut[argIndex]
+		local typeInfoForOutArg = listSig[argIndex]
 		if not typeInfoForOutArg then
 			typeError(state, call, "Function does not return anything for '%s' (output argument #%d).", ident.name, argIndex)
 		end
 
 		if typeInfoExpected and typeInfoForOutArg ~= typeInfoExpected then
-			-- @UX: Mention the declaration type in the message (maybe with getFriendlyTypeInfoName()).
 			local calleeName = (call.callee.nodeType == !(nodeTypes.AstIdentifier) and call.callee.name or "?")
 			typeError(
 				state, assignment.values[math.min(i, lastIndex)],
-				"Type of return value #%d of '%s' does not match specified type in declaration.",
-				argIndex, calleeName
+				"%s: The type of return value #%d of '%s' (%s) does not match the type of '%s' (%s).",
+				(isDecl and "Declaration" or "Assignment"),
+				argIndex,
+				calleeName,
+				getFriendlyTypeInfoName(typeInfoForOutArg),
+				ident.name,
+				getFriendlyTypeInfoName(typeInfoExpected)
 			)
 		end
 
@@ -802,91 +948,93 @@ local function inferDeclarationAssignmentValue(state, assignment, ident, i, type
 	else
 		if not expr.inferredType then
 			inferExpression(state, expr)
+			if not expr.inferredType then  return nil, nil  end
 
 			if typeInfoExpected and expr.inferredType ~= typeInfoExpected then
 				-- @Cleanup: Define isTypeCompatibleWith(typeToCheck, otherType) or something.
+				local valExpr = assignment.values[math.min(i, lastIndex)]
+
 				if expr.inferredType.tag ~= typeInfoExpected.tag then
 					typeError(
-						state, assignment.values[math.min(i, lastIndex)],
-						!if DEBUG then
-							"Value and type mismatch in declaration. (Type is %s [%d], value is %s [%d])",
-							getFriendlyTypeInfoName(typeInfoExpected),
-							typeInfoExpected.id,
-							expr.inferredType and getFriendlyTypeInfoName(expr.inferredType) or "?",
-							expr.inferredType and expr.inferredType.id or 0
-						!else
-							"Value and type mismatch in declaration. (Type is %s, value is %s)",
-							getFriendlyTypeInfoName(typeInfoExpected),
-							expr.inferredType and getFriendlyTypeInfoName(expr.inferredType) or "?"
-						!end
+						state, valExpr,
+						"%s: Value and type mismatch. (%s is %s, value is %s)",
+						(isDecl and "Declaration" or "Assignment"),
+						(isDecl and "Type" or "'"..ident.name.."'"),
+						getFriendlyTypeInfoName(typeInfoExpected),
+						getFriendlyTypeInfoName(expr.inferredType)
 					)
 
 				elseif typeInfoExpected.tag == !(typeTags.TypeInfoFunction) then
-					-- @Incomplete: Print the type signature.
-					typeError(state, assignment.values[math.min(i, lastIndex)], "Function signature is different from the type in the declaration.")
+					typeError(
+						state, valExpr,
+						"%s: Function signature is different from the type. (Expected %s, got %s)",
+						(isDecl and "Declaration" or "Assignment"),
+						getFriendlyTypeInfoName(typeInfoExpected),
+						getFriendlyTypeInfoName(expr.inferredType)
+					)
 
 				elseif typeInfoExpected.tag == !(typeTags.TypeInfoStruct) then
 					typeError(
-						state, assignment.values[math.min(i, lastIndex)],
-						"Value and type mismatch in declaration. Expected a struct initializer.",
-						-- "Value and type mismatch in declaration. Expected a struct initializer for '%s'.", -- @Incomplete: Fill in TypeInfoStruct.name somewhere.
-						typeInfoExpected.name
+						state, valExpr,
+						"%s: Value and type mismatch. Expected a struct initializer for %s.",
+						(isDecl and "Declaration" or "Assignment"),
+						getFriendlyTypeInfoName(typeInfoExpected)
 					)
 
 				else
-					typeError(state, assignment.values[math.min(i, lastIndex)], "Value and type mismatch in declaration.")
+					typeError(state, valExpr, "%s: Value and type mismatch.", (isDecl and "Declaration" or "Assignment"))
 				end
 			end
-
-			if not expr.inferredType then  return nil, nil  end
 		end
 
 		local typeInfo        = expr.inferredType
 		local typeInfoForDecl = nil
 
-		if expr.nodeType == !(nodeTypes.AstType) then
-			local typeNode = expr
+		if isDecl then
+			if expr.nodeType == !(nodeTypes.AstType) then
+				local typeNode = expr
 
-			-- @Cleanup: I feel like all these cases can be handled the same, but I'm not sure...
+				-- @Cleanup: I feel like all these cases can be handled the same, but I'm not sure...
 
-			if not typeNode.isUserType then
-				typeInfoForDecl = getTypeInfoFromTypeNode(state, typeNode)
-				-- typeInfoForDecl = getTypeInfoForBuiltinType(typeNode.typeName) -- This is the same as the above line but more direct, right? @Cleanup
+				if not typeNode.isUserType then
+					typeInfoForDecl = getTypeInfoFromTypeNode(state, typeNode)
+					-- typeInfoForDecl = getTypeInfoForBuiltinType(typeNode.typeName) -- This is the same as the above line but more direct, right? @Cleanup
 
-			elseif typeNode.functionSignature then
-				typeInfoForDecl = getTypeInfoFromTypeNode(state, typeNode)
-				assert(typeInfoForDecl)
+				elseif typeNode.functionSignature then
+					typeInfoForDecl = getTypeInfoFromTypeNode(state, typeNode)
+					assert(typeInfoForDecl)
 
-			else
-				-- Do we ever get here? @Revise
-				local defn
-				typeInfoForDecl, defn = getTypeInfoFromTypeNode(state, typeNode)
+				else
+					-- Do we ever get here? @Revise
+					local defn
+					typeInfoForDecl, defn = getTypeInfoFromTypeNode(state, typeNode)
+					assert(defn)
+
+					typeInfoForDecl = defn.typeInfoForDeclaration
+					assert(typeInfoForDecl)
+				end
+
+			elseif expr.nodeType == !(nodeTypes.AstIdentifier) then
+				local ident = expr
+				local defn  = findDefinition(state, ident, ident.name)
 				assert(defn)
 
-				typeInfoForDecl = defn.typeInfoForDeclaration
-				assert(typeInfoForDecl)
+				typeInfoForDecl = defn.typeInfoForDeclaration -- Can be nil.
+
+			elseif expr.nodeType == !(nodeTypes.AstCall) then
+				local call = expr
+				-- Should we do the same as for AstIdentifier here above? I think so. @Incomplete
+
+			elseif expr.nodeType == !(nodeTypes.AstStruct) then
+				typeInfoForDecl = typeInfo
+				typeInfo        = getTypeInfoForBuiltinType"type"
+			elseif expr.nodeType == !(nodeTypes.AstEnum) then
+				typeInfoForDecl = typeInfo
+				typeInfo        = getTypeInfoForBuiltinType"type"
+
+			-- else
+			-- 	print(AST_NODE_TYPE_NAMES[expr.nodeType])
 			end
-
-		elseif expr.nodeType == !(nodeTypes.AstIdentifier) then
-			local ident = expr
-			local defn  = findDefinition(state, ident, ident.name)
-			assert(defn)
-
-			typeInfoForDecl = defn.typeInfoForDeclaration -- Can be nil.
-
-		elseif expr.nodeType == !(nodeTypes.AstCall) then
-			local call = expr
-			-- Should we do the same as for AstIdentifier here above? I think so. @Incomplete
-
-		elseif expr.nodeType == !(nodeTypes.AstStruct) then
-			typeInfoForDecl = typeInfo
-			typeInfo        = getTypeInfoForBuiltinType"type"
-		elseif expr.nodeType == !(nodeTypes.AstEnum) then
-			typeInfoForDecl = typeInfo
-			typeInfo        = getTypeInfoForBuiltinType"type"
-
-		-- else
-		-- 	print(AST_NODE_TYPE_NAMES[expr.nodeType])
 		end
 
 		return typeInfo, typeInfoForDecl
@@ -933,6 +1081,7 @@ function _G.inferDeclaration(state, decl, isOutArg)
 							typeInfo = defn.typeInfoForDeclaration
 
 							if not typeInfo then
+								print()
 								typeMessage(state, typeNode, "Error", "'%s' is not a type. (It is %s)", typeName, getFriendlyTypeInfoName(defn.typeInfo))
 								printDefinitionChain(state, defn, typeName)
 								exitFailure()
@@ -965,7 +1114,7 @@ function _G.inferDeclaration(state, decl, isOutArg)
 			-- No type specified - infer from initial values. (Also infers the values.)
 			else
 				assert(decl.assignment) -- This should have been caught during parsing.
-				typeInfo, valueTypeInfo = inferDeclarationAssignmentValue(state, decl.assignment, ident, i, nil)
+				typeInfo, valueTypeInfo = inferAssignmentValue(state, decl.assignment, ident, i, nil, true)
 			end
 
 			if typeInfo then
@@ -975,6 +1124,8 @@ function _G.inferDeclaration(state, decl, isOutArg)
 				if not isOutArg then
 					defineInClosestScope(state, ident, typeInfo, valueTypeInfo)
 				end
+			else
+				!WAITING_SILENT()
 			end
 
 			-- [[ DEBUG
@@ -985,7 +1136,7 @@ function _G.inferDeclaration(state, decl, isOutArg)
 						getFriendlyTypeInfoName(typeInfo),
 						ident.placeDeclared and " IN "..AST_NODE_TYPE_NAMES[ident.placeDeclared.nodeType] or "",
 						isOutArg            and " (isOutArg)"                                             or "",
-						valueTypeInfo       and " (value:"..getFriendlyTypeInfoName(valueTypeInfo)..")"   or ""
+						valueTypeInfo       and " (VALUE "..getFriendlyTypeInfoName(valueTypeInfo)..")"   or ""
 					)
 				else
 					printf("(failed declaring %s)", ident.name)
@@ -997,15 +1148,172 @@ function _G.inferDeclaration(state, decl, isOutArg)
 		-- Infer values (if types are specified). This will make sure types and value types are matching.
 		if typeInfo and decl.types[1] and decl.assignment --[[and decl.assignment.values[1] ]]then
 			typeInfo = (typeInfo.definition and typeInfo.definition.typeInfoForDeclaration or typeInfo) -- Necessary, or even correct?
-			inferDeclarationAssignmentValue(state, decl.assignment, ident, i, typeInfo)
+			inferAssignmentValue(state, decl.assignment, ident, i, typeInfo, true)
 		end--if specified value and type
 	end--for decl.names
+end
+
+function _G.inferStatement(state, statement)
+	local node = statement.what
+
+	if node.nodeType == !(nodeTypes.AstDeclaration) then
+		local decl = node
+		inferDeclaration(state, decl)
+
+	elseif node.nodeType == !(nodeTypes.AstAssignment) then
+		local assignment = node
+
+		for i, ident in ipairs(assignment.targets) do
+			if not ident.inferredType then
+				inferExpression(state, ident)
+				if ident.inferredType then
+					state.progress = state.progress+1 -- Needed here?
+				else
+					!WAITING_SILENT()
+				end
+			end
+
+			if ident.inferredType then
+				-- @Speed: Don't do this every round.
+				inferAssignmentValue(state, assignment, ident, i, ident.inferredType, false)
+			end
+		end
+
+	elseif node.nodeType == !(nodeTypes.AstCall) then
+		local call = node
+		if not call.inferredType then
+			inferExpression(state, call)
+			if call.inferredType then
+				state.progress = state.progress+1 -- Needed here?
+			else
+				!WAITING_SILENT()
+			end
+		end
+
+	elseif node.nodeType == !(nodeTypes.AstReturn) then
+		local returnNode    = node
+		local allIsInferred = true
+
+		for _, expr in ipairs(returnNode.values) do
+			if not expr.inferredType then
+				inferExpression(state, expr)
+				if expr.inferredType then
+					state.progress = state.progress+1 -- Needed here?
+				else
+					allIsInferred = false
+					!WAITING_SILENT()
+				end
+			end
+		end
+
+		if not allIsInferred then  return  end
+
+		local lambda = astFindParent(returnNode, !(nodeTypes.AstLambda))
+		assert(lambda) -- This should have been caught during parsing.
+
+		assert(lambda.inferredType) -- Not sure if we always have done this at this point. Maybe we should just return instead.
+		local argTypesOut = lambda.inferredType.argumentTypesOut
+
+		local lastValueExpr = getLast(returnNode.values)
+
+		local lastIsListToExpand
+			=   lastValueExpr ~= nil
+			and lastValueExpr.nodeType == !(nodeTypes.AstCall)
+			and not lastValueExpr.surroundedByParenthesis
+			and lastValueExpr.inferredType.tag == !(typeTags.TypeInfoList)
+
+		local returnValueCount = #returnNode.values
+
+		if lastIsListToExpand then
+			local listSig    = lastValueExpr.inferredType
+			returnValueCount = returnValueCount - 1 + #listSig
+		end
+
+		if returnValueCount == #argTypesOut then
+			-- void
+
+		-- Too few values.
+		elseif returnValueCount < #argTypesOut then
+			-- @UX: Show a better message if lastValueExpr is a function call (not wrapped in parenthesis).
+			typeError(state, returnNode, "Too few values to return. (Expected %d, got %d)", #argTypesOut, returnValueCount)
+
+		-- Too many values.
+		elseif not lastIsListToExpand then
+			typeError(state, returnNode.values[#argTypesOut+1], "Too many values to return. (Expected %d, got %d)", #argTypesOut, returnValueCount)
+		else
+			local callOutArgCount = #returnNode.values-1
+			local listSig         = lastValueExpr.inferredType
+			typeError(state, lastValueExpr, "Too many values returned from call. (Expected %d, got %d)", #argTypesOut-callOutArgCount, #listSig)
+		end
+
+		if lastIsListToExpand then
+			local listSig = lastValueExpr.inferredType
+
+			for i = #returnNode.values, returnValueCount do
+				local callOutArgIndex = i-#returnNode.values+1
+				local typeInfo        = listSig[callOutArgIndex]
+
+				if typeInfo ~= argTypesOut[i] then
+					-- @Cleanup: Define isTypeCompatibleWith(typeToCheck, otherType) or something.
+					typeError(state, lastValueExpr,
+						"Returned value #%d from call is of incorrect type. (Expected %s, got %s)",
+						callOutArgIndex,
+						getFriendlyTypeInfoName(argTypesOut[i]),
+						getFriendlyTypeInfoName(typeInfo)
+					)
+				end
+			end
+		end
+
+		for i = 1, #returnNode.values - (lastIsListToExpand and 1 or 0) do
+			local expr     = returnNode.values[i]
+			local typeInfo = expr.inferredType
+
+			if typeInfo.tag == !(typeTags.TypeInfoList) then
+				local listSig = typeInfo
+				typeInfo      = listSig[1]
+
+				if not typeInfo then
+					-- Note: TypeInfoLists are only used when calling functions (at the moment, at least). 2019-12-06
+					typeError(state, expr, "Function call returns nothing. (Expected at least one value.)")
+				end
+			end
+
+			if typeInfo ~= argTypesOut[i] then
+				-- @Cleanup: Define isTypeCompatibleWith(typeToCheck, otherType) or something.
+				typeError(state, expr,
+					"Returned value from call is of incorrect type. (Expected %s, got %s)",
+					getFriendlyTypeInfoName(argTypesOut[i]),
+					getFriendlyTypeInfoName(typeInfo)
+				)
+			end
+		end
+
+	else
+		errorUnhandledNodeType(node)
+	end
+end
+
+function _G.inferBlock(state, block)
+	for _, statement in ipairs(block) do
+		inferStatement(state, statement)
+	end
 end
 
 function _G.inferFileScope(state, fileScope)
 	for _, decl in ipairs(fileScope.declarations) do
 		inferDeclaration(state, decl)
 	end
+
+	-- @Speed: Visiting all nodes constantly surely isn't necessary...
+	-- @Incomplete: Beware of blocks inside polymorphic functions (when we got those implemented)?
+	astVisitAllNodes(fileScope, function(node)
+		if node.nodeType == !(nodeTypes.AstBlock) then
+			local block = node
+			inferBlock(state, block)
+			-- return !(VISIT_IGNORE_CHILDREN) -- Good? No, we need to visit deeper blocks too! @Speed
+		end
+	end)
 end
 
 
@@ -1028,29 +1336,43 @@ function _G.typeMessage(state, node, label, s, ...)
 	reportMessageInFile(buffer, path, tokens.position1[token], label, "Typer", s, ...)
 end
 
-function _G.errorUnhandledNodeType(node)
-	!if DEBUG then
-		astPrint(node)
-	!end
-	errorInternal(2, "Incomplete: Unhandled node type '%s'.", (AST_NODE_TYPE_NAMES[node.nodeType] or node.nodeType))
-end
-
 
 
 function _G.getFriendlyTypeInfoName(typeInfo)
+	local name = ""
+
 	if typeInfo.tag == !(typeTags.TypeInfoStruct) then
 		local structInfo = typeInfo
-		if structInfo.name ~= "" then  return structInfo.name  end
+		name             = structInfo.name -- @Incomplete: Include parameters for parameterized structs.
 
 	elseif typeInfo.tag == !(typeTags.TypeInfoEnum) then
 		local enumInfo = typeInfo
-		if enumInfo.name ~= "" then  return enumInfo.name  end
+		name           = enumInfo.name
 
 	elseif typeInfo.tag == !(typeTags.TypeInfoFunction) then
-		-- @Incomplete: Return function signature.
+		local funcSig      = typeInfo
+		local typeTextsIn  = {}
+		local typeTextsOut = {}
+
+		for i, argTypeInfo in ipairs(funcSig.argumentTypesIn) do
+			typeTextsIn[i] = getFriendlyTypeInfoName(argTypeInfo)
+		end
+		for i, argTypeInfo in ipairs(funcSig.argumentTypesOut) do
+			typeTextsOut[i] = getFriendlyTypeInfoName(argTypeInfo)
+		end
+
+		name = typeTextsOut[1]
+			and F("function(%s)->(%s)", table.concat(typeTextsIn, ","), table.concat(typeTextsOut, ","))
+			or  F("function(%s)->void", table.concat(typeTextsIn, ","))
 	end
 
-	return TYPE_TAG_NAMES[typeInfo.tag]
+	if name == "" then
+		name = TYPE_TAG_NAMES[typeInfo.tag]
+	end
+
+	-- !(if DEBUG then)  name = name.."@"..typeInfo.id  !(end)
+
+	return name
 end
 
 
