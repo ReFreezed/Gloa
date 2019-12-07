@@ -101,9 +101,10 @@ end
 }
 _G.!structAst"AstTypeDefinition:_AstNode"{ -- Created during type phase.
 	-- Type phase:
-	name     = NIL, -- AstIdentifier|AstVararg
-	scope    = NIL, -- AstFileScope|AstBlock|AstStruct|AstFor|AstLambda|AstEnum (This should be the same as the parent.)
-	typeInfo = NIL,
+	name       = NIL, -- AstIdentifier|AstVararg
+	scope      = NIL, -- AstFileScope|AstBlock|AstStruct|AstFor|AstLambda|AstEnum (This should be the same as the parent.)
+	isConstant = false,
+	typeInfo   = NIL,
 	typeInfoForDeclaration = NIL, -- Type of value in type declarations. Is used when type aliases are specified as types.
 }
 
@@ -187,7 +188,7 @@ local !structAst"AstDeclaration:_AstNode"{
 	names      = {},  -- [](AstIdentifier|AstVararg)
 	types      = {},  -- No value here means the types are inferred.
 	notes      = {},  -- []AstNote @Incomplete
-	isLocal    = true,
+	isGlobal   = false,
 	isConstant = false,
 
 	-- assignment=nil means all names gets their default value (which depends on the type, of which there must be only one).
@@ -220,10 +221,10 @@ local !structAst"AstDefer:_AstNode"{
 }
 
 local !structAst"AstImport:_AstNode"{
-	isLoad      = false,
-	importName  = "",
-	name        = NIL, -- AstIdentifier
-	nameIsLocal = true,
+	isLoad       = false,
+	importName   = "",
+	name         = NIL, -- AstIdentifier
+	nameIsGlobal = false,
 }
 
 !structAst"_AstControlStructure:_AstNode"{}
@@ -386,9 +387,9 @@ function _G.parseType(state, parentNode)
 	end
 
 	-- User type parameters.
-	tokType2, tokValue2 = peekNextToken(state)
+	tokType, tokValue = peekNextToken(state)
 
-	if isToken(tokType2,tokValue2, !(TOKEN_PUNCTUATION),"(") then
+	if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"(") then
 		consumeNextToken(state)
 
 		if isBuiltinType then
@@ -836,7 +837,7 @@ function _G.parseDeclaration(state, parentNode, declType)
 		if not isToken(tokType,tokValue, !(TOKEN_KEYWORD),"local","global") then
 			!ERROR_OR_RETURN `errorParsingLast(state, "Expected 'local'.")`
 		end
-		decl.isLocal = (tokValue == "local")
+		decl.isGlobal = (tokValue == "global")
 	end
 
 	local nameListStartToken = state.nextToken
@@ -1440,7 +1441,7 @@ function _G.parseFileScope(state, path, parentNode)
 		then
 			-- @Incomplete: Warn about duplicate imports? Maybe not necessay as things will only ever be imported once anyway.
 			consumeNextToken(state)
-			local isLocal = (tokValue == "local")
+			local isGlobal = (tokValue == "global")
 
 			local ident = parseIdentifier(state, fileScope) -- Parent is temporary until we have the import object.
 			consumeNextToken(state) -- ':'
@@ -1450,7 +1451,7 @@ function _G.parseFileScope(state, path, parentNode)
 			table.insert(fileScope.includedNamespaces, import)
 
 			import.name         = ident
-			import.nameIsLocal  = isLocal
+			import.nameIsGlobal = isGlobal
 
 			ident.parent        = import
 			ident.placeDeclared = import
@@ -2025,10 +2026,11 @@ do
 	end
 
 	function printNode(node, indent, printed, printChildren, keyName)
+		!local INDENT            = "    "
 		!local CHILD_PRINT_START = "if not printChildren then write('\\n') else write('" .. (PRINT_NODE_BRACKETS and " {" or "") .. "\\n')"
 		!local CHILD_PRINT_END   = (PRINT_NODE_BRACKETS and "write(indentStr, '}\\n') " or "") .. "end"
 
-		local indentStr = ("\t"):rep(indent)
+		local indentStr = (!(INDENT)):rep(indent)
 
 		assert(node.s)
 
@@ -2052,7 +2054,7 @@ do
 				write(" (", binOp.operation, ")")
 				!!(CHILD_PRINT_START)
 				if binOp.left  then  printNode(binOp.left,  indent+1, printed, printChildren)  end
-				write(indentStr, "\top ", binOp.operation, "\n")
+				write(indentStr, !(INDENT.."op "), binOp.operation, "\n")
 				if binOp.right then  printNode(binOp.right, indent+1, printed, printChildren)  end
 				!!(CHILD_PRINT_END)
 
@@ -2065,11 +2067,11 @@ do
 
 			elseif node.nodeType == !(nodeTypes.AstDeclaration) then
 				local decl = node
-				if decl.isConstant and not decl.isLocal then
+				if decl.isConstant and decl.isGlobal then
 					write(" (global const)")
 				elseif decl.isConstant then
 					write(" (const)")
-				elseif not decl.isLocal then
+				elseif decl.isGlobal then
 					write(" (global)")
 				end
 				!!(CHILD_PRINT_START)
@@ -2100,6 +2102,9 @@ do
 
 			elseif node.nodeType == !(nodeTypes.AstLambda) then
 				local lambda = node
+				local decl   = astFindParent(lambda, !(nodeTypes.AstDeclaration))
+				local i      = decl and decl.assignment and indexOf(decl.assignment.values, lambda)
+				if i then  write(" (", decl.names[i].name, ")")  end
 				!!(CHILD_PRINT_START)
 				if lambda.argumentsIn then
 					printNode(lambda.argumentsIn, indent+1, printed, printChildren, "IN")
@@ -2159,11 +2164,11 @@ do
 				write(" (", assignment.operation, ")")
 				!!(CHILD_PRINT_START)
 				if assignment.parent and assignment.parent.nodeType == !(nodeTypes.AstDeclaration) and printed[assignment.targets[1]] then
-					write(indentStr, "\t(targets)\n")
+					write(indentStr, !(INDENT.."(targets)\n"))
 				else
 					printNodeList(assignment.targets, indent+1, printed, printChildren)
 				end
-				write(indentStr, "\top ", assignment.operation, "\n")
+				write(indentStr, !(INDENT.."op "), assignment.operation, "\n")
 				printNodeList(assignment.values, indent+1, printed, printChildren)
 				!!(CHILD_PRINT_END)
 
@@ -2344,24 +2349,30 @@ end
 -- [ controlValue = ] callback( node )  -- Not return anything is the same as returning !(VISIT_CONTINUE).
 -- controlValue = !(VISIT_CONTINUE|VISIT_BREAK|VISIT_IGNORE_CHILDREN)
 do
-	-- break = visit( node, callback )
-	local function visit(node, cb)
+	-- break = visit( visited, node, callback )
+	local function visit(visited, node, cb)
 		!(
+		local INDENT = "\t\t\t"
+
 		local function visitIfNotNil(var) return function(fieldNames)
 			for _, fieldName in ipairs(fieldNames) do
-				__LUA("if ",var,".",fieldName," then  if visit(",var,".",fieldName,", cb) then return true end  end ")
+				__LUA("\n",INDENT,"if ",var,".",fieldName," then\n",INDENT,"\tif visit(visited, ",var,".",fieldName,", cb) then return true\n",INDENT,"end  end ")
 			end
 		end end
+
 		local function visitList(var) return function(fieldNames)
 			for _, fieldName in ipairs(fieldNames) do
 				if fieldName == "" then
-					__LUA("for _, item in ipairs(",var,              ") do  if visit(item, cb) then return true end  end ")
+					__LUA("\n",INDENT,"for _, item in ipairs(",var,              ") do\n",INDENT,"\tif visit(visited, item, cb) then return true\n",INDENT,"end  end ")
 				else
-					__LUA("for _, item in ipairs(",var,".",fieldName,") do  if visit(item, cb) then return true end  end ")
+					__LUA("\n",INDENT,"for _, item in ipairs(",var,".",fieldName,") do\n",INDENT,"\tif visit(visited, item, cb) then return true\n",INDENT,"end  end ")
 				end
 			end
 		end end
 		)
+
+		assert(not visited[node])
+		visited[node] = true
 
 		local controlValue = cb(node)
 		if controlValue == !(VISIT_BREAK) then
@@ -2423,7 +2434,7 @@ do
 	end
 
 	function _G.astVisitAllNodes(node, cb)
-		visit(node, cb)
+		visit({}, node, cb)
 	end
 end
 

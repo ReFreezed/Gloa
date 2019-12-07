@@ -325,44 +325,26 @@ end
 
 -- scope, childClosestToScope = getClosestScope( node )
 function _G.getClosestScope(node)
-	return astFindParent(node, !(nodeTypes.AstFileScope),!(nodeTypes.AstLambda),!(nodeTypes.AstBlock),!(nodeTypes.AstStruct),!(nodeTypes.AstEnum),!(nodeTypes.AstFor))
+	return astFindParent(node, !(nodeTypes.AstFileScope),!(nodeTypes.AstStruct),!(nodeTypes.AstEnum),!(nodeTypes.AstBlock),!(nodeTypes.AstFor),!(nodeTypes.AstLambda))
 end
 
 function _G.isScope(node)
-	return isAny(node.nodeType, !(nodeTypes.AstFileScope),!(nodeTypes.AstLambda),!(nodeTypes.AstBlock),!(nodeTypes.AstStruct),!(nodeTypes.AstEnum),!(nodeTypes.AstFor))
+	return isAny(node.nodeType, !(nodeTypes.AstFileScope),!(nodeTypes.AstStruct),!(nodeTypes.AstEnum),!(nodeTypes.AstBlock),!(nodeTypes.AstFor),!(nodeTypes.AstLambda))
 end
 function _G.isScopeDeclarative(scope)
-	return isAny(scope.nodeType, !(nodeTypes.AstFileScope),!(nodeTypes.AstLambda),!(nodeTypes.AstStruct),!(nodeTypes.AstEnum))
+	return isAny(scope.nodeType, !(nodeTypes.AstFileScope),!(nodeTypes.AstStruct),!(nodeTypes.AstEnum))
 end
 function _G.isScopeImperative(scope)
-	return isAny(scope.nodeType, !(nodeTypes.AstBlock),!(nodeTypes.AstFor))
+	return isAny(scope.nodeType, !(nodeTypes.AstBlock),!(nodeTypes.AstFor),!(nodeTypes.AstLambda))
 end
 
 
 
 function _G.findDefinition(state, startNode, name)
 	-- @Incomplete: Check that the defined value is constant everywhere a type is expected.
-	local scope      = startNode
-	local lastParent = startNode
+	local scope = startNode
 
 	while true do
-		--[[
-		repeat
-			lastParent = scope
-			scope      = scope.parent
-			if not scope then  return nil  end
-		until isScope(scope)
-
-		assert(scope.definitions, scope.nodeType)
-
-		for _, defn in ipairs(scope.definitions) do
-			if defn.name.name == name then  return defn  end
-		end
-
-		???
-		--]]
-
-		-- [[
 		scope = getClosestScope(scope)
 		if not scope then  return nil  end
 
@@ -373,60 +355,50 @@ function _G.findDefinition(state, startNode, name)
 				return defn
 			end
 		end
-		--]]
 	end
 end
 
 function _G.isDefinitionVisibleToNode(defn, node)
 	local nodeScope, nodeScopeChild = getClosestScope(node)
-	local placeDeclared             = defn.name.placeDeclared or errorInternal()
-
-	local commonParent = astFindCommonParent(defn, node) or errorInternal()
-	local commonScope  = isScope(commonParent) and commonParent or getClosestScope(commonParent) or errorInternal()
+	local canSeeImperativeVariables = not defn.isConst
 
 	while true do
-		-- astPrint(nodeScope)
-
-		-- Declarative scope.
 		if isScopeDeclarative(nodeScope) then
 			if indexOf(nodeScope.definitions, defn) then  return true  end
 
-		-- Imperative scope.
+		elseif isAny(nodeScope.nodeType, !(nodeTypes.AstFor),!(nodeTypes.AstLambda)) then
+			if canSeeImperativeVariables and indexOf(nodeScope.definitions, defn) then  return true  end
+
 		elseif nodeScope.nodeType == !(nodeTypes.AstBlock) then
-			local block = nodeScope
-			local i     = indexOf(block, nodeScopeChild) or errorInternal()
+			local block           = nodeScope
+			local imperativeIndex = indexOf(block, nodeScopeChild) or errorInternal()
 
-			for i = 1, i-1 do
-				local statement = block[i]
-				if astHasParent(placeDeclared, statement) then  return true  end
+			for i, statement in ipairs(block) do
+				if statement.what.nodeType == !(nodeTypes.AstDeclaration) then
+					local decl = statement.what
+					if decl.isConstant or (canSeeImperativeVariables and i < imperativeIndex) then
+						if astHasParent(defn.name, decl) then  return true  end
+					end
+				end
 			end
-
-		elseif nodeScope.nodeType == !(nodeTypes.AstFor) then
-			errorInternal("@Incomplete: AstFor")
 
 		else
 			errorUnhandledNodeType(nodeScope)
 		end
 
-		if nodeScope == commonScope then  return false  end
-
-		local nextScope, nextScopeChild = getClosestScope(nodeScope)
-		if not nextScope then  return false  end
-
 		if nodeScope.nodeType == !(nodeTypes.AstLambda) then
-			while isScopeImperative(nextScope) do
-				nextScope, nextScopeChild = getClosestScope(nodeScope) -- We should hit a fileScope eventually (which is declarative).
-				if not nextScope then  return false  end
-			end
+			-- Lambdas act as the only boundary between imperative and declarative
+			-- scopes right now. Maybe this will change in the future? 2019-12-07
+			canSeeImperativeVariables = false
 		end
 
-		nodeScope      = nextScope
-		nodeScopeChild = nextScopeChild
+		nodeScope, nodeScopeChild = getClosestScope(nodeScope)
+		if not nodeScope then  return false  end
 	end
 end
 
--- defineInClosestScope( state, ident, typeInfo [, typeInfoForDeclaration ] )
-function _G.defineInClosestScope(state, ident, typeInfo, typeInfoForDecl)
+-- defineInClosestScope( state, ident, isConstant, typeInfo [, typeInfoForDeclaration ] )
+function _G.defineInClosestScope(state, ident, isConst, typeInfo, typeInfoForDecl)
 	-- @Incomplete: (Sometimes) add hints in all parent scopes about this definition so we (quickly?) can detect name shadowing.
 
 	assert(typeInfo.tag ~= !(typeTags.TypeInfoList))
@@ -449,10 +421,11 @@ function _G.defineInClosestScope(state, ident, typeInfo, typeInfoForDecl)
 		typeError(state, ident, "Could not find what scope '%s' is in.", ident.name)
 	end
 
-	local defn    = astNewNode(AstTypeDefinition, ident.token, scope)
-	defn.name     = ident
-	defn.scope    = scope
-	defn.typeInfo = typeInfo
+	local defn      = astNewNode(AstTypeDefinition, ident.token, scope)
+	defn.name       = ident
+	defn.scope      = scope
+	defn.isConstant = isConst
+	defn.typeInfo   = typeInfo
 	defn.typeInfoForDeclaration = typeInfoForDecl -- May be nil.
 
 	if not typeInfoForDecl then
@@ -898,15 +871,25 @@ function _G.inferExpression(state, expr)
 	expr.inferredType = typeInfo
 end
 
--- typeInfo, typeInfoForDeclaration = inferAssignmentValue( state, assignment, identifier, assignmentTargetIndex, expectedTypeInfo=any, isDeclaration )
-local function inferAssignmentValue(state, assignment, ident, i, typeInfoExpected, isDecl)
+-- typeInfo, typeInfoForDeclaration = inferAssignmentValue( state, assignment, identifier, assignmentTargetIndex, expectedTypeInfo=any, isDeclaration, isConstantDeclaration )
+local function inferAssignmentValue(state, assignment, ident, i, typeInfoExpected, isDecl, isConstDecl)
+	if not isDecl then  assert(not isConstDecl)  end
+
+	-- @Robustness: If isConstDecl, make sure we're not grabbing a variable from an outer imperative scope.
+	local scope              = getClosestScope(assignment)
+	local scopeIsDeclarative = isScopeDeclarative(scope)
+
 	local expr      = assignment.values[i]
 	local lastIndex = #assignment.values
 
 	-- Value list ending in a call (hopefully).
 	-- @Incomplete: Check that !must args from functions have an assignment target.
-	if not expr or expr.nodeType == !(nodeTypes.AstCall) then
+	if (not expr) or (expr.nodeType == !(nodeTypes.AstCall) and not expr.surroundedByParenthesis) then
 		local call = expr
+
+		if isConstDecl or scopeIsDeclarative then
+			typeError(state, call, "%s: Value expression #%d is not constant.", (isDecl and "Declaration" or "Assignment"), i)
+		end
 
 		if not call then
 			-- We're past the end of the list - get the last specified value.
@@ -969,6 +952,26 @@ local function inferAssignmentValue(state, assignment, ident, i, typeInfoExpecte
 		if not expr.inferredType then
 			inferExpression(state, expr)
 			if not expr.inferredType then  return nil, nil  end
+
+			-- @Speed: Don't do this every round.
+			astVisitAllNodes(expr, function(node)
+				if isScope(node) then
+					return !(VISIT_IGNORE_CHILDREN)
+
+				elseif (isConstDecl or scopeIsDeclarative) and node.nodeType == !(nodeTypes.AstCall) then -- (I think this will match parameterized structs. @Incomplete: Polymorphism.)
+					local call = node
+					typeError(state, call, "%s: Expression is not constant.", (isDecl and "Declaration" or "Assignment"))
+
+				elseif isConstDecl and node.nodeType == !(nodeTypes.AstIdentifier) then
+					local ident = node
+					local defn  = findDefinition(state, ident, ident.name)
+					assert(defn)
+
+					if not defn.isConstant then
+						typeError(state, ident, "%s: '%s' is not constant.", (isDecl and "Declaration" or "Assignment"), ident.name)
+					end
+				end
+			end)
 
 			if typeInfoExpected and expr.inferredType ~= typeInfoExpected then
 				-- @Cleanup: Define isTypeCompatibleWith(typeToCheck, otherType) or something.
@@ -1043,7 +1046,7 @@ local function inferAssignmentValue(state, assignment, ident, i, typeInfoExpecte
 
 			elseif expr.nodeType == !(nodeTypes.AstCall) then
 				local call = expr
-				-- Should we do the same as for AstIdentifier here above? I think so. @Incomplete
+				-- Should we do the same as for AstIdentifier here above? I think so. pre-2019-12-07 @Incomplete
 
 			elseif expr.nodeType == !(nodeTypes.AstStruct) then
 				typeInfoForDecl = typeInfo
@@ -1094,10 +1097,17 @@ function _G.inferDeclaration(state, decl, isOutArg)
 
 					if typeNode.inferredType then
 						local defn
-						typeInfo, defn = getTypeInfoFromTypeNode(state, typeNode--[[, true]])
+						typeInfo, defn = getTypeInfoFromTypeNode(state, typeNode)
 						assert(typeInfo)
 
 						if defn then
+							if not defn.isConstant then -- I don't think this ever matches. 2019-12-07 @Cleanup
+								print()
+								typeMessage(state, typeNode, "Error", "'%s' is not a constant. Types must be constant.", typeName)
+								typeMessage(state, defn.name, "Info", "...here is '%s' defined.", typeName)
+								exitFailure()
+							end
+
 							typeInfo = defn.typeInfoForDeclaration
 
 							if not typeInfo then
@@ -1134,7 +1144,7 @@ function _G.inferDeclaration(state, decl, isOutArg)
 			-- No type specified - infer from initial values. (Also infers the values.)
 			else
 				assert(decl.assignment) -- This should have been caught during parsing.
-				typeInfo, valueTypeInfo = inferAssignmentValue(state, decl.assignment, ident, i, nil, true)
+				typeInfo, valueTypeInfo = inferAssignmentValue(state, decl.assignment, ident, i, nil, true, decl.isConstant)
 			end
 
 			if typeInfo then
@@ -1142,7 +1152,7 @@ function _G.inferDeclaration(state, decl, isOutArg)
 				decl.inferredTypes[i] = typeInfo
 
 				if not isOutArg then
-					defineInClosestScope(state, ident, typeInfo, valueTypeInfo)
+					defineInClosestScope(state, ident, decl.isConstant, typeInfo, valueTypeInfo)
 				end
 			else
 				!WAITING_SILENT()
@@ -1156,6 +1166,7 @@ function _G.inferDeclaration(state, decl, isOutArg)
 						getFriendlyTypeInfoName(typeInfo),
 						ident.placeDeclared and " IN "..AST_NODE_TYPE_NAMES[ident.placeDeclared.nodeType] or "",
 						isOutArg            and " (isOutArg)"                                             or "",
+						decl.isConstant     and " (CONST)"                                                or "",
 						valueTypeInfo       and " (VALUE "..getFriendlyTypeInfoName(valueTypeInfo)..")"   or ""
 					)
 				else
@@ -1168,7 +1179,7 @@ function _G.inferDeclaration(state, decl, isOutArg)
 		-- Infer values (if types are specified). This will make sure types and value types are matching.
 		if typeInfo and decl.types[1] and decl.assignment --[[and decl.assignment.values[1] ]]then
 			typeInfo = (typeInfo.definition and typeInfo.definition.typeInfoForDeclaration or typeInfo) -- Necessary, or even correct?
-			inferAssignmentValue(state, decl.assignment, ident, i, typeInfo, true)
+			inferAssignmentValue(state, decl.assignment, ident, i, typeInfo, true, decl.isConstant)
 		end--if specified value and type
 	end--for decl.names
 end
@@ -1195,7 +1206,7 @@ function _G.inferStatement(state, statement)
 
 			if ident.inferredType then
 				-- @Speed: Don't do this every round.
-				inferAssignmentValue(state, assignment, ident, i, ident.inferredType, false)
+				inferAssignmentValue(state, assignment, ident, i, ident.inferredType, false, false)
 			end
 		end
 
@@ -1231,18 +1242,20 @@ function _G.inferStatement(state, statement)
 		local lambda = astFindParent(returnNode, !(nodeTypes.AstLambda))
 		assert(lambda) -- This should have been caught during parsing.
 
-		assert(lambda.inferredType) -- Not sure if we always have done this at this point. Maybe we should just return instead.
-		local argTypesOut = lambda.inferredType.argumentTypesOut
+		if not lambda.inferredType then
+			!WAITING_SILENT()
+			return
+		end
 
-		local lastValueExpr = getLast(returnNode.values)
+		local argTypesOut      = lambda.inferredType.argumentTypesOut
+		local lastValueExpr    = getLast(returnNode.values)
+		local returnValueCount = #returnNode.values
 
 		local lastValueIsListToUnpack
 			=   lastValueExpr ~= nil
 			and lastValueExpr.nodeType == !(nodeTypes.AstCall)
 			and not lastValueExpr.surroundedByParenthesis
 			and lastValueExpr.inferredType.tag == !(typeTags.TypeInfoList)
-
-		local returnValueCount = #returnNode.values
 
 		if lastValueIsListToUnpack then
 			local listSig    = lastValueExpr.inferredType

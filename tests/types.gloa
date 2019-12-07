@@ -49,6 +49,9 @@ local double41, double42 : typeOf(double22) = 1, 2
 
 -- local a :: b -- Circular dependency.
 -- local b :: a
+
+-- local var =  5
+-- local bad :: var -- Value is not const.
 --]]
 
 
@@ -58,87 +61,93 @@ local double41, double42 : typeOf(double22) = 1, 2
 
 local theMain :: () -> void {}
 
-local oneInTwoOut1 :: (a:int) -> int, int { return a, 2*a }
-local one1, two1, three1 : int = 5, oneInTwoOut1(99)
+local funcTest :: () -> void {
+	local oneInTwoOut1 :: (a:int) -> int, int { return a, 2*a }
+	local one1, two1, three1 : int = 5, oneInTwoOut1(99)
 
-local oneInTwoOut2 :: (a:int) -> int, string { return a, "foo" }
-local one2, two2, three2 = 5, oneInTwoOut2(99)
+	local oneInTwoOut2 :: (a:int) -> int, string { return a, "foo" }
+	local one2, two2, three2 = 5, oneInTwoOut2(99)
 
-local mySig :: (arg1:string, arg2,arg3:int) -> bool, string
-local myFunc1:mySig : (arg1:string, arg2,arg3:int) -> bool, string { return true, "foo" }
+	local mySig :: (arg1:string, arg2,arg3:int) -> bool, string
+	local myFunc1:mySig : (arg1:string, arg2,arg3:int) -> bool, string { return true, "foo" }
 
-local myFunc : (arg1:string,arg2,arg3:int)->bool,string : (arg1:string, arg2,arg3:int) -> bool, string { return true, "" }
+	local myFunc : (arg1:string,arg2,arg3:int)->bool,string : (arg1:string, arg2,arg3:int) -> bool, string { return true, "" }
 
-local funcReturningFunc :: () -> (n:int)->string {
-	return (n:int) -> string {
-		return "foo"
+	local testFuncReturningFunc :: () {
+		local funcReturningFunc :: () -> (n:int)->string {
+			return (n:int) -> string {
+				return "foo"
+			}
+		}
+		local theString = funcReturningFunc()(5)
 	}
-}
-local theString :: funcReturningFunc()(5)
 
-local getTwo    :: () -> int, int      { return 1, 2 }
-local getThree1 :: () -> int, int, int { return 1, getTwo() }
-local getThree2 :: () -> int, int, int { return 1, getTwo(), 3 }
-local getThree3 :: () -> int, int, int { return 1, 2, (getTwo()) }
+	local getTwo    :: () -> int, int      { return 1, 2 }
+	local getThree1 :: () -> int, int, int { return 1, getTwo() }
+	local getThree2 :: () -> int, int, int { return 1, getTwo(), 3 }
+	local getThree3 :: () -> int, int, int { return 1, 2, (getTwo()) }
+}
 
 --====== Things that should result in an error. ======--
 
--- local oneInNoneOut :: (a:int) { return }
--- local x, y, z : int = 5, oneInNoneOut(99) -- Nothing for y (nor z).
+local funcErrors :: () {
+	-- local oneInNoneOut :: (a:int) { return }
+	-- local x, y, z : int = 5, oneInNoneOut(99) -- Nothing for y (nor z).
 
--- local oneInOneOut :: (a:int) -> int { return a }
--- local x, y, z : int = 5, oneInOneOut(99) -- Nothing for z.
+	-- local oneInOneOut :: (a:int) -> int { return a }
+	-- local x, y, z : int = 5, oneInOneOut(99) -- Nothing for z.
 
--- local func :: (a:int) -> int, string { return a, "foo" }
--- local x, y, z : int = 5, func(99) -- Type mismatch for 'z'.
+	-- local func :: (a:int) -> int, string { return a, "foo" }
+	-- local x, y, z : int = 5, func(99) -- Type mismatch for 'z'.
 
--- local sig :: (arg1:string, arg2:int) -> bool, string
--- local func:sig : (arg1:string, arg2,arg3:int) -> bool, string {}
+	-- local sig :: (arg1:string, arg2:int) -> bool, string
+	-- local func:sig : (arg1:string, arg2,arg3:int) -> bool, string {}
 
--- local mySig3 :: (arg1:string, arg2,arg3:string) -> bool, string
--- local myFunc3:mySig3 : (arg1:string, arg2,arg3:int) -> bool, string {}
+	-- local mySig3 :: (arg1:string, arg2,arg3:string) -> bool, string
+	-- local myFunc3:mySig3 : (arg1:string, arg2,arg3:int) -> bool, string {}
 
--- local mySig :: (a:int,b:nope) -- Undefined identifier.
+	-- local mySig :: (a:int,b:nope) -- Undefined identifier.
 
--- local func :: () -> () {}
--- local bad  =  func() -- No return arguments.
+	-- local func :: () -> () {}
+	-- local bad  =  func() -- No return arguments.
 
--- local func :: () -> (n:int)->string {}
--- local bad  =  func(5)()() -- Trying to call a string.
+	-- local func :: () -> (n:int)->string {}
+	-- local bad  =  func(5)()() -- Trying to call a string.
 
--- local func :: () -> ()->string {
--- 	return ()->string { return bad } -- Undefined identifier.
--- }
+	-- local func :: () -> ()->string {
+	-- 	return ()->string { return bad } -- Undefined identifier.
+	-- }
 
--- local func :: () {}
--- local bad  :: () -> int { return func() } -- Too few values.
+	-- local func :: () {}
+	-- local bad  :: () -> int { return func() } -- Too few values.
 
--- local func :: () -> int { return 1 }
--- local bad  :: () -> int, int { return func() } -- Too few values.
+	-- local func :: () -> int { return 1 }
+	-- local bad  :: () -> int, int { return func() } -- Too few values.
 
--- local func :: () {}
--- local bad  :: () -> int { return (func()) } -- No resulting value in parenthesis.
+	-- local func :: () {}
+	-- local bad  :: () -> int { return (func()) } -- No resulting value in parenthesis.
 
--- local func :: () -> int, int { return 1, 2 }
--- local bad  :: () -> int, int { return 1, func() } -- Too many values.
+	-- local func :: () -> int, int { return 1, 2 }
+	-- local bad  :: () -> int, int { return 1, func() } -- Too many values.
 
--- local func :: () -> string, int { return "", 2 }
--- local bad  :: () -> int, int, int { return 1, func() } -- Returning wrong type.
+	-- local func :: () -> string, int { return "", 2 }
+	-- local bad  :: () -> int, int, int { return 1, func() } -- Returning wrong type.
 
--- local func :: () -> int, string { return 1, "" }
--- local bad  :: () -> int, int, int { return 1, func() } -- Returning wrong type.
+	-- local func :: () -> int, string { return 1, "" }
+	-- local bad  :: () -> int, int, int { return 1, func() } -- Returning wrong type.
 
--- local func :: (a:int) -> int { return a }
--- local bad  =  func() -- Missing args.
+	-- local func :: (a:int) -> int { return a }
+	-- local bad  =  func() -- Missing args.
 
--- local func :: (a:int) -> int { return a }
--- local bad  =  func(1, 2) -- Too many args.
+	-- local func :: (a:int) -> int { return a }
+	-- local bad  =  func(1, 2) -- Too many args.
 
--- local func :: (a:int) -> int { return a }
--- local bad  =  func("nope") -- Wrong type.
+	-- local func :: (a:int) -> int { return a }
+	-- local bad  =  func("nope") -- Wrong type.
 
--- local Bad  :: struct {}
--- local func :: (a:Bad) -> int { return a } -- Wrong type.
+	-- local Bad  :: struct {}
+	-- local func :: (a:Bad) -> int { return a } -- Wrong type.
+}
 --]]
 
 
@@ -179,7 +188,7 @@ local myClass:ClassName
 
 --====== Things that should result in an error. ======--
 
--- local bad :: struct {a:nope} -- Undefined identifier.
+-- local bad :: struct {a:nope} -- Undefined type/identifier.
 
 -- local myVec2:MyVecType = MyVecType -- Type/value type mismatch.
 --]]
@@ -229,12 +238,11 @@ local blocks :: () {
 
 	blocks()
 
-	-- @Incomplete: Higher visibility of constants.
-	-- inner()
-	-- local inner :: () {}
-
 	local returnArg :: (a:int) -> int { return a }
 	returnArg(5)
+
+	inner()
+	local inner :: () {} -- Constants have higher visibility than stack variables.
 }
 
 --====== Things that should result in an error. ======--
@@ -250,6 +258,13 @@ local blockErrors :: () {
 
 	-- local func :: (a:int) -> int { return a }
 	-- func("nope") -- Wrong type.
+
+	-- local func :: () -> int { return 5 }
+	-- local var  =  func()
+	-- local bad  :: 2*var -- Not a constant expression.
+
+	-- local func :: () -> int { return 5 }
+	-- local bad :: func() -- Calls are not constant.
 }
 --]]
 
