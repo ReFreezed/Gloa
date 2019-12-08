@@ -9,6 +9,7 @@
 --=
 --==============================================================
 
+	addDepencencyIfNew
 	getClosestScope, isScope
 	getTypeInfo*
 	inferType*
@@ -46,6 +47,7 @@ _G.!struct"TyperState"{
 	errorStep     = 0,
 
 	allTypeInfos  = {},
+	dependencies  = {},
 }
 
 
@@ -140,7 +142,7 @@ local !structTypeInfo"TypeInfoList:_TypeInfo"{ -- Special type used for returns 
 	-- [1]=typeInfo1, ...
 }
 
-local TYPE_TAG_NAMES = !(typeTagNames)
+_G.TYPE_TAG_NAMES = !(typeTagNames)
 
 
 
@@ -480,7 +482,7 @@ local LITERAL_TYPE_TO_BUILTIN_TYPE_NAME = !({
 	[LITERAL_STRING]  = "string",
 })
 
-function _G.inferExpression(state, expr)
+function _G.inferExpressionThatHasNotBeenInferredYet(state, expr)
 	assert(not expr.inferredType)
 
 	local typeInfo
@@ -489,7 +491,7 @@ function _G.inferExpression(state, expr)
 		local typeNode = expr
 
 		if typeNode.functionSignature and not typeNode.functionSignature.inferredType then
-			inferExpression(state, typeNode.functionSignature)
+			inferExpressionThatHasNotBeenInferredYet(state, typeNode.functionSignature)
 			if not typeNode.functionSignature then  return  end
 		end
 
@@ -517,6 +519,7 @@ function _G.inferExpression(state, expr)
 		if defn then
 			typeInfo = defn.typeInfo
 		else
+			-- @Incomplete: Report about captures/upvalues, which is not supported (yet?).
 			!WAITING_OR_ERROR `typeError(state, ident, "Undefined identifier '%s'.", ident.name)`
 			return
 		end
@@ -570,7 +573,7 @@ function _G.inferExpression(state, expr)
 		local calleeTypeInfo = call.callee.inferredType
 
 		if not calleeTypeInfo then
-			inferExpression(state, call.callee)
+			inferExpressionThatHasNotBeenInferredYet(state, call.callee)
 			calleeTypeInfo = call.callee.inferredType
 
 			if not calleeTypeInfo then
@@ -598,7 +601,7 @@ function _G.inferExpression(state, expr)
 
 		for _, argExpr in ipairs(call.arguments) do
 			if not argExpr.inferredType then
-				inferExpression(state, argExpr)
+				inferExpressionThatHasNotBeenInferredYet(state, argExpr)
 				allIsInferred = (allIsInferred and argExpr.inferredType ~= nil)
 			end
 		end
@@ -726,7 +729,7 @@ function _G.inferExpression(state, expr)
 		local unary = expr
 
 		if not unary.expression.inferredType then
-			inferExpression(state, unary.expression)
+			inferExpressionThatHasNotBeenInferredYet(state, unary.expression)
 			if not unary.expression.inferredType then  return  end
 		end
 
@@ -761,8 +764,8 @@ function _G.inferExpression(state, expr)
 	elseif expr.nodeType == !(nodeTypes.AstBinary) then
 		local binary = expr
 
-		if not binary.left .inferredType then  inferExpression(state, binary.left )  end
-		if not binary.right.inferredType then  inferExpression(state, binary.right)  end
+		if not binary.left .inferredType then  inferExpressionThatHasNotBeenInferredYet(state, binary.left )  end
+		if not binary.right.inferredType then  inferExpressionThatHasNotBeenInferredYet(state, binary.right)  end
 
 		if not (binary.left.inferredType and binary.right.inferredType) then  return  end
 
@@ -840,8 +843,8 @@ function _G.inferExpression(state, expr)
 	elseif expr.nodeType == !(nodeTypes.AstCast) then
 		local cast = expr
 
-		if not cast.targetType.inferredType then  inferExpression(state, cast.targetType)  end
-		if not cast.expression.inferredType then  inferExpression(state, cast.expression)  end
+		if not cast.targetType.inferredType then  inferExpressionThatHasNotBeenInferredYet(state, cast.targetType)  end
+		if not cast.expression.inferredType then  inferExpressionThatHasNotBeenInferredYet(state, cast.expression)  end
 
 		if not (cast.targetType.inferredType and cast.expression.inferredType) then  return  end
 
@@ -905,8 +908,7 @@ local function inferAssignmentValue(state, assignment, ident, i, typeInfoExpecte
 		local argIndex = i-lastIndex+1
 
 		if not call.inferredType then
-			inferExpression(state, call)
-
+			inferExpressionThatHasNotBeenInferredYet(state, call)
 			if not call.inferredType then  return nil, nil  end
 
 			-- :OncePerValue
@@ -950,7 +952,7 @@ local function inferAssignmentValue(state, assignment, ident, i, typeInfoExpecte
 	-- Non-call value or value not last in list.
 	else
 		if not expr.inferredType then
-			inferExpression(state, expr)
+			inferExpressionThatHasNotBeenInferredYet(state, expr)
 			if not expr.inferredType then  return nil, nil  end
 
 			-- @Speed: Don't do this every round.
@@ -1089,7 +1091,7 @@ function _G.inferDeclaration(state, decl, isOutArg)
 					local typeName = typeNode.typeName
 
 					if not typeNode.inferredType then
-						inferExpression(state, typeNode) -- The inferred type of the type node should be TypeInfoType, or else we messed up.
+						inferExpressionThatHasNotBeenInferredYet(state, typeNode) -- The inferred type of the type node should be TypeInfoType, or else we messed up.
 						if typeNode.inferredType then
 							assert(typeNode.inferredType.tag == !(typeTags.TypeInfoType))
 						end
@@ -1131,7 +1133,7 @@ function _G.inferDeclaration(state, decl, isOutArg)
 					local expr   = typeOf.expression
 
 					if not typeOf.inferredType then
-						inferExpression(state, expr)
+						inferExpressionThatHasNotBeenInferredYet(state, expr)
 						typeOf.inferredType = expr.inferredType
 					end
 
@@ -1160,7 +1162,9 @@ function _G.inferDeclaration(state, decl, isOutArg)
 
 			-- [[ DEBUG
 			!if DEBUG then
-				if typeInfo then
+				if not debug_onlyInferTypes then
+					-- void
+				elseif typeInfo then
 					printf("DECLARE %s:%s%s%s%s",
 						ident.name,
 						getFriendlyTypeInfoName(typeInfo),
@@ -1196,7 +1200,7 @@ function _G.inferStatement(state, statement)
 
 		for i, ident in ipairs(assignment.targets) do
 			if not ident.inferredType then
-				inferExpression(state, ident)
+				inferExpressionThatHasNotBeenInferredYet(state, ident)
 				if ident.inferredType then
 					state.progress = state.progress+1 -- Needed here?
 				else
@@ -1213,7 +1217,7 @@ function _G.inferStatement(state, statement)
 	elseif node.nodeType == !(nodeTypes.AstCall) then
 		local call = node
 		if not call.inferredType then
-			inferExpression(state, call)
+			inferExpressionThatHasNotBeenInferredYet(state, call)
 			if call.inferredType then
 				state.progress = state.progress+1 -- Needed here?
 			else
@@ -1227,7 +1231,7 @@ function _G.inferStatement(state, statement)
 
 		for _, expr in ipairs(returnNode.values) do
 			if not expr.inferredType then
-				inferExpression(state, expr)
+				inferExpressionThatHasNotBeenInferredYet(state, expr)
 				if expr.inferredType then
 					state.progress = state.progress+1 -- Needed here?
 				else
@@ -1407,6 +1411,25 @@ function _G.getFriendlyTypeInfoName(typeInfo)
 	-- !(if DEBUG then)  name = name.."@"..typeInfo.id  !(end)
 
 	return name
+end
+
+
+
+local !struct"Depencency"{
+	dependent = NIL,
+	dependOn  = NIL,
+}
+
+-- @Speed: Don't even call this if a depencency should exist.
+function _G.addDepencencyIfNew(state, dependent, dependOn)
+	if itemWith2(state.dependencies, "dependent",dependent, "dependOn",dependOn) then
+		return
+	end
+
+	local depencency     = Depencency()
+	depencency.dependent = dependent
+	depencency.dependOn  = dependee
+	table.insert(state.dependencies, depencency)
 end
 
 
