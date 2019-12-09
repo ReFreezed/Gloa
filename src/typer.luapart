@@ -412,9 +412,9 @@ function _G.defineInClosestScope(state, ident, isConst, typeInfo, typeInfoForDec
 
 	if defnExisting then
 		-- @Incomplete: We're not following imperative scope rules for name shadowing (if that's what happening here).
-		print()
-		typeMessage(state, ident,             "Error", "'%s' has already been defined.", ident.name)
-		typeMessage(state, defnExisting.name, "Info",  "...it was defined here.")
+		printerr()
+		typeMessage(io.stderr, state, ident,             "Error", "'%s' has already been defined.", ident.name)
+		typeMessage(io.stderr, state, defnExisting.name, "Info",  "...it was defined here.")
 		exitFailure()
 	end
 
@@ -445,11 +445,13 @@ function _G.defineInClosestScope(state, ident, isConst, typeInfo, typeInfoForDec
 	table.insert(scope.definitions, defn)
 end
 
-function _G.printDefinitionChain(state, defn, typeName)
+function _G.printDefinitionChain(file, state, defn, typeName)
+	if type(file) ~= "userdata" then  return printDefinitionChain(io.stdout, file, state, defn)  end
+
 	!local MAX_CHAIN_LENGTH = 10
 
 	for i = 1, !(MAX_CHAIN_LENGTH) do
-		typeMessage(state, defn.name, "Info", "...here is '%s' defined.", typeName)
+		typeMessage(file, state, defn.name, "Info", "...here is '%s' defined.", typeName)
 
 		local placeDeclared = defn.name.placeDeclared
 		if not placeDeclared then  break  end
@@ -1104,18 +1106,18 @@ function _G.inferDeclaration(state, decl, isOutArg)
 
 						if defn then
 							if not defn.isConstant then -- I don't think this ever matches. 2019-12-07 @Cleanup
-								print()
-								typeMessage(state, typeNode, "Error", "'%s' is not a constant. Types must be constant.", typeName)
-								typeMessage(state, defn.name, "Info", "...here is '%s' defined.", typeName)
+								printerr()
+								typeMessage(io.stderr, state, typeNode, "Error", "'%s' is not a constant. Types must be constant.", typeName)
+								typeMessage(io.stderr, state, defn.name, "Info", "...here is '%s' defined.", typeName)
 								exitFailure()
 							end
 
 							typeInfo = defn.typeInfoForDeclaration
 
 							if not typeInfo then
-								print()
-								typeMessage(state, typeNode, "Error", "'%s' is not a type. (It is %s)", typeName, getFriendlyTypeInfoName(defn.typeInfo))
-								printDefinitionChain(state, defn, typeName)
+								printerr()
+								typeMessage(io.stderr, state, typeNode, "Error", "'%s' is not a type. (It is %s)", typeName, getFriendlyTypeInfoName(defn.typeInfo))
+								printDefinitionChain(io.stderr, state, defn, typeName)
 								exitFailure()
 							end
 
@@ -1365,13 +1367,15 @@ function _G.typeError(state, node, s, ...)
 	errorInFile(buffer, path, tokens.position1[token], "Typer", s, ...)
 end
 
--- typeMessage( typerState, node, label, formatString, ... )
-function _G.typeMessage(state, node, label, s, ...)
+-- typeMessage( [ outputFile=io.stdout, ] typerState, node, label, formatString, ... )
+function _G.typeMessage(file, state, node, label, s, ...)
+	if type(file) ~= "userdata" then  return typeMessage(io.stdout, file, state, node, label, s, ...)  end
+
 	local tokens = state.tokens
 	local token  = node.token
 	local path   = tokens.file[token]      or errorInternal(2, "No tokens.")
 	local buffer = state.fileBuffers[path] or errorInternal("No file buffer for '%s'.", path)
-	reportMessageInFile(buffer, path, tokens.position1[token], label, "Typer", s, ...)
+	reportMessageInFile(file, buffer, path, tokens.position1[token], label, "Typer", s, ...)
 end
 
 

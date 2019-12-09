@@ -25,7 +25,7 @@
 	iterate
 	pack
 	pairsSorted
-	printf, printTraceback, printobj
+	printf, printTraceback, printobj, printerr, printerrf
 	recycleTable, recycleTablesInArray, getRecycledTable, getRecycledTableCount
 	reportMessageInFile
 	setFields
@@ -49,21 +49,23 @@ end
 
 
 function _G.printf(s, ...)
-	print(F(s, ...))
+	print(s:format(...))
 end
 
--- printTraceback( [ level=1 ] )
-function _G.printTraceback(level)
-	print("stack traceback:")
+-- printTraceback( [ outputFile=io.stdout, ] [ level=1 ] )
+function _G.printTraceback(file, level)
+	if type(file) ~= "userdata" then  return printTraceback(io.stdout, file)  end
+
+	file:write("stack traceback:\n")
 
 	for level = 1+(level or 1), math.huge do
 		local info = debug.getinfo(level, "nSl")
 		if not info then  break  end
 
-		-- print(level, "source   ", info.source)
-		-- print(level, "short_src", info.short_src)
-		-- print(level, "name     ", info.name)
-		-- print(level, "what     ", info.what)
+		-- file:write(level, " source    ", tostring(info.source))
+		-- file:write(level, " short_src ", tostring(info.short_src))
+		-- file:write(level, " name      ", tostring(info.name))
+		-- file:write(level, " what      ", tostring(info.what))
 
 		local where = info.source:match"^@(.+)" or info.short_src
 		local lnStr = info.currentline > 0 and ":"..info.currentline or ""
@@ -75,7 +77,7 @@ function _G.printTraceback(level)
 			or info.what == "tail" and "tail call"
 			or "?"
 
-		printf("\t%s%s  (%s)", where, lnStr, name)
+		file:write(F("\t%s%s  (%s)", where, lnStr, name))
 	end
 end
 
@@ -154,12 +156,25 @@ do
 	end
 end
 
+function _G.printerr(...)
+	local file = io.stderr
+	for i = 1, select("#", ...) do
+		if i > 1 then  file:write("\t")  end
+		file:write(tostring((select(i, ...))))
+	end
+	file:write("\n")
+end
+
+function _G.printerrf(s, ...)
+	io.stderr:write(s:format(...), "\n")
+end
+
 
 
 -- errorInternal( [ level=1, ] [ formatString, ... ] )
 local function _errorInternal(level, s, ...)
-	printf("\nError: "..(s or "Internal error."), ...)
-	printTraceback(1+level)
+	printerrf("\nError: "..(s or "Internal error."), ...)
+	printTraceback(io.stderr, 1+level)
 	exitFailure()
 end
 function _G.errorInternal(levelOrS, ...)
@@ -172,9 +187,9 @@ end
 
 function _G.errorLine(agent, s, ...)
 	if agent then
-		printf("\n[%s] Error: "..s, agent, ...)
+		printerrf("\n[%s] Error: "..s, agent, ...)
 	else
-		printf("\nError: "..s, ...)
+		printerrf("\nError: "..s, ...)
 	end
 	exitFailure()
 end
@@ -182,23 +197,25 @@ end
 function _G.errorOnLine(path, ln, agent, s, ...)
 	s = F(s, ...)
 	if agent then
-		printf("\nError @ %s:%d: [%s] %s\n", path, ln, agent, s)
+		printerrf("\nError @ %s:%d: [%s] %s\n", path, ln, agent, s)
 	else
-		printf("\nError @ %s:%d: %s\n",      path, ln,        s)
+		printerrf("\nError @ %s:%d: %s\n",      path, ln,        s)
 	end
 	exitFailure()
 end
 
 function _G.errorInFile(buffer, path, ptr, agent, s, ...)
-	print()
-	reportMessageInFile(buffer, path, ptr, "Error", agent, s, ...)
+	printerr()
+	reportMessageInFile(io.stderr, buffer, path, ptr, "Error", agent, s, ...)
 	exitFailure()
 end
 
 
 
+-- reportMessageInFile( [ outputFile=io.stdout, ] buffer, path, ptr, label, agent, s, ...)
+function _G.reportMessageInFile(file, buffer, path, ptr, label, agent, s, ...)
+	if type(file) ~= "userdata" then  return reportMessageInFile(io.stdout, file, buffer, path, ptr, label, agent, s, ...)  end
 
-function _G.reportMessageInFile(buffer, path, ptr, label, agent, s, ...)
 	!local BUFFER_LINES_TO_PRINT = 3
 
 	s   = F(s, ...)
@@ -260,26 +277,26 @@ function _G.reportMessageInFile(buffer, path, ptr, label, agent, s, ...)
 	local col = 1+len
 
 	if agent then
-		printf("%s @ %s:%d: [%s] %s", label, path, ln, agent, s)
+		file:write(F("%s @ %s:%d: [%s] %s\n", label, path, ln, agent, s))
 	else
-		printf("%s @ %s:%d: %s",      label, path, ln,        s)
+		file:write(F("%s @ %s:%d: %s\n",      label, path, ln,        s))
 	end
 
-	print()
+	file:write("\n")
 
 	!for i = BUFFER_LINES_TO_PRINT, 1, -1 do
 		!local varThis = "lastLine"..i
 
 		!if i == 1 then
-			print("> "..!!(varThis))
+			file:write("> ", !!(varThis), "\n")
 		!else
 			if !!(varThis) ~= "" then
-				print("> "..!!(varThis))
+				file:write("> ", !!(varThis), "\n")
 			end
 		!end
 	!end
 
-	printf("> %s^\n", ("-"):rep(col-1))
+	file:write(F("> %s^\n", ("-"):rep(col-1)))
 end
 
 
