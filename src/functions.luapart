@@ -10,7 +10,7 @@
 --==============================================================
 
 	copyTable, copyArray, copyToArray, emptyArray, fillArray, reverseArray, flipArray
-	errorInternal, errorLine, errorOnLine, errorInFile
+	errorInternal, errorLine, errorOnLine, errorInFile, assert
 	exit, exitFailure
 	F
 	formatNumber, formatBinary
@@ -62,10 +62,10 @@ function _G.printTraceback(file, level)
 		local info = debug.getinfo(level, "nSl")
 		if not info then  break  end
 
-		-- file:write(level, " source    ", tostring(info.source))
-		-- file:write(level, " short_src ", tostring(info.short_src))
-		-- file:write(level, " name      ", tostring(info.name))
-		-- file:write(level, " what      ", tostring(info.what))
+		-- file:write(level, " source    ", tostring(info.source),    "\n")
+		-- file:write(level, " short_src ", tostring(info.short_src), "\n")
+		-- file:write(level, " name      ", tostring(info.name),      "\n")
+		-- file:write(level, " what      ", tostring(info.what),      "\n")
 
 		local where = info.source:match"^@(.+)" or info.short_src
 		local lnStr = info.currentline > 0 and ":"..info.currentline or ""
@@ -77,7 +77,7 @@ function _G.printTraceback(file, level)
 			or info.what == "tail" and "tail call"
 			or "?"
 
-		file:write(F("\t%s%s  (%s)", where, lnStr, name))
+		file:write("\t",where,lnStr,"  (",name,")\n")
 	end
 end
 
@@ -173,7 +173,11 @@ end
 
 -- errorInternal( [ level=1, ] [ formatString, ... ] )
 local function _errorInternal(level, s, ...)
-	printerrf("\nError: "..(s or "Internal error."), ...)
+	if s then
+		printerrf("\nError: Internal compiler error: "..s, ...)
+	else
+		printerrf("\nError: Internal compiler error.")
+	end
 	printTraceback(io.stderr, 1+level)
 	exitFailure()
 end
@@ -208,6 +212,14 @@ function _G.errorInFile(buffer, path, ptr, agent, s, ...)
 	printerr()
 	reportMessageInFile(io.stderr, buffer, path, ptr, "Error", agent, s, ...)
 	exitFailure()
+end
+
+function _G.assert(...)
+	if ... then  return ...  end
+
+	local _, err = ...
+	err          = tostring(err or "Assertion failed!")
+	errorInternal(2, "%s", err)
 end
 
 
@@ -735,7 +747,7 @@ do
 
 	function _G.recycleTable(t)
 		!if EXTRA_ERROR_CHECKING then
-			if recycled[t] then  error("Table is already recycled.", 2)  end
+			if recycled[t] then  errorInternal(2, "Table is already recycled.")  end
 			recycled[t] = true
 		!end
 
@@ -746,7 +758,7 @@ do
 	function _G.recycleTablesInArray(ts)
 		for i = 1, #ts do
 			!if EXTRA_ERROR_CHECKING then
-				if recycled[ts[i]] then  error("At least one table is already recycled.", 2)  end
+				if recycled[ts[i]] then  errorInternal(2, "At least one table is already recycled.")  end
 				recycled[ts[i]] = true
 			!end
 

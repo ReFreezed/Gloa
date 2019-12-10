@@ -9,9 +9,11 @@
 --=
 --==============================================================
 
+	astCopy
 	astFindParent, astFindCommonParent, astHasParent
 	astNewNode
 	astPrint, astPrintTree
+	astVisitAllNodes, astVisitAllNodesLeavesFirst
 	errorParsing*, errorUnhandledNodeType
 	parse*
 
@@ -95,16 +97,18 @@ end
 
 !struct"_AstNode"{
 	nodeType = 0,
-	s        = 0, -- Serial number.
-	parent   = NIL,
+	s        = 0,   -- Serial number.
+	parent   = NIL, -- AstNode
 	token    = 1,
+	-- v2:
+	queued   = NIL, -- Queued
 }
 _G.!structAst"AstTypeDefinition:_AstNode"{ -- Created during type phase.
 	-- Type phase:
 	name       = NIL, -- AstIdentifier|AstVararg
 	scope      = NIL, -- AstFileScope|AstBlock|AstStruct|AstFor|AstLambda|AstEnum (This should be the same as the parent.)
 	isConstant = false,
-	typeInfo   = NIL,
+	typeInfo   = NIL, -- TypeInfo
 	typeInfoForDeclaration = NIL, -- Type of value in type declarations. Is used when type aliases are specified as types.
 }
 
@@ -118,6 +122,9 @@ local !structAst"AstIdentifier:_AstExpression"{
 	name = "",
 	-- Type phase:
 	placeDeclared = NIL, -- AstDeclaration|AstStruct|AstFor|AstLambda (Can/should this be moved to AstTypeDefinition?)
+	-- v2:
+	declaration   = NIL, -- AstDeclaration
+	definition    = NIL, -- AstTypeDefinition
 }
 local !structAst"AstVararg:_AstExpression"{
 	surroundedByParenthesis = false,
@@ -134,15 +141,19 @@ local !structAst"AstType:_AstExpression"{
 	arguments         = NIL, -- []AstExpression (Is set for parameterized structs.)
 	-- Type phase:
 	typeInfo          = NIL,
+	-- v2:
+	representedType   = NIL, -- TypeInfo
+	declaration       = NIL, -- AstDeclaration
+	definition        = NIL, -- AstTypeDefinition
 }
 local !structAst"AstUnary:_AstExpression"{
-	operation  = "",
-	expression = NIL,
+	operation  = "",  -- "-" or "not" etc.
+	expression = NIL, -- AstExpression
 }
 local !structAst"AstBinary:_AstExpression"{
-	operation = "",
-	left      = NIL,
-	right     = NIL,
+	operation = "",  -- "+" or "-" etc.
+	left      = NIL, -- AstExpression
+	right     = NIL, -- AstExpression
 }
 local !struct"TableField"{ key=NIL, value=NIL }
 local !structAst"AstTable:_AstExpression"{
@@ -170,9 +181,9 @@ local !structAst"AstArguments:_AstExpression"{ -- @Cleanup: Move this into an ar
 local !structAst"AstLambda:_AstExpression"{
 	argumentsIn  = NIL, -- AstArguments
 	argumentsOut = NIL, -- AstArguments
-	body         = NIL, -- AstBlock (If this is nil then the lambda is a function signature.)
+	body         = NIL, -- AstBlock  (If this is nil then the lambda is a function signature.)
 	-- Type phase:
-	definitions = {},  -- []AstTypeDefinition (Note that the body has it's own definitions.)
+	definitions  = {},  -- []AstTypeDefinition (Note that the body has it's own definitions.)
 }
 local !structAst"AstTypeOf:_AstExpression"{
 	expression = NIL,
@@ -187,18 +198,17 @@ local !structAst"AstStatement:_AstNode"{ -- Needed? I think so?
 }
 
 local !structAst"AstDeclaration:_AstNode"{
-	names      = {},  -- [](AstIdentifier|AstVararg)
-	types      = {},  -- No value here means the types are inferred.
-	notes      = {},  -- []AstNote @Incomplete
-	isGlobal   = false,
-	isConstant = false,
+	names         = {},  -- [](AstIdentifier|AstVararg)
+	types         = {},  -- []AstType  (No value here means the types are inferred.)
+	notes         = {},  -- []AstNote  @Incomplete: Nodes.
+	isGlobal      = false,
+	isConstant    = false,
 
 	-- assignment=nil means all names gets their default value (which depends on the type, of which there must be only one).
-	-- Note: assignment.targets will contain the same nodes as decl.names.  @Robustness: Don't! Make copies of the identifiers instead.
-	assignment = NIL, -- AstAssignment
+	assignment    = NIL, -- AstAssignment
 
 	-- Type phase:
-	inferredTypes = {}, -- []TypeInfo (One for each name.)
+	inferredTypes = {},  -- []TypeInfo (One for each name.)
 }
 
 local !structAst"AstAssignment:_AstNode"{
@@ -219,7 +229,7 @@ local !structAst"AstContinue:_AstJump"{
 }
 
 local !structAst"AstDefer:_AstNode"{
-	body = NIL,
+	body = NIL, -- AstBlock
 }
 
 local !structAst"AstImport:_AstNode"{
@@ -231,26 +241,26 @@ local !structAst"AstImport:_AstNode"{
 
 !structAst"_AstControlStructure:_AstNode"{}
 local !structAst"AstIf:_AstControlStructure"{
-	condition   = NIL,
-	branchTrue  = NIL,
-	branchFalse = NIL,
+	condition   = NIL, -- AstExpression
+	branchTrue  = NIL, -- AstBlock
+	branchFalse = NIL, -- AstBlock
 }
 local !structAst"AstWhile:_AstControlStructure"{
-	condition = NIL,
-	body      = NIL,
+	condition   = NIL, -- AstExpression
+	body        = NIL, -- AstBlock
 }
 local !structAst"AstFor:_AstControlStructure"{
 	forType     = FOR_NUMERIC,
-	names       = {},  -- []AstIdentifier
+	names       = {},  -- []AstIdentifier  @Incomplete @Cleanup: Use AstDeclaration in AstFor.
 	expressions = {},  -- []AstExpression
-	body        = NIL, -- AstBlock|AstNode
+	body        = NIL, -- AstBlock
 	-- Type phase:
 	definitions = {},  -- []AstTypeDefinition (Note that the body has it's own definitions.)
 }
 
 !structAst"_AstDeclarativeScope:_AstNode"{
-	declarations       = {},
-	includedNamespaces = {},
+	declarations       = {}, -- []AstDeclaration
+	includedNamespaces = {}, -- []AstImport
 	-- Type phase:
 	definitions        = {}, -- []AstTypeDefinition
 }
@@ -632,12 +642,15 @@ function _G.parseArguments(state, parentNode, isInput, placeDeclared)
 
 			token = state.nextToken
 			for i, arg in ipairs(argGroup) do
-				state.nextToken = token
-				local decl      = arg.declaration
+				state.nextToken       = token
+				local decl            = arg.declaration
 
 				local assignment      = astNewNode(AstAssignment, expr.token, decl)
-				assignment.targets[1] = decl.names[1]
 				decl.assignment       = assignment
+
+				local identCopy       = astCopy(decl.names[1])
+				identCopy.parent      = assignment
+				assignment.targets[1] = identCopy
 
 				!SET_OR_RETURN `local expr = parseExpression(state, assignment)` -- @Speed: Parse once then just copy the first one.
 				assignment.values[1]       = expr
@@ -850,6 +863,10 @@ function _G.parseDeclaration(state, parentNode, declType)
 		table.insert(decl.names, ident)
 	end
 
+	for _, ident in ipairs(decl.names) do
+		ident.declaration = decl
+	end
+
 	local typesStartToken          = state.nextToken -- Dummy position, kinda.
 	local tokType, tokValue, token = peekNextToken(state)
 
@@ -888,8 +905,12 @@ function _G.parseDeclaration(state, parentNode, declType)
 		consumeNextToken(state)
 
 		local assignment = astNewNode(AstAssignment, token, decl)
-		copyToArray(decl.names, assignment.targets)
-		decl.assignment  = assignment
+		for i, ident in ipairs(decl.names) do
+			local identCopy       = astCopy(ident)
+			identCopy.parent      = assignment
+			assignment.targets[i] = identCopy
+		end
+		decl.assignment = assignment
 
 		if declType == !(DECLARATION_ENUM) then
 			!ERROR_OR_RETURN `errorParsingLast(state, "Enum members must be constant.")`
@@ -909,9 +930,14 @@ function _G.parseDeclaration(state, parentNode, declType)
 			!ERROR_OR_RETURN `errorParsing(state, decl.types[2].token-1, "Constants can only be of one type.")`
 		end
 
+		-- @CopyPaste from above.
 		local assignment = astNewNode(AstAssignment, token, decl)
-		copyToArray(decl.names, assignment.targets)
-		decl.assignment  = assignment
+		for i, ident in ipairs(decl.names) do
+			local identCopy       = astCopy(ident)
+			identCopy.parent      = assignment
+			assignment.targets[i] = identCopy
+		end
+		decl.assignment = assignment
 
 		tokType, tokValue = peekNextToken(state)
 
@@ -1120,13 +1146,13 @@ function _G.parseStatementInImperativeScope(state, parentNode)
 
 	elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"do") then
 		consumeNextToken(state)
-		!SET_OR_RETURN `statement.what = parseBlockOrScopedStatementOrUnwrappedNonPolutingStatement(state, statement)`
+		!SET_OR_RETURN `statement.what = parseBlockOrScopedStatement(state, statement)`
 
 	elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"defer") then
 		consumeNextToken(state)
 
 		local defer                = astNewNode(AstDefer, statement.token, statement)
-		!SET_OR_RETURN `defer.body = parseBlockOrScopedStatementOrUnwrappedNonPolutingStatement(state, defer)`
+		!SET_OR_RETURN `defer.body = parseBlockOrScopedStatement(state, defer)`
 
 		statement.what = defer
 
@@ -1145,7 +1171,7 @@ function _G.parseStatementInImperativeScope(state, parentNode)
 
 		local ifBranch                      = astNewNode(AstIf, statement.token, statement)
 		!SET_OR_RETURN `ifBranch.condition  = parseExpression(state, ifBranch)`
-		!SET_OR_RETURN `ifBranch.branchTrue = parseBlockOrScopedStatementOrUnwrappedNonPolutingStatement(state, ifBranch)`
+		!SET_OR_RETURN `ifBranch.branchTrue = parseBlockOrScopedStatement(state, ifBranch)`
 		statement.what                      = ifBranch
 
 		while true do
@@ -1160,7 +1186,7 @@ function _G.parseStatementInImperativeScope(state, parentNode)
 
 			local ifBranchElse                      = astNewNode(AstIf, token, ifBranch)
 			!SET_OR_RETURN `ifBranchElse.condition  = parseExpression(state, ifBranchElse)`
-			!SET_OR_RETURN `ifBranchElse.branchTrue = parseBlockOrScopedStatementOrUnwrappedNonPolutingStatement(state, ifBranchElse)`
+			!SET_OR_RETURN `ifBranchElse.branchTrue = parseBlockOrScopedStatement(state, ifBranchElse)`
 
 			ifBranch.branchFalse = ifBranchElse
 			ifBranch             = ifBranchElse
@@ -1168,7 +1194,7 @@ function _G.parseStatementInImperativeScope(state, parentNode)
 
 		if isToken(tokType,tokValue, !(TOKEN_KEYWORD),"else") then
 			consumeNextToken(state)
-			!SET_OR_RETURN `ifBranch.branchFalse = parseBlockOrScopedStatementOrUnwrappedNonPolutingStatement(state, ifBranch)`
+			!SET_OR_RETURN `ifBranch.branchFalse = parseBlockOrScopedStatement(state, ifBranch)`
 		end
 
 	elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"while") then
@@ -1176,7 +1202,7 @@ function _G.parseStatementInImperativeScope(state, parentNode)
 
 		local whileLoop                     = astNewNode(AstWhile, statement.token, statement)
 		!SET_OR_RETURN `whileLoop.condition = parseExpression(state, whileLoop)`
-		!SET_OR_RETURN `whileLoop.body      = parseBlockOrScopedStatementOrUnwrappedNonPolutingStatement(state, whileLoop)`
+		!SET_OR_RETURN `whileLoop.body      = parseBlockOrScopedStatement(state, whileLoop)`
 		statement.what                      = whileLoop
 
 	elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"for") then
@@ -1282,7 +1308,7 @@ function _G.parseStatementInImperativeScope(state, parentNode)
 			!DO_OR_RETURN `parseExpressionList(state, forLoop, forLoop.expressions)`
 		end
 
-		!SET_OR_RETURN `forLoop.body = parseBlockOrScopedStatementOrUnwrappedNonPolutingStatement(state, forLoop, true)`
+		!SET_OR_RETURN `forLoop.body = parseBlockOrScopedStatement(state, forLoop)`
 		statement.what               = forLoop
 
 	elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"import","load") then
@@ -1373,6 +1399,23 @@ function _G.parseBlock(state, parentNode)
 	return block
 end
 
+-- block = parseBlockOrScopedStatement( parseState, parentNode )
+function _G.parseBlockOrScopedStatement(state, parentNode)
+	local tokType, tokValue = peekNextToken(state)
+
+	if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"{") then
+		consumeNextToken(state)
+		return parseBlock(state, parentNode) -- May return nil.
+	end
+
+	local block = astNewNode(AstBlock, statement.token, parentNode)
+
+	!SET_OR_RETURN `local statement = parseStatementInImperativeScope(state, block)`
+	table.insert(block, statement)
+
+	return block
+end
+--[[
 -- node = parseBlockOrScopedStatementOrUnwrappedNonPolutingStatement( parseState, parentNode [, requireBlock=false ] )
 function _G.parseBlockOrScopedStatementOrUnwrappedNonPolutingStatement(state, parentNode, requireBlock)
 	local tokType, tokValue = peekNextToken(state)
@@ -1397,6 +1440,7 @@ function _G.parseBlockOrScopedStatementOrUnwrappedNonPolutingStatement(state, pa
 	statement.what.parent = parentNode
 	return statement.what
 end
+]]
 
 function _G.parseImportOrLoad(state, parentNode)
 	local import = astNewNode(AstImport, state.nextToken, parentNode)
@@ -2165,11 +2209,7 @@ do
 				local assignment = node
 				write(" (", assignment.operation, ")")
 				!!(CHILD_PRINT_START)
-				if assignment.parent and assignment.parent.nodeType == !(nodeTypes.AstDeclaration) and printed[assignment.targets[1]] then
-					write(indentStr, !(INDENT.."(targets)\n"))
-				else
-					printNodeList(assignment.targets, indent+1, printed, printChildren)
-				end
+				printNodeList(assignment.targets, indent+1, printed, printChildren)
 				write(indentStr, !(INDENT.."op "), assignment.operation, "\n")
 				printNodeList(assignment.values, indent+1, printed, printChildren)
 				!!(CHILD_PRINT_END)
@@ -2236,6 +2276,7 @@ do
 
 			elseif node.nodeType == !(nodeTypes.AstTypeDefinition) then
 				local defn = node
+				assert(defn.typeInfo)
 				write(" (")
 				write(defn.name.name)
 				write(", ", getFriendlyTypeInfoName(defn.typeInfo))
@@ -2349,28 +2390,32 @@ end
 
 
 
--- astVisitAllNodes( topNode, callback )
--- [ controlValue = ] callback( node )  -- Not return anything is the same as returning !(VISIT_CONTINUE).
--- controlValue = !(VISIT_CONTINUE|VISIT_BREAK|VISIT_IGNORE_CHILDREN)
+-- astVisitAllNodes           ( topNode, callback )
+-- astVisitAllNodesLeavesFirst( topNode, callback )
+-- [ controlValue = ] callback( node, container, key )  -- Not return anything is the same as returning VISIT_CONTINUE.
+-- controlValue = VISIT_CONTINUE|VISIT_BREAK|VISIT_IGNORE_CHILDREN
+-- Note: VISIT_IGNORE_CHILDREN does nothing when using astVisitAllNodesLeavesFirst().
 do
-	-- break = visit( visited, node, callback )
-	local function visit(visited, node, cb)
+	local function visit(visited, cb, leavesFirst, container, key, node)
+		-- Note: We return true from this function if we want to break.
 		!(
-		local INDENT = "\t\t\t"
+		local INDENT = ("\t"):rep(3)
 
 		local function visitIfNotNil(var) return function(fieldNames)
+			__LUA("\n",INDENT,"local subNode")
 			for _, fieldName in ipairs(fieldNames) do
-				__LUA("\n",INDENT,"if ",var,".",fieldName," then\n",INDENT,"\tif visit(visited, ",var,".",fieldName,", cb) then return true\n",INDENT,"end  end ")
+				__LUA("\n",INDENT,"subNode = ",var,".",fieldName)
+				__LUA("\n",INDENT,"if subNode and visit(visited, cb, leavesFirst, ",var,", ",toLua(fieldName),", subNode) then  return true  end")
 			end
 		end end
 
 		local function visitList(var) return function(fieldNames)
+			__LUA("\n",INDENT,"local arr")
 			for _, fieldName in ipairs(fieldNames) do
-				if fieldName == "" then
-					__LUA("\n",INDENT,"for _, item in ipairs(",var,              ") do\n",INDENT,"\tif visit(visited, item, cb) then return true\n",INDENT,"end  end ")
-				else
-					__LUA("\n",INDENT,"for _, item in ipairs(",var,".",fieldName,") do\n",INDENT,"\tif visit(visited, item, cb) then return true\n",INDENT,"end  end ")
-				end
+				__LUA("\n",INDENT,"arr = ",var) ; if fieldName ~= "" then  __LUA(".",fieldName)  end
+				__LUA("\n",INDENT,"for i, subNode in ipairs(arr) do")
+				__LUA("\n",INDENT,"\tif visit(visited, cb, leavesFirst, arr, i, subNode) then  return true  end")
+				__LUA("\n",INDENT,"end ")
 			end
 		end end
 		)
@@ -2378,11 +2423,13 @@ do
 		assert(not visited[node])
 		visited[node] = true
 
-		local controlValue = cb(node)
-		if controlValue == !(VISIT_BREAK) then
-			return true
-		elseif controlValue == !(VISIT_IGNORE_CHILDREN) then
-			return false
+		if not leavesFirst then
+			local controlValue = cb(node)
+			if controlValue == !(VISIT_BREAK) then
+				return true
+			elseif controlValue == !(VISIT_IGNORE_CHILDREN) then
+				return false
+			end
 		end
 
 		if node.nodeType == !(nodeTypes.AstTypeDefinition)  then  -- void
@@ -2407,16 +2454,7 @@ do
 		elseif node.nodeType == !(nodeTypes.AstTypeOf)      then  !visitIfNotNil"node"{"expression"}
 		elseif node.nodeType == !(nodeTypes.AstCast)        then  !visitIfNotNil"node"{"targetType","expression"}
 		elseif node.nodeType == !(nodeTypes.AstStatement)   then  !visitIfNotNil"node"{"what"}
-		elseif node.nodeType == !(nodeTypes.AstDeclaration) then
-			!visitList"node"{"names","types","notes"}
-			if node.assignment then
-				controlValue = cb(node.assignment)
-				if controlValue == !(VISIT_BREAK) then
-					return true
-				elseif controlValue ~= !(VISIT_IGNORE_CHILDREN) then
-					!visitList"node.assignment"{"values"} -- Don't visit the targets as those have already been visited.  @Cleanup @Robustness: Separate the two?
-				end
-			end
+		elseif node.nodeType == !(nodeTypes.AstDeclaration) then  !visitList"node"{"names","types","notes"} ; visitIfNotNil"node"{"assignment"}
 		elseif node.nodeType == !(nodeTypes.AstAssignment)  then  !visitList"node"{"targets","values"}
 		elseif node.nodeType == !(nodeTypes.AstReturn)      then  !visitList"node"{"values"}
 		elseif node.nodeType == !(nodeTypes.AstBreak)       then  !visitIfNotNil"node"{"loopName"}
@@ -2434,12 +2472,40 @@ do
 			errorUnhandledNodeType(node)
 		end
 
+		if leavesFirst and cb(node) == !(VISIT_BREAK) then
+			return true
+		end
+
 		return false
 	end
 
 	function _G.astVisitAllNodes(node, cb)
-		visit({}, node, cb)
+		visit({}, cb, false, nil, nil, node)
 	end
+
+	function _G.astVisitAllNodesLeavesFirst(node, cb)
+		visit({}, cb, true,  nil, nil, node)
+	end
+end
+
+
+
+function _G.astCopy(node)
+	local copy
+
+	if node.nodeType == !(nodeTypes.AstIdentifier) then
+		local ident        = node
+		copy               = astNewNode(AstIdentifier, ident.token, ident.parent)
+		copy.name          = ident.name
+		copy.placeDeclared = ident.placeDeclared
+		copy.declaration   = ident.declaration
+		copy.definition    = ident.definition
+
+	else
+		errorUnhandledNodeType(node)
+	end
+
+	return copy or errorInternal()
 end
 
 

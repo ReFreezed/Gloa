@@ -61,8 +61,8 @@ local silent         = false
 local i              = 1
 
 !if DEBUG then
-local debug_onlyParse      = false
-local debug_onlyInferTypes = false
+_G.debug_onlyParse      = false
+_G.debug_onlyInferTypes = false
 !end
 
 while args[i] do
@@ -89,11 +89,11 @@ while args[i] do
 
 	!if DEBUG then
 	elseif arg == "--debug:onlyparse" then
-		debug_onlyParse = true
+		_G.debug_onlyParse = true
 		i = i+1
 
 	elseif arg == "--debug:onlyinfer" then
-		debug_onlyInferTypes = true
+		_G.debug_onlyInferTypes = true
 		i = i+1
 	!end
 
@@ -166,16 +166,15 @@ for i = 1, tokens.count do
 		local expected = BRACKETS[tokens.value[iStart]]
 
 		if not iStart then
-			reportMessageInFile(s, path, tokens.position1[i], "Error", "BracketChecker", "Stray bracket.")
+			reportMessageInFile(io.stderr, s, path, tokens.position1[i], "Error", "BracketChecker", "Stray bracket.")
 			bracketTokenIndices[1] = nil
 			break
 
 		elseif tokens.value[i] ~= expected then
-			reportMessageInFile(s, path, tokens.position1[i],      "Error", "BracketChecker", "Expected '%s'.", expected)
-			reportMessageInFile(s, path, tokens.position1[iStart], "Info",  "BracketChecker", "...here is the unmatched bracket.")
+			printerr()
+			reportMessageInFile(io.stderr, s, path, tokens.position1[i],      "Error", "BracketChecker", "Expected '%s'.", expected)
+			reportMessageInFile(io.stderr, s, path, tokens.position1[iStart], "Info",  "BracketChecker", "...here is the unmatched bracket.")
 			exitFailure()
-			-- bracketTokenIndices[1] = nil
-			-- break
 		end
 	end
 end
@@ -183,7 +182,6 @@ end
 if bracketTokenIndices[1] then
 	local i = bracketTokenIndices[1]
 	errorInFile(s, path, tokens.position1[i], "BracketChecker", "Missing end bracket.", BRACKETS[tokens.value[i]])
-	-- reportMessageInFile(s, path, tokens.position1[i], "Error", "BracketChecker", "Missing end bracket.", BRACKETS[tokens.value[i]])
 end
 
 
@@ -201,6 +199,140 @@ end
 
 
 
+-- Run pipes.
+!ifDEBUG`if not debug_onlyParse then`
+	local function getDeclaredIdentifierWaitingToBeDefinedWithName(queue, name, queuedToIgnore)
+		for _, queued in ipairs(queue) do
+			if queued ~= queuedToIgnore and queued.waitingOn and queued.node.nodeType == !(nodeTypes.AstIdentifier) then
+				local ident = queued.node
+				if ident.parent == ident.declaration and ident.name == name then  return queued  end
+			end
+		end
+		return nil
+	end
+
+	local state             = TyperState()
+	state.fileBuffers[path] = s
+	state.tokens            = tokens
+
+	local queue = {} -- Should this be part of TyperState?  @Incomplete: Use one queue per pipe?
+	v2_addToQueueRecursively(state, queue, topNode)
+
+	for i = 1, math.huge do
+		local waitCount    = 0
+		local didSomething = false
+
+		for _, queued in ipairsr(queue) do
+			if queued.waitingOn then
+				local dependency = queued.waitingOn
+
+				if dependency.dependType == !(DEPEND_DEFINITION) then
+					local name = dependency.dependOn
+					-- @Speed: Only call findDefinition() if it's reported that a definition with the awaited name has been defined.
+					if findDefinition(state, queued.node, name) then
+						queued.waitingOn = nil
+					end
+
+				elseif dependency.dependType == !(DEPEND_NODE_INFERRED) then
+					if dependency.dependOn.queued.pipe > !(PIPE_INFER) then
+					-- if dependency.dependOn.inferredType then -- Invalid! dependOn is not necessarily an expression.
+						queued.waitingOn = nil
+					end
+
+				else
+					errorInternal("%d", dependency.dependType)
+				end
+			end
+
+			if queued.waitingOn then
+				waitCount = waitCount+1
+
+			elseif queued.pipe == !(PIPE_INFER) then
+				didSomething = true
+				v2_inferNode(state, queued.node)
+
+			elseif queued.pipe == !(PIPE_BYTECODE) then
+				-- @Incomplete: Bytecode.
+
+			else
+				-- @Incomplete: More pipes?
+			end
+		end
+
+		if waitCount == 0 then
+			local allDone = true
+
+			for _, queued in ipairs(queue) do
+				if queued.pipe <= !(PIPE_INFER) then -- TEMP
+				-- if queued.pipe < !(PIPE_DONE) then
+					allDone = false
+					break
+				end
+			end
+
+			if allDone then  break  end
+
+		elseif not didSomething then
+			-- [[ Report undefined identifier.
+			for _, queued in ipairs(queue) do
+				local dependency = queued.waitingOn
+
+				if dependency and dependency.dependType == !(DEPEND_DEFINITION) then
+					local name = dependency.dependOn
+
+					if not getDeclaredIdentifierWaitingToBeDefinedWithName(queue, name, queued) then
+						typeError(state, queued.node, "Undefined identifier '%s'.", name)
+					end
+				end
+			end
+			--]]
+
+			-- [[ Report about-to-be-declared identifier waiting for something.
+			for _, queued in ipairs(queue) do
+				local dependency = queued.waitingOn
+
+				if
+					dependency
+					and dependency.dependType == !(DEPEND_NODE_INFERRED)
+					and queued.node.nodeType  == !(nodeTypes.AstIdentifier)
+					and queued.node.parent    == queued.node.declaration
+				then
+					local expr = dependency.dependOn
+
+					printerr()
+					typeMessage(io.stderr, state, expr,        "Error", "Failed inferring the type of this expression.")
+					typeMessage(io.stderr, state, queued.node, "Info",  "...this thing is waiting for the above to finish.")
+					exitFailure()
+				end
+			end
+			--]]
+
+			-- [[ Report something waiting for something else.
+			for _, queued in ipairsr(queue) do
+				local dependency = queued.waitingOn
+
+				if dependency and dependency.dependType == !(DEPEND_NODE_INFERRED) then
+					local expr = dependency.dependOn
+
+					printerr()
+					typeMessage(io.stderr, state, expr,        "Error", "Failed inferring the type of this expression.")
+					typeMessage(io.stderr, state, queued.node, "Info",  "...this thing is waiting for the above to finish.")
+					exitFailure()
+				end
+			end
+			--]]
+
+			errorInternal("Pipes are stuck. Also failed to figure out where the issue actually is. Oops...")
+		end
+
+		-- Guard against an infinite loop.
+		if i == 100 then
+			errorInternal("The pipes ran for too long. (waiting:%d)", waitCount)
+		end
+	end
+!ifDEBUG`end`
+
+--[[ OLD:
 -- Infer types.
 !ifDEBUG`if not debug_onlyParse then`
 	local state             = TyperState()
@@ -227,19 +359,18 @@ end
 		-- Guard against an infinite loop.
 		if i == 100 then
 			errorInternal("Type inference loop went on for too long. (waiting:%d, progress:%d)", state.waiting+state.waitingSilent, state.progress)
-			exitFailure()
 		end
 	end
 !ifDEBUG`end`
+]]
 
 
 
--- Generate bytecode.
-!ifDEBUG`if not (debug_onlyParse or debug_onlyInferTypes) then`
-	local state = BytecodeState()
-
-	bcGenerate(state, topNode)
-!ifDEBUG`end`
+-- -- Generate bytecode.
+-- !ifDEBUG`if not (debug_onlyParse or debug_onlyInferTypes) then`
+-- 	local state = BytecodeState()
+-- 	bcGenerate(state, topNode)
+-- !ifDEBUG`end`
 
 
 

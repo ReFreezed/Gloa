@@ -9,11 +9,12 @@
 --=
 --==============================================================
 
-	addDepencencyIfNew
 	getClosestScope, isScope
 	getTypeInfo*
 	inferType*
 	typeError, typeMessage
+
+	v2_*
 
 --============================================================]]
 
@@ -35,7 +36,7 @@ end
 
 
 
-_G.!struct"TyperState"{
+_G.!struct"TyperState"{ -- @Cleanup: Rename to PipesState?
 	fileBuffers   = {},
 	tokens        = {},
 
@@ -47,6 +48,8 @@ _G.!struct"TyperState"{
 	errorStep     = 0,
 
 	allTypeInfos  = {},
+
+	-- v2:
 	dependencies  = {},
 }
 
@@ -264,7 +267,7 @@ function _G.getTypeInfoFromTypeNode(state, typeNode)
 		local funcSig = getTypeInfoForLambda(state, lambda)
 		return funcSig, nil
 
-	elseif typeNode.arrayType then
+	elseif typeNode.arrayItemType then
 		errorInternal("@Incomplete: Array types.")
 
 	else
@@ -451,6 +454,7 @@ function _G.printDefinitionChain(file, state, defn, typeName)
 	!local MAX_CHAIN_LENGTH = 10
 
 	for i = 1, !(MAX_CHAIN_LENGTH) do
+		file:write("\n")
 		typeMessage(file, state, defn.name, "Info", "...here is '%s' defined.", typeName)
 
 		local placeDeclared = defn.name.placeDeclared
@@ -1419,21 +1423,733 @@ end
 
 
 
-local !struct"Depencency"{
-	dependent = NIL,
-	dependOn  = NIL,
+local !struct"Dependency"{ -- @Cleanup: Rename to something with "wait"?
+	dependent  = NIL,
+	dependType = 0,   -- DEPEND_DEFINITION|DEPEND_NODE_INFERRED
+	dependOn   = NIL, -- The value depends on what dependType is.
 }
 
--- @Speed: Don't even call this if a depencency should exist.
-function _G.addDepencencyIfNew(state, dependent, dependOn)
-	if itemWith2(state.dependencies, "dependent",dependent, "dependOn",dependOn) then
+function _G.v2_addDependency(state, dependent, dependType, dependOn)
+	assert(not dependent.queued.waitingOn)
+	assert(not itemWith3(state.dependencies, "dependent",dependent, "dependType",dependType, "dependOn",dependOn))
+
+	local dependency      = Dependency()
+	dependency.dependent  = dependent
+	dependency.dependType = dependType
+	dependency.dependOn   = dependOn
+	table.insert(state.dependencies, dependency)
+
+	dependent.queued.waitingOn = dependency
+
+	if dependType == !(DEPEND_NODE_INFERRED) then
+		assert(dependent ~= dependOn)
+	end
+
+	!if DEBUG then
+		--[[
+		if debug_onlyInferTypes then
+			io.stdout:write("DEPEND ")
+			astPrint(dependent)
+
+			io.stdout:write("    ON ", DEPEND_TITLES[dependType], " ")
+			if dependType == !(DEPEND_DEFINITION) then
+				print(dependOn)
+			elseif dependType == !(DEPEND_NODE_INFERRED) then
+				astPrint(dependOn)
+			else
+				print("? ("..tostring(dependOn)..")")
+			end
+		end
+		--]]
+	!end
+end
+
+
+
+local !struct"Queued"{
+	node      = NIL, -- AstNode
+	container = NIL,
+	key       = NIL,
+	pipe      = PIPE_INFER,
+	waitingOn = NIL, -- Dependency
+}
+
+function _G.v2_addToQueueRecursively(state, queue, topNode)
+	astVisitAllNodes(topNode, function(node, container, key)
+		-- astPrint(node)
+
+		local queued     = Queued()
+		queued.node      = node
+		queued.container = container
+		queued.key       = key
+		node.queued      = queued
+
+		table.insert(queue, queued)
+
+		if node.nodeType == !(nodeTypes.AstIdentifier) and node.declaration and node.parent.nodeType == !(nodeTypes.AstAssignment) then
+			local ident       = node
+			local assignment  = node.parent
+			local decl        = node.declaration
+			local i           = indexOf(assignment.targets, ident) or errorInternal()
+			local identSource = decl.names[i]
+			v2_addDependency(state, ident, !(DEPEND_NODE_INFERRED), identSource)
+		end
+	end)
+end
+
+function _G.v2_replaceNode(nodeOld, nodeNew)
+	local queued   = nodeOld.queued
+	queued.node    = nodeNew
+	nodeOld.queued = nil
+	nodeNew.queued = queued
+
+	if queued.container then
+		queued.container[queued.key] = nodeNew
+	end
+end
+
+
+function _G.v2_moveToNextPipe(state, node)
+	local queued = node.queued
+	queued.pipe  = queued.pipe+1
+end
+
+
+
+!(
+local function DEPEND_AND_RETURN(dependentCode, dependType, dependOnCode)
+	__LUA("v2_addDependency(state, ",dependentCode,", ",toLua(dependType),", ",dependOnCode,") ; return")
+end
+
+local function NODE_INFERRER(funcHeaderCode)
+	local replacements
+
+	funcHeaderCode, replacements = funcHeaderCode:gsub("function +nodeInferrers%.(Ast%w+)", function(nodeName)
+		local nodeType = nodeTypes[nodeName] or error(nodeName)
+		return "nodeInferrers[--[["..nodeName.."]]"..nodeType.."] = function"
+	end)
+
+	assert(replacements == 1, funcHeaderCode)
+
+	__LUA(funcHeaderCode)
+end
+)
+
+local nodeInferrers = {}
+
+!NODE_INFERRER `function nodeInferrers.AstTypeDefinition(state, defn)`
+	assert(false) -- @Incomplete: Make AstTypeDefinition exist and behave like other nodes in the tree?
+end
+
+!NODE_INFERRER `function nodeInferrers.AstIdentifier(state, ident)`
+	local decl = ident.declaration
+
+	-- Loose identifier.
+	if not decl then
+		assert(not ident.placeDeclared)
+
+		local defn = findDefinition(state, ident, ident.name)
+
+		if not defn then
+			!DEPEND_AND_RETURN(`ident`, DEPEND_DEFINITION, `ident.name`)
+		end
+
+		ident.definition   = defn
+		ident.inferredType = defn.typeInfo
+
+		v2_moveToNextPipe(state, ident)
+		return
+
+	-- Assignment target in declaration (which is a copy of the identifier in the declaration).
+	elseif ident.parent.nodeType == !(nodeTypes.AstAssignment) then
+		local identDecl, i = itemWith1(decl.names, "name", ident.name)
+		if not identDecl then  errorInternal()  end
+
+		if not identDecl.inferredType then
+			!DEPEND_AND_RETURN(`ident`, DEPEND_DEFINITION, `identDecl`)
+		end
+
+		ident.definition   = identDecl.definition
+		ident.inferredType = identDecl.inferredType
+
+		v2_moveToNextPipe(state, ident)
 		return
 	end
 
-	local depencency     = Depencency()
-	depencency.dependent = dependent
-	depencency.dependOn  = dependee
-	table.insert(state.dependencies, depencency)
+	-- At this point we're defining a declared identifier.
+
+	for _, typeNode in ipairs(decl.types) do
+		if not typeNode.inferredType then
+			!DEPEND_AND_RETURN(`ident`, DEPEND_NODE_INFERRED, `typeNode`)
+		end
+	end
+
+	local assignment = decl.assignment
+
+	if assignment then
+		for _, valueExpr in ipairs(assignment.values) do
+			if not valueExpr.inferredType then
+				!DEPEND_AND_RETURN(`ident`, DEPEND_NODE_INFERRED, `valueExpr`)
+			end
+		end
+	end
+
+	local typeInfo
+	local typeInfoForDecl = nil
+
+	-- Compound type.
+	if decl.types[2] then
+		errorInternal("@Incomplete: Compound types.")
+
+	-- Single type.
+	elseif decl.types[1] then
+		local typeExpr = decl.types[1]
+
+		if typeExpr.nodeType == !(nodeTypes.AstType) then
+			local typeNode = typeExpr
+			typeInfo       = typeNode.representedType
+
+		elseif typeExpr.nodeType == !(nodeTypes.AstTypeOf) then
+			local typeOf   = typeExpr
+			typeInfo       = typeOf.expression.inferredType
+
+		else
+			errorUnhandledNodeType(typeExpr)
+		end
+
+	-- Infer type from value.
+	else
+		local i                        = indexWith1(decl.names, "name", ident.name) or errorInternal()
+		local valueExpr, valueTypeInfo = v2_getAssignmentValue(assignment.values, i)
+		assert(valueExpr)
+
+		typeInfo = valueTypeInfo
+
+		if typeInfo ~= getTypeInfoForBuiltinType"type" then
+			-- void
+
+		elseif valueExpr.nodeType == !(nodeTypes.AstType) then
+			local typeNode   = valueExpr
+			typeInfoForDecl  = typeNode.representedType
+
+		elseif valueExpr.nodeType == !(nodeTypes.AstIdentifier) then
+			local identOther = valueExpr
+			typeInfoForDecl  = identOther.definition.typeInfoForDeclaration
+
+		elseif valueExpr.nodeType == !(nodeTypes.AstTypeOf) then
+			local typeOf     = valueExpr
+			typeInfoForDecl  = typeOf.expression.inferredType
+
+		else
+			errorUnhandledNodeType(valueExpr)
+		end
+	end
+
+	if assignment and decl.types[1] then
+		local i                        = indexWith1(decl.names, "name", ident.name) or errorInternal()
+		local valueExpr, valueTypeInfo = v2_getAssignmentValue(assignment.values, i)
+		assert(valueExpr)
+
+		if valueTypeInfo ~= typeInfo then
+			-- @Cleanup: Define isTypeCompatibleWith(typeToCheck, otherType) or something.
+			-- @UX: Better error message if the list ends with a call?
+			typeError(
+				state, valueExpr,
+				"Type of assignment value #%d (%s) does not match the type of '%s' (%s).",
+				i,
+				getFriendlyTypeInfoName(valueTypeInfo),
+				ident.name,
+				getFriendlyTypeInfoName(typeInfo)
+			)
+		end
+	end
+
+	assert(typeInfo)
+
+	local scope = getClosestScope(decl)
+	if not scope then
+		typeError(state, ident, "Could not find what scope '%s' is in.", ident.name)
+	end
+
+	local defn      = astNewNode(AstTypeDefinition, ident.token, scope)
+	defn.name       = ident
+	defn.scope      = scope
+	defn.isConstant = decl.isConstant
+	defn.typeInfo   = typeInfo
+	defn.typeInfoForDeclaration = typeInfoForDecl -- May be nil.
+
+	ident.definition   = defn
+	ident.inferredType = typeInfo
+
+	table.insert(scope.definitions, defn)
+
+	!if DEBUG then
+		if debug_onlyInferTypes then
+			io.stdout:write("DEFINE ", ident.name ,":", getFriendlyTypeInfoName(typeInfo), " ")
+			if defn.isConstant then  io.stdout:write("(CONST) ")  end
+			if typeInfoForDecl then  io.stdout:write("(VALUE ", getFriendlyTypeInfoName(typeInfoForDecl), ") ")  end
+			io.stdout:write("IN ") ; astPrint(scope)
+		end
+	!end
+
+	v2_moveToNextPipe(state, ident)
+end
+
+!NODE_INFERRER `function nodeInferrers.AstType(state, typeNode)`
+	local defn = nil
+	local typeInfo, typeInfoRepresented
+
+	if not typeNode.isUserType then
+		typeInfoRepresented = getTypeInfoForBuiltinType(typeNode.typeName)
+		typeInfo            = getTypeInfoForBuiltinType"type"
+
+	elseif typeNode.functionSignature then
+		local lambda = typeNode.functionSignature
+
+		if not lambda.inferredType then
+			!DEPEND_AND_RETURN(`typeNode`, DEPEND_NODE_INFERRED, `lambda`)
+		end
+		assert(lambda.inferredType == getTypeInfoForBuiltinType"type")
+
+		local funcSig       = getTypeInfoForLambda(state, lambda)
+		typeInfoRepresented = funcSig
+		typeInfo            = getTypeInfoForBuiltinType"type"
+
+	elseif typeNode.arrayItemType then
+		local itemTypeInfo = typeNode.arrayItemType
+
+		if not itemTypeInfo.inferredType then
+			!DEPEND_AND_RETURN(`typeNode`, DEPEND_NODE_INFERRED, `itemTypeInfo`)
+		end
+		assert(itemTypeInfo.inferredType == getTypeInfoForBuiltinType"type")
+
+		typeInfoRepresented = itemTypeInfo
+		typeInfo            = getTypeInfoForBuiltinType"type"
+
+	else
+		assert(typeNode.typeName ~= "")
+
+		defn = findDefinition(state, typeNode, typeNode.typeName)
+		if not defn then
+			!DEPEND_AND_RETURN(`typeNode`, DEPEND_DEFINITION, `typeNode.typeName`)
+		end
+
+		typeInfoRepresented = defn.typeInfoForDeclaration
+		typeInfo            = defn.typeInfo
+		assert(typeInfo)
+
+		if typeInfo ~= getTypeInfoForBuiltinType"type" then
+			printerr()
+			typeMessage(io.stderr, state, typeNode, "Error", "'%s' is not a type. (It is %s)", typeNode.typeName, getFriendlyTypeInfoName(typeInfo))
+			printDefinitionChain(io.stderr, state, defn, typeNode.typeName)
+			exitFailure()
+		end
+
+		for _, expr in ipairs(typeNode.arguments or EMPTY_TABLE) do
+			if not expr.inferredType then
+				!DEPEND_AND_RETURN(`typeNode`, DEPEND_NODE_INFERRED, `expr`)
+			end
+		end
+
+		-- @Incomplete: Proper error messages here:
+
+		if SIMPLE_TYPE_TAG[typeInfo.tag] then
+			assert(not typeNode.arguments) -- This should have been caught during parsing, e.g. int(a,b).
+
+		elseif typeInfo.tag == !(typeTags.TypeInfoStruct) then
+			local structInfo = typeInfo
+			if structInfo.arguments[1] then
+				errorInternal("@Incomplete: Struct arguments.")
+			elseif typeNode.arguments then
+				typeError(state, typeNode.arguments[1], "Parameters for structs are not supported yet.")
+			end
+
+		elseif typeInfo.tag == !(typeTags.TypeInfoEnum) then
+			assert(not typeNode.arguments)
+
+		elseif typeInfo.tag == !(typeTags.TypeInfoFunction) then
+			assert(not typeNode.arguments) -- This should not be possible I think. The node should have been parsed as an AstCall - not an AstType without functionSignature... right? I may be wrong.
+
+		else
+			errorInternal("Incomplete: Unhandled type tag '%s'.", TYPE_TAG_NAMES[typeInfo.tag])
+		end
+	end
+
+	assert(typeInfoRepresented)
+	assert(typeInfo)
+
+	typeNode.representedType = typeInfoRepresented
+	typeNode.inferredType    = typeInfo
+	typeNode.declaration     = defn and defn.name.declaration
+	typeNode.definition      = defn
+
+	v2_moveToNextPipe(state, typeNode)
+end
+
+!NODE_INFERRER `function nodeInferrers.AstCall(state, call)`
+	if not call.callee.inferredType then
+		!DEPEND_AND_RETURN(`call`, DEPEND_NODE_INFERRED, `call.callee`)
+	end
+
+	for _, arg in ipairs(call.arguments) do
+		if not arg.inferredType then
+			!DEPEND_AND_RETURN(`call`, DEPEND_NODE_INFERRED, `arg`)
+		end
+	end
+
+	if call.callee.inferredType.tag ~= !(typeTags.TypeInfoFunction) then -- @Incomplete: Parameterized structs.
+		if call.callee.nodeType == !(nodeTypes.AstIdentifier) then
+			local ident = call.callee
+			typeError(state, ident, "'%s' is not a function. (It is %s)", ident.name, getFriendlyTypeInfoName(ident.inferredType))
+		else
+			typeError(state, call, "The object being called is not a function. (It is %s)", getFriendlyTypeInfoName(call.callee.inferredType))
+		end
+	end
+
+	errorInternal("@Incomplete: Calls.")
+
+	--[[
+	local call           = expr
+	local allIsInferred  = true
+	local calleeTypeInfo = call.callee.inferredType
+
+	if not calleeTypeInfo then
+		inferExpressionThatHasNotBeenInferredYet(state, call.callee)
+		calleeTypeInfo = call.callee.inferredType
+
+		if not calleeTypeInfo then
+			allIsInferred = false
+
+		elseif calleeTypeInfo.tag == !(typeTags.TypeInfoList) then
+			local listSig   = calleeTypeInfo
+			local typeInfo1 = listSig[1]
+			if not typeInfo1 then
+				typeError(state, call, "Trying to call void.")
+			elseif typeInfo1.tag == !(typeTags.TypeInfoFunction) then
+				-- void
+			else
+				typeError(state, call, "The object being called is not a function. (It is %s)", getFriendlyTypeInfoName(typeInfo1))
+			end
+
+		elseif calleeTypeInfo.tag == !(typeTags.TypeInfoFunction) then
+			-- void
+
+		else
+			-- @Incomplete: Allow parameterized structs.
+			typeError(state, call, "The object being called is not a function. (It is %s)", getFriendlyTypeInfoName(calleeTypeInfo))
+		end
+	end
+
+	for _, argExpr in ipairs(call.arguments) do
+		if not argExpr.inferredType then
+			inferExpressionThatHasNotBeenInferredYet(state, argExpr)
+			allIsInferred = (allIsInferred and argExpr.inferredType ~= nil)
+		end
+	end
+
+	if not allIsInferred then  return  end
+
+	local effectiveCalleeTypeInfo
+
+	if calleeTypeInfo.tag == !(typeTags.TypeInfoList) then
+		local listSig           = calleeTypeInfo
+		effectiveCalleeTypeInfo = listSig[1]
+	else
+		effectiveCalleeTypeInfo = calleeTypeInfo
+	end
+	assert(effectiveCalleeTypeInfo.tag == !(typeTags.TypeInfoFunction)) -- @Incomplete: Handle parameterized structs.
+
+	-- @Incomplete: Check for optional arguments.
+	if #call.arguments < #effectiveCalleeTypeInfo.argumentTypesIn then
+		typeError(state, call, "Missing arguments.")
+	elseif #call.arguments > #effectiveCalleeTypeInfo.argumentTypesIn then
+		typeError(state, call.arguments[#effectiveCalleeTypeInfo.argumentTypesIn+1], "Too many arguments.")
+	end
+
+	for i, argExpr in ipairs(call.arguments) do
+		local typeInfoWanted = effectiveCalleeTypeInfo.argumentTypesIn[i]
+		if argExpr.inferredType ~= typeInfoWanted then
+			-- @Cleanup: Define isTypeCompatibleWith(typeToCheck, otherType) or something.
+			-- @UX: Tell the name of the argument. (Probably only possible for constants, and maybe not all. Not sure!)
+			typeError(
+				state, argExpr,
+				"Wrong type for argument #%d. (Wanted %s, got %s)",
+				i,
+				getFriendlyTypeInfoName(typeInfoWanted),
+				getFriendlyTypeInfoName(argExpr.inferredType)
+			)
+		end
+	end
+
+	typeInfo = getTypeInfoForList(state, effectiveCalleeTypeInfo.argumentTypesOut)
+	]]
+
+	v2_moveToNextPipe(state, call)
+end
+
+!NODE_INFERRER `function nodeInferrers.AstDeclaration(state, decl)`
+	if decl.assignment and decl.assignment.queued.pipe <= !(PIPE_INFER) then
+		!DEPEND_AND_RETURN(`decl`, DEPEND_NODE_INFERRED, `decl.assignment`)
+	end
+
+	for _, ident in ipairs(decl.names) do
+		if not ident.inferredType then
+			!DEPEND_AND_RETURN(`decl`, DEPEND_NODE_INFERRED, `ident`)
+		end
+	end
+
+	for _, typeNode in ipairs(decl.types) do
+		if not typeNode.inferredType then
+			!DEPEND_AND_RETURN(`decl`, DEPEND_NODE_INFERRED, `typeNode`)
+		end
+	end
+
+	-- @Incomplete: decl.notes (if we make them structured)
+
+	for i, ident in ipairs(decl.names) do
+		decl.inferredTypes[i] = ident.inferredType or errorInternal()
+	end
+
+	v2_moveToNextPipe(state, decl)
+end
+
+-- !NODE_INFERRER `function nodeInferrers.AstVararg(state, vararg)`
+-- end
+
+!NODE_INFERRER `function nodeInferrers.AstLiteral(state, literal)`
+	local typeName = LITERAL_TYPE_TO_BUILTIN_TYPE_NAME[literal.literalType] or errorUnhandledNodeType(literal)
+
+	literal.inferredType = getTypeInfoForBuiltinType(typeName)
+
+	v2_moveToNextPipe(state, literal)
+end
+
+-- !NODE_INFERRER `function nodeInferrers.AstUnary(state, unary)`
+-- 	unary.expression
+-- end
+
+-- !NODE_INFERRER `function nodeInferrers.AstBinary(state, binary)`
+-- 	binary.left
+-- 	binary.right
+-- end
+
+-- !NODE_INFERRER `function nodeInferrers.AstTable(state, tableNode)`
+-- 	for _, tableField in ipairs(tableNode) do
+-- 		tableField.key
+-- 		tableField.value
+-- 	end
+-- end
+
+-- !NODE_INFERRER `function nodeInferrers.AstArgument(state, arg)`
+-- 	arg.declaration
+-- end
+
+-- !NODE_INFERRER `function nodeInferrers.AstArguments(state, args)`
+-- 	args[]
+-- end
+
+!NODE_INFERRER `function nodeInferrers.AstLambda(state, lambda)`
+	if lambda.argumentsIn and not lambda.argumentsIn.inferredType then
+		!DEPEND_AND_RETURN(`lambda`, DEPEND_NODE_INFERRED, `lambda.argumentsIn`)
+	end
+	if lambda.argumentsOut and not lambda.argumentsOut.inferredType then
+		!DEPEND_AND_RETURN(`lambda`, DEPEND_NODE_INFERRED, `lambda.argumentsOut`)
+	end
+	if lambda.body and lambda.body.queued.pipe <= !(PIPE_INFER) then
+		!DEPEND_AND_RETURN(`lambda`, DEPEND_NODE_INFERRED, `lambda.body`)
+	end
+
+	lambda.inferredType = getTypeInfoForLambda(state, lambda)
+	assert(lambda.inferredType)
+
+	v2_moveToNextPipe(state, lambda)
+end
+
+!NODE_INFERRER `function nodeInferrers.AstTypeOf(state, typeOf)`
+	if not typeOf.expression.inferredType then
+		!DEPEND_AND_RETURN(`typeOf`, DEPEND_NODE_INFERRED, `typeOf.expression`)
+	end
+
+	typeOf.inferredType = getTypeInfoForBuiltinType"type"
+	-- typeOf.representedType = typeOf.expression.inferredType
+	-- typeOf.inferredType    = getTypeInfoForBuiltinType"type"
+
+	v2_moveToNextPipe(state, typeOf)
+end
+
+-- !NODE_INFERRER `function nodeInferrers.AstCast(state, cast)`
+-- 	cast.targetType
+-- 	cast.expression
+-- end
+
+!NODE_INFERRER `function nodeInferrers.AstStatement(state, statement)`
+	if not statement.what.inferredType then
+		!DEPEND_AND_RETURN(`statement`, DEPEND_NODE_INFERRED, `statement.what`)
+	end
+
+	v2_moveToNextPipe(state, statement)
+end
+
+function _G.v2_getAssignmentValue(values, i)
+	local expr      = values[i]
+	local lastIndex = #values
+
+	-- Non-call value or value not last in list.
+	if expr and not (expr.nodeType == !(nodeTypes.AstCall) and not expr.surroundedByParenthesis) then
+		return expr, expr.inferredType
+	end
+
+	-- Value list ending in a call (hopefully).
+	local call = expr
+
+	if not call then
+		-- We're past the end of the list - get the last specified value.
+		call = values[lastIndex]
+
+		if call.nodeType ~= !(nodeTypes.AstCall) then
+			typeError(state, call, "Expected a function call. Missing a value for '%s'.", ident.name)
+		elseif call.surroundedByParenthesis then
+			typeError(state, ident, "Missing a value for '%s'.", ident.name)
+		end
+	end
+
+	local argIndex = i-lastIndex+1
+
+	local typeInfoForCall = call.inferredType
+	local listSig
+
+	if typeInfoForCall.tag == !(typeTags.TypeInfoList) then
+		listSig = typeInfoForCall
+	elseif typeInfoForCall.tag == !(typeTags.TypeInfoVoid) then
+		typeError(state, call, "Called function does not return anything.") -- Only function calls can be void at the moment. 2019-12-04
+	else
+		typeError(state, call, "Trying to call %s object.", getFriendlyTypeInfoName(typeInfoForCall))
+	end
+
+	local typeInfoForOutArg = listSig[argIndex]
+	if not typeInfoForOutArg then
+		typeError(state, call, "Function does not return anything for '%s' (output argument #%d).", ident.name, argIndex)
+	end
+
+	return call, listSig[argIndex]
+end
+
+!NODE_INFERRER `function nodeInferrers.AstAssignment(state, assignment)`
+	for _, ident in ipairs(assignment.targets) do
+		if not ident.inferredType then
+			!DEPEND_AND_RETURN(`assignment`, DEPEND_NODE_INFERRED, `ident`)
+		end
+	end
+
+	for _, expr in ipairs(assignment.values) do
+		if not expr.inferredType then
+			!DEPEND_AND_RETURN(`assignment`, DEPEND_NODE_INFERRED, `expr`)
+		end
+	end
+
+	for i, ident in ipairs(assignment.targets) do
+		local valueExpr, valueTypeInfo = v2_getAssignmentValue(assignment.values, i)
+		assert(valueExpr)
+
+		if valueTypeInfo ~= ident.inferredType then
+			-- @Cleanup: Define isTypeCompatibleWith(typeToCheck, otherType) or something.
+			-- @UX: Better error message if the list ends with a call?
+			typeError(
+				state, valueExpr,
+				"Type of assignment value #%d (%s) does not match the type of '%s' (%s).",
+				i,
+				getFriendlyTypeInfoName(valueTypeInfo),
+				ident.name,
+				getFriendlyTypeInfoName(ident.inferredType)
+			)
+		end
+	end
+
+	-- @Incomplete: Check that !must args from functions have an assignment target.
+
+	v2_moveToNextPipe(state, assignment)
+end
+
+!NODE_INFERRER `function nodeInferrers.AstReturn(state, returnNode)`
+	for _, valueExpr in ipairs(returnNode.values) do
+		if not valueExpr.inferredType then
+			!DEPEND_AND_RETURN(`returnNode`, DEPEND_NODE_INFERRED, `valueExpr`)
+		end
+	end
+
+	v2_moveToNextPipe(state, returnNode)
+end
+
+-- !NODE_INFERRER `function nodeInferrers.AstBreak(state, breakNode)`
+-- 	breakNode.loopName
+-- end
+
+-- !NODE_INFERRER `function nodeInferrers.AstContinue(state, continue)`
+-- 	continue.loopName
+-- end
+
+-- !NODE_INFERRER `function nodeInferrers.AstDefer(state, defer)`
+-- 	defer.body
+-- end
+
+-- !NODE_INFERRER `function nodeInferrers.AstImport(state, import)`
+-- 	import.name
+-- end
+
+-- !NODE_INFERRER `function nodeInferrers.AstIf(state, ifBranch)`
+-- 	ifBranch.condition
+-- 	ifBranch.branchTrue
+-- 	ifBranch.branchFalse
+-- end
+
+-- !NODE_INFERRER `function nodeInferrers.AstWhile(state, whileLoop)`
+--  whileLoop.condition
+--  whileLoop.body
+-- end
+
+-- !NODE_INFERRER `function nodeInferrers.AstFor(state, forLoop)`
+-- 	forLoop.names[]
+-- 	forLoop.expressions[]
+-- 	forLoop.body
+-- end
+
+-- !NODE_INFERRER `function nodeInferrers.AstStruct(state, struct)`
+-- 	struct.declarations[]
+-- 	struct.includedNamespaces[]
+-- 	struct.arguments
+-- end
+
+-- !NODE_INFERRER `function nodeInferrers.AstEnum(state, enum)`
+-- 	enum.declarations[]
+-- 	enum.includedNamespaces[]
+-- 	enum.memberType
+-- end
+
+!NODE_INFERRER `function nodeInferrers.AstFileScope(state, fileScope)`
+	for _, decl in ipairs(fileScope.declarations) do
+		if decl.queued.pipe <= !(PIPE_INFER) then
+			!DEPEND_AND_RETURN(`fileScope`, DEPEND_NODE_INFERRED, `decl`)
+		end
+	end
+
+	-- @Incomplete: fileScope.includedNamespaces
+
+	v2_moveToNextPipe(state, fileScope)
+end
+
+!NODE_INFERRER `function nodeInferrers.AstBlock(state, block)`
+	for _, statement in ipairs(block) do
+		if statement.queued.pipe <= !(PIPE_INFER) then
+			!DEPEND_AND_RETURN(`block`, DEPEND_NODE_INFERRED, `statement`)
+		end
+	end
+
+	v2_moveToNextPipe(state, block)
+end
+
+function _G.v2_inferNode(state, node)
+	local nodeInferrer = nodeInferrers[node.nodeType] or errorUnhandledNodeType(node)
+	return nodeInferrer(state, node)
 end
 
 
