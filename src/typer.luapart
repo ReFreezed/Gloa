@@ -1620,8 +1620,7 @@ end
 	-- Infer type from value.
 	else
 		local i                        = indexWith1(decl.names, "name", ident.name) or errorInternal()
-		local valueExpr, valueTypeInfo = v2_getAssignmentValue(assignment.values, i)
-		assert(valueExpr)
+		local valueExpr, valueTypeInfo = v2_getAssignmentValue(state, ident, assignment.values, i)
 
 		typeInfo = valueTypeInfo
 
@@ -1646,22 +1645,8 @@ end
 	end
 
 	if assignment and decl.types[1] then
-		local i                        = indexWith1(decl.names, "name", ident.name) or errorInternal()
-		local valueExpr, valueTypeInfo = v2_getAssignmentValue(assignment.values, i)
-		assert(valueExpr)
-
-		if valueTypeInfo ~= typeInfo then
-			-- @Cleanup: Define isTypeCompatibleWith(typeToCheck, otherType) or something.
-			-- @UX: Better error message if the list ends with a call?
-			typeError(
-				state, valueExpr,
-				"Type of assignment value #%d (%s) does not match the type of '%s' (%s).",
-				i,
-				getFriendlyTypeInfoName(valueTypeInfo),
-				ident.name,
-				getFriendlyTypeInfoName(typeInfo)
-			)
-		end
+		local i = indexWith1(decl.names, "name", ident.name) or errorInternal()
+		v2_getAssignmentValue(state, ident, assignment.values, i, typeInfo)
 	end
 
 	assert(typeInfo)
@@ -1709,7 +1694,7 @@ end
 		if not lambda.inferredType then
 			!DEPEND_AND_RETURN(`typeNode`, DEPEND_NODE_INFERRED, `lambda`)
 		end
-		assert(lambda.inferredType == getTypeInfoForBuiltinType"type")
+		assert(lambda.inferredType.tag == !(typeTags.TypeInfoFunction))
 
 		local funcSig       = getTypeInfoForLambda(state, lambda)
 		typeInfoRepresented = funcSig
@@ -1790,64 +1775,37 @@ end
 	if not call.callee.inferredType then
 		!DEPEND_AND_RETURN(`call`, DEPEND_NODE_INFERRED, `call.callee`)
 	end
-
 	for _, arg in ipairs(call.arguments) do
 		if not arg.inferredType then
 			!DEPEND_AND_RETURN(`call`, DEPEND_NODE_INFERRED, `arg`)
 		end
 	end
 
-	if call.callee.inferredType.tag ~= !(typeTags.TypeInfoFunction) then -- @Incomplete: Parameterized structs.
+	local calleeTypeInfo = call.callee.inferredType
+
+	if calleeTypeInfo.tag == !(typeTags.TypeInfoFunction) then -- @Incomplete: Parameterized structs.
+		-- void
+
+	elseif calleeTypeInfo.tag == !(typeTags.TypeInfoList) then
+		local listSig   = calleeTypeInfo
+		local typeInfo1 = listSig[1]
+
+		if not typeInfo1 then
+			typeError(state, call, "Trying to call void.")
+		elseif typeInfo1.tag == !(typeTags.TypeInfoFunction) then
+			-- void
+		else
+			typeError(state, call, "The object being called is not a function. (It is %s)", getFriendlyTypeInfoName(typeInfo1))
+		end
+
+	else
 		if call.callee.nodeType == !(nodeTypes.AstIdentifier) then
 			local ident = call.callee
 			typeError(state, ident, "'%s' is not a function. (It is %s)", ident.name, getFriendlyTypeInfoName(ident.inferredType))
 		else
-			typeError(state, call, "The object being called is not a function. (It is %s)", getFriendlyTypeInfoName(call.callee.inferredType))
-		end
-	end
-
-	errorInternal("@Incomplete: Calls.")
-
-	--[[
-	local call           = expr
-	local allIsInferred  = true
-	local calleeTypeInfo = call.callee.inferredType
-
-	if not calleeTypeInfo then
-		inferExpressionThatHasNotBeenInferredYet(state, call.callee)
-		calleeTypeInfo = call.callee.inferredType
-
-		if not calleeTypeInfo then
-			allIsInferred = false
-
-		elseif calleeTypeInfo.tag == !(typeTags.TypeInfoList) then
-			local listSig   = calleeTypeInfo
-			local typeInfo1 = listSig[1]
-			if not typeInfo1 then
-				typeError(state, call, "Trying to call void.")
-			elseif typeInfo1.tag == !(typeTags.TypeInfoFunction) then
-				-- void
-			else
-				typeError(state, call, "The object being called is not a function. (It is %s)", getFriendlyTypeInfoName(typeInfo1))
-			end
-
-		elseif calleeTypeInfo.tag == !(typeTags.TypeInfoFunction) then
-			-- void
-
-		else
-			-- @Incomplete: Allow parameterized structs.
 			typeError(state, call, "The object being called is not a function. (It is %s)", getFriendlyTypeInfoName(calleeTypeInfo))
 		end
 	end
-
-	for _, argExpr in ipairs(call.arguments) do
-		if not argExpr.inferredType then
-			inferExpressionThatHasNotBeenInferredYet(state, argExpr)
-			allIsInferred = (allIsInferred and argExpr.inferredType ~= nil)
-		end
-	end
-
-	if not allIsInferred then  return  end
 
 	local effectiveCalleeTypeInfo
 
@@ -1868,6 +1826,7 @@ end
 
 	for i, argExpr in ipairs(call.arguments) do
 		local typeInfoWanted = effectiveCalleeTypeInfo.argumentTypesIn[i]
+
 		if argExpr.inferredType ~= typeInfoWanted then
 			-- @Cleanup: Define isTypeCompatibleWith(typeToCheck, otherType) or something.
 			-- @UX: Tell the name of the argument. (Probably only possible for constants, and maybe not all. Not sure!)
@@ -1881,9 +1840,7 @@ end
 		end
 	end
 
-	typeInfo = getTypeInfoForList(state, effectiveCalleeTypeInfo.argumentTypesOut)
-	]]
-
+	call.inferredType = getTypeInfoForList(state, effectiveCalleeTypeInfo.argumentTypesOut)
 	v2_moveToNextPipe(state, call)
 end
 
@@ -1924,14 +1881,133 @@ end
 	v2_moveToNextPipe(state, literal)
 end
 
--- !NODE_INFERRER `function nodeInferrers.AstUnary(state, unary)`
--- 	unary.expression
--- end
+!NODE_INFERRER `function nodeInferrers.AstUnary(state, unary)`
+	if not unary.expression.inferredType then
+		!DEPEND_AND_RETURN(`unary`, DEPEND_NODE_INFERRED, `unary.expression`)
+	end
 
--- !NODE_INFERRER `function nodeInferrers.AstBinary(state, binary)`
--- 	binary.left
--- 	binary.right
--- end
+	local typeInfo = unary.expression.inferredType
+
+	if isAny(unary.operation, "+","-") then
+		if not isAny(typeInfo,
+			getTypeInfoForBuiltinType"int",
+			getTypeInfoForBuiltinType"number"
+		) then
+			typeError(state, unary.expression,
+				"Unary operation: Expected a number or int. (Got %s)",
+				getFriendlyTypeInfoName(typeInfo)
+			)
+		end
+
+	elseif unary.operation == "#" then
+		errorInternal("@Incomplete: Length operator.")
+
+	elseif unary.operation == "not" then
+		if typeInfo ~= getTypeInfoForBuiltinType"bool" then
+			typeError(state, unary.expression,
+				"Unary operation: Expected a bool. (Got %s)",
+				getFriendlyTypeInfoName(typeInfo)
+			)
+		end
+
+	else
+		errorUnhandledNodeType(unary)
+	end
+
+	unary.inferredType = typeInfo
+	v2_moveToNextPipe(state, unary)
+end
+
+!NODE_INFERRER `function nodeInferrers.AstBinary(state, binary)`
+	local typeInfoL = binary.left.inferredType
+	local typeInfoR = binary.right.inferredType
+
+	if not typeInfoL then
+		!DEPEND_AND_RETURN(`binary`, DEPEND_NODE_INFERRED, `binary.left`)
+	end
+	if not typeInfoR then
+		!DEPEND_AND_RETURN(`binary`, DEPEND_NODE_INFERRED, `binary.right`)
+	end
+
+	-- @Cleanup: Define isTypeCompatibleWith(typeToCheck, otherType) or something.
+	-- For now, both sides need to be the same exact type.
+	if typeInfoL ~= typeInfoR then
+		typeError(
+			state, binary,
+			"Binary operation: Operands are different types. (Left is %s, right is %s)",
+			getFriendlyTypeInfoName(typeInfoL),
+			getFriendlyTypeInfoName(typeInfoR)
+		)
+	end
+
+	-- Numeric operation.
+	if isAny(binary.operation, "+","-","*","/","//","^","%") then
+		if not isAny(typeInfoL,
+			getTypeInfoForBuiltinType"int",
+			getTypeInfoForBuiltinType"number"
+		) then
+			typeError(
+				state, binary.left,
+				"Binary operation: Expected a number or int. (Got %s)",
+				getFriendlyTypeInfoName(typeInfoL)
+			)
+		end
+
+		if isAny(binary.operation, "/") then -- Result in number.
+			typeInfo = getTypeInfoForBuiltinType"number"
+		elseif isAny(binary.operation, "//") then -- Result in int.
+			typeInfo = getTypeInfoForBuiltinType"int"
+		else -- Keep type.
+			typeInfo = typeInfoL
+		end
+
+	-- Comparison.
+	elseif isAny(binary.operation, "<",">","<=",">=") then
+		if not isAny(typeInfoL,
+			getTypeInfoForBuiltinType"int",
+			getTypeInfoForBuiltinType"number",
+			getTypeInfoForBuiltinType"string"
+		) then
+			typeError(
+				state, binary.left,
+				"Binary operation: Expected a number, int or string. (Got %s)",
+				getFriendlyTypeInfoName(typeInfoL)
+			)
+		end
+
+		typeInfo = getTypeInfoForBuiltinType"bool"
+
+	-- Equality.
+	elseif isAny(binary.operation, "==","~=") then
+		typeInfo = getTypeInfoForBuiltinType"bool"
+
+	-- Boolean operation.
+	elseif isAny(binary.operation, "and","or") then
+		if typeInfoL ~= getTypeInfoForBuiltinType"bool" then
+			typeError(state, binary.left, "Binary operation: Expected a bool. (Got %s)", getFriendlyTypeInfoName(typeInfoL))
+		end
+		typeInfo = getTypeInfoForBuiltinType"bool"
+
+	-- String concatination.
+	elseif isAny(binary.operation, "..") then
+		if typeInfoL ~= getTypeInfoForBuiltinType"string" then
+			typeError(state, binary.left, "Binary operation: Expected a string. (Got %s)", getFriendlyTypeInfoName(typeInfoL))
+		end
+		typeInfo = getTypeInfoForBuiltinType"string"
+
+	-- Lookup, or similar.
+	elseif isAny(binary.operation, ".") then
+		errorInternal("@Incomplete: Handle '.' operator.")
+
+	else
+		errorUnhandledNodeType(binary)
+	end
+
+	assert(typeInfo)
+	binary.inferredType = typeInfo
+
+	v2_moveToNextPipe(state, binary)
+end
 
 -- !NODE_INFERRER `function nodeInferrers.AstTable(state, tableNode)`
 -- 	for _, tableField in ipairs(tableNode) do
@@ -1940,13 +2016,24 @@ end
 -- 	end
 -- end
 
--- !NODE_INFERRER `function nodeInferrers.AstArgument(state, arg)`
--- 	arg.declaration
--- end
+!NODE_INFERRER `function nodeInferrers.AstArgument(state, arg)`
+	if arg.declaration.queued.pipe <= !(PIPE_INFER) then
+		!DEPEND_AND_RETURN(`arg`, DEPEND_NODE_INFERRED, `arg.declaration`)
+	end
+	v2_moveToNextPipe(state, arg)
+end
 
--- !NODE_INFERRER `function nodeInferrers.AstArguments(state, args)`
--- 	args[]
--- end
+!NODE_INFERRER `function nodeInferrers.AstArguments(state, args)` -- @Cleanup: Make AstArguments obsolete.
+	for _, arg in ipairs(args) do
+		if arg.queued.pipe <= !(PIPE_INFER) then
+			!DEPEND_AND_RETURN(`args`, DEPEND_NODE_INFERRED, `arg`)
+		end
+	end
+
+	args.inferredType = getTypeInfoForBuiltinType"void" -- AstArguments is an expression, for some reason. @Cleanup
+
+	v2_moveToNextPipe(state, args)
+end
 
 !NODE_INFERRER `function nodeInferrers.AstLambda(state, lambda)`
 	if lambda.argumentsIn and not lambda.argumentsIn.inferredType then
@@ -1983,24 +2070,57 @@ end
 -- end
 
 !NODE_INFERRER `function nodeInferrers.AstStatement(state, statement)`
-	if not statement.what.inferredType then
+	if statement.what.queued.pipe <= !(PIPE_INFER) then
 		!DEPEND_AND_RETURN(`statement`, DEPEND_NODE_INFERRED, `statement.what`)
 	end
 
 	v2_moveToNextPipe(state, statement)
 end
 
-function _G.v2_getAssignmentValue(values, i)
-	local expr      = values[i]
-	local lastIndex = #values
+-- expression, typeInfo = v2_getAssignmentValue( state, ident, values, i [, expectedTypeInfo=any ] )
+function _G.v2_getAssignmentValue(state, ident, values, i, typeInfoExpected)
+	local valueExpr = values[i]
 
 	-- Non-call value or value not last in list.
-	if expr and not (expr.nodeType == !(nodeTypes.AstCall) and not expr.surroundedByParenthesis) then
-		return expr, expr.inferredType
+	if valueExpr and not (valueExpr.nodeType == !(nodeTypes.AstCall) and not valueExpr.surroundedByParenthesis) then
+		if typeInfoExpected and valueExpr.inferredType ~= typeInfoExpected then
+			-- @Cleanup: Define isTypeCompatibleWith(typeToCheck, otherType) or something.
+			if valueExpr.inferredType.tag ~= typeInfoExpected.tag then
+				typeError(
+					state, valueExpr,
+					"Value and type mismatch. ('%s' is %s, value is %s)",
+					ident.name,
+					getFriendlyTypeInfoName(typeInfoExpected),
+					getFriendlyTypeInfoName(valueExpr.inferredType)
+				)
+
+			elseif typeInfoExpected.tag == !(typeTags.TypeInfoFunction) then
+				typeError(
+					state, valueExpr,
+					"Function signature is different from the type of '%s'. (Wanted %s, got %s)",
+					ident.name,
+					getFriendlyTypeInfoName(typeInfoExpected),
+					getFriendlyTypeInfoName(valueExpr.inferredType)
+				)
+
+			elseif typeInfoExpected.tag == !(typeTags.TypeInfoStruct) then
+				typeError(
+					state, valueExpr,
+					"Value and type mismatch. Expected a struct initializer for %s.",
+					getFriendlyTypeInfoName(typeInfoExpected)
+				)
+
+			else
+				typeError(state, valueExpr, "Value and type mismatch.")
+			end
+		end
+
+		return valueExpr, valueExpr.inferredType
 	end
 
 	-- Value list ending in a call (hopefully).
-	local call = expr
+	local call      = valueExpr
+	local lastIndex = #values
 
 	if not call then
 		-- We're past the end of the list - get the last specified value.
@@ -2023,15 +2143,28 @@ function _G.v2_getAssignmentValue(values, i)
 	elseif typeInfoForCall.tag == !(typeTags.TypeInfoVoid) then
 		typeError(state, call, "Called function does not return anything.") -- Only function calls can be void at the moment. 2019-12-04
 	else
-		typeError(state, call, "Trying to call %s object.", getFriendlyTypeInfoName(typeInfoForCall))
+		typeError(state, call, "The object being called is not a function. (It is %s)", getFriendlyTypeInfoName(typeInfoForCall))
 	end
 
 	local typeInfoForOutArg = listSig[argIndex]
 	if not typeInfoForOutArg then
-		typeError(state, call, "Function does not return anything for '%s' (output argument #%d).", ident.name, argIndex)
+		typeError(state, call, "Function does not return anything for '%s' (return value #%d).", ident.name, argIndex)
 	end
 
-	return call, listSig[argIndex]
+	if typeInfoExpected and typeInfoForOutArg ~= typeInfoExpected then
+		local calleeName = (call.callee.nodeType == !(nodeTypes.AstIdentifier) and call.callee.name or "?")
+		typeError(
+			state, call,
+			"The type of return value #%d of '%s' (%s) does not match the type of '%s' (%s).",
+			argIndex,
+			calleeName,
+			getFriendlyTypeInfoName(typeInfoForOutArg),
+			ident.name,
+			getFriendlyTypeInfoName(typeInfoExpected)
+		)
+	end
+
+	return call, typeInfoForOutArg
 end
 
 !NODE_INFERRER `function nodeInferrers.AstAssignment(state, assignment)`
@@ -2048,21 +2181,7 @@ end
 	end
 
 	for i, ident in ipairs(assignment.targets) do
-		local valueExpr, valueTypeInfo = v2_getAssignmentValue(assignment.values, i)
-		assert(valueExpr)
-
-		if valueTypeInfo ~= ident.inferredType then
-			-- @Cleanup: Define isTypeCompatibleWith(typeToCheck, otherType) or something.
-			-- @UX: Better error message if the list ends with a call?
-			typeError(
-				state, valueExpr,
-				"Type of assignment value #%d (%s) does not match the type of '%s' (%s).",
-				i,
-				getFriendlyTypeInfoName(valueTypeInfo),
-				ident.name,
-				getFriendlyTypeInfoName(ident.inferredType)
-			)
-		end
+		v2_getAssignmentValue(state, ident, assignment.values, i, ident.inferredType)
 	end
 
 	-- @Incomplete: Check that !must args from functions have an assignment target.
