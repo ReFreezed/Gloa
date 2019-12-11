@@ -1639,6 +1639,14 @@ end
 			local typeOf     = valueExpr
 			typeInfoForDecl  = typeOf.expression.inferredType
 
+		elseif valueExpr.nodeType == !(nodeTypes.AstStruct) then
+			local struct     = valueExpr
+			typeInfoForDecl  = struct.representedType
+
+		elseif valueExpr.nodeType == !(nodeTypes.AstEnum) then
+			local enum       = valueExpr
+			typeInfoForDecl  = enum.representedType
+
 		else
 			errorUnhandledNodeType(valueExpr)
 		end
@@ -1650,6 +1658,19 @@ end
 	end
 
 	assert(typeInfo)
+
+	-- print(typeInfoForDecl and getFriendlyTypeInfoName(typeInfoForDecl))
+	if not typeInfoForDecl then
+		-- void
+
+	elseif typeInfoForDecl.tag == !(typeTags.TypeInfoStruct) then
+		local structInfo = typeInfoForDecl
+		structInfo.name  = ident.name
+
+	elseif typeInfoForDecl.tag == !(typeTags.TypeInfoEnum) then
+		local enumInfo = typeInfoForDecl
+		enumInfo.name  = ident.name
+	end
 
 	local scope = getClosestScope(decl)
 	if not scope then
@@ -2232,17 +2253,90 @@ end
 -- 	forLoop.body
 -- end
 
--- !NODE_INFERRER `function nodeInferrers.AstStruct(state, struct)`
--- 	struct.declarations[]
--- 	struct.includedNamespaces[]
--- 	struct.arguments
--- end
+!NODE_INFERRER `function nodeInferrers.AstStruct(state, struct)`
+	for _, decl in ipairs(struct.declarations) do
+		if decl.queued.pipe <= !(PIPE_INFER) then
+			!DEPEND_AND_RETURN(`struct`, DEPEND_NODE_INFERRED, `decl`)
+		end
+	end
 
--- !NODE_INFERRER `function nodeInferrers.AstEnum(state, enum)`
--- 	enum.declarations[]
--- 	enum.includedNamespaces[]
--- 	enum.memberType
--- end
+	local structInfo = newTypeInfo(TypeInfoStruct)
+
+	for i, decl in ipairs(struct.declarations) do
+		local member          = TypeInfoStructMember()
+		member.name           = decl.names[1].name -- Note: Struct member declarations only have one name.
+		member.typeInfo       = decl.inferredTypes[1]
+		structInfo.members[i] = member
+	end
+
+	-- @Incomplete: struct.includedNamespaces[]
+	-- @Incomplete: struct.arguments
+
+	table.insert(state.allTypeInfos, structInfo)
+
+	struct.representedType = structInfo
+	struct.inferredType    = getTypeInfoForBuiltinType"type"
+
+	v2_moveToNextPipe(state, struct)
+end
+
+!NODE_INFERRER `function nodeInferrers.AstEnum(state, enum)`
+	for _, decl in ipairs(enum.declarations) do
+		if decl.queued.pipe <= !(PIPE_INFER) then
+			!DEPEND_AND_RETURN(`enum`, DEPEND_NODE_INFERRED, `decl`)
+		end
+	end
+
+	assert(enum.declarations[1], "Enums must have members.") -- This should have been caught during parsing.
+
+	local enumMemberInfo
+
+	if enum.memberType then
+		enumMemberInfo = getTypeInfoForBuiltinType(enum.memberType.typeName)
+	else
+		-- Just use the type of the first member as the wanted type for the enum.
+		-- Note: Struct member declarations only have one name.
+		enumMemberInfo = enum.declarations[1].inferredTypes[1]
+		if not isAny(enumMemberInfo,
+			getTypeInfoForBuiltinType"int",
+			getTypeInfoForBuiltinType"string",
+			getTypeInfoForBuiltinType"type",
+			getTypeInfoForBuiltinType"bool",
+			getTypeInfoForBuiltinType"number"
+		) then
+			typeError(state, enum, "Supported enum member types are: int, string, type, bool, number")
+		end
+	end
+
+	local enumInfo = newTypeInfo(TypeInfoEnum)
+
+	for i, decl in ipairs(enum.declarations) do
+		local valExpr = decl.assignment.values[1]
+
+		if valExpr.inferredType ~= enumMemberInfo then
+			-- @Cleanup: Define isTypeCompatibleWith(typeToCheck, otherType) or something.
+			typeError(state, valExpr,
+				"Incorrect value type for '%s'. (Wanted %s, got %s)",
+				decl.names[1].name,
+				getFriendlyTypeInfoName(enumMemberInfo),
+				getFriendlyTypeInfoName(valExpr.inferredType)
+			)
+		end
+
+		local member        = TypeInfoEnumMember()
+		member.name         = decl.names[1].name
+		enumInfo.members[i] = member
+	end
+
+	-- @Incomplete: enum.includedNamespaces[]
+
+	table.insert(state.allTypeInfos, enumInfo)
+
+	enum.representedType = enumInfo
+	enum.inferredType    = getTypeInfoForBuiltinType"type"
+
+	v2_moveToNextPipe(state, enum)
+end
 
 !NODE_INFERRER `function nodeInferrers.AstFileScope(state, fileScope)`
 	for _, decl in ipairs(fileScope.declarations) do
