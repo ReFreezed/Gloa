@@ -1505,7 +1505,7 @@ function _G.v2_addToQueue(state, node, container, key, pipe)
 end
 
 function _G.v2_addToQueueRecursively(state, topNode)
-	astVisitAllNodes(topNode, function(node, container, key)
+	astVisitAllNodesLeavesFirst(topNode, function(node, container, key)
 		-- astPrint(node)
 		v2_addToQueue(state, node, container, key, !(PIPE_INFER))
 	end)
@@ -1612,6 +1612,24 @@ end
 			typeError(state, ident, "Could not find what scope '%s' is in.", ident.name)
 		end
 
+		local isLambdaArgOut = (
+			scope.nodeType == !(nodeTypes.AstLambda)
+			and scope.argumentsOut ~= nil
+			and indexOf(scope.argumentsOut, astFindParent(decl, !(nodeTypes.AstArgument))) ~= nil
+		)
+
+		if not isLambdaArgOut then
+			local defnExisting = findDefinition(state, ident, ident.name)
+
+			if defnExisting then
+				-- @Check: Are we following imperative scope rules for name shadowing?
+				printerr()
+				typeMessage(io.stderr, state, ident,             "Error", "'%s' has already been defined.", ident.name)
+				typeMessage(io.stderr, state, defnExisting.name, "Info",  "...it was defined here.")
+				exitFailure()
+			end
+		end
+
 		defn            = astNewNode(AstTypeDefinition, ident.token, scope)
 		defn.name       = ident
 		defn.scope      = scope
@@ -1619,10 +1637,13 @@ end
 
 		ident.definition = defn
 
-		local i              = #scope.definitions+1
-		scope.definitions[i] = defn
-
-		v2_addToQueue(state, defn, scope.definitions, i, !(PIPE_INFER))
+		if isLambdaArgOut then
+			v2_addToQueue(state, defn, nil, nil, !(PIPE_INFER))
+		else
+			local i              = #scope.definitions+1
+			scope.definitions[i] = defn
+			v2_addToQueue(state, defn, scope.definitions, i, !(PIPE_INFER))
+		end
 	end
 
 	for _, typeNode in ipairs(decl.types) do
