@@ -50,6 +50,7 @@ _G.!struct"TyperState"{ -- @Cleanup: Rename to PipesState?
 	allTypeInfos  = {},
 
 	-- v2:
+	queue         = {},
 	dependencies  = {},
 }
 
@@ -454,7 +455,6 @@ function _G.printDefinitionChain(file, state, defn, typeName)
 	!local MAX_CHAIN_LENGTH = 10
 
 	for i = 1, !(MAX_CHAIN_LENGTH) do
-		file:write("\n")
 		typeMessage(file, state, defn.name, "Info", "...here is '%s' defined.", typeName)
 
 		local placeDeclared = defn.name.placeDeclared
@@ -1433,6 +1433,20 @@ function _G.v2_addDependency(state, dependent, dependType, dependOn)
 	assert(not dependent.queued.waitingOn)
 	assert(not itemWith3(state.dependencies, "dependent",dependent, "dependType",dependType, "dependOn",dependOn))
 
+	!if DEBUG then
+		if dependType == !(DEPEND_DEFINITION) then
+			assert(type(dependOn) == "string")
+		elseif dependType == !(DEPEND_NODE_INFERRED) then
+			assert(type(dependOn) == "table")
+		else
+			error(dependType)
+		end
+	!end
+
+	if dependType == !(DEPEND_NODE_INFERRED) then
+		assert(dependent ~= dependOn)
+	end
+
 	local dependency      = Dependency()
 	dependency.dependent  = dependent
 	dependency.dependType = dependType
@@ -1440,10 +1454,6 @@ function _G.v2_addDependency(state, dependent, dependType, dependOn)
 	table.insert(state.dependencies, dependency)
 
 	dependent.queued.waitingOn = dependency
-
-	if dependType == !(DEPEND_NODE_INFERRED) then
-		assert(dependent ~= dependOn)
-	end
 
 	!if DEBUG then
 		--[[
@@ -1470,30 +1480,34 @@ local !struct"Queued"{
 	node      = NIL, -- AstNode
 	container = NIL,
 	key       = NIL,
-	pipe      = PIPE_INFER,
+	pipe      = 0,
 	waitingOn = NIL, -- Dependency
 }
 
-function _G.v2_addToQueueRecursively(state, queue, topNode)
+function _G.v2_addToQueue(state, node, container, key, pipe)
+	local queued     = Queued()
+	queued.node      = node
+	queued.container = container
+	queued.key       = key
+	queued.pipe      = pipe
+
+	node.queued = queued
+	table.insert(state.queue, queued)
+
+	if node.nodeType == !(nodeTypes.AstIdentifier) and node.declaration and node.parent.nodeType == !(nodeTypes.AstAssignment) then
+		local ident       = node
+		local assignment  = node.parent
+		local decl        = node.declaration
+		local i           = indexOf(assignment.targets, ident) or errorInternal()
+		local identSource = decl.names[i]
+		v2_addDependency(state, ident, !(DEPEND_NODE_INFERRED), identSource)
+	end
+end
+
+function _G.v2_addToQueueRecursively(state, topNode)
 	astVisitAllNodes(topNode, function(node, container, key)
 		-- astPrint(node)
-
-		local queued     = Queued()
-		queued.node      = node
-		queued.container = container
-		queued.key       = key
-		node.queued      = queued
-
-		table.insert(queue, queued)
-
-		if node.nodeType == !(nodeTypes.AstIdentifier) and node.declaration and node.parent.nodeType == !(nodeTypes.AstAssignment) then
-			local ident       = node
-			local assignment  = node.parent
-			local decl        = node.declaration
-			local i           = indexOf(assignment.targets, ident) or errorInternal()
-			local identSource = decl.names[i]
-			v2_addDependency(state, ident, !(DEPEND_NODE_INFERRED), identSource)
-		end
+		v2_addToQueue(state, node, container, key, !(PIPE_INFER))
 	end)
 end
 
@@ -1538,7 +1552,13 @@ end
 local nodeInferrers = {}
 
 !NODE_INFERRER `function nodeInferrers.AstTypeDefinition(state, defn)`
-	assert(false) -- @Incomplete: Make AstTypeDefinition exist and behave like other nodes in the tree?
+	if not defn.typeInfo then
+		!DEPEND_AND_RETURN(`defn`, DEPEND_NODE_INFERRED, `defn.name`)
+	end
+
+	-- @Refactor: Maybe move some logic from AstIdentifier to here?
+
+	v2_moveToNextPipe(state, defn)
 end
 
 !NODE_INFERRER `function nodeInferrers.AstIdentifier(state, ident)`
@@ -1549,12 +1569,14 @@ end
 		assert(not ident.placeDeclared)
 
 		local defn = findDefinition(state, ident, ident.name)
-
 		if not defn then
 			!DEPEND_AND_RETURN(`ident`, DEPEND_DEFINITION, `ident.name`)
 		end
+		ident.definition = defn
 
-		ident.definition   = defn
+		if not defn.typeInfo then
+			!DEPEND_AND_RETURN(`ident`, DEPEND_NODE_INFERRED, `defn`)
+		end
 		ident.inferredType = defn.typeInfo
 
 		v2_moveToNextPipe(state, ident)
@@ -1565,18 +1587,43 @@ end
 		local identDecl, i = itemWith1(decl.names, "name", ident.name)
 		if not identDecl then  errorInternal()  end
 
-		if not identDecl.inferredType then
+		local defn = identDecl.definition
+		if not defn then
 			!DEPEND_AND_RETURN(`ident`, DEPEND_DEFINITION, `identDecl`)
 		end
+		ident.definition = defn
 
-		ident.definition   = identDecl.definition
-		ident.inferredType = identDecl.inferredType
+		if not defn.typeInfo then
+			!DEPEND_AND_RETURN(`ident`, DEPEND_NODE_INFERRED, `defn`)
+		end
+		ident.inferredType = defn.typeInfo
 
 		v2_moveToNextPipe(state, ident)
 		return
 	end
 
 	-- At this point we're defining a declared identifier.
+
+	local defn = ident.definition
+
+	if not defn then
+		local scope = getClosestScope(decl)
+		if not scope then
+			typeError(state, ident, "Could not find what scope '%s' is in.", ident.name)
+		end
+
+		defn            = astNewNode(AstTypeDefinition, ident.token, scope)
+		defn.name       = ident
+		defn.scope      = scope
+		defn.isConstant = decl.isConstant
+
+		ident.definition = defn
+
+		local i              = #scope.definitions+1
+		scope.definitions[i] = defn
+
+		v2_addToQueue(state, defn, scope.definitions, i, !(PIPE_INFER))
+	end
 
 	for _, typeNode in ipairs(decl.types) do
 		if not typeNode.inferredType then
@@ -1628,24 +1675,27 @@ end
 			-- void
 
 		elseif valueExpr.nodeType == !(nodeTypes.AstType) then
-			local typeNode   = valueExpr
-			typeInfoForDecl  = typeNode.representedType
+			local typeNode  = valueExpr
+			typeInfoForDecl = typeNode.representedType
 
 		elseif valueExpr.nodeType == !(nodeTypes.AstIdentifier) then
 			local identOther = valueExpr
-			typeInfoForDecl  = identOther.definition.typeInfoForDeclaration
+			if not identOther.definition.typeInfo then
+				!DEPEND_AND_RETURN(`ident`, DEPEND_NODE_INFERRED, `identOther.definition`)
+			end
+			typeInfoForDecl = identOther.definition.typeInfoForDeclaration
 
 		elseif valueExpr.nodeType == !(nodeTypes.AstTypeOf) then
-			local typeOf     = valueExpr
-			typeInfoForDecl  = typeOf.expression.inferredType
+			local typeOf    = valueExpr
+			typeInfoForDecl = typeOf.expression.inferredType
 
 		elseif valueExpr.nodeType == !(nodeTypes.AstStruct) then
-			local struct     = valueExpr
-			typeInfoForDecl  = struct.representedType
+			local struct    = valueExpr
+			typeInfoForDecl = struct.representedType
 
 		elseif valueExpr.nodeType == !(nodeTypes.AstEnum) then
-			local enum       = valueExpr
-			typeInfoForDecl  = enum.representedType
+			local enum      = valueExpr
+			typeInfoForDecl = enum.representedType
 
 		else
 			errorUnhandledNodeType(valueExpr)
@@ -1672,29 +1722,18 @@ end
 		enumInfo.name  = ident.name
 	end
 
-	local scope = getClosestScope(decl)
-	if not scope then
-		typeError(state, ident, "Could not find what scope '%s' is in.", ident.name)
-	end
-
-	local defn      = astNewNode(AstTypeDefinition, ident.token, scope)
-	defn.name       = ident
-	defn.scope      = scope
-	defn.isConstant = decl.isConstant
-	defn.typeInfo   = typeInfo
+	defn.typeInfo               = typeInfo
 	defn.typeInfoForDeclaration = typeInfoForDecl -- May be nil.
+	ident.inferredType          = typeInfo
 
-	ident.definition   = defn
-	ident.inferredType = typeInfo
-
-	table.insert(scope.definitions, defn)
+	table.insert(defn.scope.definitions, defn)
 
 	!if DEBUG then
 		if debug_onlyInferTypes then
 			io.stdout:write("DEFINE ", ident.name ,":", getFriendlyTypeInfoName(typeInfo), " ")
 			if defn.isConstant then  io.stdout:write("(CONST) ")  end
 			if typeInfoForDecl then  io.stdout:write("(VALUE ", getFriendlyTypeInfoName(typeInfoForDecl), ") ")  end
-			io.stdout:write("IN ") ; astPrint(scope)
+			io.stdout:write("IN ") ; astPrint(defn.scope)
 		end
 	!end
 
@@ -1738,6 +1777,9 @@ end
 		defn = findDefinition(state, typeNode, typeNode.typeName)
 		if not defn then
 			!DEPEND_AND_RETURN(`typeNode`, DEPEND_DEFINITION, `typeNode.typeName`)
+		end
+		if not defn.typeInfo then
+			!DEPEND_AND_RETURN(`typeNode`, DEPEND_NODE_INFERRED, `defn`)
 		end
 
 		typeInfoRepresented = defn.typeInfoForDeclaration
@@ -2063,9 +2105,8 @@ end
 	if lambda.argumentsOut and not lambda.argumentsOut.inferredType then
 		!DEPEND_AND_RETURN(`lambda`, DEPEND_NODE_INFERRED, `lambda.argumentsOut`)
 	end
-	if lambda.body and lambda.body.queued.pipe <= !(PIPE_INFER) then
-		!DEPEND_AND_RETURN(`lambda`, DEPEND_NODE_INFERRED, `lambda.body`)
-	end
+
+	-- Note: We don't require the body to inferred.
 
 	lambda.inferredType = getTypeInfoForLambda(state, lambda)
 	assert(lambda.inferredType)
@@ -2079,16 +2120,46 @@ end
 	end
 
 	typeOf.inferredType = getTypeInfoForBuiltinType"type"
-	-- typeOf.representedType = typeOf.expression.inferredType
-	-- typeOf.inferredType    = getTypeInfoForBuiltinType"type"
 
 	v2_moveToNextPipe(state, typeOf)
 end
 
--- !NODE_INFERRER `function nodeInferrers.AstCast(state, cast)`
--- 	cast.targetType
--- 	cast.expression
--- end
+!NODE_INFERRER `function nodeInferrers.AstCast(state, cast)`
+	if not cast.targetType.inferredType then
+		!DEPEND_AND_RETURN(`cast`, DEPEND_NODE_INFERRED, `cast.targetType`)
+	end
+	if not cast.expression.inferredType then
+		!DEPEND_AND_RETURN(`cast`, DEPEND_NODE_INFERRED, `cast.expression`)
+	end
+
+	local castTypeInfo
+
+	if cast.targetType.nodeType == !(nodeTypes.AstType) then
+		local typeNode = cast.targetType
+		castTypeInfo   = typeNode.representedType
+	elseif cast.targetType.nodeType == !(nodeTypes.AstTypeOf) then
+		local typeOf   = cast.targetType
+		castTypeInfo   = typeOf.expression.inferredType
+	else
+		errorUnhandledNodeType(cast.targetType)
+	end
+
+	if isAny(castTypeInfo, getTypeInfoForBuiltinType"number",getTypeInfoForBuiltinType"int") then
+		if not isAny(cast.expression.inferredType, getTypeInfoForBuiltinType"number",getTypeInfoForBuiltinType"int") then
+			typeError(
+				state, cast.expression,
+				"Cannot cast from %s to %s.",
+				getFriendlyTypeInfoName(cast.expression.inferredType),
+				getFriendlyTypeInfoName(castTypeInfo)
+			)
+		end
+	else
+		errorUnhandledNodeType(cast)
+	end
+
+	cast.inferredType = castTypeInfo
+	v2_moveToNextPipe(state, cast)
+end
 
 !NODE_INFERRER `function nodeInferrers.AstStatement(state, statement)`
 	if statement.what.queued.pipe <= !(PIPE_INFER) then

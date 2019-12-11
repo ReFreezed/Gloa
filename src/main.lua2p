@@ -200,9 +200,17 @@ end
 
 
 -- Run pipes.
+!if DEBUG then
+local pipeCycles = 0
+!end
+
 !ifDEBUG`if not debug_onlyParse then`
-	local function getDeclaredIdentifierWaitingToBeDefinedWithName(queue, name, queuedToIgnore)
-		for _, queued in ipairs(queue) do
+	local state             = TyperState()
+	state.fileBuffers[path] = s
+	state.tokens            = tokens
+
+	local function getDeclaredIdentifierWaitingToBeDefinedWithName(name, queuedToIgnore)
+		for _, queued in ipairs(state, queue) do
 			if queued ~= queuedToIgnore and queued.waitingOn and queued.node.nodeType == !(nodeTypes.AstIdentifier) then
 				local ident = queued.node
 				if ident.parent == ident.declaration and ident.name == name then  return queued  end
@@ -211,18 +219,17 @@ end
 		return nil
 	end
 
-	local state             = TyperState()
-	state.fileBuffers[path] = s
-	state.tokens            = tokens
+	v2_addToQueueRecursively(state, topNode)
 
-	local queue = {} -- Should this be part of TyperState?  @Incomplete: Use one queue per pipe?
-	v2_addToQueueRecursively(state, queue, topNode)
+	for cycle = 1, math.huge do
+		!if DEBUG then
+			pipeCycles = pipeCycles+1
+		!end
 
-	for i = 1, math.huge do
 		local waitCount    = 0
 		local didSomething = false
 
-		for _, queued in ipairsr(queue) do
+		for _, queued in ipairsr(state.queue) do
 			if queued.waitingOn then
 				local dependency = queued.waitingOn
 
@@ -259,10 +266,11 @@ end
 			end
 		end
 
+		-- Pipes may have completed.
 		if waitCount == 0 then
 			local allDone = true
 
-			for _, queued in ipairs(queue) do
+			for _, queued in ipairs(state.queue) do
 				if queued.pipe <= !(PIPE_INFER) then -- TEMP
 				-- if queued.pipe < !(PIPE_DONE) then
 					allDone = false
@@ -272,23 +280,45 @@ end
 
 			if allDone then  break  end
 
+		-- Pipes are stuck.
 		elseif not didSomething then
 			-- [[ Report undefined identifier.
-			for _, queued in ipairs(queue) do
+			for _, queued in ipairs(state.queue) do
 				local dependency = queued.waitingOn
 
 				if dependency and dependency.dependType == !(DEPEND_DEFINITION) then
 					local name = dependency.dependOn
+					print('wait', name)
 
-					if not getDeclaredIdentifierWaitingToBeDefinedWithName(queue, name, queued) then
+					if not getDeclaredIdentifierWaitingToBeDefinedWithName(name, queued) then
 						typeError(state, queued.node, "Undefined identifier '%s'.", name)
 					end
 				end
 			end
 			--]]
 
+			-- [[ Report identifier waiting for definition to be defined.
+			for _, queued in ipairs(state.queue) do
+				local dependency = queued.waitingOn
+
+				if
+					dependency
+					and dependency.dependType        == !(DEPEND_NODE_INFERRED)
+					and queued.node.nodeType         == !(nodeTypes.AstIdentifier)
+					and dependency.dependOn.nodeType == !(nodeTypes.AstTypeDefinition)
+				then
+					local defn = dependency.dependOn
+
+					printerr()
+					typeMessage(io.stderr, state, defn,        "Error", "Failed inferring the type of this definition.")
+					typeMessage(io.stderr, state, queued.node, "Info",  "...this identifier is waiting for the above to finish.")
+					exitFailure()
+				end
+			end
+			--]]
+
 			-- [[ Report about-to-be-declared identifier waiting for something.
-			for _, queued in ipairs(queue) do
+			for _, queued in ipairs(state.queue) do
 				local dependency = queued.waitingOn
 
 				if
@@ -301,14 +331,14 @@ end
 
 					printerr()
 					typeMessage(io.stderr, state, expr,        "Error", "Failed inferring the type of this expression.")
-					typeMessage(io.stderr, state, queued.node, "Info",  "...this thing is waiting for the above to finish.")
+					typeMessage(io.stderr, state, queued.node, "Info",  "...this identifier is waiting for the above to finish.")
 					exitFailure()
 				end
 			end
 			--]]
 
 			-- [[ Report something waiting for something else.
-			for _, queued in ipairsr(queue) do
+			for _, queued in ipairsr(state.queue) do
 				local dependency = queued.waitingOn
 
 				if dependency and dependency.dependType == !(DEPEND_NODE_INFERRED) then
@@ -326,7 +356,7 @@ end
 		end
 
 		-- Guard against an infinite loop.
-		if i == 100 then
+		if cycle == 100 then
 			errorInternal("The pipes ran for too long. (waiting:%d)", waitCount)
 		end
 	end
@@ -377,7 +407,7 @@ end
 -- All done!
 
 !if DEBUG then
-	printf("Compilation completed in %.3f seconds", os.clock()-compilationStartTime)
+	printf("Compilation completed in %.3f seconds in %d cycles", os.clock()-compilationStartTime, pipeCycles)
 	if debug_onlyParse then
 		astPrintTree(topNode)--, io.stderr)
 	end
