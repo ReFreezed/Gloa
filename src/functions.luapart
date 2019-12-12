@@ -32,7 +32,7 @@
 	sort, sortByColumn, sortNatural, naturalCompare
 	timeIt
 	trim, triml, trimr
-	utf8Char
+	utf8Char, utf8Codepoint
 
 --============================================================]]
 
@@ -280,7 +280,7 @@ function _G.reportMessageInFile(file, buffer, path, ptr, label, agent, s, ...)
 	while true do
 		if lenPtr > #lastLinePre then  break  end
 
-		local _, i2 = lastLinePre:find("^[%z\1-\127\194-\244][\128-\191]*", lenPtr)
+		local _, i2 = lastLinePre:find(!("^"..UTF8_CHARACTER_PATTERN), lenPtr)
 
 		len    = len+1 -- The length isn't going to be perfect, depending on what Unicode characters are encountered.
 		lenPtr = i2+1
@@ -361,6 +361,36 @@ do
 		cache[cp] = cache[cp] or _utf8Char(cp)
 		return cache[cp]
 	end
+
+	-- codepoint = utf8Codepoint( string [, startBytePosition=1 ] )
+	-- It's assumed the string is valid UTF-8.
+	function _G.utf8Codepoint(s, pos)
+		pos = (pos or 1)
+		--[[
+			Bits  Last code point  Range for byte 1  Bytes
+			7     U+007F           000-127           0xxxxxxx
+			11    U+07FF           192-223           110xxxxx  10xxxxxx
+			16    U+FFFF           224-239           1110xxxx  10xxxxxx  10xxxxxx
+			21    U+1FFFFF         240-247           11110xxx  10xxxxxx  10xxxxxx  10xxxxxx
+		]]
+		local b1, b2, b3, b4 = s:byte(pos, pos+3)
+		if     b1 < 128 then  return b1
+		elseif b1 < 224 then  return (b1-192)*!(2^(1*6)) + (b2-128)
+		elseif b1 < 240 then  return (b1-224)*!(2^(2*6)) + (b2-128)*!(2^(1*6)) + (b3-128)
+		else                  return (b1-240)*!(2^(3*6)) + (b2-128)*!(2^(2*6)) + (b3-128)*!(2^(1*6)) + (b4-128)  end
+	end
+
+	--[[ UTF-8 tests:
+	printf("%s $ %s",          utf8Char(0x0024), (utf8Char(0x0024)=="$" and "ok" or "FAIL"))
+	printf("%s £ %s",          utf8Char(0x00A3), (utf8Char(0x00A3)=="£" and "ok" or "FAIL"))
+	printf("%s β %s",          utf8Char(0x03B2), (utf8Char(0x03B2)=="β" and "ok" or "FAIL"))
+	printf("%s Я %s",          utf8Char(0x042F), (utf8Char(0x042F)=="Я" and "ok" or "FAIL"))
+	printf("U+%04X U+0024 %s", utf8Codepoint"$", (utf8Codepoint"$"==0x0024 and "ok" or "FAIL"))
+	printf("U+%04X U+00A3 %s", utf8Codepoint"£", (utf8Codepoint"£"==0x00A3 and "ok" or "FAIL"))
+	printf("U+%04X U+03B2 %s", utf8Codepoint"β", (utf8Codepoint"β"==0x03B2 and "ok" or "FAIL"))
+	printf("U+%04X U+042F %s", utf8Codepoint"Я", (utf8Codepoint"Я"==0x042F and "ok" or "FAIL"))
+	os.exit(2)
+	--]]
 end
 
 

@@ -1844,6 +1844,28 @@ function _G.parseExpression(state, parentNode, minOpPrecedence)
 		putBackLastToken(state)
 		!SET_OR_RETURN `expr = parseType(state, parentNode)`
 
+	-- Unicode codepoint.
+	elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"char") then
+		tokType, tokValue = consumeNextToken(state)
+
+		if not isToken(tokType,tokValue, !(TOKEN_STRING)) then
+			!ERROR_OR_RETURN `errorParsingLast(state, "Expected a string.")`
+		elseif tokValue == "" then
+			!ERROR_OR_RETURN `errorParsingLast(state, "Expected a UTF-8 character in the string.")`
+		elseif tokValue:find!("^"..UTF8_CHARACTER_PATTERN.."$") then
+			-- void
+		elseif tokValue:find!("^"..UTF8_CHARACTER_PATTERN) then
+			!ERROR_OR_RETURN `errorParsingLast(state, "The string must contain a single UTF-8 character.")`
+		else
+			!ERROR_OR_RETURN `errorParsingLast(state, "Invalid UTF-8 string.")`
+		end
+
+		local literal       = astNewNode(AstLiteral, token, parentNode)
+		literal.literalType = !(LITERAL_INTEGER)
+		literal.value       = utf8Codepoint(tokValue)
+
+		expr = literal
+
 	-- Import/load (invalid here).
 	elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"import","load") then
 		!ERROR_OR_RETURN `errorParsingLast(state, "Invalid place for '!%s'.", tokValue)`
