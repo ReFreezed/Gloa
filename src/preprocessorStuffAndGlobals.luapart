@@ -129,7 +129,27 @@ _G.getByte = string.byte
 -- local !struct "Name[:Parent]"  { field1=value1, ... }
 -- _G.!struct    "Name[:Parent]"  { field1=value1, ... }
 do
-	local structs = {}
+	--[[
+	local TEMPLATE_STRUCT_PREALLOC_PREPARATION = trimTemplate(`
+		local __struct_$structN_preAllocated__ = {}
+		local __struct_$structN_index__        = math.huge
+	`)
+	local TEMPLATE_STRUCT_PREALLOC_FUNCTION = trimTemplate(`
+		$structName = function()
+			__struct_$structN_index__ = __struct_$structN_index__+1
+			if __struct_$structN_index__ > $count then
+				__struct_$structN_index__ = 1
+				for i = 1, $count do
+					__struct_$structN_preAllocated__[i] = $tableConstructor
+				end
+			end
+			return __struct_$structN_preAllocated__[__struct_$structN_index__]
+		end
+	`)
+	]]
+
+	local structs      = {}
+	local structNumber = 0
 
 	function _G.struct(nameAndMaybeParent) return function(fields)
 		local name, nameParent = nameAndMaybeParent:match"^([%w_]+):([%w_]+)()$"
@@ -139,8 +159,10 @@ do
 			error(F("Duplicate struct '%s'.", name), 2)
 		end
 
-		local overrides   = fields._overrides
-		fields._overrides = nil
+		local overrides     = fields._overrides
+		local preAllocate   = fields._preAllocate
+		fields._overrides   = nil
+		fields._preAllocate = nil
 
 		if nameParent then
 			local fieldsParent = structs[nameParent] or error(F("No struct '%s'.", nameParent), 2)
@@ -178,9 +200,23 @@ do
 				end
 			end
 
-			__LUA("",name,"=function()")
-			__LUA("return")__VAL(fieldsToOutput)
-			__LUA("end")
+			if preAllocate then
+				error("Pre-allocation of tables doesn't seem any faster...", 2)
+
+				--[[
+				structNumber = structNumber+1
+
+				local values = {structN=structNumber, structName=name, count=preAllocate, tableConstructor=toLua(fieldsToOutput)}
+
+				preprocessorOutputAtTopOfFile(templateToLua(TEMPLATE_STRUCT_PREALLOC_PREPARATION, values))
+				__LUA(templateToLua(TEMPLATE_STRUCT_PREALLOC_FUNCTION, values))
+				]]
+
+			else
+				__LUA(name,"=function()")
+					__LUA("return")__VAL(fieldsToOutput)
+				__LUA("end")
+			end
 		end
 	end end
 end

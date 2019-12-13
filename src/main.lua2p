@@ -147,7 +147,9 @@ if not silent then  print("Compiling "..path:gsub("^.*/", ""))  end
 
 s = s:gsub("\r\n?", "\n") -- Normalize line endings.  @Robustness: Handle the uncommon occurrence of \n\r.
 
-local tokens = tokenize(s, path)
+local lexingStartTime = os.clock()
+local tokens          = tokenize(s, path)
+local lexingEndTime   = os.clock()
 
 
 
@@ -191,7 +193,9 @@ local state             = ParseState()
 state.fileBuffers[path] = s
 state.tokens            = tokens
 
-local topNode = parseFileScope(state, path)
+local parseStartTime    = os.clock()
+local topNode           = parseFileScope(state, path)
+local parsingEndTime    = os.clock()
 
 if peekNextToken(state) then
 	errorParsingNext(state, "Expected the end of the file.")
@@ -200,8 +204,11 @@ end
 
 
 -- Run pipes.
+local pipesStartTime = os.clock()
+
 !if DEBUG then
 local pipeCycles = 0
+local queueSize  = 0
 !end
 
 !ifDEBUG`if not debug_onlyParse then`
@@ -210,8 +217,8 @@ local pipeCycles = 0
 	state.tokens            = tokens
 
 	local function getDeclaredIdentifierWaitingToBeDefinedWithName(name, queuedToIgnore)
-		for _, queued in ipairs(state, queue) do
-			if queued ~= queuedToIgnore and queued.waitingOn and queued.node.nodeType == !(nodeTypes.AstIdentifier) then
+		for _, queued in ipairs(state.queue) do
+			if queued ~= queuedToIgnore and not queued.removed and queued.waitingOn and queued.node.nodeType == !(nodeTypes.AstIdentifier) then
 				local ident = queued.node
 				if ident.parent == ident.declaration and ident.name == name then  return queued  end
 			end
@@ -224,45 +231,48 @@ local pipeCycles = 0
 	for cycle = 1, math.huge do
 		!if DEBUG then
 			pipeCycles = pipeCycles+1
+			queueSize  = #state.queue
 		!end
 
 		local waitCount    = 0
 		local didSomething = false
 
 		for _, queued in ipairs(state.queue) do -- Should we use ipairs() or ipairsr()?
-			if queued.waitingOn then
-				local dependency = queued.waitingOn
+			if not queued.removed then
+				if queued.waitingOn then
+					local dependency = queued.waitingOn
 
-				if dependency.dependType == !(DEPEND_DEFINITION) then
-					local name = dependency.dependOn
-					-- @Speed: Only call findDefinition() if it's reported that a definition with the awaited name has been defined.
-					if findDefinition(state, queued.node, name) then
-						queued.waitingOn = nil
-					end
+					if dependency.dependType == !(DEPEND_DEFINITION) then
+						local name = dependency.dependOn
+						-- @Speed: Only call findDefinition() if it's reported that a definition with the awaited name has been defined.
+						if findDefinition(state, queued.node, name) then
+							queued.waitingOn = nil
+						end
 
-				elseif dependency.dependType == !(DEPEND_NODE_INFERRED) then
-					if dependency.dependOn.queued.pipe > !(PIPE_INFER) then
-					-- if dependency.dependOn.inferredType then -- Invalid! dependOn is not necessarily an expression.
-						queued.waitingOn = nil
+					elseif dependency.dependType == !(DEPEND_NODE_INFERRED) then
+						if dependency.dependOn.pipe > !(PIPE_INFER) then
+						-- if dependency.dependOn.node.inferredType then -- Invalid! dependOn.node is not necessarily an expression.
+							queued.waitingOn = nil
+						end
+
+					else
+						errorInternal("%d", dependency.dependType)
 					end
+				end
+
+				if queued.waitingOn then
+					waitCount = waitCount+1
+
+				elseif queued.pipe == !(PIPE_INFER) then
+					didSomething = true
+					v2_inferNode(state, queued.node)
+
+				elseif queued.pipe == !(PIPE_BYTECODE) then
+					-- @Incomplete: Bytecode.
 
 				else
-					errorInternal("%d", dependency.dependType)
+					-- @Incomplete: More pipes?
 				end
-			end
-
-			if queued.waitingOn then
-				waitCount = waitCount+1
-
-			elseif queued.pipe == !(PIPE_INFER) then
-				didSomething = true
-				v2_inferNode(state, queued.node)
-
-			elseif queued.pipe == !(PIPE_BYTECODE) then
-				-- @Incomplete: Bytecode.
-
-			else
-				-- @Incomplete: More pipes?
 			end
 		end
 
@@ -271,8 +281,8 @@ local pipeCycles = 0
 			local allDone = true
 
 			for _, queued in ipairs(state.queue) do
-				if queued.pipe <= !(PIPE_INFER) then -- TEMP
-				-- if queued.pipe < !(PIPE_DONE) then
+				if not queued.removed and queued.pipe <= !(PIPE_INFER) then -- TEMP
+				-- if not queued.removed and queued.pipe < !(PIPE_DONE) then
 					allDone = false
 					break
 				end
@@ -284,11 +294,10 @@ local pipeCycles = 0
 		elseif not didSomething then
 			-- [[ Report undefined identifier.
 			for _, queued in ipairs(state.queue) do
-				local dependency = queued.waitingOn
+				local dependency = not queued.removed and queued.waitingOn
 
 				if dependency and dependency.dependType == !(DEPEND_DEFINITION) then
 					local name = dependency.dependOn
-					print('wait', name)
 
 					if not getDeclaredIdentifierWaitingToBeDefinedWithName(name, queued) then
 						typeError(state, queued.node, "Undefined identifier '%s'.", name)
@@ -299,15 +308,15 @@ local pipeCycles = 0
 
 			-- [[ Report identifier waiting for definition to be defined.
 			for _, queued in ipairs(state.queue) do
-				local dependency = queued.waitingOn
+				local dependency = not queued.removed and queued.waitingOn
 
 				if
 					dependency
-					and dependency.dependType        == !(DEPEND_NODE_INFERRED)
-					and queued.node.nodeType         == !(nodeTypes.AstIdentifier)
-					and dependency.dependOn.nodeType == !(nodeTypes.AstTypeDefinition)
+					and dependency.dependType             == !(DEPEND_NODE_INFERRED)
+					and queued.node.nodeType              == !(nodeTypes.AstIdentifier)
+					and dependency.dependOn.node.nodeType == !(nodeTypes.AstTypeDefinition)
 				then
-					local defn = dependency.dependOn
+					local defn = dependency.dependOn.node
 
 					printerr()
 					typeMessage(io.stderr, state, defn,        "Error", "Failed inferring the type of this definition.")
@@ -319,7 +328,7 @@ local pipeCycles = 0
 
 			-- [[ Report about-to-be-declared identifier waiting for something.
 			for _, queued in ipairs(state.queue) do
-				local dependency = queued.waitingOn
+				local dependency = not queued.removed and queued.waitingOn
 
 				if
 					dependency
@@ -327,7 +336,7 @@ local pipeCycles = 0
 					and queued.node.nodeType  == !(nodeTypes.AstIdentifier)
 					and queued.node.parent    == queued.node.declaration
 				then
-					local expr = dependency.dependOn
+					local expr = dependency.dependOn.node
 
 					printerr()
 					typeMessage(io.stderr, state, expr,        "Error", "Failed inferring the type of this expression.")
@@ -339,10 +348,10 @@ local pipeCycles = 0
 
 			-- [[ Report something waiting for something else.
 			for _, queued in ipairsr(state.queue) do
-				local dependency = queued.waitingOn
+				local dependency = not queued.removed and queued.waitingOn
 
 				if dependency and dependency.dependType == !(DEPEND_NODE_INFERRED) then
-					local expr = dependency.dependOn
+					local expr = dependency.dependOn.node
 
 					printerr()
 					typeMessage(io.stderr, state, expr,        "Error", "Failed inferring the type of this expression.")
@@ -361,6 +370,8 @@ local pipeCycles = 0
 		end
 	end
 !ifDEBUG`end`
+
+local pipesEndTime = os.clock()
 
 --[[ OLD:
 -- Infer types.
@@ -407,17 +418,14 @@ local pipeCycles = 0
 -- All done!
 
 !if DEBUG then
-	printf("Compilation completed in %.3f seconds in %d cycles", os.clock()-compilationStartTime, pipeCycles)
-	if debug_onlyParse then
-		astPrintTree(topNode)--, io.stderr)
-	end
-	print("██████████████████████")
-	print("████    ████  ████  ██")
-	print("██  ████  ██  ██  ████")
-	print("██  ████  ██    ██████")
-	print("██  ████  ██  ██  ████")
-	print("████    ████  ████  ██")
-	print("██████████████████████")
+	if debug_onlyParse then  astPrintTree(topNode)  end
+	printf("██████████████████████ Total:   %.3f sec", os.clock()-compilationStartTime)
+	printf("████    ████  ████  ██ Lexing:  %.3f sec", lexingEndTime-lexingStartTime)
+	printf("██  ████  ██  ██  ████ Parsing: %.3f sec", parsingEndTime-parseStartTime)
+	printf("██  ████  ██    ██████ Pipes:   %.3f sec", pipesEndTime-pipesStartTime)
+	printf("██  ████  ██  ██  ████ Queue:   %d",       queueSize)
+	printf("████    ████  ████  ██ Cycles:  %d",       pipeCycles)
+	printf("██████████████████████")
 !else
 	if not silent then
 		printf("Compilation completed in %.3f seconds", os.clock()-compilationStartTime)

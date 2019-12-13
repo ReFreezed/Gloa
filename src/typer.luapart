@@ -1424,14 +1424,15 @@ end
 
 
 local !struct"Dependency"{ -- @Cleanup: Rename to something with "wait"?
-	dependent  = NIL,
+	dependent  = NIL, -- Queued
 	dependType = 0,   -- DEPEND_DEFINITION|DEPEND_NODE_INFERRED
-	dependOn   = NIL, -- The value depends on what dependType is.
+	dependOn   = NIL, -- string|Queued  (The value depends on what dependType is.)
 }
 
+-- v2_addDependency( state, dependent, DEPEND_DEFINITION,    name    )
+-- v2_addDependency( state, dependent, DEPEND_NODE_INFERRED, astNode )
 function _G.v2_addDependency(state, dependent, dependType, dependOn)
 	assert(not dependent.queued.waitingOn)
-	assert(not itemWith3(state.dependencies, "dependent",dependent, "dependType",dependType, "dependOn",dependOn))
 
 	!if DEBUG then
 		if dependType == !(DEPEND_DEFINITION) then
@@ -1445,15 +1446,18 @@ function _G.v2_addDependency(state, dependent, dependType, dependOn)
 
 	if dependType == !(DEPEND_NODE_INFERRED) then
 		assert(dependent ~= dependOn)
+		dependOn = dependOn.queued
 	end
 
 	local dependency      = Dependency()
-	dependency.dependent  = dependent
+	dependency.dependent  = dependent.queued
 	dependency.dependType = dependType
 	dependency.dependOn   = dependOn
-	table.insert(state.dependencies, dependency)
 
 	dependent.queued.waitingOn = dependency
+
+	assert(not itemWith3(state.dependencies, "dependent",dependency.dependent, "dependType",dependency.dependType, "dependOn",dependency.dependOn))
+	table.insert(state.dependencies, dependency)
 
 	!if DEBUG then
 		--[[
@@ -1465,7 +1469,7 @@ function _G.v2_addDependency(state, dependent, dependType, dependOn)
 			if dependType == !(DEPEND_DEFINITION) then
 				print(dependOn)
 			elseif dependType == !(DEPEND_NODE_INFERRED) then
-				astPrint(dependOn)
+				astPrint(dependOn.node)
 			else
 				print("? ("..tostring(dependOn)..")")
 			end
@@ -1482,6 +1486,7 @@ local !struct"Queued"{
 	key       = NIL,
 	pipe      = 0,
 	waitingOn = NIL, -- Dependency
+	removed   = false,
 }
 
 function _G.v2_addToQueue(state, node, container, key, pipe)
@@ -1504,6 +1509,19 @@ function _G.v2_addToQueue(state, node, container, key, pipe)
 	end
 end
 
+function _G.v2_scheduleRemovalFromQueueRecursively(state, topNode)
+	astVisitAllNodes(topNode, function(node)
+		node.queued.removed = true
+	end)
+end
+function _G.v2_scheduleRemovalOfChildrenFromQueueRecursively(state, topNode)
+	astVisitAllNodes(topNode, function(node)
+		if node ~= topNode then
+			node.queued.removed = true
+		end
+	end)
+end
+
 function _G.v2_addToQueueRecursively(state, topNode)
 	astVisitAllNodesLeavesFirst(topNode, function(node, container, key)
 		-- astPrint(node)
@@ -1511,8 +1529,10 @@ function _G.v2_addToQueueRecursively(state, topNode)
 	end)
 end
 
-function _G.v2_replaceNode(nodeOld, nodeNew)
-	local queued   = nodeOld.queued
+function _G.v2_replaceQueuedNode(state, nodeOld, nodeNew)
+	assert(not nodeNew.queued)
+
+	local queued   = nodeOld.queued or errorInternal()
 	queued.node    = nodeNew
 	nodeOld.queued = nil
 	nodeNew.queued = queued
@@ -1830,7 +1850,7 @@ end
 			if structInfo.arguments[1] then
 				errorInternal("@Incomplete: Struct arguments.")
 			elseif typeNode.arguments then
-				typeError(state, typeNode.arguments[1], "Parameters for structs are not supported yet.")
+				typeError(state, astGetExpressionVisuallyFurthestToTheLeft(typeNode.arguments[1]), "Parameters for structs are not supported yet.")
 			end
 
 		elseif typeInfo.tag == !(typeTags.TypeInfoEnum) then
@@ -1905,7 +1925,7 @@ end
 	if #call.arguments < #effectiveCalleeTypeInfo.argumentTypesIn then
 		typeError(state, call, "Missing arguments.")
 	elseif #call.arguments > #effectiveCalleeTypeInfo.argumentTypesIn then
-		typeError(state, call.arguments[#effectiveCalleeTypeInfo.argumentTypesIn+1], "Too many arguments.")
+		typeError(state, astGetExpressionVisuallyFurthestToTheLeft(call.arguments[#effectiveCalleeTypeInfo.argumentTypesIn+1]), "Too many arguments.")
 	end
 
 	for i, argExpr in ipairs(call.arguments) do
@@ -1915,7 +1935,7 @@ end
 			-- @Cleanup: Define isTypeCompatibleWith(typeToCheck, otherType) or something.
 			-- @UX: Tell the name of the argument. (Probably only possible for constants, and maybe not all. Not sure!)
 			typeError(
-				state, argExpr,
+				state, astGetExpressionVisuallyFurthestToTheLeft(argExpr),
 				"Wrong type for argument #%d. (Wanted %s, got %s)",
 				i,
 				getFriendlyTypeInfoName(typeInfoWanted),
@@ -1947,8 +1967,29 @@ end
 
 	-- @Incomplete: decl.notes (if we make them structured)
 
+	if decl.assignment then
+		local scope              = getClosestScope(decl) or errorInternal()
+		local scopeIsDeclarative = isScopeDeclarative(scope)
+
+		if scopeIsDeclarative or decl.isConstant then
+			for i, ident in ipairs(decl.names) do
+				local valueExpr = v2_getAssignmentValue(state, ident, decl.assignment.values, i)
+
+				if not v2_getLiteralValueFromExpressionIfConstant(state, valueExpr) then
+					typeError(
+						state, astGetExpressionVisuallyFurthestToTheLeft(valueExpr),
+						"Value for declared %s '%s' is not a constant expression.%s",
+						(decl.isConstant and "constant" or "variable"),
+						ident.name,
+						(scopeIsDeclarative and not decl.isConstant and " (All values in declarative scopes must be contant.)" or "")
+					)
+				end
+			end
+		end
+	end
+
 	for i, ident in ipairs(decl.names) do
-		decl.inferredTypes[i] = ident.inferredType or errorInternal()
+		decl.inferredTypes[i] = ident.inferredType or errorInternal() -- Is decl.inferredTypes needed? @Cleanup
 	end
 
 	v2_moveToNextPipe(state, decl)
@@ -1983,9 +2024,6 @@ end
 			)
 		end
 
-	elseif unary.operation == "#" then
-		errorInternal("@Incomplete: Length operator.")
-
 	elseif unary.operation == "not" then
 		if typeInfo ~= getTypeInfoForBuiltinType"bool" then
 			typeError(state, unary.expression,
@@ -1994,12 +2032,59 @@ end
 			)
 		end
 
+	elseif unary.operation == "#" then
+		errorInternal("@Incomplete: Length operator.")
+
 	else
 		errorUnhandledNodeType(unary)
 	end
 
 	unary.inferredType = typeInfo
 	v2_moveToNextPipe(state, unary)
+
+	--
+	-- Inferring complete! Now fold the expression if it's constant.
+	--
+
+	-- Not sure if all the following is necessary. Won't we be doing the same thing
+	-- when running bytecode? Is it faster to do this here?
+
+	local isConst, v = v2_getLiteralValueFromExpressionIfConstant(state, unary.expression)
+	if not isConst then
+		-- void
+
+	!for _, opArithmetic in ipairs{"+","-"} do
+	elseif unary.operation == !(opArithmetic) then
+		local literal = astNewNode(AstLiteral, unary.token, unary.parent)
+
+		literal.literalType
+			=  typeInfo == getTypeInfoForBuiltinType"int"    and !(LITERAL_INTEGER)
+			or typeInfo == getTypeInfoForBuiltinType"number" and !(LITERAL_NUMBER)
+			or errorInternal(getFriendlyTypeInfoName(typeInfo))
+
+		literal.value        = !!(opArithmetic ~= "+" and opArithmetic or "") v
+		literal.inferredType = typeInfo
+
+		v2_scheduleRemovalOfChildrenFromQueueRecursively(state, unary)
+		v2_replaceQueuedNode(state, unary, literal)
+	!end
+
+	elseif unary.operation == "not" then
+		local literal        = astNewNode(AstLiteral, unary.token, unary.parent)
+		literal.literalType  = !(LITERAL_BOOLEAN)
+		literal.value        = not v
+		literal.inferredType = typeInfo
+		v2_scheduleRemovalOfChildrenFromQueueRecursively(state, unary)
+		v2_replaceQueuedNode(state, unary, literal)
+
+	elseif unary.operation == "#" then
+		errorUnhandledNodeType(unary)
+
+	else
+		errorUnhandledNodeType(unary)
+	end
+
+	-- astPrintTree(unary.parent)
 end
 
 !NODE_INFERRER `function nodeInferrers.AstBinary(state, binary)`
@@ -2025,7 +2110,7 @@ end
 	end
 
 	-- Numeric operation.
-	if isAny(binary.operation, "+","-","*","/","//","^","%") then
+	if isAny(binary.operation, "+","-","*","^","%","/","//") then
 		if not isAny(typeInfoL,
 			getTypeInfoForBuiltinType"int",
 			getTypeInfoForBuiltinType"number"
@@ -2037,13 +2122,9 @@ end
 			)
 		end
 
-		if isAny(binary.operation, "/") then -- Result in number.
-			typeInfo = getTypeInfoForBuiltinType"number"
-		elseif isAny(binary.operation, "//") then -- Result in int.
-			typeInfo = getTypeInfoForBuiltinType"int"
-		else -- Keep type.
-			typeInfo = typeInfoL
-		end
+		if     binary.operation == "/"  then  typeInfo = getTypeInfoForBuiltinType"number" -- Cast to number.
+		elseif binary.operation == "//" then  typeInfo = getTypeInfoForBuiltinType"int"    -- Cast to int.
+		else                                  typeInfo = typeInfoL  end                    -- Keep type.
 
 	-- Comparison.
 	elseif isAny(binary.operation, "<",">","<=",">=") then
@@ -2091,6 +2172,79 @@ end
 	binary.inferredType = typeInfo
 
 	v2_moveToNextPipe(state, binary)
+
+	--
+	-- Inferring complete! Now fold the expression if it's constant.
+	-- @Incomplete: Fold these kinds of expressions: (1+x)+2 => (1+2)+x => 3+x
+	-- @Incomplete: Fold these kinds of expressions: 1 + -x => 1 - x
+	--
+
+	-- Not sure if all the following is necessary. Won't we be doing the same thing
+	-- when running bytecode? Is it faster to do this here?
+
+	local isConstL, valueL = v2_getLiteralValueFromExpressionIfConstant(state, binary.left)
+	local isConstR, valueR = v2_getLiteralValueFromExpressionIfConstant(state, binary.right)
+	if not (isConstL and isConstR) then
+		-- void
+
+	!for _, opArithmeticKeepType in ipairs{"+","-","*","^","%"} do
+	elseif binary.operation == !(opArithmeticKeepType) then
+		local literal = astNewNode(AstLiteral, binary.token, binary.parent)
+
+		literal.literalType
+			=  typeInfo == getTypeInfoForBuiltinType"int"    and !(LITERAL_INTEGER)
+			or typeInfo == getTypeInfoForBuiltinType"number" and !(LITERAL_NUMBER)
+			or errorInternal(getFriendlyTypeInfoName(typeInfo))
+
+		literal.value        = valueL !!(opArithmeticKeepType) valueR
+		literal.inferredType = typeInfo
+
+		v2_scheduleRemovalOfChildrenFromQueueRecursively(state, binary)
+		v2_replaceQueuedNode(state, binary, literal)
+	!end
+
+	elseif binary.operation == "/" then
+		local literal        = astNewNode(AstLiteral, binary.token, binary.parent)
+		literal.literalType  = !(LITERAL_NUMBER)
+		literal.value        = valueL/valueR
+		literal.inferredType = typeInfo
+		v2_scheduleRemovalOfChildrenFromQueueRecursively(state, binary)
+		v2_replaceQueuedNode(state, binary, literal)
+
+	elseif binary.operation == "//" then
+		local literal        = astNewNode(AstLiteral, binary.token, binary.parent)
+		literal.literalType  = !(LITERAL_INTEGER)
+		literal.value        = math.floor(valueL/valueR) -- Do we need to floor valueL and valueR before the division too?
+		literal.inferredType = typeInfo
+		v2_scheduleRemovalOfChildrenFromQueueRecursively(state, binary)
+		v2_replaceQueuedNode(state, binary, literal)
+
+	!for _, opComparison in ipairs{"<",">","<=",">=","==","~=","and","or"} do
+	elseif binary.operation == !(opComparison) then
+		local literal        = astNewNode(AstLiteral, binary.token, binary.parent)
+		literal.literalType  = !(LITERAL_BOOLEAN)
+		literal.value        = valueL !!(opComparison) valueR
+		literal.inferredType = typeInfo
+		v2_scheduleRemovalOfChildrenFromQueueRecursively(state, binary)
+		v2_replaceQueuedNode(state, binary, literal)
+	!end
+
+	elseif binary.operation == ".." then
+		local literal        = astNewNode(AstLiteral, binary.token, binary.parent)
+		literal.literalType  = !(LITERAL_BOOLEAN)
+		literal.value        = valueL..valueR -- @Speed: Concatinate more than two values at a time. (Probably need to update parsing stage.)
+		literal.inferredType = typeInfo
+		v2_replaceQueuedNode(state, binary, literal)
+		v2_scheduleRemovalOfChildrenFromQueueRecursively(state, binary)
+
+	elseif binary.operation == "." then
+		errorUnhandledNodeType(binary)
+
+	else
+		errorUnhandledNodeType(binary)
+	end
+
+	-- astPrintTree(binary.parent)
 end
 
 -- !NODE_INFERRER `function nodeInferrers.AstTable(state, tableNode)`
@@ -2309,6 +2463,105 @@ end
 		end
 	end
 
+	local scope = getClosestScope(returnNode) or errorInternal()
+
+	while scope.nodeType ~= !(nodeTypes.AstLambda) do
+		if not isScopeImperative(scope) then -- This may eventually be AstFileScope, at most.
+			-- I think this is an internal compiler error, actually. Parsing must have goofed up or something.
+			typeError(state, scope, "Return statement is not in a function.")
+		end
+
+		scope = getClosestScope(scope) or errorInternal()
+	end
+
+	local lambda = scope
+
+	if not lambda.inferredType then
+		!DEPEND_AND_RETURN(`returnNode`, DEPEND_NODE_INFERRED, `lambda`)
+	end
+
+	--
+	-- From now on we check that the correct stuff is returned.
+	-- @Cleanup: Use v2_getAssignmentValue() or something here?
+	--
+
+	local argTypesOut      = lambda.inferredType.argumentTypesOut
+	local lastValueExpr    = getLast(returnNode.values)
+	local returnValueCount = #returnNode.values
+
+	local lastValueIsListToUnpack
+		=   lastValueExpr ~= nil
+		and lastValueExpr.nodeType == !(nodeTypes.AstCall)
+		and not lastValueExpr.surroundedByParenthesis
+		and lastValueExpr.inferredType.tag == !(typeTags.TypeInfoList)
+
+	if lastValueIsListToUnpack then
+		local listSig    = lastValueExpr.inferredType
+		returnValueCount = returnValueCount - 1 + #listSig
+	end
+
+	if returnValueCount == #argTypesOut then
+		-- void
+
+	-- Too few values.
+	elseif returnValueCount < #argTypesOut then
+		-- @UX: Show a better message if lastValueExpr is a function call (not wrapped in parenthesis).
+		typeError(state, returnNode, "Too few values to return. (Expected %d, got %d)", #argTypesOut, returnValueCount)
+
+	-- Too many values.
+	elseif not lastValueIsListToUnpack then
+		local expr = astGetExpressionVisuallyFurthestToTheLeft(returnNode.values[#argTypesOut+1])
+		typeError(state, expr, "Too many values to return. (Expected %d, got %d)", #argTypesOut, returnValueCount)
+	else
+		local callOutArgCount = #returnNode.values-1
+		local listSig         = lastValueExpr.inferredType
+		typeError(state, lastValueExpr, "Too many values returned from call. (Expected %d, got %d)", #argTypesOut-callOutArgCount, #listSig)
+	end
+
+	if lastValueIsListToUnpack then
+		local listSig = lastValueExpr.inferredType
+
+		for i = #returnNode.values, returnValueCount do
+			local callOutArgIndex = i-#returnNode.values+1
+			local typeInfo        = listSig[callOutArgIndex]
+
+			if typeInfo ~= argTypesOut[i] then
+				-- @Cleanup: Define isTypeCompatibleWith(typeToCheck, otherType) or something.
+				typeError(state, lastValueExpr,
+					"Return value #%d from call is of incorrect type. (Wanted %s, got %s)",
+					callOutArgIndex,
+					getFriendlyTypeInfoName(argTypesOut[i]),
+					getFriendlyTypeInfoName(typeInfo)
+				)
+			end
+		end
+	end
+
+	for i = 1, #returnNode.values - (lastValueIsListToUnpack and 1 or 0) do
+		local expr     = returnNode.values[i]
+		local typeInfo = expr.inferredType
+
+		if typeInfo.tag == !(typeTags.TypeInfoList) then
+			local listSig = typeInfo
+			typeInfo      = listSig[1]
+
+			if not typeInfo then
+				-- Note: TypeInfoLists are only used when calling functions (at the moment, at least). 2019-12-06
+				typeError(state, expr, "Function call returns nothing. (Expected at least one value.)")
+			end
+		end
+
+		if typeInfo ~= argTypesOut[i] then
+			-- @Cleanup: Define isTypeCompatibleWith(typeToCheck, otherType) or something.
+			typeError(state, astGetExpressionVisuallyFurthestToTheLeft(expr),
+				"Return value #%d is of incorrect type. (Wanted %s, got %s)",
+				i,
+				getFriendlyTypeInfoName(argTypesOut[i]),
+				getFriendlyTypeInfoName(typeInfo)
+			)
+		end
+	end
+
 	v2_moveToNextPipe(state, returnNode)
 end
 
@@ -2455,6 +2708,61 @@ end
 function _G.v2_inferNode(state, node)
 	local nodeInferrer = nodeInferrers[node.nodeType] or errorUnhandledNodeType(node)
 	return nodeInferrer(state, node)
+end
+
+
+
+-- expressionIsContant, value = v2_getLiteralValueFromExpressionIfConstant( typerState, expression )
+-- Note: It's assumed that the expression tree has all types figured out.
+function _G.v2_getLiteralValueFromExpressionIfConstant(state, expr)
+	-- @Incomplete: Return an AstNode?
+
+	if expr.nodeType == !(nodeTypes.AstLiteral) then
+		local literal = expr
+		return true, literal.value
+
+	elseif expr.nodeType == !(nodeTypes.AstIdentifier) then
+		local ident = expr
+		local defn  = ident.definition
+		local decl  = defn.name.declaration or errorInternal()
+
+		if not decl.isConstant then  return false, nil  end
+
+		assert(decl.assignment) -- Constant declarations must have a value.
+
+		local i         = indexWith1(decl.names, "name", ident.name) or errorInternal()
+		local valueExpr = v2_getAssignmentValue(state, ident, decl.assignment.values, i)
+
+		return v2_getLiteralValueFromExpressionIfConstant(state, valueExpr)
+
+	elseif isAny(expr.nodeType, !(nodeTypes.AstType),!(nodeTypes.AstTypeOf)) then
+		return true, nil -- All types are constant, just like literals.
+
+	elseif isAny(expr.nodeType, !(nodeTypes.AstLambda),!(nodeTypes.AstStruct),!(nodeTypes.AstEnum)) then
+		return true, nil -- Lambdas (which are function signatures), structs and enums are types (which are constant, just like literals).
+
+	elseif expr.nodeType == !(nodeTypes.AstCast) then
+		local cast       = expr
+		local isConst, v = v2_getLiteralValueFromExpressionIfConstant(state, cast.expression)
+		if not isConst then  return false, nil  end
+
+		if cast.inferredType == getTypeInfoForBuiltinType"int" then
+			return true, math.floor(v)
+		elseif cast.inferredType == getTypeInfoForBuiltinType"number" then
+			return true, v
+		else
+			errorInternal("Unhandled cast type: %s", getFriendlyTypeInfoName(cast.inferredType))
+		end
+
+	elseif isAny(expr.nodeType, !(nodeTypes.AstBinary),!(nodeTypes.AstBinary)) then
+		return false, nil -- We don't check child nodes as those should have been folded into 'expr' where this function is called.
+
+	elseif expr.nodeType == !(nodeTypes.AstCall) then
+		return false, nil -- Calls are always a runtime operation.
+
+	else
+		errorUnhandledNodeType(expr)
+	end
 end
 
 

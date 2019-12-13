@@ -57,20 +57,35 @@ local pp                    = chunk()
 pp.metaEnvironment.DEBUG    = debugMode
 pp.metaEnvironment.DEBUGGER = debugMode and debugger
 
+local luaSegments = {}
+function pp.metaEnvironment.preprocessorOutputAtTopOfFile(lua)
+	table.insert(luaSegments, lua)
+end
+
+function pp.metaEnvironment.trimTemplate(lua)
+	return (lua:gsub("%s+", " "):gsub("^ ", ""):gsub(" $", ""))
+end
+function pp.metaEnvironment.templateToLua(template, values)
+	return (template:gsub("$(%w+)", values))
+end
+
 pp.processFile{
 	pathIn          = DIR_HERE.."/main.lua2p",
 	pathOut         = pathGloaOut,
 	pathMeta        = pathGloaOut:gsub("%.%w+", ".meta%0"),
 
 	debug           = false,
-	addLineNumbers  = false,
-
 	backtickStrings = true,
 
 	onInsert = function(path)
 		if not silent then  print("Inserting "..path)  end
 
 		return assert(pp.getFileContents(DIR_HERE.."/"..path))
+	end,
+
+	onAfterMeta = function(lua)
+		table.insert(luaSegments, lua)
+		return table.concat(luaSegments, "\n")
 	end,
 
 	onError = function(err)
