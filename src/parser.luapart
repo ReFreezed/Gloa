@@ -97,11 +97,12 @@ end
 }
 _G.!structAst"AstTypeDefinition:_AstNode"{ -- Created during type phase.
 	-- Type phase:
-	name       = NIL, -- AstIdentifier|AstVararg
-	scope      = NIL, -- AstGlobalScope|AstFileScope|AstBlock|AstStruct|AstFor|AstLambda|AstEnum (This should be the same as the parent.)
+	name       = NIL,   -- AstIdentifier|AstVararg
+	scope      = NIL,   -- AstGlobalScope|AstFileScope|AstBlock|AstStruct|AstFor|AstLambda|AstEnum (This should be the same as the parent.)
 	isConstant = false,
-	typeInfo   = NIL, -- TypeInfo
-	typeInfoForDeclaration = NIL, -- Type of value in type declarations. Is used when type aliases are specified as types.
+	canShadow  = false, -- @Cleanup: Probably don't need to store this here.
+	typeInfo   = NIL,   -- TypeInfo
+	typeInfoForDeclaration = NIL, -- Type represented by the value in type declarations. If this is set then the identifier can be used in places where a type is expected.
 }
 
 !structAst"_AstExpression:_AstNode"{
@@ -173,7 +174,8 @@ _G.!structAst"AstLambda:_AstExpression"{
 	argumentsOut = NIL, -- AstArguments
 	body         = NIL, -- AstBlock  (If this is nil then the lambda is a function signature.)
 	-- Type phase:
-	definitions  = {},  -- []AstTypeDefinition (Note that the body has it's own definitions.)
+	definitions   = {},  -- []AstTypeDefinition (Note that the body has it's own definitions.)
+	definedLocals = {},
 }
 _G.!structAst"AstTypeOf:_AstExpression"{
 	expression = NIL,
@@ -199,6 +201,7 @@ _G.!structAst"AstDeclaration:_AstNode"{
 	notes              = {},  -- []AstNote  @Incomplete: Nodes.
 	isGlobalOrExported = false,
 	isConstant         = false,
+	canShadow          = false,
 
 	-- assignment      = nil means all names gets their default value (which depends on the type, of which there must be only one).
 	assignment         = NIL, -- AstAssignment
@@ -244,7 +247,8 @@ _G.!structAst"AstFor:_AstControlStructure"{
 	expressions = {},  -- []AstExpression
 	body        = NIL, -- AstBlock
 	-- Type phase:
-	definitions = {},  -- []AstTypeDefinition (Note that the body has it's own definitions.)
+	definitions   = {},  -- []AstTypeDefinition (Note that the body has it's own definitions.)
+	definedLocals = {},
 }
 
 !structAst"_AstDeclarativeScope:_AstNode"{
@@ -252,7 +256,8 @@ _G.!structAst"AstFor:_AstControlStructure"{
 	imports            = {}, -- []AstImport
 	-- includedNamespaces = {}, -- []AstImport  @Depricated
 	-- Type phase:
-	definitions        = {}, -- []AstTypeDefinition
+	definitions   = {}, -- []AstTypeDefinition
+	definedLocals = {},
 }
 _G.!structAst"AstStruct:_AstDeclarativeScope"{
 	arguments       = NIL, -- AstArguments
@@ -276,7 +281,8 @@ _G.!structAst"AstGlobalScope:_AstDeclarativeScope"{
 _G.!structAst"AstBlock:_AstNode"{
 	-- [1]=statement1, ...
 	-- Type phase:
-	definitions = {}, -- []AstTypeDefinition
+	definitions   = {}, -- []AstTypeDefinition
+	definedLocals = {},
 }
 
 _G.AST_NODE_TYPE_NAMES = !(nodeTypeNames)
@@ -669,6 +675,16 @@ function _G.parseArguments(state, parentNode, isInput, placeDeclared)
 			end
 		end
 
+		-- Set if shadowing is allowed.
+		tokType, tokValue = peekNextToken(state)
+
+		if isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"shadow") then
+			consumeNextToken(state)
+			for _, arg in ipairs(argGroup) do
+				arg.declaration.canShadow = true
+			end
+		end
+
 		-- @Incomplete: Set arg.isRequired.
 		-- if isInput then
 		-- 	arg.isRequired = (arg.declaration.values[1] == nil)
@@ -827,7 +843,8 @@ function _G.parseEnum(state, parentNode)
 	return enum
 end
 
--- declaration = parseDeclaration( compilationState, parentNode [, declarationType=DECLARATION_NORMAL ] )
+-- declaration     = parseDeclaration( compilationState, parentNode [, declarationType=DECLARATION_NORMAL ] )
+-- declarationType = DECLARATION_NORMAL|DECLARATION_STRUCT|DECLARATION_ENUM
 function _G.parseDeclaration(state, parentNode, declType)
 	--[[
 	local a = 0         -- Variable, inferred type.
@@ -837,12 +854,9 @@ function _G.parseDeclaration(state, parentNode, declType)
 	local B:number : 0  -- Constant, explicit type.
 	local a,b,c = 0,f() -- Multiples always have either inferred type...
 	local a,b:int : 1,2 -- ...or the same type.
-	-- No multiples allowed:
-	local a :: struct {}
-	local a :: enum   {}
-	local a :: !import "foo"
-	local a :: !load   "foo.gloa"
-	-- @Incomplete: Limit function declarations to a single?
+	local A :: struct {}
+	local A :: enum   {}
+	local a :: !import "lib"
 	]]
 
 	declType   = declType or !(DECLARATION_NORMAL)
@@ -952,6 +966,25 @@ function _G.parseDeclaration(state, parentNode, declType)
 
 	elseif decl.types[2] then
 		!ERROR_OR_RETURN `errorParsingAfterLast(state, "Initial values are required if multiple types are specified.")`
+	end
+
+	-- Set if shadowing is allowed.
+	tokType, tokValue = peekNextToken(state)
+
+	if isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"shadow") then
+		consumeNextToken(state)
+
+		if decl.isConstant then
+			!ERROR_OR_RETURN `errorParsingLast(state, "Constants cannot be shadows.")`
+		elseif declType == !(DECLARATION_STRUCT) then
+			!ERROR_OR_RETURN `errorParsingLast(state, "Struct members cannot be marked as shadows.")`
+		elseif declType == !(DECLARATION_STRUCT) then
+			!ERROR_OR_RETURN `errorParsingLast(state, "Enum members cannot be marked as shadows.")`
+		elseif declType ~= !(DECLARATION_NORMAL) then
+			errorInternal(declType)
+		end
+
+		decl.canShadow = true
 	end
 
 	-- Quickly check if there are obviously too many values.

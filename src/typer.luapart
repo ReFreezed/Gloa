@@ -643,11 +643,14 @@ end
 	if not defn then
 		local scope = getClosestScope(decl)
 		if not scope then
-			typeError(state, ident, "Could not find what scope '%s' is in.", ident.name)
+			typeError(state, ident, "Internal compiler error: Could not find what scope '%s' is in.", ident.name)
 		end
 
+		local isMember = isAny(scope.nodeType, !(nodeTypes.AstStruct),!(nodeTypes.AstEnum))
+
 		local isLambdaArgOut = (
-			scope.nodeType == !(nodeTypes.AstLambda)
+			not isMember
+			and scope.nodeType == !(nodeTypes.AstLambda)
 			and scope.argumentsOut ~= nil
 			and indexOf(scope.argumentsOut, astFindParent(decl, !(nodeTypes.AstArgument))) ~= nil
 		)
@@ -655,12 +658,52 @@ end
 		if not isLambdaArgOut then
 			local defnExisting = findDefinition(state, ident, ident.name)
 
-			if defnExisting then
-				-- @Check: Are we following imperative scope rules for name shadowing?
+			if not defnExisting then
+				-- void
+
+			elseif isMember and scope ~= defnExisting.scope then
+				-- void  (Members never shadow anything.)
+
+			elseif not decl.canShadow then
 				printerr()
 				typeMessage(io.stderr, state, ident,             "Error", "'%s' has already been defined.", ident.name)
 				typeMessage(io.stderr, state, defnExisting.name, "Info",  "...it was defined here.")
 				exitFailure()
+
+			elseif
+				scope == defnExisting.scope
+				or (
+					-- We do not allow declarations on lambda bodies to shadow the lambda's arguments.
+					-- @Robustness: Check the reverse is always true.
+					scope.nodeType == !(nodeTypes.AstBlock)
+					and getClosestScope(scope).nodeType == !(nodeTypes.AstLambda) -- @Cleanup: Store each node's enclosing scope on each respective node.
+					and getClosestScope(scope) == defnExisting.scope
+				)
+			then
+				printerr()
+				typeMessage(io.stderr, state, ident,             "Error", "'%s' has already been defined in the same scope (which means name shadowing does not work).", ident.name)
+				typeMessage(io.stderr, state, defnExisting.name, "Info",  "...it was defined here.")
+				exitFailure()
+
+			else
+				-- void  (We're validly shadowing something in an outer scope.)
+			end
+
+			-- Make sure new globals are not shadowing any locals.
+			if decl.isGlobalOrExported then
+				local parentScope = scope
+				repeat
+					local defnExisting = parentScope.definedLocals[ident.name]
+
+					if defnExisting then
+						printerr()
+						typeMessage(io.stderr, state, defnExisting.name, "Error", "'%s' is shadowing a global.", ident.name)
+						typeMessage(io.stderr, state, ident,             "Info",  "...the global was defined here.")
+						exitFailure()
+					end
+
+					parentScope = getClosestScope(parentScope)
+				until not parentScope
 			end
 		end
 
@@ -668,6 +711,7 @@ end
 		defn.name       = ident
 		defn.scope      = scope
 		defn.isConstant = decl.isConstant
+		defn.canShadow  = decl.canShadow
 
 		ident.definition = defn
 
@@ -677,6 +721,14 @@ end
 			local i              = #scope.definitions+1
 			scope.definitions[i] = defn
 			addToQueue(state, defn, scope.definitions, i, !(PIPE_INFER))
+
+			if not decl.canShadow then
+				local parentScope = scope
+				repeat
+					parentScope.definedLocals[ident.name] = defn -- @Speed: Can we store this on the global scope only?
+					parentScope = getClosestScope(parentScope)
+				until not parentScope
+			end
 		end
 	end
 
@@ -738,7 +790,7 @@ end
 			if not identOther.definition.typeInfo then
 				!DEPEND_AND_RETURN(`ident`, DEPEND_NODE_INFERRED, `identOther.definition`)
 			end
-			typeInfoForDecl = identOther.definition.typeInfoForDeclaration
+			typeInfoForDecl = identOther.definition.typeInfoForDeclaration -- May be nil.
 
 		elseif valueExpr.nodeType == !(nodeTypes.AstTypeOf) then
 			local typeOf    = valueExpr
@@ -780,8 +832,6 @@ end
 	defn.typeInfo               = typeInfo
 	defn.typeInfoForDeclaration = typeInfoForDecl -- May be nil.
 	ident.inferredType          = typeInfo
-
-	table.insert(defn.scope.definitions, defn)
 
 	!if DEBUG then
 		if debug_onlyInferTypes then
