@@ -65,15 +65,6 @@ local function DO_OR_RETURN_FALSE(exprCode)  doOrReturn(exprCode, "false")  end
 
 
 
-_G.!struct"ParseState"{
-	fileBuffers = {},
-	tokens      = {},
-	nextToken   = 1,
-	soft        = false, -- Enabling this will make parsing functions return nil on error instead of triggering an actual error.
-}
-
-
-
 !(
 _G.nodeTypes        = {}
 local nodeTypeN     = 0
@@ -101,13 +92,13 @@ end
 	s        = 0,   -- Serial number.
 	parent   = NIL, -- AstNode
 	token    = 1,
-	-- v2:
+	-- Pipe phase:
 	queued   = NIL, -- Queued
 }
 _G.!structAst"AstTypeDefinition:_AstNode"{ -- Created during type phase.
 	-- Type phase:
 	name       = NIL, -- AstIdentifier|AstVararg
-	scope      = NIL, -- AstFileScope|AstBlock|AstStruct|AstFor|AstLambda|AstEnum (This should be the same as the parent.)
+	scope      = NIL, -- AstGlobalScope|AstFileScope|AstBlock|AstStruct|AstFor|AstLambda|AstEnum (This should be the same as the parent.)
 	isConstant = false,
 	typeInfo   = NIL, -- TypeInfo
 	typeInfoForDeclaration = NIL, -- Type of value in type declarations. Is used when type aliases are specified as types.
@@ -123,7 +114,6 @@ _G.!structAst"AstIdentifier:_AstExpression"{
 	name = "",
 	-- Type phase:
 	placeDeclared = NIL, -- AstDeclaration|AstStruct|AstFor|AstLambda (Can/should this be moved to AstTypeDefinition?)
-	-- v2:
 	declaration   = NIL, -- AstDeclaration
 	definition    = NIL, -- AstTypeDefinition
 }
@@ -142,7 +132,6 @@ _G.!structAst"AstType:_AstExpression"{
 	arguments         = NIL, -- []AstExpression (Is set for parameterized structs.)
 	-- Type phase:
 	typeInfo          = NIL,
-	-- v2:
 	representedType   = NIL, -- TypeInfo
 	declaration       = NIL, -- AstDeclaration
 	definition        = NIL, -- AstTypeDefinition
@@ -194,10 +183,10 @@ _G.!structAst"AstCast:_AstExpression"{
 	expression = NIL, -- AstExpression
 }
 _G.!structAst"AstImport:_AstExpression"{
-	isLoad       = false,
-	importName   = "",
-	-- name         = NIL, -- AstIdentifier
-	-- nameIsGlobal = false,
+	isLoad     = false,
+	importName = "",
+	-- Type phase:
+	fileScope  = NIL, -- AstFileScope
 }
 
 _G.!structAst"AstStatement:_AstNode"{ -- Needed? I think so?
@@ -205,17 +194,17 @@ _G.!structAst"AstStatement:_AstNode"{ -- Needed? I think so?
 }
 
 _G.!structAst"AstDeclaration:_AstNode"{
-	names         = {},  -- [](AstIdentifier|AstVararg)
-	types         = {},  -- []AstType  (No value here means the types are inferred.)
-	notes         = {},  -- []AstNote  @Incomplete: Nodes.
-	isGlobal      = false,
-	isConstant    = false,
+	names              = {},  -- [](AstIdentifier|AstVararg)
+	types              = {},  -- []AstType  (No value here means the types are inferred.)
+	notes              = {},  -- []AstNote  @Incomplete: Nodes.
+	isGlobalOrExported = false,
+	isConstant         = false,
 
-	-- assignment=nil means all names gets their default value (which depends on the type, of which there must be only one).
-	assignment    = NIL, -- AstAssignment
+	-- assignment      = nil means all names gets their default value (which depends on the type, of which there must be only one).
+	assignment         = NIL, -- AstAssignment
 
 	-- Type phase:
-	inferredTypes = {},  -- []TypeInfo (One for each name.)
+	inferredTypes      = {},  -- []TypeInfo (One for each name.)
 }
 
 _G.!structAst"AstAssignment:_AstNode"{
@@ -267,16 +256,21 @@ _G.!structAst"AstFor:_AstControlStructure"{
 }
 _G.!structAst"AstStruct:_AstDeclarativeScope"{
 	arguments       = NIL, -- AstArguments
-	-- v2:
+	-- Type phase:
 	representedType = NIL, -- TypeInfoStruct
 }
 _G.!structAst"AstEnum:_AstDeclarativeScope"{ -- Should this be a DeclarativeScope?
 	memberType      = NIL, -- AstType
-	-- v2:
+	-- Type phase:
 	representedType = NIL, -- TypeInfoEnum
 }
 _G.!structAst"AstFileScope:_AstDeclarativeScope"{
-	path = "",
+	isModule = false,
+	path     = "",
+}
+_G.!structAst"AstGlobalScope:_AstDeclarativeScope"{
+	firstFileScope = NIL, -- AstFileScope
+	fileScopes     = {},  -- []AstFileScope
 }
 
 _G.!structAst"AstBlock:_AstNode"{
@@ -305,7 +299,7 @@ do
 		if not AstNodeType then  errorInternal(2, "No AstNodeType specified.")  end
 		!ifDEBUG`assert(token)`
 
-		if not parentNode and AstNodeType ~= AstFileScope then
+		if not parentNode and AstNodeType ~= AstGlobalScope then
 			errorInternal(2, "No parent.")
 		end
 
@@ -332,7 +326,7 @@ end
 
 
 
--- identifier = parseIdentifier( parseState, parentNode [, placeDeclared ] )
+-- identifier = parseIdentifier( compilationState, parentNode [, placeDeclared ] )
 --
 -- placeDeclared should be set when they are declared, i.e. in declarations or
 -- function argument lists (loose identifiers should have it be nil as we figure
@@ -354,7 +348,7 @@ end
 function _G.parseType(state, parentNode)
 	local tokType, tokValue, token = consumeNextToken(state)
 
-	if isToken(tokType,tokValue, !(TOKEN_KEYWORD),"typeOf") then
+	if isToken(tokType,tokValue, !(TOKEN_KEYWORD),"type_of") then
 		tokType, tokValue = consumeNextToken(state)
 		if not isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"(") then
 			!ERROR_OR_RETURN `errorParsingAfterPrevious(state, "Expected '('.")`
@@ -426,7 +420,7 @@ function _G.parseType(state, parentNode)
 	return typeNode
 end
 
--- success = parsePipeSeparatedTypes( parseState, parentNode, identifierTypes )
+-- success = parsePipeSeparatedTypes( compilationState, parentNode, identifierTypes )
 function _G.parsePipeSeparatedTypes(state, parentNode, typeNodes)
 	-- @Incomplete: Detect repeated types. (This may be more difficult than it seems. It's possibly a task for the typer.)
 	while true do
@@ -547,7 +541,7 @@ function _G.parseTable(state, parentNode)
 end
 
 -- Parse comma-separated expressions. Used for function calls and struct parameters.
--- success = parseExpressionList( parseState, parentNode, expressions [, expectLeftValues=false ] )
+-- success = parseExpressionList( compilationState, parentNode, expressions [, expectLeftValues=false ] )
 function _G.parseExpressionList(state, parentNode, expressions, expectLeftValues)
 	while true do
 		!SET_OR_RETURN_FALSE `local expr = parseExpression(state, parentNode, nil, expectLeftValues)`
@@ -566,7 +560,7 @@ function _G.parseExpressionList(state, parentNode, expressions, expectLeftValues
 	return true
 end
 
--- parseArguments( parseState, parentNode, isInput, placeDeclared )
+-- parseArguments( compilationState, parentNode, isInput, placeDeclared )
 -- placeDeclared = AstLambda|AstStruct
 function _G.parseArguments(state, parentNode, isInput, placeDeclared)
 	local args       = astNewNode(AstArguments, state.nextToken, parentNode)
@@ -833,7 +827,7 @@ function _G.parseEnum(state, parentNode)
 	return enum
 end
 
--- declaration = parseDeclaration( parseState, parentNode [, declarationType=DECLARATION_NORMAL ] )
+-- declaration = parseDeclaration( compilationState, parentNode [, declarationType=DECLARATION_NORMAL ] )
 function _G.parseDeclaration(state, parentNode, declType)
 	--[[
 	local a = 0         -- Variable, inferred type.
@@ -856,10 +850,10 @@ function _G.parseDeclaration(state, parentNode, declType)
 
 	if declType == !(DECLARATION_NORMAL) then
 		local tokType, tokValue = consumeNextToken(state)
-		if not isToken(tokType,tokValue, !(TOKEN_KEYWORD),"local","global") then
+		if not isToken(tokType,tokValue, !(TOKEN_KEYWORD),"local","global","export") then
 			!ERROR_OR_RETURN `errorParsingLast(state, "Expected 'local'.")`
 		end
-		decl.isGlobal = (tokValue == "global")
+		decl.isGlobalOrExported = isAny(tokValue, "global","export")
 	end
 
 	local nameListStartToken = state.nextToken
@@ -1000,7 +994,7 @@ function _G.parseAssignment(state, parentNode)
 end
 
 -- Add the names to the 'names' array.
--- success = parseNameList( parseState, parentNode, names [, placeDeclared ] )
+-- success = parseNameList( compilationState, parentNode, names [, placeDeclared ] )
 function _G.parseNameList(state, parentNode, names, placeDeclared)
 	local takenNames = {}
 
@@ -1039,6 +1033,8 @@ function _G.parseStatement(state, parentNode)
 		!SET_OR_RETURN `statement.what = parseDeclaration(state, statement)`
 	elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"global") then
 		!ERROR_OR_RETURN `errorParsingNext(state, "Globals can only be declared in file scope.")`
+	elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"export") then
+		!ERROR_OR_RETURN `errorParsingNext(state, "Exports can only be declared in file scope.")`
 
 	elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"return") then
 		consumeNextToken(state)
@@ -1054,8 +1050,8 @@ function _G.parseStatement(state, parentNode)
 		--
 		local lambda = astFindParent(statement, !(nodeTypes.AstLambda))
 		if not lambda then
-			-- This shouldn't happen as parseStatement() shouldn't be
-			-- called by parseFileScope(), which is the highest top-level thing.
+			-- This shouldn't happen as parseStatement() shouldn't be called
+			-- by anything that does not parse return statements.
 			!ERROR_OR_RETURN `errorParsingNext(state, "Not inside a function.")`
 		end
 
@@ -1336,7 +1332,7 @@ function _G.parseBlock(state, parentNode)
 	return block
 end
 
--- block = parseBlockOrScopedStatement( parseState, parentNode )
+-- block = parseBlockOrScopedStatement( compilationState, parentNode )
 function _G.parseBlockOrScopedStatement(state, parentNode)
 	local tokType, tokValue, token = peekNextToken(state)
 
@@ -1374,30 +1370,26 @@ function _G.parseImportOrLoad(state, parentNode)
 	return import
 end
 
-function _G.parseFileScope(state, path, parentNode)
+function _G.parseFileScope(state, parentNode, path)
 	local fileScope = astNewNode(AstFileScope, state.nextToken, parentNode)
 	fileScope.path  = path
 
 	while true do
-		local tokType,  tokValue, token = peekNextToken(state, 1)
-		local tokType2, tokValue2       = peekNextToken(state, 2)
-		local tokType3, tokValue3       = peekNextToken(state, 3)
-		local tokType4, tokValue4       = peekNextToken(state, 4)
-		local tokType5, tokValue5       = peekNextToken(state, 5)
+		local tokType, tokValue, token = peekNextToken(state)
 
 		if not tokType then
 			break
 
 		elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"import","load") then
 			-- @Incomplete: Warn about duplicate imports? Maybe not necessay as things will only ever be imported once anyway.
-			!SET_OR_RETURN `local import = parseStatement(state, fileScope)`
+			!SET_OR_RETURN `local import = parseImportOrLoad(state, fileScope)`
 			table.insert(fileScope.imports, import)
 
-		elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"local","global") then
+		elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"local","global","export") then
 			!SET_OR_RETURN `local decl = parseDeclaration(state, fileScope)`
 			table.insert(fileScope.declarations, decl)
 
-		elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"export","use") then
+		elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"using") then
 			!ERROR_OR_RETURN `errorParsingNext(state, "@Incomplete: Handle '%s'.", tokValue)`
 
 		elseif isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),";") then
@@ -1412,7 +1404,7 @@ function _G.parseFileScope(state, path, parentNode)
 	return fileScope
 end
 
--- call = parseCall( parseState, parentNode, couldBeType [, callee=theFollowingIdentifier, isMethod=false ] )
+-- call = parseCall( compilationState, parentNode, couldBeType [, callee=theFollowingIdentifier, isMethod=false ] )
 function _G.parseCall(state, parentNode, couldBeType, callee, isMethod)
 	assert(type(couldBeType) == "boolean")
 
@@ -1465,7 +1457,7 @@ function _G.parseCall(state, parentNode, couldBeType, callee, isMethod)
 	return call
 end
 
--- parseLambda( parseState, parentNode [, allowBody=false ] )
+-- parseLambda( compilationState, parentNode [, allowBody=false ] )
 function _G.parseLambda(state, parentNode, allowBody)
 	-- Note: We assume the initial '(' has been consumed already.
 
@@ -1555,7 +1547,7 @@ end
 
 
 
--- expression = parseExpression( parseState, parentNode [, minOperatorPrecedence, expectLeftValue=false ] )
+-- expression = parseExpression( compilationState, parentNode [, minOperatorPrecedence, expectLeftValue=false ] )
 function _G.parseExpression(state, parentNode, minOpPrecedence, expectLeftValue)
 	-- @Robustness: Check that parents are set correctly everywhere in here.
 
@@ -1719,14 +1711,14 @@ function _G.parseExpression(state, parentNode, minOpPrecedence, expectLeftValue)
 		!SET_OR_RETURN `expr = parseType(state, parentNode)`
 
 	elseif
-		isToken(tokType,tokValue, !(TOKEN_KEYWORD),"typeOf") or
+		isToken(tokType,tokValue, !(TOKEN_KEYWORD),"type_of") or
 		isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"[")
 	then
 		putBackLastToken(state)
 		!SET_OR_RETURN `expr = parseType(state, parentNode)`
 
 	elseif
-		isToken(tokType,tokValue, !(TOKEN_KEYWORD),"typeOf") or
+		isToken(tokType,tokValue, !(TOKEN_KEYWORD),"type_of") or
 		isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"[")
 	then
 		putBackLastToken(state)
@@ -1907,7 +1899,7 @@ end
 
 
 
--- tokenType, tokenValue, tokenIndex = consumeNextToken( parseState )
+-- tokenType, tokenValue, tokenIndex = consumeNextToken( compilationState )
 function _G.consumeNextToken(state)
 	local i         = state.nextToken
 	state.nextToken = i+1
@@ -1915,7 +1907,7 @@ function _G.consumeNextToken(state)
 	return tokType, tokValue, i
 end
 
--- tokenType, tokenValue, tokenIndex = peekNextToken( parseState [, steps=1 ] )
+-- tokenType, tokenValue, tokenIndex = peekNextToken( compilationState [, steps=1 ] )
 function _G.peekNextToken(state, steps)
 	steps   = steps or 1
 	local i = state.nextToken+steps-1
@@ -1934,7 +1926,7 @@ end
 
 
 
--- errorParsing( parseState, tokenIndex, formatString, ... )
+-- errorParsing( compilationState, tokenIndex, formatString, ... )
 function _G.errorParsing(state, i, s, ...)
 	local tokens = state.tokens
 
@@ -1954,7 +1946,7 @@ function _G.errorParsing(state, i, s, ...)
 	errorInFile(buffer, path, ptr, "Parser", s, ...)
 end
 
--- parserMessage( [ outputFile=io.stdout, ] parseState, token, label, formatString, ... )
+-- parserMessage( [ outputFile=io.stdout, ] compilationState, token, label, formatString, ... )
 function _G.parserMessage(file, state, token, label, s, ...)
 	if type(file) ~= "userdata" then  return parserMessage(io.stdout, file, state, token, label, s, ...)  end
 
@@ -1964,7 +1956,7 @@ function _G.parserMessage(file, state, token, label, s, ...)
 	reportMessageInFile(file, buffer, path, tokens.position1[token], label, "Parser", s, ...)
 end
 
--- parserMessageLine( [ outputFile=io.stdout, ] parseState, token, label, formatString, ... )
+-- parserMessageLine( [ outputFile=io.stdout, ] compilationState, token, label, formatString, ... )
 function _G.parserMessageLine(file, state, token, label, s, ...)
 	if type(file) ~= "userdata" then  return parserMessageLine(io.stdout, file, state, token, label, s, ...)  end
 
@@ -1973,7 +1965,7 @@ function _G.parserMessageLine(file, state, token, label, s, ...)
 	reportMessageOnLine(file, path, tokens.line1[token], label, "Parser", s, ...)
 end
 
--- errorParsingAfter( parseState, tokenIndex, formatString, ... )
+-- errorParsingAfter( compilationState, tokenIndex, formatString, ... )
 function _G.errorParsingAfter(state, i, s, ...)
 	local tokens = state.tokens
 
@@ -2074,12 +2066,12 @@ do
 
 			elseif node.nodeType == !(nodeTypes.AstDeclaration) then
 				local decl = node
-				if decl.isConstant and decl.isGlobal then
-					write(" (global const)")
+				if decl.isConstant and decl.isGlobalOrExported then
+					write(" (global/exported const)")
 				elseif decl.isConstant then
 					write(" (const)")
-				elseif decl.isGlobal then
-					write(" (global)")
+				elseif decl.isGlobalOrExported then
+					write(" (global/exported)")
 				end
 				!!(CHILD_PRINT_START)
 				printNodeList(decl.names,  indent+1, printed, printChildren, "NAME")
@@ -2226,9 +2218,7 @@ do
 			elseif node.nodeType == !(nodeTypes.AstImport) then
 				local import = node
 				write(" (", (import.isLoad and "load " or "import "), import.importName, ")")
-				!!(CHILD_PRINT_START)
-				if import.name then  printNode(import.name, indent+1, printed, printChildren)  end
-				!!(CHILD_PRINT_END)
+				write("\n")
 
 			elseif node.nodeType == !(nodeTypes.AstVararg) then
 				local vararg = node
@@ -2243,6 +2233,12 @@ do
 				write(", ", getFriendlyTypeInfoName(defn.typeInfo))
 				if defn.typeInfoForDeclaration then  write(", ", getFriendlyTypeInfoName(defn.typeInfoForDeclaration))  end
 				write(")\n")
+
+			elseif node.nodeType == !(nodeTypes.AstGlobalScope) then
+				local globalScope = node
+				!!(CHILD_PRINT_START)
+				printNodeList(globalScope.fileScopes, indent+1, printed, printChildren)
+				!!(CHILD_PRINT_END)
 
 			elseif node.nodeType == !(nodeTypes.AstLiteral) then
 				local literal = node
@@ -2292,8 +2288,7 @@ do
 					printNodeList(node.arguments, indent+1, printed, printChildren)
 				end
 				if node.imports then  printNodeList(node.imports, indent+1, printed, printChildren)  end
-				-- printNodeList(node.includedNamespaces, indent+1, printed, printChildren)
-				printNodeList(node.declarations,       indent+1, printed, printChildren)
+				printNodeList(node.declarations, indent+1, printed, printChildren)
 				!!(CHILD_PRINT_END)
 
 			else
@@ -2418,13 +2413,14 @@ do
 		elseif node.nodeType == !(nodeTypes.AstBreak)       then  !visitIfNotNil"node"{"loopName"}
 		elseif node.nodeType == !(nodeTypes.AstContinue)    then  !visitIfNotNil"node"{"loopName"}
 		elseif node.nodeType == !(nodeTypes.AstDefer)       then  !visitIfNotNil"node"{"body"}
-		elseif node.nodeType == !(nodeTypes.AstImport)      then  !visitIfNotNil"node"{"name"}
+		elseif node.nodeType == !(nodeTypes.AstImport)      then  -- void
 		elseif node.nodeType == !(nodeTypes.AstIf)          then  !visitIfNotNil"node"{"condition","branchTrue","branchFalse"}
 		elseif node.nodeType == !(nodeTypes.AstWhile)       then  !visitIfNotNil"node"{"condition","body"}
 		elseif node.nodeType == !(nodeTypes.AstFor)         then  !visitList"node"{"names","expressions"} ; visitIfNotNil"node"{"body"}
 		elseif node.nodeType == !(nodeTypes.AstStruct)      then  !visitList"node"{--[["includedNamespaces",]]"declarations"} ; visitIfNotNil"node"{"arguments"}
 		elseif node.nodeType == !(nodeTypes.AstEnum)        then  !visitList"node"{--[["includedNamespaces",]]"declarations"} ; visitIfNotNil"node"{"memberType"}
 		elseif node.nodeType == !(nodeTypes.AstFileScope)   then  !visitList"node"{"imports","declarations"}
+		elseif node.nodeType == !(nodeTypes.AstGlobalScope) then  !visitList"node"{"fileScopes"}
 		elseif node.nodeType == !(nodeTypes.AstBlock)       then  !visitList"node"{""}
 		else
 			errorUnhandledNodeType(node)

@@ -14,13 +14,13 @@ exec lua "$0" "$@"
 --=
 --============================================================]]
 
-local compilationStartTime = os.clock()
+local timeStartCompiling = os.clock()
 
 io.stdout:setvbuf("no") -- Note: This slows down astPrint().
 io.stderr:setvbuf("no")
 
 !if DEBUG then
-	io.stderr = io.stdout -- Kinda solves stdout/stderr buffering seemingly still being enabled for Sublime Text 2 build systems for some reason. Sigh...
+	io.stdout = io.stderr -- Fixes a Sublime Text 2 stdout/stderr desync in build system results. Sigh... :SublimeText2Desync
 !end
 
 
@@ -36,69 +36,72 @@ do !(do) @insert "bytecode.luapart"  !(end) end
 
 
 -- Parse arguments.
-local function printHelpAndExit()
-	print("Glóa")
-	print()
-	print("Synopsis:")
-	print("    lua gloa.lua [options] myProgram.gloa [myOtherProgram.gloa ...]")
-	print()
-	print("Options:")
-	print("    --help    Display this help.")
-	print("    --nogc    Disable garbage collection during compilation. This may decrease compilation time.")
-	print("    --silent  Disable output to stdout. (Errors and warnings are still printed to stderr.)")
-	print("    --        Stop parsing options.")
-	print()
-	exit(0)
-end
-
-local args = {...}
-if not args[1] then  printHelpAndExit()  end
-
-local parseOptions   = true
-local pathsToCompile = {}
-local disableGc      = false
-local silent         = false
-local i              = 1
+local pathsToCompile    = {}
+local disableGc         = false
+local silent            = false
 
 !if DEBUG then
 _G.debug_onlyParse      = false
 _G.debug_onlyInferTypes = false
 !end
 
-while args[i] do
-	local arg = args[i]
+do
+	local function printHelpAndExit()
+		print("Glóa")
+		print()
+		print("Synopsis:")
+		print("    lua gloa.lua [options] myProgram.gloa [myOtherProgram.gloa ...]")
+		print()
+		print("Options:")
+		print("    --help    Display this help.")
+		print("    --nogc    Disable garbage collection during compilation. This may decrease compilation time.")
+		print("    --silent  Disable output to stdout. (Errors and warnings are still printed to stderr.)")
+		print("    --        Stop parsing options.")
+		print()
+		exit(0)
+	end
 
-	if not (parseOptions and arg:find"^%-") then
-		table.insert(pathsToCompile, arg)
-		i = i+1
+	local args = {...}
+	if not args[1] then  printHelpAndExit()  end
 
-	elseif arg == "--" then
-		parseOptions = false
-		i            = i+1
+	local parseOptions   = true
+	local i              = 1
 
-	elseif arg == "--help" or arg == "-help" or arg == "-?" or arg == "/help" or arg == "/?" then
-		printHelpAndExit()
+	while args[i] do
+		local arg = args[i]
 
-	elseif arg == "--nogc" then
-		disableGc = true
-		i = i+1
+		if not (parseOptions and arg:find"^%-") then
+			table.insert(pathsToCompile, arg)
+			i = i+1
 
-	elseif arg == "--silent" then
-		silent = true
-		i = i+1
+		elseif arg == "--" then
+			parseOptions = false
+			i            = i+1
 
-	!if DEBUG then
-	elseif arg == "--debug:onlyparse" then
-		_G.debug_onlyParse = true
-		i = i+1
+		elseif arg == "--help" or arg == "-help" or arg == "-?" or arg == "/help" or arg == "/?" then
+			printHelpAndExit()
 
-	elseif arg == "--debug:onlyinfer" then
-		_G.debug_onlyInferTypes = true
-		i = i+1
-	!end
+		elseif arg == "--nogc" then
+			disableGc = true
+			i = i+1
 
-	else
-		errorLine(nil, "Unknown option '%s'.", arg)
+		elseif arg == "--silent" then
+			silent = true
+			i = i+1
+
+		!if DEBUG then
+		elseif arg == "--debug:onlyparse" then
+			_G.debug_onlyParse = true
+			i = i+1
+
+		elseif arg == "--debug:onlyinfer" then
+			_G.debug_onlyInferTypes = true
+			i = i+1
+		!end
+
+		else
+			errorLine(nil, "Unknown option '%s'.", arg)
+		end
 	end
 end
 
@@ -120,12 +123,14 @@ end
 
 if disableGc then  collectgarbage("stop")  end
 
-local duplicates = {}
-for _, path in ipairs(pathsToCompile) do
-	if duplicates[path] then
-		errorLine(nil, "Duplicate path in arguments: %s", path)
+do
+	local duplicates = {}
+	for _, path in ipairs(pathsToCompile) do
+		if duplicates[path] then
+			errorLine(nil, "Duplicate path in arguments: %s", path)
+		end
+		duplicates[path] = true
 	end
-	duplicates[path] = true
 end
 
 if not pathsToCompile[1] then
@@ -134,68 +139,107 @@ end
 
 
 
+local !struct"CompilationState"{
+	fileBuffers    = {},
+	tokens         = nil,   -- Tokens (struct)
+
+	-- Parser:
+	globalScope    = NIL,   -- AstGlobalScope
+	nextToken      = 1,
+	soft           = false, -- Enabling this will make parsing functions return nil on error instead of triggering an actual error.
+
+	-- Typer:
+	allTypeInfos   = {},
+	queue          = {},
+	dependencies   = {},
+
+	-- Bytecode:
+	bytecodes      = {},
+	constants      = {},
+	lastConstantId = 0,
+}
+
+local state  = CompilationState()
+state.tokens = Tokens()
+
+
+
 -- Tokenize file.
+function _G.readAndTokenizeFile(state, path)
+	assert(not state.fileBuffers[path], path)
+
+	local s = assert(getFileContents(path, true))
+	s       = s:gsub("\r\n?", "\n") -- Normalize line endings.  @Robustness: Handle the uncommon occurrence of \n\r.
+
+	state.fileBuffers[path] = s
+
+	local tokens     = state.tokens
+	local startToken = tokens.count+1
+
+	local startTime = os.clock()
+	tokenize(s, path, tokens)
+	local endTime = os.clock()
+
+	-- Quickly check for stray/unmatched brackets.
+
+	-- Note: Sometimes an error message here isn't very helpful, so we
+	-- sometimes continue with parsing despite getting an error here.
+
+	local BRACKETS            = {["("]=")", ["{"]="}", ["["]="]"}
+	local bracketTokenIndices = {}
+
+	for i = startToken, tokens.count do
+		if isToken(tokens.type[i],tokens.value[i], !(TOKEN_PUNCTUATION),"(","{","[") then
+			table.insert(bracketTokenIndices, i)
+
+		elseif isToken(tokens.type[i],tokens.value[i], !(TOKEN_PUNCTUATION),")","}","]") then
+			local iStart   = table.remove(bracketTokenIndices)
+			local expected = BRACKETS[tokens.value[iStart]]
+
+			if not iStart then
+				reportMessageInFile(io.stderr, s, path, tokens.position1[i], "Error", "BracketChecker", "Stray bracket.")
+				bracketTokenIndices[1] = nil
+				break
+
+			elseif tokens.value[i] ~= expected then
+				printerr()
+				reportMessageInFile(io.stderr, s, path, tokens.position1[i],      "Error", "BracketChecker", "Expected '%s'.", expected)
+				reportMessageInFile(io.stderr, s, path, tokens.position1[iStart], "Info",  "BracketChecker", "...here is the unmatched bracket.")
+				exitFailure()
+			end
+		end
+	end
+
+	if bracketTokenIndices[1] then
+		local i = bracketTokenIndices[1]
+		errorInFile(s, path, tokens.position1[i], "BracketChecker", "Missing end bracket.", BRACKETS[tokens.value[i]])
+	end
+
+	return startTime, endTime
+end
+
 -- @Incomplete: Handle multiple files to compile.
 if pathsToCompile[2] then
 	errorLine(nil, "Can only compile one file at a time right now. (%d files were given.)", #pathsToCompile)
 end
 
-local path = pathsToCompile[1]
-local s    = assert(getFileContents(path, true))
+local thePath = pathsToCompile[1]
 
-if not silent then  print("Compiling "..path:gsub("^.*/", ""))  end
+if not silent then  print("Compiling "..thePath:gsub("^.*/", ""))  end
 
-s = s:gsub("\r\n?", "\n") -- Normalize line endings.  @Robustness: Handle the uncommon occurrence of \n\r.
-
-local lexingStartTime = os.clock()
-local tokens          = tokenize(s, path)
-local lexingEndTime   = os.clock()
-
-
-
--- Quickly check for stray/unmatched brackets.
--- Note: Sometimes an error message here isn't very helpful, so we sometimes continue with parsing despite getting an error here.
-
-local BRACKETS            = {["("]=")", ["{"]="}", ["["]="]"}
-local bracketTokenIndices = {}
-
-for i = 1, tokens.count do
-	if isToken(tokens.type[i],tokens.value[i], !(TOKEN_PUNCTUATION),"(","{","[") then
-		table.insert(bracketTokenIndices, i)
-
-	elseif isToken(tokens.type[i],tokens.value[i], !(TOKEN_PUNCTUATION),")","}","]") then
-		local iStart   = table.remove(bracketTokenIndices)
-		local expected = BRACKETS[tokens.value[iStart]]
-
-		if not iStart then
-			reportMessageInFile(io.stderr, s, path, tokens.position1[i], "Error", "BracketChecker", "Stray bracket.")
-			bracketTokenIndices[1] = nil
-			break
-
-		elseif tokens.value[i] ~= expected then
-			printerr()
-			reportMessageInFile(io.stderr, s, path, tokens.position1[i],      "Error", "BracketChecker", "Expected '%s'.", expected)
-			reportMessageInFile(io.stderr, s, path, tokens.position1[iStart], "Info",  "BracketChecker", "...here is the unmatched bracket.")
-			exitFailure()
-		end
-	end
-end
-
-if bracketTokenIndices[1] then
-	local i = bracketTokenIndices[1]
-	errorInFile(s, path, tokens.position1[i], "BracketChecker", "Missing end bracket.", BRACKETS[tokens.value[i]])
-end
+local timeStartLexing, timeEndLexing = readAndTokenizeFile(state, thePath)
 
 
 
 -- Parse.
-local state             = ParseState()
-state.fileBuffers[path] = s
-state.tokens            = tokens
+local globalScope = astNewNode(AstGlobalScope, state.nextToken)
+state.globalScope = globalScope
 
-local parseStartTime    = os.clock()
-local topNode           = parseFileScope(state, path)
-local parsingEndTime    = os.clock()
+local timeStartParsing     = os.clock()
+globalScope.firstFileScope = parseFileScope(state, globalScope, thePath)
+local timeEndParsing       = os.clock()
+
+table.insert(globalScope.fileScopes, globalScope.firstFileScope)
 
 if peekNextToken(state) then
 	errorParsingNext(state, "Expected the end of the file.")
@@ -204,7 +248,7 @@ end
 
 
 -- Run pipes.
-local pipesStartTime = os.clock()
+local timeStartPipes = os.clock()
 
 !if DEBUG then
 local pipeCycles = 0
@@ -212,10 +256,6 @@ local queueSize  = 0
 !end
 
 !ifDEBUG`if not debug_onlyParse then`
-	local state             = TyperState()
-	state.fileBuffers[path] = s
-	state.tokens            = tokens
-
 	local function getDeclaredIdentifierWaitingToBeDefinedWithName(name, queuedToIgnore)
 		for _, queued in ipairs(state.queue) do
 			if queued ~= queuedToIgnore and not queued.removed and queued.waitingOn and queued.node.nodeType == !(nodeTypes.AstIdentifier) then
@@ -226,7 +266,7 @@ local queueSize  = 0
 		return nil
 	end
 
-	addToQueueRecursively(state, topNode)
+	addToQueueRecursively(state, globalScope)
 
 	for cycle = 1, math.huge do
 		!if DEBUG then
@@ -292,7 +332,7 @@ local queueSize  = 0
 
 		-- Pipes are stuck.
 		elseif not didSomething then
-			-- [[ Report undefined identifier.
+			-- [[ Report undeclared identifier.
 			for _, queued in ipairs(state.queue) do
 				local dependency = not queued.removed and queued.waitingOn
 
@@ -300,7 +340,7 @@ local queueSize  = 0
 					local name = dependency.dependOn
 
 					if not getDeclaredIdentifierWaitingToBeDefinedWithName(name, queued) then
-						typeError(state, queued.node, "Undefined identifier '%s'.", name)
+						typeError(state, queued.node, "Undeclared identifier '%s'.", name)
 					end
 				end
 			end
@@ -371,34 +411,34 @@ local queueSize  = 0
 	end
 !ifDEBUG`end`
 
-local pipesEndTime = os.clock()
+local timeEndPipes = os.clock()
 
 
 
 -- -- Generate bytecode.
 -- !ifDEBUG`if not (debug_onlyParse or debug_onlyInferTypes) then`
--- 	local state = BytecodeState()
--- 	bcGenerate(state, topNode)
+-- 	bcGenerate(state, globalScope)
 -- !ifDEBUG`end`
 
 
 
 -- All done!
+local timeEndCompilation = os.clock()
 
 !if DEBUG then
-	if debug_onlyParse then  astPrintTree(topNode)  end
-	printf("██████████████████████ Total:   %.3f sec", os.clock()-compilationStartTime)
-	printf("████    ████  ████  ██ Lexing:  %.3f sec", lexingEndTime-lexingStartTime)
-	printf("██  ████  ██  ██  ████ Parsing: %.3f sec", parsingEndTime-parseStartTime)
-	printf("██  ████  ██    ██████ Pipes:   %.3f sec", pipesEndTime-pipesStartTime)
+	if debug_onlyParse then  astPrintTree(globalScope)  end
+	printf("██████████████████████ Total:   %.3f sec", timeEndCompilation - timeStartCompiling)
+	printf("████    ████  ████  ██ Lexing:  %.3f sec", timeEndLexing      - timeStartLexing)
+	printf("██  ████  ██  ██  ████ Parsing: %.3f sec", timeEndParsing     - timeStartParsing)
+	printf("██  ████  ██    ██████ Pipes:   %.3f sec", timeEndPipes       - timeStartPipes)
 	printf("██  ████  ██  ██  ████ Queue:   %d",       queueSize)
 	printf("████    ████  ████  ██ Cycles:  %d",       pipeCycles)
 	printf("██████████████████████")
 !else
 	if not silent then
-		printf("Compilation completed in %.3f seconds", os.clock()-compilationStartTime)
+		printf("Compilation completed in %.3f seconds", timeEndCompilation-timeStartCompiling)
 		if disableGc then
-			printf("Memory usage: %d bytes", collectgarbage("count")*1024)
+			printf("Memory usage: %d bytes", collectgarbage"count"*1024)
 		end
 		print()
 	end

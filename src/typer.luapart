@@ -21,42 +21,6 @@
 
 --============================================================]]
 
-!(
-local function WAITING_OR_ERROR(errCode)
-	__LUA("if state.mustInfer then ")
-		__LUA("state.errorStep = state.errorStep-1 ")
-		__LUA("if state.errorStep <= 0 then ")
-			__LUA(errCode," ")
-		__LUA("end ")
-	__LUA("end ")
-	__LUA("state.waiting = state.waiting+1")
-end
-
-local function WAITING_SILENT()
-	__LUA("state.waitingSilent = state.waitingSilent+1")
-end
-)
-
-
-
-_G.!struct"TyperState"{ -- @Cleanup: Rename to PipesState?
-	fileBuffers   = {},
-	tokens        = {},
-
-	progress      = 0,
-	waiting       = 0,
-	waitingSilent = 0,
-
-	mustInfer     = false,
-	errorStep     = 0,
-
-	allTypeInfos  = {},
-
-	-- v2:
-	queue         = {},
-	dependencies  = {},
-}
-
 
 
 !(
@@ -96,18 +60,20 @@ local !structTypeInfo"TypeInfoNumber:_TypeInfo"{}
 local !structTypeInfo"TypeInfoString:_TypeInfo"{}
 local !structTypeInfo"TypeInfoTable:_TypeInfo"{}
 local !structTypeInfo"TypeInfoType:_TypeInfo"{}
+local !structTypeInfo"TypeInfoNamespace:_TypeInfo"{}
 local !structTypeInfo"TypeInfoVoid:_TypeInfo"{}
 
 !!local SIMPLE_TYPE_TAG = {
 	-- These small type infos don't have any extra information.
-	[typeTags.TypeInfoAny]    = true,
-	[typeTags.TypeInfoBool]   = true,
-	[typeTags.TypeInfoInt]    = true,
-	[typeTags.TypeInfoNil]    = true,
-	[typeTags.TypeInfoNumber] = true,
-	[typeTags.TypeInfoString] = true,
-	[typeTags.TypeInfoTable]  = true,
-	[typeTags.TypeInfoType]   = true,
+	[typeTags.TypeInfoAny]       = true,
+	[typeTags.TypeInfoBool]      = true,
+	[typeTags.TypeInfoInt]       = true,
+	[typeTags.TypeInfoNil]       = true,
+	[typeTags.TypeInfoNumber]    = true,
+	[typeTags.TypeInfoString]    = true,
+	[typeTags.TypeInfoTable]     = true,
+	[typeTags.TypeInfoType]      = true,
+	[typeTags.TypeInfoNamespace] = true,
 }
 
 local !structTypeInfo"TypeInfoArray:_TypeInfo"{
@@ -180,24 +146,27 @@ do
 	local builtinTypeInfos = {}
 
 	local BUILTIN_TYPE_STRUCTS = {
-		["*"]      = TypeInfoAny,
-		["bool"]   = TypeInfoBool,
-		["int"]    = TypeInfoInt,
-		["nil"]    = TypeInfoNil,
-		["number"] = TypeInfoNumber,
-		["string"] = TypeInfoString,
-		["table"]  = TypeInfoTable,
-		["type"]   = TypeInfoType, -- The result of e.g. typeOf(int) or typeOf(typeOf(myVariable)).
-		["void"]   = TypeInfoVoid, -- Only used for calls that return nothing.
+		["*"]         = TypeInfoAny,
+		["bool"]      = TypeInfoBool,
+		["int"]       = TypeInfoInt,
+		["nil"]       = TypeInfoNil,
+		["number"]    = TypeInfoNumber,
+		["string"]    = TypeInfoString,
+		["table"]     = TypeInfoTable,
+		["type"]      = TypeInfoType,      -- The result of e.g. type_of(int) or type_of(type_of(myVariable)).
+		["namespace"] = TypeInfoNamespace, -- Imports/loads.
+		["void"]      = TypeInfoVoid,      -- Barely used, if at all.
 	}
 
-	function _G.getTypeInfoForBuiltinType(typeName)
+	function _G.getTypeInfoForBuiltinType(state, typeName)
 		local typeInfo = builtinTypeInfos[typeName]
 
 		if not typeInfo then
 			local TypeInfoCreator      = BUILTIN_TYPE_STRUCTS[typeName] or errorInternal(tostring(typeName))
 			typeInfo                   = newTypeInfo(TypeInfoCreator)
 			builtinTypeInfos[typeName] = typeInfo
+
+			table.insert(state.allTypeInfos, typeInfo)
 		end
 
 		return typeInfo
@@ -279,14 +248,14 @@ end
 
 -- scope, childClosestToScope = getClosestScope( node )
 function _G.getClosestScope(node)
-	return astFindParent(node, !(nodeTypes.AstFileScope),!(nodeTypes.AstStruct),!(nodeTypes.AstEnum),!(nodeTypes.AstBlock),!(nodeTypes.AstFor),!(nodeTypes.AstLambda))
+	return astFindParent(node, !(nodeTypes.AstGlobalScope),!(nodeTypes.AstFileScope),!(nodeTypes.AstStruct),!(nodeTypes.AstEnum),!(nodeTypes.AstBlock),!(nodeTypes.AstFor),!(nodeTypes.AstLambda))
 end
 
 function _G.isScope(node)
-	return isAny(node.nodeType, !(nodeTypes.AstFileScope),!(nodeTypes.AstStruct),!(nodeTypes.AstEnum),!(nodeTypes.AstBlock),!(nodeTypes.AstFor),!(nodeTypes.AstLambda))
+	return isAny(node.nodeType, !(nodeTypes.AstGlobalScope),!(nodeTypes.AstFileScope),!(nodeTypes.AstStruct),!(nodeTypes.AstEnum),!(nodeTypes.AstBlock),!(nodeTypes.AstFor),!(nodeTypes.AstLambda))
 end
 function _G.isScopeDeclarative(scope)
-	return isAny(scope.nodeType, !(nodeTypes.AstFileScope),!(nodeTypes.AstStruct),!(nodeTypes.AstEnum))
+	return isAny(scope.nodeType, !(nodeTypes.AstGlobalScope),!(nodeTypes.AstFileScope),!(nodeTypes.AstStruct),!(nodeTypes.AstEnum))
 end
 function _G.isScopeImperative(scope)
 	return isAny(scope.nodeType, !(nodeTypes.AstBlock),!(nodeTypes.AstFor),!(nodeTypes.AstLambda))
@@ -295,12 +264,14 @@ end
 
 
 function _G.findDefinition(state, startNode, name)
-	-- @Robustness: Check that the defined value is constant everywhere a type is expected.
 	local scope = startNode
 
+	-- @Speed: There's duplicate work being done here.
+
+	-- Locals.
 	while true do
 		scope = getClosestScope(scope)
-		if not scope then  return nil  end
+		if not scope then  break  end
 
 		assert(scope.definitions, scope.nodeType)
 
@@ -309,7 +280,30 @@ function _G.findDefinition(state, startNode, name)
 				return defn
 			end
 		end
+
+		--[[ @Incomplete: Look in imports. (Not necessary when looking for globals.)  Also, look through usings for the scope.
+		for _, import in ipairs(scope.imports or EMPTY_TABLE) do
+			if import.fileScope then
+				for _, defn in ipairs(import.fileScope.definitions) do
+					if defn.name.name == name and defn.name.declaration.isGlobalOrExported then
+						return defn
+					end
+				end
+			end
+		end
+		--]]
 	end
+
+	-- Globals.  @Cleanup: Define globals in the actual global scope.
+	for _, fileScope in ipairs(state.globalScope.fileScopes) do
+		for _, defn in ipairs(fileScope.definitions) do
+			if defn.name.name == name and defn.name.declaration.isGlobalOrExported then
+				return defn
+			end
+		end
+	end
+
+	return nil
 end
 
 function _G.isDefinitionVisibleToNode(defn, node)
@@ -382,7 +376,7 @@ end
 
 
 
--- typeError( typerState, node, formatString, ... )
+-- typeError( compilationState, node, formatString, ... )
 function _G.typeError(state, node, s, ...)
 	local tokens = state.tokens
 	local token  = node.token
@@ -391,7 +385,7 @@ function _G.typeError(state, node, s, ...)
 	errorInFile(buffer, path, tokens.position1[token], "Typer", s, ...)
 end
 
--- typeMessage( [ outputFile=io.stdout, ] typerState, node, label, formatString, ... )
+-- typeMessage( [ outputFile=io.stdout, ] compilationState, node, label, formatString, ... )
 function _G.typeMessage(file, state, node, label, s, ...)
 	if type(file) ~= "userdata" then  return typeMessage(io.stdout, file, state, node, label, s, ...)  end
 
@@ -732,7 +726,7 @@ end
 
 		typeInfo = valueTypeInfo
 
-		if typeInfo ~= getTypeInfoForBuiltinType"type" then
+		if typeInfo ~= getTypeInfoForBuiltinType(state, "type") then
 			-- void
 
 		elseif valueExpr.nodeType == !(nodeTypes.AstType) then
@@ -806,8 +800,8 @@ end
 	local typeInfo, typeInfoRepresented
 
 	if not typeNode.isUserType then
-		typeInfoRepresented = getTypeInfoForBuiltinType(typeNode.typeName)
-		typeInfo            = getTypeInfoForBuiltinType"type"
+		typeInfoRepresented = getTypeInfoForBuiltinType(state, typeNode.typeName)
+		typeInfo            = getTypeInfoForBuiltinType(state, "type")
 
 	elseif typeNode.functionSignature then
 		local lambda = typeNode.functionSignature
@@ -819,7 +813,7 @@ end
 
 		local funcSig       = getTypeInfoForLambda(state, lambda)
 		typeInfoRepresented = funcSig
-		typeInfo            = getTypeInfoForBuiltinType"type"
+		typeInfo            = getTypeInfoForBuiltinType(state, "type")
 
 	elseif typeNode.arrayItemType then
 		local itemTypeInfo = typeNode.arrayItemType
@@ -827,10 +821,10 @@ end
 		if not itemTypeInfo.inferredType then
 			!DEPEND_AND_RETURN(`typeNode`, DEPEND_NODE_INFERRED, `itemTypeInfo`)
 		end
-		assert(itemTypeInfo.inferredType == getTypeInfoForBuiltinType"type")
+		assert(itemTypeInfo.inferredType == getTypeInfoForBuiltinType(state, "type"))
 
 		typeInfoRepresented = itemTypeInfo
-		typeInfo            = getTypeInfoForBuiltinType"type"
+		typeInfo            = getTypeInfoForBuiltinType(state, "type")
 
 	else
 		assert(typeNode.typeName ~= "")
@@ -847,7 +841,7 @@ end
 		typeInfo            = defn.typeInfo
 		assert(typeInfo)
 
-		if typeInfo ~= getTypeInfoForBuiltinType"type" then
+		if typeInfo ~= getTypeInfoForBuiltinType(state, "type") then
 			printerr()
 			typeMessage(io.stderr, state, typeNode, "Error", "'%s' is not a type. (It is %s)", typeNode.typeName, getFriendlyTypeInfoName(typeInfo))
 			printDefinitionChain(io.stderr, state, defn, typeNode.typeName)
@@ -1029,7 +1023,7 @@ local LITERAL_TYPE_TO_BUILTIN_TYPE_NAME = !({
 !NODE_INFERRER `function nodeInferrers.AstLiteral(state, literal)`
 	local typeName = LITERAL_TYPE_TO_BUILTIN_TYPE_NAME[literal.literalType] or errorUnhandledNodeType(literal)
 
-	literal.inferredType = getTypeInfoForBuiltinType(typeName)
+	literal.inferredType = getTypeInfoForBuiltinType(state, typeName)
 
 	moveToNextPipe(state, literal)
 end
@@ -1043,8 +1037,8 @@ end
 
 	if isAny(unary.operation, "+","-") then
 		if not isAny(typeInfo,
-			getTypeInfoForBuiltinType"int",
-			getTypeInfoForBuiltinType"number"
+			getTypeInfoForBuiltinType(state, "int"),
+			getTypeInfoForBuiltinType(state, "number")
 		) then
 			typeError(state, unary.expression,
 				"Unary operation: Expected a number or int. (Got %s)",
@@ -1053,7 +1047,7 @@ end
 		end
 
 	elseif unary.operation == "not" then
-		if typeInfo ~= getTypeInfoForBuiltinType"bool" then
+		if typeInfo ~= getTypeInfoForBuiltinType(state, "bool") then
 			typeError(state, unary.expression,
 				"Unary operation: Expected a bool. (Got %s)",
 				getFriendlyTypeInfoName(typeInfo)
@@ -1086,8 +1080,8 @@ end
 		local literal = astNewNode(AstLiteral, unary.token, unary.parent)
 
 		literal.literalType
-			=  typeInfo == getTypeInfoForBuiltinType"int"    and !(LITERAL_INTEGER)
-			or typeInfo == getTypeInfoForBuiltinType"number" and !(LITERAL_NUMBER)
+			=  typeInfo == getTypeInfoForBuiltinType(state, "int")    and !(LITERAL_INTEGER)
+			or typeInfo == getTypeInfoForBuiltinType(state, "number") and !(LITERAL_NUMBER)
 			or errorInternal(getFriendlyTypeInfoName(typeInfo))
 
 		literal.value        = !!(opArithmetic ~= "+" and opArithmetic or "") v
@@ -1140,8 +1134,8 @@ end
 	-- Numeric operation.
 	if isAny(binary.operation, "+","-","*","^","%","/","//") then
 		if not isAny(typeInfoL,
-			getTypeInfoForBuiltinType"int",
-			getTypeInfoForBuiltinType"number"
+			getTypeInfoForBuiltinType(state, "int"),
+			getTypeInfoForBuiltinType(state, "number")
 		) then
 			typeError(
 				state, binary.left,
@@ -1150,16 +1144,16 @@ end
 			)
 		end
 
-		if     binary.operation == "/"  then  typeInfo = getTypeInfoForBuiltinType"number" -- Cast to number.
-		elseif binary.operation == "//" then  typeInfo = getTypeInfoForBuiltinType"int"    -- Cast to int.
-		else                                  typeInfo = typeInfoL  end                    -- Keep type.
+		if     binary.operation == "/"  then  typeInfo = getTypeInfoForBuiltinType(state, "number") -- Cast to number.
+		elseif binary.operation == "//" then  typeInfo = getTypeInfoForBuiltinType(state, "int")    -- Cast to int.
+		else                                  typeInfo = typeInfoL  end                             -- Keep type.
 
 	-- Comparison.
 	elseif isAny(binary.operation, "<",">","<=",">=") then
 		if not isAny(typeInfoL,
-			getTypeInfoForBuiltinType"int",
-			getTypeInfoForBuiltinType"number",
-			getTypeInfoForBuiltinType"string"
+			getTypeInfoForBuiltinType(state, "int"),
+			getTypeInfoForBuiltinType(state, "number"),
+			getTypeInfoForBuiltinType(state, "string")
 		) then
 			typeError(
 				state, binary.left,
@@ -1168,25 +1162,25 @@ end
 			)
 		end
 
-		typeInfo = getTypeInfoForBuiltinType"bool"
+		typeInfo = getTypeInfoForBuiltinType(state, "bool")
 
 	-- Equality.
 	elseif isAny(binary.operation, "==","~=") then
-		typeInfo = getTypeInfoForBuiltinType"bool"
+		typeInfo = getTypeInfoForBuiltinType(state, "bool")
 
 	-- Boolean operation.
 	elseif isAny(binary.operation, "and","or") then
-		if typeInfoL ~= getTypeInfoForBuiltinType"bool" then
+		if typeInfoL ~= getTypeInfoForBuiltinType(state, "bool") then
 			typeError(state, binary.left, "Binary operation: Expected a bool. (Got %s)", getFriendlyTypeInfoName(typeInfoL))
 		end
-		typeInfo = getTypeInfoForBuiltinType"bool"
+		typeInfo = getTypeInfoForBuiltinType(state, "bool")
 
 	-- String concatination.
 	elseif isAny(binary.operation, "..") then
-		if typeInfoL ~= getTypeInfoForBuiltinType"string" then
+		if typeInfoL ~= getTypeInfoForBuiltinType(state, "string") then
 			typeError(state, binary.left, "Binary operation: Expected a string. (Got %s)", getFriendlyTypeInfoName(typeInfoL))
 		end
-		typeInfo = getTypeInfoForBuiltinType"string"
+		typeInfo = getTypeInfoForBuiltinType(state, "string")
 
 	-- Lookup, or similar.
 	elseif isAny(binary.operation, ".") then
@@ -1220,8 +1214,8 @@ end
 		local literal = astNewNode(AstLiteral, binary.token, binary.parent)
 
 		literal.literalType
-			=  typeInfo == getTypeInfoForBuiltinType"int"    and !(LITERAL_INTEGER)
-			or typeInfo == getTypeInfoForBuiltinType"number" and !(LITERAL_NUMBER)
+			=  typeInfo == getTypeInfoForBuiltinType(state, "int")    and !(LITERAL_INTEGER)
+			or typeInfo == getTypeInfoForBuiltinType(state, "number") and !(LITERAL_NUMBER)
 			or errorInternal(getFriendlyTypeInfoName(typeInfo))
 
 		literal.value        = valueL !!(opArithmeticKeepType) valueR
@@ -1296,7 +1290,7 @@ end
 		end
 	end
 
-	args.inferredType = getTypeInfoForBuiltinType"void" -- AstArguments is an expression, for some reason. @Cleanup
+	args.inferredType = getTypeInfoForBuiltinType(state, "void") -- AstArguments is an expression, for some reason. @Cleanup
 
 	moveToNextPipe(state, args)
 end
@@ -1320,9 +1314,12 @@ end
 !NODE_INFERRER `function nodeInferrers.AstTypeOf(state, typeOf)`
 	if not typeOf.expression.inferredType then
 		!DEPEND_AND_RETURN(`typeOf`, DEPEND_NODE_INFERRED, `typeOf.expression`)
+
+	elseif typeOf.expression.inferredType == getTypeInfoForBuiltinType(state, "namespace") then
+		typeError(state, typeOf.expression, "Namespaces don't have a type.")
 	end
 
-	typeOf.inferredType = getTypeInfoForBuiltinType"type"
+	typeOf.inferredType = getTypeInfoForBuiltinType(state, "type")
 
 	moveToNextPipe(state, typeOf)
 end
@@ -1347,8 +1344,8 @@ end
 		errorUnhandledNodeType(cast.targetType)
 	end
 
-	if isAny(castTypeInfo, getTypeInfoForBuiltinType"number",getTypeInfoForBuiltinType"int") then
-		if not isAny(cast.expression.inferredType, getTypeInfoForBuiltinType"number",getTypeInfoForBuiltinType"int") then
+	if isAny(castTypeInfo, getTypeInfoForBuiltinType(state, "number"),getTypeInfoForBuiltinType(state, "int")) then
+		if not isAny(cast.expression.inferredType, getTypeInfoForBuiltinType(state, "number"),getTypeInfoForBuiltinType(state, "int")) then
 			typeError(
 				state, cast.expression,
 				"Cannot cast from %s to %s.",
@@ -1515,9 +1512,39 @@ end
 -- 	defer.body
 -- end
 
--- !NODE_INFERRER `function nodeInferrers.AstImport(state, import)`
--- 	-- import.importName
--- end
+!NODE_INFERRER `function nodeInferrers.AstImport(state, import)`
+	local path
+	if import.isLoad then
+		path = import.importName
+	else
+		typeError(state, import, "@Incomplete: !import")
+	end
+
+	local globalScope = state.globalScope
+
+	if not state.fileBuffers[path] then
+		-- @Incomplete: Include the times in compilation stats.
+		local timeStartLexing, timeEndLexing = readAndTokenizeFile(state, path)
+		assert(state.fileBuffers[path], path)
+
+		local timeStartParsing = os.clock()
+		local fileScope        = parseFileScope(state, globalScope, path)
+		local timeEndParsing   = os.clock()
+
+		table.insert(globalScope.fileScopes, fileScope)
+
+		if peekNextToken(state) then
+			errorParsingNext(state, "Expected the end of the file.")
+		end
+
+		addToQueueRecursively(state, fileScope)
+	end
+
+	import.fileScope = itemWith1(globalScope.fileScopes, "path", path) or errorInternal(path)
+
+	import.inferredType = getTypeInfoForBuiltinType(state, "namespace")
+	moveToNextPipe(state, import)
+end
 
 -- !NODE_INFERRER `function nodeInferrers.AstIf(state, ifBranch)`
 -- 	ifBranch.condition
@@ -1558,7 +1585,7 @@ end
 	table.insert(state.allTypeInfos, structInfo)
 
 	struct.representedType = structInfo
-	struct.inferredType    = getTypeInfoForBuiltinType"type"
+	struct.inferredType    = getTypeInfoForBuiltinType(state, "type")
 
 	moveToNextPipe(state, struct)
 end
@@ -1575,17 +1602,17 @@ end
 	local enumMemberInfo
 
 	if enum.memberType then
-		enumMemberInfo = getTypeInfoForBuiltinType(enum.memberType.typeName)
+		enumMemberInfo = getTypeInfoForBuiltinType(state, enum.memberType.typeName)
 	else
 		-- Just use the type of the first member as the wanted type for the enum.
 		-- Note: Struct member declarations only have one name.
 		enumMemberInfo = enum.declarations[1].inferredTypes[1]
 		if not isAny(enumMemberInfo,
-			getTypeInfoForBuiltinType"int",
-			getTypeInfoForBuiltinType"string",
-			getTypeInfoForBuiltinType"type",
-			getTypeInfoForBuiltinType"bool",
-			getTypeInfoForBuiltinType"number"
+			getTypeInfoForBuiltinType(state, "int"),
+			getTypeInfoForBuiltinType(state, "string"),
+			getTypeInfoForBuiltinType(state, "type"),
+			getTypeInfoForBuiltinType(state, "bool"),
+			getTypeInfoForBuiltinType(state, "number")
 		) then
 			typeError(state, enum, "Supported enum member types are: int, string, type, bool, number")
 		end
@@ -1616,7 +1643,7 @@ end
 	table.insert(state.allTypeInfos, enumInfo)
 
 	enum.representedType = enumInfo
-	enum.inferredType    = getTypeInfoForBuiltinType"type"
+	enum.inferredType    = getTypeInfoForBuiltinType(state, "type")
 
 	moveToNextPipe(state, enum)
 end
@@ -1628,9 +1655,21 @@ end
 		end
 	end
 
-	-- @Incomplete: fileScope.includedNamespaces
+	-- @Incomplete: fileScope.imports[]
 
 	moveToNextPipe(state, fileScope)
+end
+
+!NODE_INFERRER `function nodeInferrers.AstGlobalScope(state, globalScope)`
+	for _, fileScope in ipairs(globalScope.fileScopes) do
+		if fileScope.queued.pipe <= !(PIPE_INFER) then
+			!DEPEND_AND_RETURN(`globalScope`, DEPEND_NODE_INFERRED, `fileScope`)
+		end
+	end
+
+	-- @Incomplete: globalScope.includedNamespaces[]
+
+	moveToNextPipe(state, globalScope)
 end
 
 !NODE_INFERRER `function nodeInferrers.AstBlock(state, block)`
@@ -1650,7 +1689,7 @@ end
 
 
 
--- expressionIsContant, value = getLiteralValueFromExpressionIfConstant( typerState, expression )
+-- expressionIsContant, value = getLiteralValueFromExpressionIfConstant( compilationState, expression )
 -- Note: It's assumed that the expression tree has all types figured out.
 function _G.getLiteralValueFromExpressionIfConstant(state, expr)
 	-- @Incomplete: Return an AstNode?
@@ -1684,9 +1723,9 @@ function _G.getLiteralValueFromExpressionIfConstant(state, expr)
 		local isConst, v = getLiteralValueFromExpressionIfConstant(state, cast.expression)
 		if not isConst then  return false, nil  end
 
-		if cast.inferredType == getTypeInfoForBuiltinType"int" then
+		if cast.inferredType == getTypeInfoForBuiltinType(state, "int") then
 			return true, math.floor(v)
-		elseif cast.inferredType == getTypeInfoForBuiltinType"number" then
+		elseif cast.inferredType == getTypeInfoForBuiltinType(state, "number") then
 			return true, v
 		else
 			errorInternal("Unhandled cast type: %s", getFriendlyTypeInfoName(cast.inferredType))
@@ -1697,6 +1736,9 @@ function _G.getLiteralValueFromExpressionIfConstant(state, expr)
 
 	elseif expr.nodeType == !(nodeTypes.AstCall) then
 		return false, nil -- Calls are always a runtime operation.
+
+	elseif expr.nodeType == !(nodeTypes.AstImport) then
+		return true, nil -- Namespaces, just like types, are always constant.
 
 	else
 		errorUnhandledNodeType(expr)
