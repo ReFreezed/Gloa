@@ -56,7 +56,7 @@ local !structTypeInfo"TypeInfoAny:_TypeInfo"{}
 local !structTypeInfo"TypeInfoBool:_TypeInfo"{}
 local !structTypeInfo"TypeInfoInt:_TypeInfo"{}
 local !structTypeInfo"TypeInfoNil:_TypeInfo"{}
-local !structTypeInfo"TypeInfoNumber:_TypeInfo"{}
+local !structTypeInfo"TypeInfoFloat:_TypeInfo"{}
 local !structTypeInfo"TypeInfoString:_TypeInfo"{}
 local !structTypeInfo"TypeInfoTable:_TypeInfo"{}
 local !structTypeInfo"TypeInfoType:_TypeInfo"{}
@@ -69,7 +69,7 @@ local !structTypeInfo"TypeInfoVoid:_TypeInfo"{}
 	[typeTags.TypeInfoBool]      = true,
 	[typeTags.TypeInfoInt]       = true,
 	[typeTags.TypeInfoNil]       = true,
-	[typeTags.TypeInfoNumber]    = true,
+	[typeTags.TypeInfoFloat]     = true,
 	[typeTags.TypeInfoString]    = true,
 	[typeTags.TypeInfoTable]     = true,
 	[typeTags.TypeInfoType]      = true,
@@ -103,7 +103,7 @@ local !struct"TypeInfoEnumMember"{
 }
 local !structTypeInfo"TypeInfoEnum:_TypeInfo"{
 	name     = "",
-	typeInfo = NIL, -- Must be one of these primitive types: int, string, type, bool or number.
+	typeInfo = NIL, -- Must be one of these primitive types: int, string, type, bool or float.
 	members  = {},  -- []TypeInfoEnumMember
 }
 
@@ -150,7 +150,7 @@ do
 		["bool"]      = TypeInfoBool,
 		["int"]       = TypeInfoInt,
 		["nil"]       = TypeInfoNil,
-		["number"]    = TypeInfoNumber,
+		["float"]     = TypeInfoFloat,
 		["string"]    = TypeInfoString,
 		["table"]     = TypeInfoTable,
 		["type"]      = TypeInfoType,      -- The result of e.g. type_of(int) or type_of(type_of(myVariable)).
@@ -1066,7 +1066,7 @@ local LITERAL_TYPE_TO_BUILTIN_TYPE_NAME = !({
 	[LITERAL_BOOLEAN] = "bool",
 	[LITERAL_INTEGER] = "int",
 	[LITERAL_NIL]     = "nil",
-	[LITERAL_NUMBER]  = "number",
+	[LITERAL_FLOAT]   = "float",
 	[LITERAL_STRING]  = "string",
 })
 
@@ -1088,10 +1088,10 @@ end
 	if isAny(unary.operation, "+","-") then
 		if not isAny(typeInfo,
 			getTypeInfoForBuiltinType(state, "int"),
-			getTypeInfoForBuiltinType(state, "number")
+			getTypeInfoForBuiltinType(state, "float")
 		) then
 			typeError(state, unary.expression,
-				"Unary operation: Expected a number or int. (Got %s)",
+				"Unary operation: Expected a float or int. (Got %s)",
 				getFriendlyTypeInfoName(typeInfo)
 			)
 		end
@@ -1130,8 +1130,8 @@ end
 		local literal = astNewNode(AstLiteral, unary.token, unary.parent)
 
 		literal.literalType
-			=  typeInfo == getTypeInfoForBuiltinType(state, "int")    and !(LITERAL_INTEGER)
-			or typeInfo == getTypeInfoForBuiltinType(state, "number") and !(LITERAL_NUMBER)
+			=  typeInfo == getTypeInfoForBuiltinType(state, "int")   and !(LITERAL_INTEGER)
+			or typeInfo == getTypeInfoForBuiltinType(state, "float") and !(LITERAL_FLOAT)
 			or errorInternal(getFriendlyTypeInfoName(typeInfo))
 
 		literal.value        = !!(opArithmetic ~= "+" and opArithmetic or "") v
@@ -1185,29 +1185,29 @@ end
 	if isAny(binary.operation, "+","-","*","^","%","/","//") then
 		if not isAny(typeInfoL,
 			getTypeInfoForBuiltinType(state, "int"),
-			getTypeInfoForBuiltinType(state, "number")
+			getTypeInfoForBuiltinType(state, "float")
 		) then
 			typeError(
 				state, binary.left,
-				"Binary operation: Expected a number or int. (Got %s)",
+				"Binary operation: Expected a float or int. (Got %s)",
 				getFriendlyTypeInfoName(typeInfoL)
 			)
 		end
 
-		if     binary.operation == "/"  then  typeInfo = getTypeInfoForBuiltinType(state, "number") -- Cast to number.
-		elseif binary.operation == "//" then  typeInfo = getTypeInfoForBuiltinType(state, "int")    -- Cast to int.
-		else                                  typeInfo = typeInfoL  end                             -- Keep type.
+		if     binary.operation == "/"  then  typeInfo = getTypeInfoForBuiltinType(state, "float") -- Cast to float.
+		elseif binary.operation == "//" then  typeInfo = getTypeInfoForBuiltinType(state, "int")   -- Cast to int.
+		else                                  typeInfo = typeInfoL  end                            -- Keep type.
 
 	-- Comparison.
 	elseif isAny(binary.operation, "<",">","<=",">=") then
 		if not isAny(typeInfoL,
 			getTypeInfoForBuiltinType(state, "int"),
-			getTypeInfoForBuiltinType(state, "number"),
+			getTypeInfoForBuiltinType(state, "float"),
 			getTypeInfoForBuiltinType(state, "string")
 		) then
 			typeError(
 				state, binary.left,
-				"Binary operation: Expected a number, int or string. (Got %s)",
+				"Binary operation: Expected a float, int or string. (Got %s)",
 				getFriendlyTypeInfoName(typeInfoL)
 			)
 		end
@@ -1264,8 +1264,8 @@ end
 		local literal = astNewNode(AstLiteral, binary.token, binary.parent)
 
 		literal.literalType
-			=  typeInfo == getTypeInfoForBuiltinType(state, "int")    and !(LITERAL_INTEGER)
-			or typeInfo == getTypeInfoForBuiltinType(state, "number") and !(LITERAL_NUMBER)
+			=  typeInfo == getTypeInfoForBuiltinType(state, "int")   and !(LITERAL_INTEGER)
+			or typeInfo == getTypeInfoForBuiltinType(state, "float") and !(LITERAL_FLOAT)
 			or errorInternal(getFriendlyTypeInfoName(typeInfo))
 
 		literal.value        = valueL !!(opArithmeticKeepType) valueR
@@ -1277,7 +1277,7 @@ end
 
 	elseif binary.operation == "/" then
 		local literal        = astNewNode(AstLiteral, binary.token, binary.parent)
-		literal.literalType  = !(LITERAL_NUMBER)
+		literal.literalType  = !(LITERAL_FLOAT)
 		literal.value        = valueL/valueR
 		literal.inferredType = typeInfo
 		scheduleRemovalOfChildrenFromQueueRecursively(state, binary)
@@ -1394,8 +1394,8 @@ end
 		errorUnhandledNodeType(cast.targetType)
 	end
 
-	if isAny(castTypeInfo, getTypeInfoForBuiltinType(state, "number"),getTypeInfoForBuiltinType(state, "int")) then
-		if not isAny(cast.expression.inferredType, getTypeInfoForBuiltinType(state, "number"),getTypeInfoForBuiltinType(state, "int")) then
+	if isAny(castTypeInfo, getTypeInfoForBuiltinType(state, "float"),getTypeInfoForBuiltinType(state, "int")) then
+		if not isAny(cast.expression.inferredType, getTypeInfoForBuiltinType(state, "float"),getTypeInfoForBuiltinType(state, "int")) then
 			typeError(
 				state, cast.expression,
 				"Cannot cast from %s to %s.",
@@ -1662,9 +1662,9 @@ end
 			getTypeInfoForBuiltinType(state, "string"),
 			getTypeInfoForBuiltinType(state, "type"),
 			getTypeInfoForBuiltinType(state, "bool"),
-			getTypeInfoForBuiltinType(state, "number")
+			getTypeInfoForBuiltinType(state, "float")
 		) then
-			typeError(state, enum, "Supported enum member types are: int, string, type, bool, number")
+			typeError(state, enum, "Supported enum member types are: int, string, type, bool, float")
 		end
 	end
 
@@ -1775,7 +1775,7 @@ function _G.getLiteralValueFromExpressionIfConstant(state, expr)
 
 		if cast.inferredType == getTypeInfoForBuiltinType(state, "int") then
 			return true, math.floor(v)
-		elseif cast.inferredType == getTypeInfoForBuiltinType(state, "number") then
+		elseif cast.inferredType == getTypeInfoForBuiltinType(state, "float") then
 			return true, v
 		else
 			errorInternal("Unhandled cast type: %s", getFriendlyTypeInfoName(cast.inferredType))
