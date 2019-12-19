@@ -95,10 +95,10 @@ end
 	-- Pipe phase:
 	queued   = NIL, -- Queued
 }
-_G.!structAst"AstTypeDefinition:_AstNode"{ -- Created during type phase.
+_G.!structAst"AstTypeDefinition:_AstNode"{ -- Created during type phase.  @Cleanup: This does not represent a type definition - it's just a declaration of a single name!
 	-- Type phase:
 	name       = NIL,   -- AstIdentifier|AstVararg
-	scope      = NIL,   -- AstGlobalScope|AstFileScope|AstBlock|AstStruct|AstFor|AstLambda|AstEnum (This should be the same as the parent.)
+	scope      = NIL,   -- AstBlock (or substruct) | AstFor | AstLambda  (This should be the same as the parent.)
 	isConstant = false,
 	canShadow  = false, -- @Cleanup: Probably don't need to store this here.
 	typeInfo   = NIL,   -- TypeInfo
@@ -157,18 +157,6 @@ _G.!structAst"AstCall:_AstExpression"{
 	callee                    = NIL, -- AstExpression
 	arguments                 = {},  -- []AstExpression
 }
-_G.!structAst"AstArgument:_AstNode"{
-	declaration = NIL, -- AstDeclaration
-	group       = 0,   -- Arguments in the same group have the same type. This is a small optimization for the typer.
-	autobake    = 0,   -- 0=disabled, 1=enabled, 2=required  @Incomplete
-
-	-- For an in arg, this indicates optionality.
-	-- For an out arg, if there's a !must then it must not be adjusted away by the caller.
-	isRequired  = false,
-}
-_G.!structAst"AstArguments:_AstExpression"{ -- @Cleanup: Move this into an array in the parent (like expression lists). (Also, this probably shouldn't have been an expression.)
-	-- [1]=argument1, ...
-}
 _G.!structAst"AstLambda:_AstExpression"{
 	argumentsIn  = NIL, -- AstArguments
 	argumentsOut = NIL, -- AstArguments
@@ -191,29 +179,42 @@ _G.!structAst"AstImport:_AstExpression"{
 	fileScope  = NIL, -- AstFileScope
 }
 
+_G.!structAst"AstArgument:_AstNode"{
+	declaration = NIL, -- AstDeclaration
+	assignment  = NIL, -- AstAssignment
+	group       = 0,   -- Arguments in the same group have the same type. This is a small optimization for the typer.
+	autobake    = 0,   -- 0=disabled, 1=enabled, 2=required  @Incomplete
+
+	-- For an input argument, this indicates optionality.
+	-- For an output argument, if there's a !must then it must not be adjusted away by the caller.
+	isRequired = false,
+}
+_G.!structAst"AstArguments:_AstNode"{
+	-- [1]=argument1, ...
+}
+
 _G.!structAst"AstStatement:_AstNode"{ -- Needed? I think so?
 	what = NIL,
 }
 
 _G.!structAst"AstDeclaration:_AstNode"{
-	names              = {},  -- [](AstIdentifier|AstVararg)
+	name               = NIL, -- AstIdentifier|AstVararg
 	types              = {},  -- []AstType  (No value here means the types are inferred.)
 	notes              = {},  -- []AstNote  @Incomplete: Nodes.
 	isGlobalOrExported = false,
 	isConstant         = false,
 	canShadow          = false,
 
-	-- assignment      = nil means all names gets their default value (which depends on the type, of which there must be only one).
-	assignment         = NIL, -- AstAssignment
-
-	-- Type phase:
-	inferredTypes      = {},  -- []TypeInfo (One for each name.)
+	-- assignment==nil means the name gets it's default value (which depends on the type, of which there must be only one).
+	assignment      = NIL, -- AstAssignment
+	assignmentIndex = 1,
 }
 
 _G.!structAst"AstAssignment:_AstNode"{
-	operation = "=",
-	targets   = {}, -- []AstExpression
-	values    = {}, -- []AstExpression
+	forDeclaration = false,
+	operation      = "=",
+	targets        = {}, -- []AstExpression
+	values         = {}, -- []AstExpression
 }
 
 !structAst"_AstJump:_AstNode"{}
@@ -243,7 +244,7 @@ _G.!structAst"AstWhile:_AstControlStructure"{
 }
 _G.!structAst"AstFor:_AstControlStructure"{
 	forType     = FOR_NUMERIC,
-	names       = {},  -- []AstIdentifier  @Incomplete @Cleanup: Use AstDeclaration in AstFor.
+	names       = {},  -- []AstIdentifier  @Incomplete @Cleanup: Use AstDeclaration(s) (and AstAssignment(s)?) in AstFor.
 	expressions = {},  -- []AstExpression
 	body        = NIL, -- AstBlock
 	-- Type phase:
@@ -251,38 +252,31 @@ _G.!structAst"AstFor:_AstControlStructure"{
 	definedLocals = {},
 }
 
-!structAst"_AstDeclarativeScope:_AstNode"{
-	declarations       = {}, -- []AstDeclaration
-	imports            = {}, -- []AstImport
-	-- includedNamespaces = {}, -- []AstImport  @Depricated
-	-- Type phase:
-	definitions   = {}, -- []AstTypeDefinition
-	definedLocals = {},
-}
-_G.!structAst"AstStruct:_AstDeclarativeScope"{
-	arguments       = NIL, -- AstArguments
-	-- Type phase:
-	representedType = NIL, -- TypeInfoStruct
-}
-_G.!structAst"AstEnum:_AstDeclarativeScope"{ -- Should this be a DeclarativeScope?
-	memberType      = NIL, -- AstType
-	-- Type phase:
-	representedType = NIL, -- TypeInfoEnum
-}
-_G.!structAst"AstFileScope:_AstDeclarativeScope"{
-	isModule = false,
-	path     = "",
-}
-_G.!structAst"AstGlobalScope:_AstDeclarativeScope"{
-	firstFileScope = NIL, -- AstFileScope
-	fileScopes     = {},  -- []AstFileScope
-}
-
 _G.!structAst"AstBlock:_AstNode"{
+	declarations = {}, -- []AstDeclaration
+	imports      = {}, -- []AstImport
 	-- [1]=statement1, ...
 	-- Type phase:
 	definitions   = {}, -- []AstTypeDefinition
 	definedLocals = {},
+}
+_G.!structAst"AstFileScope:AstBlock"{
+	isModule = false,
+	path     = "",
+}
+_G.!structAst"AstGlobalScope:AstBlock"{
+	firstFileScope = NIL, -- AstFileScope
+	fileScopes     = {},  -- []AstFileScope
+}
+!structAst"_AstBlockExpression:AstBlock"{
+	-- Type phase:
+	representedType = NIL, -- TypeInfoStruct
+}
+_G.!structAst"AstStruct:_AstBlockExpression"{
+	arguments = NIL, -- AstArguments
+}
+_G.!structAst"AstEnum:_AstBlockExpression"{
+	memberType = NIL, -- AstType
 }
 
 _G.AST_NODE_TYPE_NAMES = !(nodeTypeNames)
@@ -536,8 +530,7 @@ function _G.parseTable(state, parentNode)
 		if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"}") then
 			break
 		elseif isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),",",";") then
-			-- void
-			-- Note: A trailing comma or semicolon at the end of the arg list is permitted.
+			-- void  (Note: A trailing comma or semicolon at the end of the argument list is permitted.)
 		else
 			!ERROR_OR_RETURN `errorParsingAfterPrevious(state, "Expected ','.")`
 		end
@@ -576,7 +569,7 @@ function _G.parseArguments(state, parentNode, isInput, placeDeclared)
 
 	for groupN = 1, math.huge do
 		-- Argument name(s).
-		local argGroup = {}
+		local argsInGroup = {}
 
 		while true do
 			tokType, tokValue, token = consumeNextToken(state)
@@ -587,20 +580,18 @@ function _G.parseArguments(state, parentNode, isInput, placeDeclared)
 			local arg = astNewNode(AstArgument, token, args)
 			arg.group = groupN
 
-			table.insert(args,     arg)
-			table.insert(argGroup, arg)
+			table.insert(args,        arg)
+			table.insert(argsInGroup, arg)
 
 			local decl      = astNewNode(AstDeclaration, token, arg)
 			arg.declaration = decl
-
-			local nameNode
 
 			if tokType == !(TOKEN_IDENTIFIER) then
 				local ident         = astNewNode(AstIdentifier, token, decl)
 				ident.name          = tokValue
 				ident.placeDeclared = placeDeclared
 				ident.declaration   = decl
-				nameNode            = ident
+				decl.name           = ident
 
 				if takenNames[ident.name] then
 					!ERROR_OR_RETURN `errorParsingLast(state, "Duplicate name '%s'.", ident.name)`
@@ -608,11 +599,9 @@ function _G.parseArguments(state, parentNode, isInput, placeDeclared)
 				takenNames[ident.name] = true
 
 			else
-				gotVararg   = true
-				nameNode    = astNewNode(AstVararg, token, decl)
+				gotVararg = true
+				decl.name = astNewNode(AstVararg, token, decl)
 			end
-
-			decl.names[1] = nameNode
 
 			tokType, tokValue = consumeNextToken(state)
 
@@ -631,7 +620,7 @@ function _G.parseArguments(state, parentNode, isInput, placeDeclared)
 
 		-- Type(s).
 		token = state.nextToken
-		for _, arg in ipairs(argGroup) do
+		for _, arg in ipairs(argsInGroup) do
 			state.nextToken = token
 			local decl      = arg.declaration
 			!DO_OR_RETURN `parsePipeSeparatedTypes(state, decl, decl.types)` -- @Speed: Parse once then just copy the first one.
@@ -647,24 +636,38 @@ function _G.parseArguments(state, parentNode, isInput, placeDeclared)
 			end
 
 			token = state.nextToken
-			for i, arg in ipairs(argGroup) do
-				state.nextToken       = token
-				local decl            = arg.declaration
+			for i, arg in ipairs(argsInGroup) do
+				state.nextToken = token
+				local decl      = arg.declaration
 
-				local assignment      = astNewNode(AstAssignment, token, decl)
-				decl.assignment       = assignment
+				if decl.name.nodeType == !(nodeTypes.AstVararg) then
+					!ERROR_OR_RETURN `errorParsing(state, decl.name.token, "Varargs cannot have default values.")`
+				else
+					assert(decl.name.nodeType == !(nodeTypes.AstIdentifier))
+				end
 
-				local identCopy       = astCopy(decl.names[1])
-				identCopy.parent      = assignment
-				assignment.targets[1] = identCopy
+				local assignment           = astNewNode(AstAssignment, token, arg)
+				assignment.forDeclaration  = true
+				arg.assignment             = assignment
+				decl.assignment            = assignment -- Note: decl.assignmentIndex is always 1 for arguments.
+
+				local identCopy            = astCopy(decl.name)
+				identCopy.parent           = assignment
+				assignment.targets[1]      = identCopy
 
 				!SET_OR_RETURN `local expr = parseExpression(state, assignment)` -- @Speed: Parse once then just copy the first one.
 				assignment.values[1]       = expr
 
+				--
 				-- If the value is nil then we make sure 'nil' is one of the types.
+				--
+				-- @Robustness: One of the types may be an alias for the nil type, which means this
+				-- may cause an error in the typer when we check for duplicate specified types. We
+				-- should probably do this in the typer instead.
+				--
 				if
 					i == 1
-					and expr.nodeType == !(nodeTypes.AstLiteral)
+					and expr.nodeType    == !(nodeTypes.AstLiteral)
 					and expr.literalType == !(LITERAL_NIL)
 					and not itemWith1(decl.types, "typeName", "nil")
 				then
@@ -680,7 +683,7 @@ function _G.parseArguments(state, parentNode, isInput, placeDeclared)
 
 		if isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"shadow") then
 			consumeNextToken(state)
-			for _, arg in ipairs(argGroup) do
+			for _, arg in ipairs(argsInGroup) do
 				arg.declaration.canShadow = true
 			end
 		end
@@ -725,7 +728,7 @@ function _G.parseNamelessArguments(state, parentNode, placeDeclared)
 		ident.name          = "__UNNAMED_"..groupN.."__"
 		ident.placeDeclared = placeDeclared
 		ident.declaration   = decl
-		decl.names[1]       = ident
+		decl.name           = ident
 
 		tokType, tokValue = peekNextToken(state)
 
@@ -766,10 +769,9 @@ function _G.parseStruct(state, parentNode)
 	else
 		-- Note: We allow a trailing comma/semicolon after the members.
 		while true do
-			local declType             = !(DECLARATION_STRUCT)
-			!SET_OR_RETURN `local decl = parseDeclaration(state, struct, declType)`
+			local declType = !(DECLARATION_STRUCT)
+			!DO_OR_RETURN `parseDeclarationStatement(state, struct, struct, declType)`
 
-			table.insert(struct.declarations, decl)
 			tokType, tokValue = consumeNextToken(state)
 
 			if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),",",";") then
@@ -818,10 +820,9 @@ function _G.parseEnum(state, parentNode)
 
 	-- Note: We allow a trailing comma/semicolon after the members.
 	while true do
-		local declType             = !(DECLARATION_ENUM)
-		!SET_OR_RETURN `local decl = parseDeclaration(state, enum, declType)`
+		local declType = !(DECLARATION_ENUM)
+		!DO_OR_RETURN `parseDeclarationStatement(state, enum, enum, declType)`
 
-		table.insert(enum.declarations, decl)
 		tokType, tokValue = consumeNextToken(state)
 
 		if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),",",";") then
@@ -843,9 +844,9 @@ function _G.parseEnum(state, parentNode)
 	return enum
 end
 
--- declaration     = parseDeclaration( compilationState, parentNode [, declarationType=DECLARATION_NORMAL ] )
+-- success = parseDeclarationStatement( compilationState, parentBlock, placeDeclared=auto [, declarationType=DECLARATION_NORMAL ] )
 -- declarationType = DECLARATION_NORMAL|DECLARATION_STRUCT|DECLARATION_ENUM
-function _G.parseDeclaration(state, parentNode, declType)
+function _G.parseDeclarationStatement(state, block, placeDeclared, declType)
 	--[[
 	local a = 0         -- Variable, inferred type.
 	local b:float = 0   -- Variable, explicit type.
@@ -860,27 +861,61 @@ function _G.parseDeclaration(state, parentNode, declType)
 	]]
 
 	declType   = declType or !(DECLARATION_NORMAL)
-	local decl = astNewNode(AstDeclaration, state.nextToken, parentNode)
+
+	local declStatements = {}
+	local declarations   = {}
+	local declNames      = {}
+
+	local isGlobalOrExported = false
 
 	if declType == !(DECLARATION_NORMAL) then
 		local tokType, tokValue = consumeNextToken(state)
 		if not isToken(tokType,tokValue, !(TOKEN_KEYWORD),"local","global","export") then
 			!ERROR_OR_RETURN `errorParsingLast(state, "Expected 'local'.")`
 		end
-		decl.isGlobalOrExported = isAny(tokValue, "global","export")
+		isGlobalOrExported = isAny(tokValue, "global","export")
 	end
 
 	local nameListStartToken = state.nextToken
+	local takenNames = {}
+
 	if declType == !(DECLARATION_NORMAL) then
-		!DO_OR_RETURN `parseNameList(state, decl, decl.names, decl)`
+		!DO_OR_RETURN `parseNameList(state, block, declNames, nil)` -- Note: We update parent and placeDeclared here below.
+
+		for i, ident in ipairs(declNames) do
+			local statement         = astNewNode(AstStatement, state.nextToken, block)
+			declStatements[i]       = statement
+
+			local decl              = astNewNode(AstDeclaration, state.nextToken, statement)
+			decl.isGlobalOrExported = isGlobalOrExported
+			declarations[i]         = decl
+			statement.what          = decl
+
+			ident.parent            = decl
+			ident.placeDeclared     = placeDeclared or decl
+			ident.declaration       = decl
+
+			decl.name               = ident
+		end
+
 	else
-		!SET_OR_RETURN `local ident = parseIdentifier(state, decl, decl)`
-		table.insert(decl.names, ident)
+		local statement = astNewNode(AstStatement, state.nextToken, block)
+		table.insert(declStatements, statement)
+
+		local decl              = astNewNode(AstDeclaration, state.nextToken, statement)
+		decl.isGlobalOrExported = isGlobalOrExported
+		table.insert(declarations, decl)
+		statement.what          = decl
+
+		!SET_OR_RETURN `local ident = parseIdentifier(state, decl, (placeDeclared or decl))`
+		ident.declaration           = decl
+		decl.name                   = ident
+		table.insert(declNames, ident)
 	end
 
-	for _, ident in ipairs(decl.names) do
-		ident.declaration = decl
-	end
+	assert(#declarations > 0)
+	assert(#declarations == #declStatements)
+	assert(#declarations == #declNames)
 
 	local typesStartToken          = state.nextToken -- Dummy position, kinda.
 	local tokType, tokValue, token = peekNextToken(state)
@@ -896,7 +931,7 @@ function _G.parseDeclaration(state, parentNode, declType)
 		if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),":") then
 			-- void
 
-			-- @Robustness: Mark the declaration to have it's type inferred instead of just
+			-- @Robustness: Mark the declarations to have their types inferred instead of just
 			-- leaving decl.types empty? Or should we have an AstTypeInferred node?
 
 		-- Specified type.
@@ -904,7 +939,10 @@ function _G.parseDeclaration(state, parentNode, declType)
 			if declType == !(DECLARATION_ENUM) then
 				!ERROR_OR_RETURN `errorParsingNext(state, "The type of the members must be specified after the 'enum' keyword.")`
 			else
-				!DO_OR_RETURN `parsePipeSeparatedTypes(state, decl, decl.types)`
+				for _, decl in ipairs(declarations) do
+					state.nextToken = typesStartToken
+					!DO_OR_RETURN `parsePipeSeparatedTypes(state, decl, decl.types)` -- @Speed: Parse once then just copy the first one.
+				end
 			end
 		end
 
@@ -915,17 +953,32 @@ function _G.parseDeclaration(state, parentNode, declType)
 
 	tokType, tokValue, token = peekNextToken(state)
 
+	local assignmentStatement = nil
+	local assignment          = nil
+	local isConstant          = false
+
+	!local CREATE_ASSIGNMENT = `
+		assignmentStatement       = astNewNode(AstStatement,  token, block)
+		assignment                = astNewNode(AstAssignment, token, assignmentStatement)
+		assignment.forDeclaration = true
+		assignmentStatement.what  = assignment
+
+		for i, decl in ipairs(declarations) do
+			local identCopy         = astCopy(declNames[i])
+			identCopy.parent        = assignment
+			identCopy.placeDeclared = nil
+			assignment.targets[i]   = identCopy
+
+			decl.assignment         = assignment
+			decl.assignmentIndex    = i
+		end
+	`
+
 	-- Variable.
 	if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"=") then
 		consumeNextToken(state)
 
-		local assignment = astNewNode(AstAssignment, token, decl)
-		for i, ident in ipairs(decl.names) do
-			local identCopy       = astCopy(ident)
-			identCopy.parent      = assignment
-			assignment.targets[i] = identCopy
-		end
-		decl.assignment = assignment
+		!!(CREATE_ASSIGNMENT)
 
 		if declType == !(DECLARATION_ENUM) then
 			!ERROR_OR_RETURN `errorParsingLast(state, "Enum members must be constant.")`
@@ -933,7 +986,7 @@ function _G.parseDeclaration(state, parentNode, declType)
 		-- 	!SET_OR_RETURN `local expr = parseExpression(state, assignment)`
 		-- 	table.insert(assignment.values, expr)
 		elseif declType == !(DECLARATION_NORMAL) then
-			!DO_OR_RETURN `parseExpressionList(state, decl, assignment.values)`
+			!DO_OR_RETURN `parseExpressionList(state, assignment, assignment.values)`
 		else
 			!SET_OR_RETURN `local expr = parseExpression(state, assignment)`
 			table.insert(assignment.values, expr)
@@ -942,29 +995,26 @@ function _G.parseDeclaration(state, parentNode, declType)
 	-- Constant.
 	elseif isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),":") then
 		consumeNextToken(state)
-		decl.isConstant = true
 
-		if decl.types[2] then
-			!ERROR_OR_RETURN `errorParsing(state, decl.types[2].token-1, "Constants can only be of one type.")`
+		if declarations[1].types[2] then
+			!ERROR_OR_RETURN `errorParsing(state, declarations[1].types[2].token-1, "Constants can only be of one type.")`
 		end
 
-		-- @CopyPaste from above.
-		local assignment = astNewNode(AstAssignment, token, decl)
-		for i, ident in ipairs(decl.names) do
-			local identCopy       = astCopy(ident)
-			identCopy.parent      = assignment
-			assignment.targets[i] = identCopy
+		isConstant = true
+		for _, decl in ipairs(declarations) do
+			decl.isConstant = true
 		end
-		decl.assignment = assignment
+
+		!!(CREATE_ASSIGNMENT)
 
 		if declType == !(DECLARATION_NORMAL) then
-			!DO_OR_RETURN `parseExpressionList(state, decl, assignment.values)`
+			!DO_OR_RETURN `parseExpressionList(state, assignment, assignment.values)`
 		else
 			!SET_OR_RETURN `local expr = parseExpression(state, assignment)`
 			table.insert(assignment.values, expr)
 		end
 
-	elseif decl.types[2] then
+	elseif declarations[1].types[2] then
 		!ERROR_OR_RETURN `errorParsingAfterLast(state, "Initial values are required if multiple types are specified.")`
 	end
 
@@ -974,7 +1024,7 @@ function _G.parseDeclaration(state, parentNode, declType)
 	if isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"shadow") then
 		consumeNextToken(state)
 
-		if decl.isConstant then
+		if isConstant then
 			!ERROR_OR_RETURN `errorParsingLast(state, "Constants cannot be shadows.")`
 		elseif declType == !(DECLARATION_STRUCT) then
 			!ERROR_OR_RETURN `errorParsingLast(state, "Struct members cannot be marked as shadows.")`
@@ -984,15 +1034,29 @@ function _G.parseDeclaration(state, parentNode, declType)
 			errorInternal(declType)
 		end
 
-		decl.canShadow = true
+		for _, decl in ipairs(declarations) do
+			decl.canShadow = true
+		end
 	end
 
 	-- Quickly check if there are obviously too many values.
-	if decl.assignment and #decl.assignment.values > #decl.names then
-		!ERROR_OR_RETURN `errorParsing(state, decl.assignment.values[#decl.names+1].token-1, "There are more values than names being declared.")`
+	if assignment and #assignment.values > #declNames then
+		!ERROR_OR_RETURN `errorParsing(state, assignment.values[#declNames+1].token-1, "There are more values than names being declared.")`
 	end
 
-	return decl
+	--
+	-- Everything's done! Now we can modify the block.
+	--
+
+	for i = 1, #declarations do
+		table.insert(block,              declStatements[i])
+		table.insert(block.declarations, declarations[i])
+	end
+	if assignment then
+		table.insert(block, assignmentStatement)
+	end
+
+	return true
 end
 
 function _G.parseAssignment(state, parentNode)
@@ -1053,21 +1117,25 @@ function _G.parseNameList(state, parentNode, names, placeDeclared)
 	return true
 end
 
-function _G.parseStatement(state, parentNode)
-	local statement = astNewNode(AstStatement, state.nextToken, parentNode)
+-- success = parseOneStatementButSometimesMoreAndAddToBlock( state, block )
+function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
+	local tokType, tokValue = peekNextToken(state)
 
-	local tokType,  tokValue  = peekNextToken(state, 1)
+	if isToken(tokType,tokValue, !(TOKEN_KEYWORD),"local") then
+		!DO_OR_RETURN_FALSE `parseDeclarationStatement(state, block, nil)`
+		return true
+	end
+
+	local statement = astNewNode(AstStatement, state.nextToken, block)
+
 	local tokType2, tokValue2 = peekNextToken(state, 2)
 	local tokType3, tokValue3 = peekNextToken(state, 3)
 	local tokType4, tokValue4 = peekNextToken(state, 4)
-	local token
 
-	if isToken(tokType,tokValue, !(TOKEN_KEYWORD),"local") then
-		!SET_OR_RETURN `statement.what = parseDeclaration(state, statement)`
-	elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"global") then
-		!ERROR_OR_RETURN `errorParsingNext(state, "Globals can only be declared in file scope.")`
+	if isToken(tokType,tokValue, !(TOKEN_KEYWORD),"global") then
+		!ERROR_OR_RETURN_FALSE `errorParsingNext(state, "Globals can only be declared in file scope.")`
 	elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"export") then
-		!ERROR_OR_RETURN `errorParsingNext(state, "Exports can only be declared in file scope.")`
+		!ERROR_OR_RETURN_FALSE `errorParsingNext(state, "Exports can only be declared in file scope.")`
 
 	elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"return") then
 		consumeNextToken(state)
@@ -1083,13 +1151,12 @@ function _G.parseStatement(state, parentNode)
 		--
 		local lambda = astFindParent(statement, !(nodeTypes.AstLambda))
 		if not lambda then
-			-- This shouldn't happen as parseStatement() shouldn't be called
-			-- by anything that does not parse return statements.
-			!ERROR_OR_RETURN `errorParsingNext(state, "Not inside a function.")`
+			-- This shouldn't happen as this function shouldn't be called by anything that does not parse return statements.
+			!ERROR_OR_RETURN_FALSE `errorParsingNext(state, "Not inside a function.")`
 		end
 
 		if lambda.argumentsOut and lambda.argumentsOut[1] then
-			!DO_OR_RETURN `parseExpressionList(state, returnNode, returnNode.values)`
+			!DO_OR_RETURN_FALSE `parseExpressionList(state, returnNode, returnNode.values)`
 		end
 
 		statement.what = returnNode
@@ -1105,12 +1172,12 @@ function _G.parseStatement(state, parentNode)
 		if tokType == !(TOKEN_IDENTIFIER) then
 			local loop = astFindParent(breakOrContinue, !(nodeTypes.AstFor), !(nodeTypes.AstWhile))
 			if not loop then
-				!ERROR_OR_RETURN `errorParsingNext(state, "Not inside a loop.")`
+				!ERROR_OR_RETURN_FALSE `errorParsingNext(state, "Not inside a loop.")`
 			end
 
 			repeat
 				if loop.nodeType == !(nodeTypes.AstFor) and itemWith1(loop.names, "name", tokValue) then
-					!SET_OR_RETURN `breakOrContinue.loopName = parseIdentifier(state, breakOrContinue)`
+					!SET_OR_RETURN_FALSE `breakOrContinue.loopName = parseIdentifier(state, breakOrContinue)`
 					break
 				end
 
@@ -1122,13 +1189,13 @@ function _G.parseStatement(state, parentNode)
 
 	elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"do") then
 		consumeNextToken(state)
-		!SET_OR_RETURN `statement.what = parseBlockOrScopedStatement(state, statement)`
+		!SET_OR_RETURN_FALSE `statement.what = parseBlockOrScopedStatement(state, statement)`
 
 	elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"defer") then
 		consumeNextToken(state)
 
-		local defer                = astNewNode(AstDefer, statement.token, statement)
-		!SET_OR_RETURN `defer.body = parseBlockOrScopedStatement(state, defer)`
+		local defer                      = astNewNode(AstDefer, statement.token, statement)
+		!SET_OR_RETURN_FALSE `defer.body = parseBlockOrScopedStatement(state, defer)`
 
 		statement.what = defer
 
@@ -1140,30 +1207,30 @@ function _G.parseStatement(state, parentNode)
 			and isToken(tokType4,tokValue4, !(TOKEN_PUNCTUATION),"{")
 		)
 	) then
-		!ERROR_OR_RETURN `errorParsingNext(state, "@Incomplete: if x == {case...}")`
+		!ERROR_OR_RETURN_FALSE `errorParsingNext(state, "@Incomplete: if x == {case...}")`
 
 	elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"if") then
 		consumeNextToken(state)
 
-		local ifBranch                      = astNewNode(AstIf, statement.token, statement)
-		!SET_OR_RETURN `ifBranch.condition  = parseExpression(state, ifBranch)`
-		!SET_OR_RETURN `ifBranch.branchTrue = parseBlockOrScopedStatement(state, ifBranch)`
-		statement.what                      = ifBranch
+		local ifBranch                            = astNewNode(AstIf, statement.token, statement)
+		!SET_OR_RETURN_FALSE `ifBranch.condition  = parseExpression(state, ifBranch)`
+		!SET_OR_RETURN_FALSE `ifBranch.branchTrue = parseBlockOrScopedStatement(state, ifBranch)`
+		statement.what                            = ifBranch
 
 		tokType, tokValue = peekNextToken(state)
 
 		if isToken(tokType,tokValue, !(TOKEN_KEYWORD),"else") then
 			consumeNextToken(state)
-			!SET_OR_RETURN `ifBranch.branchFalse = parseBlockOrScopedStatement(state, ifBranch)`
+			!SET_OR_RETURN_FALSE `ifBranch.branchFalse = parseBlockOrScopedStatement(state, ifBranch)`
 		end
 
 	elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"while") then
 		consumeNextToken(state)
 
-		local whileLoop                     = astNewNode(AstWhile, statement.token, statement)
-		!SET_OR_RETURN `whileLoop.condition = parseExpression(state, whileLoop)`
-		!SET_OR_RETURN `whileLoop.body      = parseBlockOrScopedStatement(state, whileLoop)`
-		statement.what                      = whileLoop
+		local whileLoop                           = astNewNode(AstWhile, statement.token, statement)
+		!SET_OR_RETURN_FALSE `whileLoop.condition = parseExpression(state, whileLoop)`
+		!SET_OR_RETURN_FALSE `whileLoop.body      = parseBlockOrScopedStatement(state, whileLoop)`
+		statement.what                            = whileLoop
 
 	elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"for") then
 		consumeNextToken(state)
@@ -1172,7 +1239,7 @@ function _G.parseStatement(state, parentNode)
 		local forLoop       = astNewNode(AstFor, statement.token, statement)
 
 		local exprListWeMayOrMayNotUse = {}
-		!DO_OR_RETURN `parseExpressionList(state, forLoop, exprListWeMayOrMayNotUse)`
+		!DO_OR_RETURN_FALSE `parseExpressionList(state, forLoop, exprListWeMayOrMayNotUse)`
 
 		tokType, tokValue = peekNextToken(state)
 		local twoParter
@@ -1198,21 +1265,21 @@ function _G.parseStatement(state, parentNode)
 			twoParter       = false
 		else
 			state.nextToken = forStartIndex
-			!ERROR_OR_RETURN `errorParsingNext(state, "Could not determine what kind of 'for' statement this is.")`
+			!ERROR_OR_RETURN_FALSE `errorParsingNext(state, "Could not determine what kind of 'for' statement this is.")`
 		end
 
 		if forLoop.forType == !(FOR_NUMERIC) then
 			-- for i = start, end [, step ]
 			if twoParter then
 				state.nextToken = forStartIndex
-				!DO_OR_RETURN `parseNameList(state, forLoop, forLoop.names)`
+				!DO_OR_RETURN_FALSE `parseNameList(state, forLoop, forLoop.names)`
 
 				assert(#forLoop.names == 1)
 
 				tokType, tokValue = consumeNextToken(state) -- Should eat the '='.
 				assert(isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"="))
 
-				!DO_OR_RETURN `parseExpressionList(state, forLoop, forLoop.expressions)`
+				!DO_OR_RETURN_FALSE `parseExpressionList(state, forLoop, forLoop.expressions)`
 
 			-- for start, end [, step ]
 			else
@@ -1227,25 +1294,25 @@ function _G.parseStatement(state, parentNode)
 			end
 
 			if #forLoop.expressions < 2 then
-				!ERROR_OR_RETURN `errorParsingAfterLast(state, "Expected 2 or 3 parameters for the numeric 'for' loop.")`
+				!ERROR_OR_RETURN_FALSE `errorParsingAfterLast(state, "Expected 2 or 3 parameters for the numeric 'for' loop.")`
 
 			elseif #forLoop.expressions > 3 then
-				!ERROR_OR_RETURN `errorParsing(state, forLoop.expressions[4].token-1, "Expected 2 or 3 parameters for the numeric 'for' loop.")`
+				!ERROR_OR_RETURN_FALSE `errorParsing(state, forLoop.expressions[4].token-1, "Expected 2 or 3 parameters for the numeric 'for' loop.")`
 			end
 
 		elseif forLoop.forType == !(FOR_SHORT) then
 			-- for v1, ... : obj
 			if twoParter then
 				state.nextToken = forStartIndex
-				!DO_OR_RETURN `parseNameList(state, forLoop, forLoop.names)`
+				!DO_OR_RETURN_FALSE `parseNameList(state, forLoop, forLoop.names)`
 
 				tokType, tokValue = consumeNextToken(state) -- Should eat the ':'.
 				assert(isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),":"))
 
-				!DO_OR_RETURN `parseExpressionList(state, forLoop, forLoop.expressions)`
+				!DO_OR_RETURN_FALSE `parseExpressionList(state, forLoop, forLoop.expressions)`
 
 				if forLoop.expressions[2] then
-					!ERROR_OR_RETURN `errorParsing(state, forLoop.expressions[2].token-1, "Expected a single parameter for the short-form 'for' loop.")`
+					!ERROR_OR_RETURN_FALSE `errorParsing(state, forLoop.expressions[2].token-1, "Expected a single parameter for the short-form 'for' loop.")`
 				end
 
 				-- @Incomplete: Generate 'itIndex' name for arrays (and more?) if necessary (when types are figured out).
@@ -1261,19 +1328,19 @@ function _G.parseStatement(state, parentNode)
 		-- for v1, ... in iter [, state [, init ] ]
 		else
 			state.nextToken = forStartIndex
-			!DO_OR_RETURN `parseNameList(state, forLoop, forLoop.names)`
+			!DO_OR_RETURN_FALSE `parseNameList(state, forLoop, forLoop.names)`
 
 			tokType, tokValue = consumeNextToken(state) -- Should eat the 'in'.
 			assert(isToken(tokType,tokValue, !(TOKEN_KEYWORD),"in"))
 
-			!DO_OR_RETURN `parseExpressionList(state, forLoop, forLoop.expressions)`
+			!DO_OR_RETURN_FALSE `parseExpressionList(state, forLoop, forLoop.expressions)`
 		end
 
-		!SET_OR_RETURN `forLoop.body = parseBlockOrScopedStatement(state, forLoop)`
-		statement.what               = forLoop
+		!SET_OR_RETURN_FALSE `forLoop.body = parseBlockOrScopedStatement(state, forLoop)`
+		statement.what                     = forLoop
 
 	elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"import","load") then
-		!SET_OR_RETURN `statement.what = parseImportOrLoad(state, statement)`
+		!SET_OR_RETURN_FALSE `statement.what = parseImportOrLoad(state, statement)`
 
 	else
 		state.soft     = true
@@ -1281,7 +1348,7 @@ function _G.parseStatement(state, parentNode)
 		state.soft     = false
 
 		if not exprTest then
-			!ERROR_OR_RETURN `
+			!ERROR_OR_RETURN_FALSE `
 				printerr()
 				parserMessage(io.stderr, state, statement.token, "Error", "Could not parse statement starting here.")
 
@@ -1298,23 +1365,26 @@ function _G.parseStatement(state, parentNode)
 				and call.callee.nodeType == !(nodeTypes.AstCall)
 				and astGetCalleeVisuallyFurthestToTheLeft(call).nodeType == !(nodeTypes.AstIdentifier)
 			then
-				!ERROR_OR_RETURN `errorParsing(state, statement.token, "Ambigous expression being called.")`
+				!ERROR_OR_RETURN_FALSE `errorParsing(state, statement.token, "Ambigous expression being called.")`
 			end
 			--]]
 			statement.what = call
 
 		else
-			state.nextToken                = statement.token
-			!SET_OR_RETURN `statement.what = parseAssignment(state, statement)`
+			state.nextToken                      = statement.token
+			!SET_OR_RETURN_FALSE `statement.what = parseAssignment(state, statement)`
 		end
 	end
+
+	assert(statement.what)
 
 	tokType, tokValue = peekNextToken(state)
 	if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),";") then
 		consumeNextToken(state)
 	end
 
-	return statement
+	table.insert(block, statement)
+	return true
 end
 
 function _G.parseBlock(state, parentNode)
@@ -1354,11 +1424,11 @@ function _G.parseBlock(state, parentNode)
 				!ERROR_OR_RETURN `errorParsing(state, statementStartToken, "%s statements must be at the end of the scope.", nodeTitle)`
 			end
 
-			statementStartToken             = state.nextToken
-			!SET_OR_RETURN `local statement = parseStatement(state, block)`
+			statementStartToken = state.nextToken
+			!DO_OR_RETURN `parseOneStatementButSometimesMoreAndAddToBlock(state, block)`
 
-			table.insert(block, statement)
-			lastNodeType = statement.what.nodeType
+			local statement = getLast(block)
+			lastNodeType    = statement.what.nodeType -- This is for return/break/continue check.
 		end
 	end
 
@@ -1376,9 +1446,7 @@ function _G.parseBlockOrScopedStatement(state, parentNode)
 
 	local block = astNewNode(AstBlock, token, parentNode)
 
-	!SET_OR_RETURN `local statement = parseStatement(state, block)`
-	table.insert(block, statement)
-
+	!DO_OR_RETURN `parseOneStatementButSometimesMoreAndAddToBlock(state, block)`
 	return block
 end
 
@@ -1419,8 +1487,7 @@ function _G.parseFileScope(state, parentNode, path)
 			table.insert(fileScope.imports, import)
 
 		elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"local","global","export") then
-			!SET_OR_RETURN `local decl = parseDeclaration(state, fileScope)`
-			table.insert(fileScope.declarations, decl)
+			!DO_OR_RETURN `parseDeclarationStatement(state, fileScope, nil)`
 
 		elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"using") then
 			!ERROR_OR_RETURN `errorParsingNext(state, "@Incomplete: Handle '%s'.", tokValue)`
@@ -1435,6 +1502,21 @@ function _G.parseFileScope(state, parentNode, path)
 	end
 
 	return fileScope
+end
+
+function _G.parseGlobalScope(state, firstFilePath)
+	local globalScope          = astNewNode(AstGlobalScope, state.nextToken)
+	state.globalScope          = globalScope
+
+	local statement            = astNewNode(AstStatement, state.nextToken, globalScope)
+	local firstFileScope       = parseFileScope(state, statement, firstFilePath)
+	statement.what             = firstFileScope
+	globalScope.firstFileScope = firstFileScope
+
+	table.insert(globalScope,            statement)
+	table.insert(globalScope.fileScopes, firstFileScope)
+
+	return globalScope
 end
 
 -- call = parseCall( compilationState, parentNode, couldBeType [, callee=theFollowingIdentifier, isMethod=false ] )
@@ -2099,6 +2181,7 @@ do
 
 			elseif node.nodeType == !(nodeTypes.AstDeclaration) then
 				local decl = node
+				if decl.assignment then  write(" (assignment i=", decl.assignmentIndex, ")")  end
 				if decl.isConstant and decl.isGlobalOrExported then
 					write(" (global/exported const)")
 				elseif decl.isConstant then
@@ -2106,10 +2189,9 @@ do
 				elseif decl.isGlobalOrExported then
 					write(" (global/exported)")
 				end
+				if decl.name then  write(" (", (decl.name.name or "...vararg"), ")")  end
 				!!(CHILD_PRINT_START)
-				printNodeList(decl.names,  indent+1, printed, printChildren, "NAME")
-				printNodeList(decl.types,  indent+1, printed, printChildren, "TYPE")
-				if decl.assignment then  printNode(decl.assignment, indent+1, printed, printChildren)  end
+				printNodeList(decl.types, indent+1, printed, printChildren)
 				!!(CHILD_PRINT_END)
 
 			elseif node.nodeType == !(nodeTypes.AstTable) then
@@ -2133,19 +2215,13 @@ do
 				!!(CHILD_PRINT_END)
 
 			elseif node.nodeType == !(nodeTypes.AstLambda) then
-				local lambda = node
-				local decl   = astFindParent(lambda, !(nodeTypes.AstDeclaration))
-				local i      = decl and decl.assignment and indexOf(decl.assignment.values, lambda)
-				if i then  write(" (", decl.names[i].name, ")")  end
+				local lambda     = node
+				local assignment = astFindParent(lambda, !(nodeTypes.AstAssignment))
+				local i          = assignment and assignment.forDeclaration and indexOf(assignment.values, lambda)
+				if i then  write(" (", assignment.targets[i].name, ")")  end
 				!!(CHILD_PRINT_START)
-				if lambda.argumentsIn then
-					printNode(lambda.argumentsIn, indent+1, printed, printChildren, "IN")
-					-- printNodeList(lambda.argumentsIn, indent+1, printed, printChildren, "IN")
-				end
-				if lambda.argumentsOut then
-					printNode(lambda.argumentsOut, indent+1, printed, printChildren, "OUT")
-					-- printNodeList(lambda.argumentsOut, indent+1, printed, printChildren, "OUT")
-				end
+				if lambda.argumentsIn  then  printNode(lambda.argumentsIn,  indent+1, printed, printChildren, "IN")   end
+				if lambda.argumentsOut then  printNode(lambda.argumentsOut, indent+1, printed, printChildren, "OUT")  end
 				if lambda.body then  printNode(lambda.body, indent+1, printed, printChildren)  end
 				!!(CHILD_PRINT_END)
 
@@ -2159,13 +2235,7 @@ do
 				local arg = node
 				!!(CHILD_PRINT_START)
 				if arg.declaration then  printNode(arg.declaration, indent+1, printed, printChildren)  end
-				!!(CHILD_PRINT_END)
-
-			elseif node.nodeType == !(nodeTypes.AstBlock) then
-				-- @Incomplete: We don't print blocks.declarations as they already exist among the statements.
-				local block = node
-				!!(CHILD_PRINT_START)
-				printNodeList(block, indent+1, printed, printChildren)
+				if arg.assignment  then  printNode(arg.assignment,  indent+1, printed, printChildren)  end
 				!!(CHILD_PRINT_END)
 
 			elseif node.nodeType == !(nodeTypes.AstStatement) then
@@ -2193,6 +2263,7 @@ do
 
 			elseif node.nodeType == !(nodeTypes.AstAssignment) then
 				local assignment = node
+				if assignment.forDeclaration then  write(" (forDeclaration)")  end
 				write(" (", assignment.operation, ")")
 				!!(CHILD_PRINT_START)
 				printNodeList(assignment.targets, indent+1, printed, printChildren)
@@ -2270,7 +2341,7 @@ do
 			elseif node.nodeType == !(nodeTypes.AstGlobalScope) then
 				local globalScope = node
 				!!(CHILD_PRINT_START)
-				printNodeList(globalScope.fileScopes, indent+1, printed, printChildren)
+				printNodeList(globalScope, indent+1, printed, printChildren)
 				!!(CHILD_PRINT_END)
 
 			elseif node.nodeType == !(nodeTypes.AstLiteral) then
@@ -2305,7 +2376,7 @@ do
 
 				write(")\n")
 
-			elseif node.declarations then
+			elseif node.declarations then -- AstBlock and substructs.
 				if node.nodeType == !(nodeTypes.AstFileScope) then
 					local fileScope = node
 					write(" (", fileScope.path, ")")
@@ -2318,10 +2389,11 @@ do
 
 				!!(CHILD_PRINT_START)
 				if node.nodeType == !(nodeTypes.AstStruct) and node.arguments then
-					printNodeList(node.arguments, indent+1, printed, printChildren)
+					local struct = node
+					printNodeList(struct.arguments, indent+1, printed, printChildren)
 				end
 				if node.imports then  printNodeList(node.imports, indent+1, printed, printChildren)  end
-				printNodeList(node.declarations, indent+1, printed, printChildren)
+				printNodeList(node, indent+1, printed, printChildren)
 				!!(CHILD_PRINT_END)
 
 			else
@@ -2434,13 +2506,13 @@ do
 				!visitIfNotNil"tableField"{"key","value"}
 			end
 		elseif node.nodeType == !(nodeTypes.AstCall)        then  !visitIfNotNil"node"{"callee"} ; visitList"node"{"arguments"}
-		elseif node.nodeType == !(nodeTypes.AstArgument)    then  !visitIfNotNil"node"{"declaration"}
+		elseif node.nodeType == !(nodeTypes.AstArgument)    then  !visitIfNotNil"node"{"declaration","assignment"}
 		elseif node.nodeType == !(nodeTypes.AstArguments)   then  !visitList"node"{""}
 		elseif node.nodeType == !(nodeTypes.AstLambda)      then  !visitIfNotNil"node"{"argumentsIn","argumentsOut","body"}
 		elseif node.nodeType == !(nodeTypes.AstTypeOf)      then  !visitIfNotNil"node"{"expression"}
 		elseif node.nodeType == !(nodeTypes.AstCast)        then  !visitIfNotNil"node"{"targetType","expression"}
 		elseif node.nodeType == !(nodeTypes.AstStatement)   then  !visitIfNotNil"node"{"what"}
-		elseif node.nodeType == !(nodeTypes.AstDeclaration) then  !visitList"node"{"names","types","notes"} ; visitIfNotNil"node"{"assignment"}
+		elseif node.nodeType == !(nodeTypes.AstDeclaration) then  !visitIfNotNil"node"{"name"} ; visitList"node"{"types","notes"}
 		elseif node.nodeType == !(nodeTypes.AstAssignment)  then  !visitList"node"{"targets","values"}
 		elseif node.nodeType == !(nodeTypes.AstReturn)      then  !visitList"node"{"values"}
 		elseif node.nodeType == !(nodeTypes.AstBreak)       then  !visitIfNotNil"node"{"loopName"}
@@ -2450,11 +2522,11 @@ do
 		elseif node.nodeType == !(nodeTypes.AstIf)          then  !visitIfNotNil"node"{"condition","branchTrue","branchFalse"}
 		elseif node.nodeType == !(nodeTypes.AstWhile)       then  !visitIfNotNil"node"{"condition","body"}
 		elseif node.nodeType == !(nodeTypes.AstFor)         then  !visitList"node"{"names","expressions"} ; visitIfNotNil"node"{"body"}
-		elseif node.nodeType == !(nodeTypes.AstStruct)      then  !visitList"node"{--[["includedNamespaces",]]"declarations"} ; visitIfNotNil"node"{"arguments"}
-		elseif node.nodeType == !(nodeTypes.AstEnum)        then  !visitList"node"{--[["includedNamespaces",]]"declarations"} ; visitIfNotNil"node"{"memberType"}
-		elseif node.nodeType == !(nodeTypes.AstFileScope)   then  !visitList"node"{"imports","declarations"}
-		elseif node.nodeType == !(nodeTypes.AstGlobalScope) then  !visitList"node"{"fileScopes"}
-		elseif node.nodeType == !(nodeTypes.AstBlock)       then  !visitList"node"{""}
+		elseif node.nodeType == !(nodeTypes.AstBlock)       then  !visitList"node"{"imports",""}
+		elseif node.nodeType == !(nodeTypes.AstFileScope)   then  !visitList"node"{"imports",""}
+		elseif node.nodeType == !(nodeTypes.AstGlobalScope) then  !visitList"node"{"imports",""}
+		elseif node.nodeType == !(nodeTypes.AstStruct)      then  !visitIfNotNil"node"{"arguments"}  ; visitList"node"{"imports",""}
+		elseif node.nodeType == !(nodeTypes.AstEnum)        then  !visitIfNotNil"node"{"memberType"} ; visitList"node"{"imports",""}
 		else
 			errorUnhandledNodeType(node)
 		end

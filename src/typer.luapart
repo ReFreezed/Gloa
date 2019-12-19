@@ -175,13 +175,13 @@ end
 
 function _G.getTypeInfoForLambda(state, lambda)
 	for _, arg in ipairs(lambda.argumentsIn or EMPTY_TABLE) do
-		if not arg.declaration.inferredTypes[1] then  return nil  end
+		if not arg.declaration.name.inferredType then  return nil  end
 	end
 	for _, arg in ipairs(lambda.argumentsOut or EMPTY_TABLE) do
-		if not arg.declaration.inferredTypes[1] then  return nil  end
+		if not arg.declaration.name.inferredType then  return nil  end
 	end
 
-	-- Have we encountered an equal signature before?
+	-- Check if we've encountered an equal signature before.
 	for _, typeInfoCached in ipairs(state.allTypeInfos) do
 		if typeInfoCached.tag == !(typeTags.TypeInfoFunction) and doesLambdaHaveSignature(lambda, typeInfoCached) then
 			return typeInfoCached
@@ -191,10 +191,10 @@ function _G.getTypeInfoForLambda(state, lambda)
 	local funcSig = newTypeInfo(TypeInfoFunction)
 
 	for i, arg in ipairs(lambda.argumentsIn or EMPTY_TABLE) do
-		funcSig.argumentTypesIn[i] = arg.declaration.inferredTypes[1]
+		funcSig.argumentTypesIn[i] = arg.declaration.name.inferredType
 	end
 	for i, arg in ipairs(lambda.argumentsOut or EMPTY_TABLE) do
-		funcSig.argumentTypesOut[i] = arg.declaration.inferredTypes[1]
+		funcSig.argumentTypesOut[i] = arg.declaration.name.inferredType
 	end
 
 	table.insert(state.allTypeInfos, funcSig)
@@ -233,10 +233,10 @@ function _G.doesLambdaHaveSignature(lambda, funcSig)
 	if #(lambda.argumentsOut or EMPTY_TABLE) ~= #funcSig.argumentTypesOut then  return false  end
 
 	for i, arg in ipairs(lambda.argumentsIn or EMPTY_TABLE) do
-		if arg.declaration.inferredTypes[1] ~= funcSig.argumentTypesIn[i]  then  return false  end
+		if arg.declaration.name.inferredType ~= funcSig.argumentTypesIn[i]  then  return false  end
 	end
 	for i, arg in ipairs(lambda.argumentsOut or EMPTY_TABLE) do
-		if arg.declaration.inferredTypes[1] ~= funcSig.argumentTypesOut[i] then  return false  end
+		if arg.declaration.name.inferredType ~= funcSig.argumentTypesOut[i] then  return false  end
 	end
 
 	-- @Incomplete: Check arg.isRequired for input args.
@@ -345,12 +345,13 @@ function _G.isDefinitionVisibleToNode(defn, node)
 	end
 end
 
+-- printDefinitionChain( [ file=io.stdout, ] state, definition, typeName )
 function _G.printDefinitionChain(file, state, defn, typeName)
 	if type(file) ~= "userdata" then  return printDefinitionChain(io.stdout, file, state, defn)  end
 
 	!local MAX_CHAIN_LENGTH = 10
 
-	for i = 1, !(MAX_CHAIN_LENGTH) do
+	for _ = 1, !(MAX_CHAIN_LENGTH) do
 		typeMessage(file, state, defn.name, "Info", "...here is '%s' defined.", typeName)
 
 		local placeDeclared = defn.name.placeDeclared
@@ -360,13 +361,12 @@ function _G.printDefinitionChain(file, state, defn, typeName)
 
 		if placeDeclared.nodeType == !(nodeTypes.AstDeclaration) then
 			local decl      = placeDeclared
-			local i         = indexWith1(decl.names, "name", typeName)
-			local valueNode = decl.assignment and decl.assignment.values[i]
+			local valueNode = decl.assignment and decl.assignment.values[decl.assignmentIndex]
 
 			if valueNode and valueNode.nodeType == !(nodeTypes.AstIdentifier) then
 				local ident = valueNode
 				typeName    = ident.name
-				defn        = findDefinition(state, ident, typeName)
+				defn        = ident.definition or findDefinition(state, ident, typeName)
 			end
 		end
 
@@ -513,13 +513,16 @@ function _G.addToQueue(state, node, container, key, pipe)
 	node.queued = queued
 	table.insert(state.queue, queued)
 
-	if node.nodeType == !(nodeTypes.AstIdentifier) and node.declaration and node.parent.nodeType == !(nodeTypes.AstAssignment) then
-		local ident       = node
-		local assignment  = node.parent
-		local decl        = node.declaration
-		local i           = indexOf(assignment.targets, ident) or errorInternal()
-		local identSource = decl.names[i]
-		addDependency(state, ident, !(DEPEND_NODE_INFERRED), identSource)
+	-- Make assignment targets in declaration statements wait for their declaration.
+	if
+		node.nodeType == !(nodeTypes.AstIdentifier)
+		and node.declaration
+		and node.parent.nodeType == !(nodeTypes.AstAssignment)
+		and node.parent.forDeclaration
+		and indexOf(node.parent.targets, node)
+	then
+		local ident = node
+		addDependency(state, ident, !(DEPEND_NODE_INFERRED), ident.declaration.name)
 	end
 end
 
@@ -618,12 +621,11 @@ end
 
 	-- Assignment target in declaration (which is a copy of the identifier in the declaration).
 	elseif ident.parent.nodeType == !(nodeTypes.AstAssignment) then
-		local identDecl, i = itemWith1(decl.names, "name", ident.name)
-		if not identDecl then  errorInternal()  end
+		local identInDecl = decl.name or errorInternal()
 
-		local defn = identDecl.definition
+		local defn = identInDecl.definition
 		if not defn then
-			!DEPEND_AND_RETURN(`ident`, DEPEND_DEFINITION, `identDecl`)
+			!DEPEND_AND_RETURN(`ident`, DEPEND_DEFINITION, `identInDecl`)
 		end
 		ident.definition = defn
 
@@ -773,10 +775,8 @@ end
 
 	-- Infer type from value.
 	else
-		local i                        = indexWith1(decl.names, "name", ident.name) or errorInternal()
-		local valueExpr, valueTypeInfo = getAssignmentValue(state, ident, assignment.values, i)
-
-		typeInfo = valueTypeInfo
+		local valueExpr, valueTypeInfo = getAssignmentValue(state, ident, assignment.values, decl.assignmentIndex)
+		typeInfo                       = valueTypeInfo
 
 		if typeInfo ~= getTypeInfoForBuiltinType(state, "type") then
 			-- void
@@ -810,8 +810,7 @@ end
 	end
 
 	if assignment and decl.types[1] then
-		local i = indexWith1(decl.names, "name", ident.name) or errorInternal()
-		getAssignmentValue(state, ident, assignment.values, i, typeInfo)
+		getAssignmentValue(state, ident, assignment.values, decl.assignmentIndex, typeInfo)
 	end
 
 	assert(typeInfo)
@@ -835,10 +834,14 @@ end
 
 	!if DEBUG then
 		if debug_onlyInferTypes then
-			io.stdout:write("DEFINE ", ident.name ,":", getFriendlyTypeInfoName(typeInfo), " ")
-			if defn.isConstant then  io.stdout:write("(CONST) ")  end
-			if typeInfoForDecl then  io.stdout:write("(VALUE ", getFriendlyTypeInfoName(typeInfoForDecl), ") ")  end
-			io.stdout:write("IN ") ; astPrint(defn.scope)
+			io.stdout:write("DEFINE ", ident.name ,":", getFriendlyTypeInfoName(typeInfo))
+			if defn.isConstant then  io.stdout:write(" (CONST)")  end
+			if typeInfoForDecl then  io.stdout:write(" (VALUE ", getFriendlyTypeInfoName(typeInfoForDecl), ")")  end
+			io.stdout:write(" IN ")
+			if defn.name.placeDeclared ~= defn.scope then
+				io.stdout:write(AST_NODE_TYPE_NAMES[defn.name.placeDeclared.nodeType], " > ")
+			end
+			astPrint(defn.scope)
 		end
 	!end
 
@@ -1017,10 +1020,9 @@ end
 		!DEPEND_AND_RETURN(`decl`, DEPEND_NODE_INFERRED, `decl.assignment`)
 	end
 
-	for _, ident in ipairs(decl.names) do
-		if not ident.inferredType then
-			!DEPEND_AND_RETURN(`decl`, DEPEND_NODE_INFERRED, `ident`)
-		end
+	local ident = decl.name
+	if not ident.inferredType then
+		!DEPEND_AND_RETURN(`decl`, DEPEND_NODE_INFERRED, `ident`)
 	end
 
 	for _, typeNode in ipairs(decl.types) do
@@ -1036,24 +1038,18 @@ end
 		local scopeIsDeclarative = isScopeDeclarative(scope)
 
 		if scopeIsDeclarative or decl.isConstant then
-			for i, ident in ipairs(decl.names) do
-				local valueExpr = getAssignmentValue(state, ident, decl.assignment.values, i)
+			local valueExpr = getAssignmentValue(state, ident, decl.assignment.values, decl.assignmentIndex)
 
-				if not getLiteralValueFromExpressionIfConstant(state, valueExpr) then
-					typeError(
-						state, astGetExpressionVisuallyFurthestToTheLeft(valueExpr),
-						"Value for declared %s '%s' is not a constant expression.%s",
-						(decl.isConstant and "constant" or "variable"),
-						ident.name,
-						(scopeIsDeclarative and not decl.isConstant and " (All values in declarative scopes must be contant.)" or "")
-					)
-				end
+			if not getLiteralValueFromExpressionIfConstant(state, valueExpr) then
+				typeError(
+					state, astGetExpressionVisuallyFurthestToTheLeft(valueExpr),
+					"Value for declared %s '%s' is not a constant expression.%s",
+					(decl.isConstant and "constant" or "variable"),
+					ident.name,
+					(scopeIsDeclarative and not decl.isConstant and " (All values in declarative scopes must be constant.)" or "")
+				)
 			end
 		end
-	end
-
-	for i, ident in ipairs(decl.names) do
-		decl.inferredTypes[i] = ident.inferredType or errorInternal() -- Is decl.inferredTypes needed? @Cleanup
 	end
 
 	moveToNextPipe(state, decl)
@@ -1333,31 +1329,27 @@ end
 	moveToNextPipe(state, arg)
 end
 
-!NODE_INFERRER `function nodeInferrers.AstArguments(state, args)` -- @Cleanup: Make AstArguments obsolete.
+!NODE_INFERRER `function nodeInferrers.AstArguments(state, args)`
 	for _, arg in ipairs(args) do
 		if arg.queued.pipe <= !(PIPE_INFER) then
 			!DEPEND_AND_RETURN(`args`, DEPEND_NODE_INFERRED, `arg`)
 		end
 	end
 
-	args.inferredType = getTypeInfoForBuiltinType(state, "void") -- AstArguments is an expression, for some reason. @Cleanup
-
 	moveToNextPipe(state, args)
 end
 
 !NODE_INFERRER `function nodeInferrers.AstLambda(state, lambda)`
-	if lambda.argumentsIn and not lambda.argumentsIn.inferredType then
+	if lambda.argumentsIn and lambda.argumentsIn.queued.pipe <= !(PIPE_INFER) then
 		!DEPEND_AND_RETURN(`lambda`, DEPEND_NODE_INFERRED, `lambda.argumentsIn`)
 	end
-	if lambda.argumentsOut and not lambda.argumentsOut.inferredType then
+	if lambda.argumentsOut and lambda.argumentsOut.queued.pipe <= !(PIPE_INFER) then
 		!DEPEND_AND_RETURN(`lambda`, DEPEND_NODE_INFERRED, `lambda.argumentsOut`)
 	end
 
 	-- Note: We don't require the body to inferred.
 
-	lambda.inferredType = getTypeInfoForLambda(state, lambda)
-	assert(lambda.inferredType)
-
+	lambda.inferredType = getTypeInfoForLambda(state, lambda) or errorInternal()
 	moveToNextPipe(state, lambda)
 end
 
@@ -1370,7 +1362,6 @@ end
 	end
 
 	typeOf.inferredType = getTypeInfoForBuiltinType(state, "type")
-
 	moveToNextPipe(state, typeOf)
 end
 
@@ -1614,9 +1605,9 @@ end
 -- end
 
 !NODE_INFERRER `function nodeInferrers.AstStruct(state, struct)`
-	for _, decl in ipairs(struct.declarations) do
-		if decl.queued.pipe <= !(PIPE_INFER) then
-			!DEPEND_AND_RETURN(`struct`, DEPEND_NODE_INFERRED, `decl`)
+	for _, statement in ipairs(struct) do
+		if statement.queued.pipe <= !(PIPE_INFER) then
+			!DEPEND_AND_RETURN(`struct`, DEPEND_NODE_INFERRED, `statement`)
 		end
 	end
 
@@ -1624,12 +1615,12 @@ end
 
 	for i, decl in ipairs(struct.declarations) do
 		local member          = TypeInfoStructMember()
-		member.name           = decl.names[1].name -- Note: Struct member declarations only have one name.
-		member.typeInfo       = decl.inferredTypes[1]
+		member.name           = decl.name.name
+		member.typeInfo       = decl.name.inferredType or errorInternal()
 		structInfo.members[i] = member
 	end
 
-	-- @Incomplete: struct.includedNamespaces[]
+	-- @Incomplete: struct[] (statements)
 	-- @Incomplete: struct.arguments
 
 	table.insert(state.allTypeInfos, structInfo)
@@ -1641,9 +1632,9 @@ end
 end
 
 !NODE_INFERRER `function nodeInferrers.AstEnum(state, enum)`
-	for _, decl in ipairs(enum.declarations) do
-		if decl.queued.pipe <= !(PIPE_INFER) then
-			!DEPEND_AND_RETURN(`enum`, DEPEND_NODE_INFERRED, `decl`)
+	for _, statement in ipairs(enum) do
+		if statement.queued.pipe <= !(PIPE_INFER) then
+			!DEPEND_AND_RETURN(`enum`, DEPEND_NODE_INFERRED, `statement`)
 		end
 	end
 
@@ -1656,7 +1647,7 @@ end
 	else
 		-- Just use the type of the first member as the wanted type for the enum.
 		-- Note: Struct member declarations only have one name.
-		enumMemberInfo = enum.declarations[1].inferredTypes[1]
+		enumMemberInfo = enum.declarations[1].name.inferredType
 		if not isAny(enumMemberInfo,
 			getTypeInfoForBuiltinType(state, "int"),
 			getTypeInfoForBuiltinType(state, "string"),
@@ -1677,18 +1668,18 @@ end
 			-- @Cleanup: Define isTypeCompatibleWith(typeToCheck, otherType) or something.
 			typeError(state, valExpr,
 				"Incorrect value type for '%s'. (Wanted %s, got %s)",
-				decl.names[1].name,
+				decl.name.name,
 				getFriendlyTypeInfoName(enumMemberInfo),
 				getFriendlyTypeInfoName(valExpr.inferredType)
 			)
 		end
 
 		local member        = TypeInfoEnumMember()
-		member.name         = decl.names[1].name
+		member.name         = decl.name.name
 		enumInfo.members[i] = member
 	end
 
-	-- @Incomplete: enum.includedNamespaces[]
+	-- @Incomplete: enum[] (statements)
 
 	table.insert(state.allTypeInfos, enumInfo)
 
@@ -1699,9 +1690,9 @@ end
 end
 
 !NODE_INFERRER `function nodeInferrers.AstFileScope(state, fileScope)`
-	for _, decl in ipairs(fileScope.declarations) do
-		if decl.queued.pipe <= !(PIPE_INFER) then
-			!DEPEND_AND_RETURN(`fileScope`, DEPEND_NODE_INFERRED, `decl`)
+	for _, statement in ipairs(fileScope) do
+		if statement.queued.pipe <= !(PIPE_INFER) then
+			!DEPEND_AND_RETURN(`fileScope`, DEPEND_NODE_INFERRED, `statement`)
 		end
 	end
 
@@ -1711,13 +1702,13 @@ end
 end
 
 !NODE_INFERRER `function nodeInferrers.AstGlobalScope(state, globalScope)`
-	for _, fileScope in ipairs(globalScope.fileScopes) do
-		if fileScope.queued.pipe <= !(PIPE_INFER) then
-			!DEPEND_AND_RETURN(`globalScope`, DEPEND_NODE_INFERRED, `fileScope`)
+	for _, statement in ipairs(globalScope) do
+		if statement.queued.pipe <= !(PIPE_INFER) then
+			!DEPEND_AND_RETURN(`globalScope`, DEPEND_NODE_INFERRED, `statement`)
 		end
 	end
 
-	-- @Incomplete: globalScope.includedNamespaces[]
+	-- @Incomplete: globalScope.imports[] (if we're going to allow global imports)
 
 	moveToNextPipe(state, globalScope)
 end
@@ -1739,7 +1730,7 @@ end
 
 
 
--- expressionIsContant, value = getLiteralValueFromExpressionIfConstant( compilationState, expression )
+-- expressionIsConstant, value = getLiteralValueFromExpressionIfConstant( compilationState, expression )
 -- Note: It's assumed that the expression tree has all types figured out.
 function _G.getLiteralValueFromExpressionIfConstant(state, expr)
 	-- @Incomplete: Return an AstNode?
@@ -1757,9 +1748,7 @@ function _G.getLiteralValueFromExpressionIfConstant(state, expr)
 
 		assert(decl.assignment) -- Constant declarations must have a value.
 
-		local i         = indexWith1(decl.names, "name", ident.name) or errorInternal()
-		local valueExpr = getAssignmentValue(state, ident, decl.assignment.values, i)
-
+		local valueExpr = getAssignmentValue(state, ident, decl.assignment.values, decl.assignmentIndex)
 		return getLiteralValueFromExpressionIfConstant(state, valueExpr)
 
 	elseif isAny(expr.nodeType, !(nodeTypes.AstType),!(nodeTypes.AstTypeOf)) then
@@ -1797,7 +1786,7 @@ end
 
 
 
--- expression, typeInfo = getAssignmentValue( state, ident, values, i [, expectedTypeInfo=any ] )
+-- expression, typeInfo = getAssignmentValue( state, identifier, values, i [, expectedTypeInfo=any ] )
 function _G.getAssignmentValue(state, ident, values, i, typeInfoExpected)
 	local valueExpr = values[i]
 

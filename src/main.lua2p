@@ -231,15 +231,10 @@ local timeStartLexing, timeEndLexing = readAndTokenizeFile(state, thePath)
 
 
 
--- Parse.
-local globalScope = astNewNode(AstGlobalScope, state.nextToken)
-state.globalScope = globalScope
-
-local timeStartParsing     = os.clock()
-globalScope.firstFileScope = parseFileScope(state, globalScope, thePath)
-local timeEndParsing       = os.clock()
-
-table.insert(globalScope.fileScopes, globalScope.firstFileScope)
+-- Parse first file.
+local timeStartParsing = os.clock()
+local globalScope      = parseGlobalScope(state, thePath)
+local timeEndParsing   = os.clock()
 
 if peekNextToken(state) then
 	errorParsingNext(state, "Expected the end of the file.")
@@ -256,6 +251,12 @@ local queueSize  = 0
 !end
 
 !ifDEBUG`if not debug_onlyParse then`
+	local lastPipe = !(PIPE_DONE)
+
+	!if DEBUG then
+		if debug_onlyInferTypes then  lastPipe = !(PIPE_INFER)  end
+	!end
+
 	local function getDeclaredIdentifierWaitingToBeDefinedWithName(name, queuedToIgnore)
 		for _, queued in ipairs(state.queue) do
 			if queued ~= queuedToIgnore and not queued.removed and queued.waitingOn and queued.node.nodeType == !(nodeTypes.AstIdentifier) then
@@ -321,8 +322,7 @@ local queueSize  = 0
 			local allDone = true
 
 			for _, queued in ipairs(state.queue) do
-				if not queued.removed and queued.pipe <= !(PIPE_INFER) then -- TEMP
-				-- if not queued.removed and queued.pipe < !(PIPE_DONE) then
+				if not queued.removed and queued.pipe <= lastPipe then
 					allDone = false
 					break
 				end
@@ -406,7 +406,7 @@ local queueSize  = 0
 
 		-- Guard against an infinite loop.
 		if cycle == 100 then
-			errorInternal("The pipes ran for too long. (waiting:%d)", waitCount)
+			errorInternal("[DEBUG] The pipes ran for too long. (waiting:%d)", waitCount)
 		end
 	end
 !ifDEBUG`end`
