@@ -47,9 +47,9 @@ end
 )
 
 !struct"_TypeInfo"{
-	tag        = 0, -- This is like a "type of type info". The word "type" is used in so many places so we call it "tag" here to make it less confusing...
+	tag        = 0,    -- This is like a "type of type info". The word "type" is used in so many places so we call it "tag" here to make it less confusing...
 	id         = 0,
-	definition = NIL, -- AstTypeDefinition (This node has the scope.) (Should typeInfos even have this field? Possibly.)
+	declaration = NIL, -- AstTypeDeclaration
 }
 
 local !structTypeInfo"TypeInfoAny:_TypeInfo"{}
@@ -119,18 +119,19 @@ _G.TYPE_TAG_NAMES = !(typeTagNames)
 
 
 
--- typeInfo = newTypeInfo( TypeInfoCreator [, definition=internal ] )
+-- typeInfo = newTypeInfo( TypeInfoCreator [, declaration=internal ] )
+-- typeInfo = newTypeInfo( TypeInfoCreator [, definition=internal ] )  @Depricated
 do
 	local lastTypeId = 0
 
-	function _G.newTypeInfo(TypeInfoCreator, defn)
+	function _G.newTypeInfo(TypeInfoCreator, decl)
 		if not TypeInfoCreator then  errorInternal(2, "No TypeInfoCreator specified.")  end
 
 		lastTypeId = lastTypeId+1
 
-		local typeInfo      = TypeInfoCreator()
-		typeInfo.id         = lastTypeId
-		typeInfo.definition = defn
+		local typeInfo       = TypeInfoCreator()
+		typeInfo.id          = lastTypeId
+		typeInfo.declaration = decl
 
 		--[[
 		if lastTypeId == 22 then
@@ -248,85 +249,69 @@ end
 
 -- scope, childClosestToScope = getClosestScope( node )
 function _G.getClosestScope(node)
-	return astFindParent(node, !(nodeTypes.AstGlobalScope),!(nodeTypes.AstFileScope),!(nodeTypes.AstStruct),!(nodeTypes.AstEnum),!(nodeTypes.AstBlock),!(nodeTypes.AstFor),!(nodeTypes.AstLambda))
+	return astFindParent(node,
+		!outputCommaSeparatedValues(unpack(scopeNodeTypes))
+	)
 end
 
-function _G.isScope(node)
-	return isAny(node.nodeType, !(nodeTypes.AstGlobalScope),!(nodeTypes.AstFileScope),!(nodeTypes.AstStruct),!(nodeTypes.AstEnum),!(nodeTypes.AstBlock),!(nodeTypes.AstFor),!(nodeTypes.AstLambda))
-end
-function _G.isScopeDeclarative(scope)
-	return isAny(scope.nodeType, !(nodeTypes.AstGlobalScope),!(nodeTypes.AstFileScope),!(nodeTypes.AstStruct),!(nodeTypes.AstEnum))
-end
-function _G.isScopeImperative(scope)
-	return isAny(scope.nodeType, !(nodeTypes.AstBlock),!(nodeTypes.AstFor),!(nodeTypes.AstLambda))
-end
+function _G.isScope           (node)   return SCOPE_SET            [node .nodeType] or false  end
+function _G.isScopeDeclarative(scope)  return SCOPE_SET_DECLARATIVE[scope.nodeType] or false  end
+function _G.isScopeImperative (scope)  return SCOPE_SET_IMPERATIVE [scope.nodeType] or false  end
 
 
 
-function _G.findDefinition(state, startNode, name)
+-- declaration = findDeclaration( state, startNode, name [, declarationToIgnore ] )
+function _G.findDeclaration(state, startNode, name, declToIgnore)
 	local scope = startNode
 
-	-- @Speed: There's duplicate work being done here.
-
-	-- Locals.
 	while true do
 		scope = getClosestScope(scope)
 		if not scope then  break  end
 
-		assert(scope.definitions, scope.nodeType)
-
-		for _, defn in ipairs(scope.definitions) do
-			if defn.name.name == name and isDefinitionVisibleToNode(defn, startNode) then
-				return defn
+		for _, decl in ipairs(scope.declarations) do
+			if decl ~= declToIgnore and decl.name.name == name and isDeclarationVisibleToNode(decl, startNode) then
+				return decl
 			end
 		end
 
-		--[[ @Incomplete: Look in imports. (Not necessary when looking for globals.)  Also, look through usings for the scope.
-		for _, import in ipairs(scope.imports or EMPTY_TABLE) do
+		--[[ @Incomplete: Look in imports.
+		for _, import in ipairs(scope.imports) do
 			if import.fileScope then
-				for _, defn in ipairs(import.fileScope.definitions) do
-					if defn.name.name == name and defn.name.declaration.isGlobalOrExported then
-						return defn
+				for _, decl in ipairs(import.fileScope.declarations) do
+					if decl ~= declToIgnore and decl.name.name == name and decl.isGlobalOrExported then
+						return decl
 					end
 				end
 			end
 		end
 		--]]
-	end
 
-	-- Globals.  @Cleanup: Define globals in the actual global scope.
-	for _, fileScope in ipairs(state.globalScope.fileScopes) do
-		for _, defn in ipairs(fileScope.definitions) do
-			if defn.name.name == name and defn.name.declaration.isGlobalOrExported then
-				return defn
-			end
-		end
+		-- @Incomplete: Look through usings for the scope.
 	end
 
 	return nil
 end
 
-function _G.isDefinitionVisibleToNode(defn, node)
+function _G.isDeclarationVisibleToNode(decl, node)
+	if decl.isGlobalOrExported then  return true  end
+
 	local nodeScope, nodeScopeChild = getClosestScope(node)
-	local canSeeImperativeVariables = not defn.isConst
+	local canSeeImperativeVariables = not decl.isConstant
 
 	while true do
 		if isScopeDeclarative(nodeScope) then
-			if indexOf(nodeScope.definitions, defn) then  return true  end
+			if indexOf(nodeScope.declarations, decl) then  return true  end
 
-		elseif isAny(nodeScope.nodeType, !(nodeTypes.AstFor),!(nodeTypes.AstLambda)) then
-			if canSeeImperativeVariables and indexOf(nodeScope.definitions, defn) then  return true  end
+		elseif isAny(nodeScope.nodeType, !(nodeTypes.AstFor),!(nodeTypes.AstLambda)) then -- These are really a combination of declarative and imperative scopes.
+			if canSeeImperativeVariables and indexOf(nodeScope.declarations, decl) then  return true  end
 
 		elseif nodeScope.nodeType == !(nodeTypes.AstBlock) then
 			local block           = nodeScope
 			local imperativeIndex = indexOf(block, nodeScopeChild) or errorInternal()
 
-			for i, statement in ipairs(block) do
-				if statement.what.nodeType == !(nodeTypes.AstDeclaration) then
-					local decl = statement.what
-					if decl.isConstant or (canSeeImperativeVariables and i < imperativeIndex) then
-						if astHasParent(defn.name, decl) then  return true  end
-					end
+			for i, declInNodeParent in ipairs(block.declarations) do
+				if declInNodeParent.isConstant or (canSeeImperativeVariables and i < imperativeIndex) then
+					if astHasParent(decl.name, declInNodeParent) then  return true  end
 				end
 			end
 
@@ -345,32 +330,32 @@ function _G.isDefinitionVisibleToNode(defn, node)
 	end
 end
 
--- printDefinitionChain( [ file=io.stdout, ] state, definition, typeName )
-function _G.printDefinitionChain(file, state, defn, typeName)
-	if type(file) ~= "userdata" then  return printDefinitionChain(io.stdout, file, state, defn)  end
+-- printDeclarationChain( [ file=io.stdout, ] state, declaration, typeName )
+function _G.printDeclarationChain(file, state, decl, typeName)
+	if type(file) ~= "userdata" then  return printDeclarationChain(io.stdout, file, state, decl)  end
 
 	!local MAX_CHAIN_LENGTH = 10
 
 	for _ = 1, !(MAX_CHAIN_LENGTH) do
-		typeMessage(file, state, defn.name, "Info", "...here is '%s' defined.", typeName)
+		typeMessage(file, state, decl.name, "Info", "...here is '%s' declared.", typeName)
 
-		local placeDeclared = defn.name.placeDeclared
+		local placeDeclared = decl.name.placeDeclared
 		if not placeDeclared then  break  end
 
-		defn = nil
+		decl = nil
 
 		if placeDeclared.nodeType == !(nodeTypes.AstDeclaration) then
-			local decl      = placeDeclared
-			local valueNode = decl.assignment and decl.assignment.values[decl.assignmentIndex]
+			local declCurrent = placeDeclared
+			local valueNode   = declCurrent.assignment and declCurrent.assignment.values[declCurrent.assignmentIndex]
 
 			if valueNode and valueNode.nodeType == !(nodeTypes.AstIdentifier) then
 				local ident = valueNode
 				typeName    = ident.name
-				defn        = ident.definition or findDefinition(state, ident, typeName)
+				decl        = ident.declaration or findDeclaration(state, ident, typeName, declCurrent)
 			end
 		end
 
-		if not defn then  break  end
+		if not decl then  break  end
 	end
 end
 
@@ -439,17 +424,17 @@ end
 
 local !struct"Dependency"{ -- @Cleanup: Rename to something with "wait"?
 	dependent  = NIL, -- Queued
-	dependType = 0,   -- DEPEND_DEFINITION|DEPEND_NODE_INFERRED
+	dependType = 0,   -- DEPEND_DECLARATION|DEPEND_NODE_INFERRED
 	dependOn   = NIL, -- string|Queued  (The value depends on what dependType is.)
 }
 
--- addDependency( state, dependent, DEPEND_DEFINITION,    name    )
+-- addDependency( state, dependent, DEPEND_DECLARATION,   name    )
 -- addDependency( state, dependent, DEPEND_NODE_INFERRED, astNode )
 function _G.addDependency(state, dependent, dependType, dependOn)
 	assert(not dependent.queued.waitingOn)
 
 	!if DEBUG then
-		if dependType == !(DEPEND_DEFINITION) then
+		if dependType == !(DEPEND_DECLARATION) then
 			assert(type(dependOn) == "string")
 		elseif dependType == !(DEPEND_NODE_INFERRED) then
 			assert(type(dependOn) == "table")
@@ -470,7 +455,16 @@ function _G.addDependency(state, dependent, dependType, dependOn)
 
 	dependent.queued.waitingOn = dependency
 
-	assert(not itemWith3(state.dependencies, "dependent",dependency.dependent, "dependType",dependency.dependType, "dependOn",dependency.dependOn))
+	if itemWith3(state.dependencies, "dependent",dependency.dependent, "dependType",dependency.dependType, "dependOn",dependency.dependOn) then
+		printTraceback(io.stderr, 2)
+		printerr()
+		typeMessage(io.stderr, state, dependent, "Error", "Internal compiler error: Trying to add dependency twice.")
+		if dependType == !(DEPEND_NODE_INFERRED) then
+			typeMessage(io.stderr, state, dependOn.node, "Info", "...depending on this.")
+		end
+		exitFailure()
+	end
+
 	table.insert(state.dependencies, dependency)
 
 	!if DEBUG then
@@ -480,7 +474,7 @@ function _G.addDependency(state, dependent, dependType, dependOn)
 			astPrint(dependent)
 
 			io.stdout:write("    ON ", DEPEND_TITLES[dependType], " ")
-			if dependType == !(DEPEND_DEFINITION) then
+			if dependType == !(DEPEND_DECLARATION) then
 				print(dependOn)
 			elseif dependType == !(DEPEND_NODE_INFERRED) then
 				astPrint(dependOn.node)
@@ -504,6 +498,9 @@ local !struct"Queued"{
 }
 
 function _G.addToQueue(state, node, container, key, pipe)
+	-- astPrint(node)
+	!ASSERT `not node.queued`
+
 	local queued     = Queued()
 	queued.node      = node
 	queued.container = container
@@ -528,7 +525,14 @@ end
 
 function _G.addToQueueRecursively(state, topNode)
 	astVisitAllNodesLeavesFirst(topNode, function(node, container, key)
-		-- astPrint(node)
+		addToQueue(state, node, container, key, !(PIPE_INFER))
+	end)
+end
+
+function _G.addUnqueuedChildrenToQueueRecursively(state, topNode)
+	astVisitAllNodesLeavesFirst(topNode, function(node, container, key)
+		if node == topNode then  return                           end
+		if node.queued     then  return !(VISIT_IGNORE_CHILDREN)  end
 		addToQueue(state, node, container, key, !(PIPE_INFER))
 	end)
 end
@@ -560,12 +564,14 @@ function _G.replaceQueuedNode(state, nodeOld, nodeNew)
 end
 
 
-function _G.moveToNextPipe(state, node)
+function _G.moveToNextPipe(state, node) -- @Robustness: Make the target pipe an argument.
 	local queued = node.queued
 	queued.pipe  = queued.pipe+1
 end
 
 
+
+local nodeInferrers = {}
 
 !(
 local function DEPEND_AND_RETURN(dependentCode, dependType, dependOnCode)
@@ -586,153 +592,61 @@ local function NODE_INFERRER(funcHeaderCode)
 end
 )
 
-local nodeInferrers = {}
+local function isIdentifierPartOfAnyDeclaration(ident)
+	local parent = ident.parent
 
-!NODE_INFERRER `function nodeInferrers.AstTypeDefinition(state, defn)`
-	if not defn.typeInfo then
-		!DEPEND_AND_RETURN(`defn`, DEPEND_NODE_INFERRED, `defn.name`)
+	if parent.nodeType == !(nodeTypes.AstDeclaration) then
+		local decl = parent
+		return ident == decl.name
+
+	elseif parent.nodeType == !(nodeTypes.AstAssignment) then
+		local assignment = parent
+		return assignment.forDeclaration and indexOf(assignment.targets, ident) ~= nil
+
+	else
+		return false
 	end
-
-	-- @Refactor: Maybe move some logic from AstIdentifier to here?
-
-	moveToNextPipe(state, defn)
 end
 
 !NODE_INFERRER `function nodeInferrers.AstIdentifier(state, ident)`
 	local decl = ident.declaration
 
 	-- Loose identifier.
-	if not decl then
-		assert(not ident.placeDeclared)
-
-		local defn = findDefinition(state, ident, ident.name)
-		if not defn then
-			!DEPEND_AND_RETURN(`ident`, DEPEND_DEFINITION, `ident.name`)
+	if not isIdentifierPartOfAnyDeclaration(ident) then
+		if not decl then
+			decl = findDeclaration(state, ident, ident.name)
+			if not decl then
+				!DEPEND_AND_RETURN(`ident`, DEPEND_DECLARATION, `ident.name`)
+			end
+			ident.declaration = decl
 		end
-		ident.definition = defn
 
-		if not defn.typeInfo then
-			!DEPEND_AND_RETURN(`ident`, DEPEND_NODE_INFERRED, `defn`)
+		local identInDecl = decl.name
+		if not identInDecl.inferredType then
+			!DEPEND_AND_RETURN(`ident`, DEPEND_NODE_INFERRED, `identInDecl`)
 		end
-		ident.inferredType = defn.typeInfo
+		ident.inferredType = identInDecl.inferredType
 
 		moveToNextPipe(state, ident)
 		return
+	end
+
+	!ASSERT `decl`
+	!ASSERT `isAny(ident.parent.nodeType, !(nodeTypes.AstDeclaration),!(nodeTypes.AstAssignment)`
 
 	-- Assignment target in declaration (which is a copy of the identifier in the declaration).
-	elseif ident.parent.nodeType == !(nodeTypes.AstAssignment) then
-		local identInDecl = decl.name or errorInternal()
-
-		local defn = identInDecl.definition
-		if not defn then
-			!DEPEND_AND_RETURN(`ident`, DEPEND_DEFINITION, `identInDecl`)
+	if ident.parent.nodeType == !(nodeTypes.AstAssignment) then
+		local identInDecl = decl.name
+		if not identInDecl.inferredType then
+			!DEPEND_AND_RETURN(`ident`, DEPEND_NODE_INFERRED, `identInDecl`)
 		end
-		ident.definition = defn
-
-		if not defn.typeInfo then
-			!DEPEND_AND_RETURN(`ident`, DEPEND_NODE_INFERRED, `defn`)
-		end
-		ident.inferredType = defn.typeInfo
+		ident.inferredType = identInDecl.inferredType
 
 		moveToNextPipe(state, ident)
 		return
 	end
 
 	-- At this point we're defining a declared identifier.
-
-	local defn = ident.definition
-
-	if not defn then
-		local scope = getClosestScope(decl)
-		if not scope then
-			typeError(state, ident, "Internal compiler error: Could not find what scope '%s' is in.", ident.name)
-		end
-
-		local isMember = isAny(scope.nodeType, !(nodeTypes.AstStruct),!(nodeTypes.AstEnum))
-
-		local isLambdaArgOut = (
-			not isMember
-			and scope.nodeType == !(nodeTypes.AstLambda)
-			and scope.argumentsOut ~= nil
-			and indexOf(scope.argumentsOut, astFindParent(decl, !(nodeTypes.AstArgument))) ~= nil
-		)
-
-		if not isLambdaArgOut then
-			local defnExisting = findDefinition(state, ident, ident.name)
-
-			if not defnExisting then
-				-- void
-
-			elseif isMember and scope ~= defnExisting.scope then
-				-- void  (Members never shadow anything.)
-
-			elseif not decl.canShadow then
-				printerr()
-				typeMessage(io.stderr, state, ident,             "Error", "'%s' has already been defined.", ident.name)
-				typeMessage(io.stderr, state, defnExisting.name, "Info",  "...it was defined here.")
-				exitFailure()
-
-			elseif
-				scope == defnExisting.scope
-				or (
-					-- We do not allow declarations on lambda bodies to shadow the lambda's arguments.
-					-- @Robustness: Check the reverse is always true.
-					scope.nodeType == !(nodeTypes.AstBlock)
-					and getClosestScope(scope).nodeType == !(nodeTypes.AstLambda) -- @Cleanup: Store each node's enclosing scope on each respective node.
-					and getClosestScope(scope) == defnExisting.scope
-				)
-			then
-				printerr()
-				typeMessage(io.stderr, state, ident,             "Error", "'%s' has already been defined in the same scope (which means name shadowing does not work).", ident.name)
-				typeMessage(io.stderr, state, defnExisting.name, "Info",  "...it was defined here.")
-				exitFailure()
-
-			else
-				-- void  (We're validly shadowing something in an outer scope.)
-			end
-
-			-- Make sure new globals are not shadowing any locals.
-			if decl.isGlobalOrExported then
-				local parentScope = scope
-				repeat
-					local defnExisting = parentScope.definedLocals[ident.name]
-
-					if defnExisting then
-						printerr()
-						typeMessage(io.stderr, state, defnExisting.name, "Error", "'%s' is shadowing a global.", ident.name)
-						typeMessage(io.stderr, state, ident,             "Info",  "...the global was defined here.")
-						exitFailure()
-					end
-
-					parentScope = getClosestScope(parentScope)
-				until not parentScope
-			end
-		end
-
-		defn            = astNewNode(AstTypeDefinition, ident.token, scope)
-		defn.name       = ident
-		defn.scope      = scope
-		defn.isConstant = decl.isConstant
-		defn.canShadow  = decl.canShadow
-
-		ident.definition = defn
-
-		if isLambdaArgOut then
-			addToQueue(state, defn, nil, nil, !(PIPE_INFER))
-		else
-			local i              = #scope.definitions+1
-			scope.definitions[i] = defn
-			addToQueue(state, defn, scope.definitions, i, !(PIPE_INFER))
-
-			if not decl.canShadow then
-				local parentScope = scope
-				repeat
-					parentScope.definedLocals[ident.name] = defn -- @Speed: Can we store this on the global scope only?
-					parentScope = getClosestScope(parentScope)
-				until not parentScope
-			end
-		end
-	end
 
 	for _, typeNode in ipairs(decl.types) do
 		if not typeNode.inferredType then
@@ -748,6 +662,83 @@ end
 				!DEPEND_AND_RETURN(`ident`, DEPEND_NODE_INFERRED, `valueExpr`)
 			end
 		end
+	end
+
+	-- No more dependencies after this point!
+
+	local scope = getClosestScope(decl)
+	if not scope then
+		typeError(state, ident, "Internal compiler error: Could not find what scope '%s' is in.", ident.name)
+	end
+
+	local isMember = isAny(scope.nodeType, !(nodeTypes.AstStruct),!(nodeTypes.AstEnum))
+
+	local isLambdaArgOut = (
+		not isMember
+		and scope.nodeType == !(nodeTypes.AstLambda)
+		and scope.argumentsOut ~= nil
+		and indexOf(scope.argumentsOut, astFindParent(decl, !(nodeTypes.AstArgument))) ~= nil
+	)
+
+	if not isLambdaArgOut then
+		local declExisting = findDeclaration(state, ident, ident.name, decl)
+		!ASSERT `declExisting ~= decl`
+
+		if not declExisting then
+			-- void
+
+		elseif isMember and scope ~= getClosestScope(declExisting) then
+			-- void  (Members never shadow anything.)
+
+		elseif not decl.canShadow then
+			printerr()
+			typeMessage(io.stderr, state, ident,             "Error", "'%s' has already been declared.", ident.name)
+			typeMessage(io.stderr, state, declExisting.name, "Info",  "...it was declared here.")
+			exitFailure()
+
+		elseif
+			scope == getClosestScope(declExisting)
+			or (
+				-- We do not allow declarations on lambda bodies to shadow the lambda's arguments.
+				-- @Robustness: Check the reverse is always true.
+				scope.nodeType == !(nodeTypes.AstBlock)
+				and getClosestScope(scope).nodeType == !(nodeTypes.AstLambda) -- @Cleanup: Store each node's enclosing scope on each respective node.
+				and getClosestScope(scope) == getClosestScope(declExisting)
+			)
+		then
+			printerr()
+			typeMessage(io.stderr, state, ident,             "Error", "'%s' has already been declared in the same scope (which means name shadowing does not work).", ident.name)
+			typeMessage(io.stderr, state, declExisting.name, "Info",  "...it was declared here.")
+			exitFailure()
+
+		else
+			-- void  (We're validly shadowing something in an outer scope.)
+		end
+
+		-- Make sure new globals are not shadowing any locals.
+		if decl.isGlobalOrExported then
+			local parentScope = scope
+			repeat
+				local declExisting = parentScope.definedLocals[ident.name]
+
+				if declExisting and declExisting ~= decl then
+					printerr()
+					typeMessage(io.stderr, state, declExisting.name, "Error", "'%s' is shadowing a global.", ident.name)
+					typeMessage(io.stderr, state, ident,             "Info",  "...the global was declared here.")
+					exitFailure()
+				end
+
+				parentScope = getClosestScope(parentScope)
+			until not parentScope
+		end
+	end
+
+	if not (isLambdaArgOut or decl.canShadow) then
+		local parentScope = scope
+		repeat
+			parentScope.definedLocals[ident.name] = decl -- @Speed: Can we store this on the global scope only? I think so! 2019-12-21
+			parentScope = getClosestScope(parentScope)
+		until not parentScope
 	end
 
 	local typeInfo
@@ -787,10 +778,11 @@ end
 
 		elseif valueExpr.nodeType == !(nodeTypes.AstIdentifier) then
 			local identOther = valueExpr
-			if not identOther.definition.typeInfo then
-				!DEPEND_AND_RETURN(`ident`, DEPEND_NODE_INFERRED, `identOther.definition`)
+			if not identOther.inferredType then
+				errorInternal() -- The assignment should already be inferred. We already checked that!
+				-- !DEPEND_AND_RETURN(`ident`, DEPEND_NODE_INFERRED, `identOther`)
 			end
-			typeInfoForDecl = identOther.definition.typeInfoForDeclaration -- May be nil.
+			typeInfoForDecl = identOther.declaration.valueTypeInfo -- May be nil.
 
 		elseif valueExpr.nodeType == !(nodeTypes.AstTypeOf) then
 			local typeOf    = valueExpr
@@ -828,20 +820,19 @@ end
 		enumInfo.name  = ident.name
 	end
 
-	defn.typeInfo               = typeInfo
-	defn.typeInfoForDeclaration = typeInfoForDecl -- May be nil.
-	ident.inferredType          = typeInfo
+	decl.valueTypeInfo = typeInfoForDecl -- May be nil.  @Cleanup: Move this code to AstDeclaration?
+	ident.inferredType = typeInfo
 
 	!if DEBUG then
 		if debug_onlyInferTypes then
 			io.stdout:write("DEFINE ", ident.name ,":", getFriendlyTypeInfoName(typeInfo))
-			if defn.isConstant then  io.stdout:write(" (CONST)")  end
+			if decl.isConstant then  io.stdout:write(" (CONST)")  end
 			if typeInfoForDecl then  io.stdout:write(" (VALUE ", getFriendlyTypeInfoName(typeInfoForDecl), ")")  end
 			io.stdout:write(" IN ")
-			if defn.name.placeDeclared ~= defn.scope then
-				io.stdout:write(AST_NODE_TYPE_NAMES[defn.name.placeDeclared.nodeType], " > ")
+			if decl.name.placeDeclared ~= getClosestScope(decl) then
+				io.stdout:write(AST_NODE_TYPE_NAMES[decl.name.placeDeclared.nodeType], " > ")
 			end
-			astPrint(defn.scope)
+			astPrint(getClosestScope(decl))
 		end
 	!end
 
@@ -849,7 +840,7 @@ end
 end
 
 !NODE_INFERRER `function nodeInferrers.AstType(state, typeNode)`
-	local defn = nil
+	local decl = nil
 	local typeInfo, typeInfoRepresented
 
 	if not typeNode.isUserType then
@@ -882,22 +873,22 @@ end
 	else
 		assert(typeNode.typeName ~= "")
 
-		defn = findDefinition(state, typeNode, typeNode.typeName)
-		if not defn then
-			!DEPEND_AND_RETURN(`typeNode`, DEPEND_DEFINITION, `typeNode.typeName`)
+		decl = findDeclaration(state, typeNode, typeNode.typeName)
+		if not decl then
+			!DEPEND_AND_RETURN(`typeNode`, DEPEND_DECLARATION, `typeNode.typeName`)
 		end
-		if not defn.typeInfo then
-			!DEPEND_AND_RETURN(`typeNode`, DEPEND_NODE_INFERRED, `defn`)
+		if not decl.name.inferredType then
+			!DEPEND_AND_RETURN(`typeNode`, DEPEND_NODE_INFERRED, `decl.name`)
 		end
 
-		typeInfoRepresented = defn.typeInfoForDeclaration
-		typeInfo            = defn.typeInfo
+		typeInfoRepresented = decl.valueTypeInfo -- May be nil.
+		typeInfo            = decl.name.inferredType
 		assert(typeInfo)
 
 		if typeInfo ~= getTypeInfoForBuiltinType(state, "type") then
 			printerr()
 			typeMessage(io.stderr, state, typeNode, "Error", "'%s' is not a type. (It is %s)", typeNode.typeName, getFriendlyTypeInfoName(typeInfo))
-			printDefinitionChain(io.stderr, state, defn, typeNode.typeName)
+			printDeclarationChain(io.stderr, state, decl, typeNode.typeName)
 			exitFailure()
 		end
 
@@ -936,8 +927,7 @@ end
 
 	typeNode.representedType = typeInfoRepresented
 	typeNode.inferredType    = typeInfo
-	typeNode.declaration     = defn and defn.name.declaration
-	typeNode.definition      = defn
+	typeNode.declaration     = decl
 
 	moveToNextPipe(state, typeNode)
 end
@@ -1087,7 +1077,8 @@ end
 			getTypeInfoForBuiltinType(state, "float")
 		) then
 			typeError(state, unary.expression,
-				"Unary operation: Expected a float or int. (Got %s)",
+				"Unary numeric operation (%s): Expected a float or int. (Got %s)",
+				unary.operation,
 				getFriendlyTypeInfoName(typeInfo)
 			)
 		end
@@ -1095,7 +1086,8 @@ end
 	elseif unary.operation == "not" then
 		if typeInfo ~= getTypeInfoForBuiltinType(state, "bool") then
 			typeError(state, unary.expression,
-				"Unary operation: Expected a bool. (Got %s)",
+				"Unary boolean operation (%s): Expected a bool. (Got %s)",
+				unary.operation,
 				getFriendlyTypeInfoName(typeInfo)
 			)
 		end
@@ -1171,7 +1163,8 @@ end
 	if typeInfoL ~= typeInfoR then
 		typeError(
 			state, binary,
-			"Binary operation: Operands are different types. (Left is %s, right is %s)",
+			"Binary operation (%s): Operands are different types. (Left is %s, right is %s)",
+			binary.operation,
 			getFriendlyTypeInfoName(typeInfoL),
 			getFriendlyTypeInfoName(typeInfoR)
 		)
@@ -1185,7 +1178,8 @@ end
 		) then
 			typeError(
 				state, binary.left,
-				"Binary operation: Expected a float or int. (Got %s)",
+				"Binary numeric operation (%s): Expected a float or int. (Got %s)",
+				binary.operation,
 				getFriendlyTypeInfoName(typeInfoL)
 			)
 		end
@@ -1203,7 +1197,8 @@ end
 		) then
 			typeError(
 				state, binary.left,
-				"Binary operation: Expected a float, int or string. (Got %s)",
+				"Binary comparison (%s): Expected a float, int or string. (Got %s)",
+				binary.operation,
 				getFriendlyTypeInfoName(typeInfoL)
 			)
 		end
@@ -1217,14 +1212,14 @@ end
 	-- Boolean operation.
 	elseif isAny(binary.operation, "and","or") then
 		if typeInfoL ~= getTypeInfoForBuiltinType(state, "bool") then
-			typeError(state, binary.left, "Binary operation: Expected a bool. (Got %s)", getFriendlyTypeInfoName(typeInfoL))
+			typeError(state, binary.left, "Binary boolean operation (%s): Expected a bool. (Got %s)", binary.operation, getFriendlyTypeInfoName(typeInfoL))
 		end
 		typeInfo = getTypeInfoForBuiltinType(state, "bool")
 
 	-- String concatination.
 	elseif isAny(binary.operation, "..") then
 		if typeInfoL ~= getTypeInfoForBuiltinType(state, "string") then
-			typeError(state, binary.left, "Binary operation: Expected a string. (Got %s)", getFriendlyTypeInfoName(typeInfoL))
+			typeError(state, binary.left, "String concatination expected a string. (Got %s)", getFriendlyTypeInfoName(typeInfoL))
 		end
 		typeInfo = getTypeInfoForBuiltinType(state, "string")
 
@@ -1564,7 +1559,7 @@ end
 	local globalScope = state.globalScope
 
 	if not state.fileBuffers[path] then
-		-- @Incomplete: Include the times in compilation stats.
+		-- @Incomplete: Include times in compilation stats.
 		local timeStartLexing, timeEndLexing = readAndTokenizeFile(state, path)
 		assert(state.fileBuffers[path], path)
 
@@ -1572,12 +1567,11 @@ end
 		local fileScope        = parseFileScope(state, globalScope, path)
 		local timeEndParsing   = os.clock()
 
-		table.insert(globalScope.fileScopes, fileScope)
-
 		if peekNextToken(state) then
 			errorParsingNext(state, "Expected the end of the file.")
 		end
 
+		astMoveGlobalDeclarationsToGlobalScope(state, fileScope)
 		addToQueueRecursively(state, fileScope)
 	end
 
@@ -1741,8 +1735,7 @@ function _G.getLiteralValueFromExpressionIfConstant(state, expr)
 
 	elseif expr.nodeType == !(nodeTypes.AstIdentifier) then
 		local ident = expr
-		local defn  = ident.definition
-		local decl  = defn.name.declaration or errorInternal()
+		local decl  = ident.declaration or errorInternal()
 
 		if not decl.isConstant then  return false, nil  end
 

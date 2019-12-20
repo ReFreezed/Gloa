@@ -12,6 +12,7 @@
 	astCopy
 	astFindParent, astFindCommonParent, astHasParent
 	astGetExpressionVisuallyFurthestToTheLeft, astGetCalleeVisuallyFurthestToTheLeft
+	astMoveGlobalDeclarationsToGlobalScope
 	astNewNode
 	astPrint, astPrintTree
 	astVisitAllNodes, astVisitAllNodesLeavesFirst
@@ -66,13 +67,19 @@ local function DO_OR_RETURN_FALSE(exprCode)  doOrReturn(exprCode, "false")  end
 
 
 !(
-_G.nodeTypes        = {}
-local nodeTypeN     = 0
-local nodeTypeNames = {}
+local nodeTypeN              = 0
+local nodeTypeNames          = {}
+_G.nodeTypes                 = {}
+_G.scopeNodeTypes            = {}
+_G.scopeNodeTypesDeclarative = {}
+_G.scopeNodeTypesImperative  = {}
 
 local function structAst(nameAndParent)
 	return function(fields)
-		local name = nameAndParent:match"^[%w_]+"
+		local name        = nameAndParent:match"^[%w_]+"
+
+		local scopeType   = fields._scopeType
+		fields._scopeType = nil
 
 		if not name:find"^_" then
 			nodeTypeN         = nodeTypeN+1
@@ -80,6 +87,16 @@ local function structAst(nameAndParent)
 
 			nodeTypes[name]          = nodeTypeN
 			nodeTypeNames[nodeTypeN] = name
+
+			if scopeType then
+				local scopesOfType
+					=  scopeType == "declarative" and scopeNodeTypesDeclarative
+					or scopeType == "imperative"  and scopeNodeTypesImperative
+					or error(scopeType)
+
+				table.insert(scopeNodeTypes, nodeTypeN)
+				table.insert(scopesOfType,   nodeTypeN)
+			end
 		end
 
 		struct(nameAndParent)(fields)
@@ -95,15 +112,6 @@ end
 	-- Pipe phase:
 	queued   = NIL, -- Queued
 }
-_G.!structAst"AstTypeDefinition:_AstNode"{ -- Created during type phase.  @Cleanup: This does not represent a type definition - it's just a declaration of a single name!
-	-- Type phase:
-	name       = NIL,   -- AstIdentifier|AstVararg
-	scope      = NIL,   -- AstBlock (or substruct) | AstFor | AstLambda  (This should be the same as the parent.)
-	isConstant = false,
-	canShadow  = false, -- @Cleanup: Probably don't need to store this here.
-	typeInfo   = NIL,   -- TypeInfo
-	typeInfoForDeclaration = NIL, -- Type represented by the value in type declarations. If this is set then the identifier can be used in places where a type is expected.
-}
 
 !structAst"_AstExpression:_AstNode"{
 	-- Type phase:
@@ -112,11 +120,10 @@ _G.!structAst"AstTypeDefinition:_AstNode"{ -- Created during type phase.  @Clean
 	constant     = NIL, -- Constant
 }
 _G.!structAst"AstIdentifier:_AstExpression"{
-	name = "",
+	name          = "",
+	placeDeclared = NIL, -- AstDeclaration|AstStruct|AstFor|AstLambda  (@Cleanup: We don't really use this.)
 	-- Type phase:
-	placeDeclared = NIL, -- AstDeclaration|AstStruct|AstFor|AstLambda (Can/should this be moved to AstTypeDefinition?)
-	declaration   = NIL, -- AstDeclaration
-	definition    = NIL, -- AstTypeDefinition
+	declaration = NIL, -- AstDeclaration
 }
 _G.!structAst"AstVararg:_AstExpression"{
 	surroundedByParenthesis = false,
@@ -130,12 +137,10 @@ _G.!structAst"AstType:_AstExpression"{
 	typeName          = "",
 	functionSignature = NIL, -- AstLambda without a body. This is used to create the actual function type.
 	arrayItemType     = NIL, -- AstType
-	arguments         = NIL, -- []AstExpression (Is set for parameterized structs.)
+	arguments         = NIL, -- []AstExpression  (Is set for parameterized structs.)
 	-- Type phase:
-	typeInfo          = NIL,
 	representedType   = NIL, -- TypeInfo
 	declaration       = NIL, -- AstDeclaration
-	definition        = NIL, -- AstTypeDefinition
 }
 _G.!structAst"AstUnary:_AstExpression"{
 	operation  = "",  -- "-" or "not" etc.
@@ -156,14 +161,6 @@ _G.!structAst"AstCall:_AstExpression"{
 	surroundedByParenthesis   = false,
 	callee                    = NIL, -- AstExpression
 	arguments                 = {},  -- []AstExpression
-}
-_G.!structAst"AstLambda:_AstExpression"{
-	argumentsIn  = NIL, -- AstArguments
-	argumentsOut = NIL, -- AstArguments
-	body         = NIL, -- AstBlock  (If this is nil then the lambda is a function signature.)
-	-- Type phase:
-	definitions   = {},  -- []AstTypeDefinition (Note that the body has it's own definitions.)
-	definedLocals = {},
 }
 _G.!structAst"AstTypeOf:_AstExpression"{
 	expression = NIL,
@@ -204,6 +201,7 @@ _G.!structAst"AstDeclaration:_AstNode"{
 	isGlobalOrExported = false,
 	isConstant         = false,
 	canShadow          = false,
+	valueTypeInfo      = NIL, -- Type represented by the assigned value if isConstant. If this is set then the declared identifier can be used in places where a type is expected. Can be nil. @Incomplete: Use this!
 
 	-- assignment==nil means the name gets it's default value (which depends on the type, of which there must be only one).
 	assignment      = NIL, -- AstAssignment
@@ -232,54 +230,69 @@ _G.!structAst"AstDefer:_AstNode"{
 	body = NIL, -- AstBlock
 }
 
-!structAst"_AstControlStructure:_AstNode"{}
-_G.!structAst"AstIf:_AstControlStructure"{
-	condition   = NIL, -- AstExpression
-	branchTrue  = NIL, -- AstBlock
-	branchFalse = NIL, -- AstBlock
+_G.!structAst"AstBlock:_AstNode"{
+	_scopeType   = "imperative",
+	declarations = {}, -- []AstDeclaration  (Note that inner blocks have their own declarations.)
+	imports      = {}, -- []AstImport
+	-- [1]=statement1, ...
+	-- Type phase:
+	definedLocals = {},
 }
-_G.!structAst"AstWhile:_AstControlStructure"{
-	condition   = NIL, -- AstExpression
-	body        = NIL, -- AstBlock
+_G.!structAst"AstFileScope:AstBlock"{
+	_scopeType = "declarative",
+	isModule   = false,
+	path       = "",
 }
-_G.!structAst"AstFor:_AstControlStructure"{
+_G.!structAst"AstGlobalScope:AstBlock"{
+	_scopeType     = "declarative",
+	firstFileScope = NIL, -- AstFileScope
+	fileScopes     = {},  -- []AstFileScope
+}
+_G.!structAst"AstFor:AstBlock"{
+	_scopeType  = "imperative",
 	forType     = FOR_NUMERIC,
 	names       = {},  -- []AstIdentifier  @Incomplete @Cleanup: Use AstDeclaration(s) (and AstAssignment(s)?) in AstFor.
 	expressions = {},  -- []AstExpression
 	body        = NIL, -- AstBlock
-	-- Type phase:
-	definitions   = {},  -- []AstTypeDefinition (Note that the body has it's own definitions.)
-	definedLocals = {},
-}
-
-_G.!structAst"AstBlock:_AstNode"{
-	declarations = {}, -- []AstDeclaration
-	imports      = {}, -- []AstImport
-	-- [1]=statement1, ...
-	-- Type phase:
-	definitions   = {}, -- []AstTypeDefinition
-	definedLocals = {},
-}
-_G.!structAst"AstFileScope:AstBlock"{
-	isModule = false,
-	path     = "",
-}
-_G.!structAst"AstGlobalScope:AstBlock"{
-	firstFileScope = NIL, -- AstFileScope
-	fileScopes     = {},  -- []AstFileScope
 }
 !structAst"_AstBlockExpression:AstBlock"{
 	-- Type phase:
-	representedType = NIL, -- TypeInfoStruct
+	inferredType    = NIL, -- TypeInfo
+	representedType = NIL, -- TypeInfoStruct|TypeInfoEnum  (Used for AstEnum and AstStruct. Is nil otherwise.)
 }
 _G.!structAst"AstStruct:_AstBlockExpression"{
-	arguments = NIL, -- AstArguments
+	_scopeType = "declarative",
+	arguments  = NIL, -- AstArguments
 }
 _G.!structAst"AstEnum:_AstBlockExpression"{
+	_scopeType = "declarative",
 	memberType = NIL, -- AstType
+}
+_G.!structAst"AstLambda:_AstBlockExpression"{
+	_scopeType   = "imperative",
+	argumentsIn  = NIL, -- AstArguments
+	argumentsOut = NIL, -- AstArguments
+	body         = NIL, -- AstBlock  (If this is nil then the lambda is a function signature.)
+}
+
+_G.!structAst"AstIf:_AstNode"{
+	condition   = NIL, -- AstExpression
+	branchTrue  = NIL, -- AstBlock
+	branchFalse = NIL, -- AstBlock
+}
+_G.!structAst"AstWhile:_AstNode"{
+	condition   = NIL, -- AstExpression
+	body        = NIL, -- AstBlock
 }
 
 _G.AST_NODE_TYPE_NAMES = !(nodeTypeNames)
+
+_G.SCOPES                = !(scopeNodeTypes)
+_G.SCOPES_DECLARATIVE    = !(scopeNodeTypesDeclarative)
+_G.SCOPES_IMPERATIVE     = !(scopeNodeTypesImperative)
+_G.SCOPE_SET             = !(Set(scopeNodeTypes))
+_G.SCOPE_SET_DECLARATIVE = !(Set(scopeNodeTypesDeclarative))
+_G.SCOPE_SET_IMPERATIVE  = !(Set(scopeNodeTypesImperative))
 
 
 
@@ -1504,6 +1517,20 @@ function _G.parseFileScope(state, parentNode, path)
 	return fileScope
 end
 
+function _G.astMoveGlobalDeclarationsToGlobalScope(state, fileScope)
+	!ASSERT `not fileScope.queued`
+
+	local globalScope = state.globalScope
+	table.insert(globalScope.fileScopes, fileScope)
+
+	for i, decl in ipairsr(fileScope.declarations) do
+		if decl.isGlobalOrExported then
+			removeUnordered(fileScope.declarations, i)
+			table.insert(globalScope.declarations, decl)
+		end
+	end
+end
+
 function _G.parseGlobalScope(state, firstFilePath)
 	local globalScope          = astNewNode(AstGlobalScope, state.nextToken)
 	state.globalScope          = globalScope
@@ -1513,8 +1540,8 @@ function _G.parseGlobalScope(state, firstFilePath)
 	statement.what             = firstFileScope
 	globalScope.firstFileScope = firstFileScope
 
-	table.insert(globalScope,            statement)
-	table.insert(globalScope.fileScopes, firstFileScope)
+	table.insert(globalScope, statement)
+	astMoveGlobalDeclarationsToGlobalScope(state, firstFileScope)
 
 	return globalScope
 end
@@ -1586,6 +1613,10 @@ function _G.parseLambda(state, parentNode, allowBody)
 
 	else
 		!SET_OR_RETURN `lambda.argumentsIn = parseArguments(state, lambda, true, lambda)`
+
+		for _, arg in ipairs(lambda.argumentsIn) do
+			table.insert(lambda.declarations, arg.declaration)
+		end
 
 		tokType, tokValue = consumeNextToken(state)
 		if not isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),")") then
@@ -2189,7 +2220,11 @@ do
 				elseif decl.isGlobalOrExported then
 					write(" (global/exported)")
 				end
-				if decl.name then  write(" (", (decl.name.name or "...vararg"), ")")  end
+				write(" (", (decl.name.name or "...vararg"))
+				if decl.name.inferredType then  write(", ", getFriendlyTypeInfoName(decl.name.inferredType))  end
+				if decl.valueTypeInfo     then  write(", ", getFriendlyTypeInfoName(decl.valueTypeInfo))      end
+				write(")")
+
 				!!(CHILD_PRINT_START)
 				printNodeList(decl.types, indent+1, printed, printChildren)
 				!!(CHILD_PRINT_END)
@@ -2328,15 +2363,6 @@ do
 				local vararg = node
 				if vararg.surroundedByParenthesis then  write(" (adjustTo1)")  end
 				write("\n")
-
-			elseif node.nodeType == !(nodeTypes.AstTypeDefinition) then
-				local defn = node
-				assert(defn.typeInfo)
-				write(" (")
-				write(defn.name.name)
-				write(", ", getFriendlyTypeInfoName(defn.typeInfo))
-				if defn.typeInfoForDeclaration then  write(", ", getFriendlyTypeInfoName(defn.typeInfoForDeclaration))  end
-				write(")\n")
 
 			elseif node.nodeType == !(nodeTypes.AstGlobalScope) then
 				local globalScope = node
@@ -2490,8 +2516,7 @@ do
 			end
 		end
 
-		if node.nodeType == !(nodeTypes.AstTypeDefinition)  then  -- void
-		elseif node.nodeType == !(nodeTypes.AstIdentifier)  then  -- void
+		if     node.nodeType == !(nodeTypes.AstIdentifier)  then  -- void
 		elseif node.nodeType == !(nodeTypes.AstVararg)      then  -- void
 		elseif node.nodeType == !(nodeTypes.AstLiteral)     then  -- void
 		elseif node.nodeType == !(nodeTypes.AstType)        then
@@ -2559,7 +2584,6 @@ function _G.astCopy(node)
 		copy.name          = ident.name
 		copy.placeDeclared = ident.placeDeclared
 		copy.declaration   = ident.declaration
-		copy.definition    = ident.definition
 
 	else
 		errorUnhandledNodeType(node)

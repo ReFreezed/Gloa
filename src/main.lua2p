@@ -257,7 +257,7 @@ local queueSize  = 0
 		if debug_onlyInferTypes then  lastPipe = !(PIPE_INFER)  end
 	!end
 
-	local function getDeclaredIdentifierWaitingToBeDefinedWithName(name, queuedToIgnore)
+	local function getDeclaredIdentifierWaitingToBeDeclaredWithName(name, queuedToIgnore)
 		for _, queued in ipairs(state.queue) do
 			if queued ~= queuedToIgnore and not queued.removed and queued.waitingOn and queued.node.nodeType == !(nodeTypes.AstIdentifier) then
 				local ident = queued.node
@@ -283,10 +283,10 @@ local queueSize  = 0
 				if queued.waitingOn then
 					local dependency = queued.waitingOn
 
-					if dependency.dependType == !(DEPEND_DEFINITION) then
+					if dependency.dependType == !(DEPEND_DECLARATION) then
 						local name = dependency.dependOn
-						-- @Speed: Only call findDefinition() if it's reported that a definition with the awaited name has been defined.
-						if findDefinition(state, queued.node, name) then
+						-- @Speed: Only call findDeclaration() if it's reported that a declaration with the awaited name has been added to the tree.
+						if findDeclaration(state, queued.node, name) then
 							queued.waitingOn = nil
 						end
 
@@ -336,17 +336,17 @@ local queueSize  = 0
 			for _, queued in ipairs(state.queue) do
 				local dependency = not queued.removed and queued.waitingOn
 
-				if dependency and dependency.dependType == !(DEPEND_DEFINITION) then
+				if dependency and dependency.dependType == !(DEPEND_DECLARATION) then
 					local name = dependency.dependOn
 
-					if not getDeclaredIdentifierWaitingToBeDefinedWithName(name, queued) then
+					if not getDeclaredIdentifierWaitingToBeDeclaredWithName(name, queued) then
 						typeError(state, queued.node, "Undeclared identifier '%s'.", name)
 					end
 				end
 			end
 			--]]
 
-			-- [[ Report identifier waiting for definition to be defined.
+			-- [[ Report identifier waiting for declaration to be inferred.
 			for _, queued in ipairs(state.queue) do
 				local dependency = not queued.removed and queued.waitingOn
 
@@ -354,12 +354,12 @@ local queueSize  = 0
 					dependency
 					and dependency.dependType             == !(DEPEND_NODE_INFERRED)
 					and queued.node.nodeType              == !(nodeTypes.AstIdentifier)
-					and dependency.dependOn.node.nodeType == !(nodeTypes.AstTypeDefinition)
+					and dependency.dependOn.node.nodeType == !(nodeTypes.AstDeclaration)
 				then
-					local defn = dependency.dependOn.node
+					local decl = dependency.dependOn.node
 
 					printerr()
-					typeMessage(io.stderr, state, defn,        "Error", "Failed inferring the type of this definition.")
+					typeMessage(io.stderr, state, decl,        "Error", "Failed inferring the type of this declaration.")
 					typeMessage(io.stderr, state, queued.node, "Info",  "...this identifier is waiting for the above to finish.")
 					exitFailure()
 				end

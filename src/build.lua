@@ -69,6 +69,27 @@ function pp.metaEnvironment.templateToLua(template, values)
 	return (template:gsub("$(%w+)", values))
 end
 
+function pp.metaEnvironment.outputCommaSeparatedValues(...)
+	for i = 1, select("#", ...) do
+		if i > 1 then  pp.outputLua(",")  end
+		pp.outputValue((select(i, ...)))
+	end
+end
+
+-- Convert an array of values to a set (where the table keys are the values and the table values are 'true').
+function pp.metaEnvironment.Set(values)
+	local set = {}
+	for _, v in ipairs(values) do
+		set[v] = true
+	end
+	return set
+end
+
+-- Output an assert() in DEBUG mode.
+function pp.metaEnvironment.ASSERT(valueCode)
+	if DEBUG then  pp.outputLua("assert(",valueCode,")")  end
+end
+
 pp.processFile{
 	pathIn          = DIR_HERE.."/main.lua2p",
 	pathOut         = pathGloaOut,
