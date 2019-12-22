@@ -9,7 +9,8 @@
 --=
 --==============================================================
 
-	bcGenerate
+	bcEmit*
+	bcError, bcMessage
 
 ----------------------------------------------------------------
 
@@ -194,59 +195,186 @@ end
 
 -- constant = bcAllocateConstantIfNew( state, typeInfo, value )
 function _G.bcAllocateConstantIfNew(state, typeInfo, v)
+	if not isAny(
+		typeInfo,
+		getTypeInfoForBuiltinType(state, "bool"),
+		getTypeInfoForBuiltinType(state, "float"),
+		getTypeInfoForBuiltinType(state, "int"),
+		getTypeInfoForBuiltinType(state, "nil"),
+		getTypeInfoForBuiltinType(state, "string")
+	) then
+		errorInternal("@Incomplete: Handle '%s'.", getFriendlyTypeInfoName(typeInfo))
+	end
+
 	for _, const in ipairs(state.constants) do
 		if const.valueType == typeInfo and const.value == v then -- @Incomplete: Comparison for non-primitive values.
 			return const.id
 		end
 	end
 
-	state.lastConstantId = state.lastConstantId+1
+	local i = #state.constants+1
 
 	local const     = Constant()
-	const.id        = state.lastConstantId
+	const.id        = i
 	const.valueType = typeInfo
 	const.value     = v
 
-	table.insert(state.constants, const)
+	state.constants[i] = const
 	return const
+end
+
+function _G.bcAllocateGlobalVariable(state, name)
+	local i                  = #state.globalVariables+1
+	local globalName         = "GLOBAL"..i.."_"..name
+	state.globalVariables[i] = globalName
+	return globalName
 end
 
 
 
-function _G.bcGenerate(state, globalScope)
--- function _G.bcGenerate(state, fileScope) -- OLD
-	errorInternal("@Incomplete") -- Things have changed, yo!
+!(
+local function DEPEND_AND_RETURN(dependentCode, dependType, dependOnCode)
+	__LUA("addDependency(state, ",dependentCode,", ",toLua(dependType),", ",dependOnCode,") ; return")
+end
+local function DEPEND_AND_RETURN_FALSE(dependentCode, dependType, dependOnCode)
+	__LUA("addDependency(state, ",dependentCode,", ",toLua(dependType),", ",dependOnCode,") ; return false")
+end
+)
 
-	astPrintTree(fileScope)
+function _G.bcEmitForDeclarationStatement(state, statement)
+	local decl = statement.what
 
-	assert(fileScope.nodeType == !(nodeTypes.AstFileScope))
+	-- Constant.
+	if decl.isConstant then
+		assert(decl.assignment) -- Should have given an error during parsing.
 
-	-- Evaluate all constants.
-	astVisitAllNodes(fileScope, function(node)
-		if node.nodeType == !(nodeTypes.AstDeclaration) then
-			local decl = node
-			assert(decl.assignment, "@Incomplete: Default values.")
+		local valueExpr, typeInfo = getAssignmentValue(state, decl.name, decl.assignment.values, decl.assignmentIndex)
 
-			if decl.isConstant then
-				for i, ident in ipairs(decl.names) do
-					assert(decl.inferredTypes[i])
+		if valueExpr.nodeType == !(nodeTypes.AstLiteral) then
+			local literal      = valueExpr
+			decl.valueConstant = bcAllocateConstantIfNew(state, typeInfo, literal.value)
 
-					local valExpr    = decl.assignment.values[i]
-					local v          = evaluateConstantExpression(state, ident, valExpr)
-					valExpr.constant = bcAllocateConstantIfNew(state, decl.inferredTypes[i], v)
-				end
+		else
+			errorUnhandledNodeType(valueExpr)
+		end
+
+		moveTreeToNextPipe(state, statement, !(PIPE_BYTECODE+1)) -- Won't include the assignment statement.
+		return
+	end
+
+	local scope = getClosestScope(statement)
+
+	-- Static variable.
+	if isScopeDeclarative(scope) then
+		if not decl.assignment then
+			errorInternal("@Incomplete: Default values.")
+		end
+
+		local valueExpr, typeInfo = getAssignmentValue(state, decl.name, decl.assignment.values, decl.assignmentIndex)
+		local initialValueConst
+
+		if valueExpr.nodeType == !(nodeTypes.AstIdentifier) then
+			local ident     = valueExpr
+			local declOther = ident.declaration
+
+			if declOther.queued.pipe <= !(PIPE_BYTECODE) then
+				!DEPEND_AND_RETURN(`statement`, DEPEND_NODE_EMITTED, `declOther`)
+			end
+
+			assert(declOther.isConstant) -- Should have given an error in the typer.
+			initialValueConst = declOther.valueConstant or errorInternal() -- @Incomplete: valueConstant is nil for non-literals.
+
+		elseif valueExpr.nodeType == !(nodeTypes.AstLiteral) then
+			local literal     = valueExpr
+			initialValueConst = bcAllocateConstantIfNew(state, typeInfo, literal.value)
+
+		else
+			errorUnhandledNodeType(valueExpr)
+		end
+
+		decl.valueConstant      = initialValueConst
+		decl.globalVariableName = bcAllocateGlobalVariable(state, decl.name.name)
+		moveTreeToNextPipe(state, statement, !(PIPE_BYTECODE+1)) -- Won't include the assignment statement.
+
+	-- Dynamic variable.
+	else
+		-- void  (These will be handled by AstLambda, I think.)
+	end
+end
+
+function _G.bcEmitForAssignmentStatement(state, statement)
+	local assignment = statement.what
+
+	if assignment.forDeclaration then
+		for _, decl in ipairs(assignment.declarations) do
+			if decl.queued.pipe <= !(PIPE_BYTECODE) then
+				!DEPEND_AND_RETURN(`statement`, DEPEND_NODE_EMITTED, `decl`)
 			end
 		end
-	end)
+	end
 
-	-- Generate bytecode!
-	errorInternal("@Incomplete: Dependencies.")
-	-- for _, decl in ipairs(fileScope.declarations) do
-	-- 	if not decl.isConstant then
-	-- 		for i, ident in ipairs(decl.names) do
-	-- 		end
-	-- 	end
-	-- end
+	-- @Incomplete: Emit code for assignment.
+
+	moveTreeToNextPipe(state, statement, !(PIPE_BYTECODE+1))
+end
+
+function _G.bcEmit(state, node)
+	if node.nodeType == !(nodeTypes.AstStatement) then
+		local statement = node
+
+		if statement.what.nodeType == !(nodeTypes.AstDeclaration) then
+			bcEmitForDeclarationStatement(state, statement)
+
+		elseif statement.what.nodeType == !(nodeTypes.AstAssignment) then
+			bcEmitForAssignmentStatement(state, statement)
+
+		elseif statement.what.nodeType == !(nodeTypes.AstFileScope) then
+			local fileScope = statement.what
+
+			for _, statementInner in ipairs(fileScope) do
+				if statementInner.queued.pipe <= !(PIPE_BYTECODE) then
+					!DEPEND_AND_RETURN(`statement`, DEPEND_NODE_EMITTED, `statementInner.what`)
+				end
+			end
+
+			moveToNextPipe(state, fileScope, !(PIPE_BYTECODE+1))
+			moveToNextPipe(state, statement, !(PIPE_BYTECODE+1))
+
+		else
+			errorUnhandledNodeType(statement.what)
+		end
+
+	elseif node.nodeType == !(nodeTypes.AstGlobalScope) then
+		local globalScope = node
+
+		for _, statement in ipairs(globalScope) do
+			if statement.queued.pipe <= !(PIPE_BYTECODE) then
+				!DEPEND_AND_RETURN(`globalScope`, DEPEND_NODE_EMITTED, `statement.what`)
+			end
+		end
+
+		moveToNextPipe(state, globalScope, !(PIPE_BYTECODE+1))
+
+	else
+		-- void  (Ignore.)
+	end
+
+	--[[
+	AstIdentifier AstType AstCall AstDeclaration AstVararg AstLiteral AstUnary AstBinary AstTable AstArgument
+	AstArguments AstLambda AstTypeOf AstCast AstStatement AstAssignment AstReturn AstBreak AstContinue AstDefer
+	AstImport AstIf AstWhile AstFor AstStruct AstEnum AstFileScope AstGlobalScope AstBlock
+	]]
+end
+
+
+
+function _G.bcError(state, node, s, ...)
+	return nodeError(state, node, "Bytecode", s, ...)
+end
+
+-- bcMessage( [ outputFile=io.stdout, ] compilationState, node, label, formatString, ... )
+function _G.bcMessage(file, state, node, label, s, ...)
+	return nodeMessage(file, state, node, label, "Bytecode", s, ...)
 end
 
 

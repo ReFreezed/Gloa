@@ -16,7 +16,9 @@
 	astNewNode
 	astPrint, astPrintTree
 	astVisitAllNodes, astVisitAllNodesLeavesFirst
-	errorParsing*, errorUnhandledNodeType, parserMessage*
+	errorParsing*, parserMessage*
+	errorUnhandledNodeType
+	nodeError, nodeMessage
 	parse*
 
 --============================================================]]
@@ -116,8 +118,6 @@ end
 !structAst"_AstExpression:_AstNode"{
 	-- Type phase:
 	inferredType = NIL, -- TypeInfo
-	-- Bytecode phase:
-	constant     = NIL, -- Constant
 }
 _G.!structAst"AstIdentifier:_AstExpression"{
 	name          = "",
@@ -198,21 +198,28 @@ _G.!structAst"AstDeclaration:_AstNode"{
 	name               = NIL, -- AstIdentifier|AstVararg
 	types              = {},  -- []AstType  (No value here means the types are inferred.)
 	notes              = {},  -- []AstNote  @Incomplete: Nodes.
+
 	isGlobalOrExported = false,
 	isConstant         = false,
 	canShadow          = false,
-	valueTypeInfo      = NIL, -- Type represented by the assigned value if isConstant. If this is set then the declared identifier can be used in places where a type is expected. Can be nil. @Incomplete: Use this!
 
-	-- assignment==nil means the name gets it's default value (which depends on the type, of which there must be only one).
-	assignment      = NIL, -- AstAssignment
-	assignmentIndex = 1,
+	assignment         = NIL, -- AstAssignment  (If this is nil then the name gets it's default value (which depends on the type, of which there must be only one.))
+	assignmentIndex    = 1,
+
+	-- Type phase:
+	valueTypeInfo      = NIL, -- Type represented by the assigned value if isConstant. If this is set then the declared identifier can be used in places where a type is expected. Can be nil.
+
+	-- Bytecode phase:
+	valueConstant      = NIL,
+	globalVariableName = "",
 }
 
 _G.!structAst"AstAssignment:_AstNode"{
 	forDeclaration = false,
+	declarations   = NIL, -- []AstDeclaration  (Is set if forDeclaration is set.)
 	operation      = "=",
-	targets        = {}, -- []AstExpression
-	values         = {}, -- []AstExpression
+	targets        = {},  -- []AstExpression
+	values         = {},  -- []AstExpression
 }
 
 !structAst"_AstJump:_AstNode"{}
@@ -661,6 +668,7 @@ function _G.parseArguments(state, parentNode, isInput, placeDeclared)
 
 				local assignment           = astNewNode(AstAssignment, token, arg)
 				assignment.forDeclaration  = true
+				assignment.declarations    = {decl}
 				arg.assignment             = assignment
 				decl.assignment            = assignment -- Note: decl.assignmentIndex is always 1 for arguments.
 
@@ -873,8 +881,9 @@ function _G.parseDeclarationStatement(state, block, placeDeclared, declType)
 	local a :: !import "lib"
 	]]
 
-	declType   = declType or !(DECLARATION_NORMAL)
+	declType = declType or !(DECLARATION_NORMAL)
 
+	local declStartToken = state.nextToken
 	local declStatements = {}
 	local declarations   = {}
 	local declNames      = {}
@@ -971,9 +980,10 @@ function _G.parseDeclarationStatement(state, block, placeDeclared, declType)
 	local isConstant          = false
 
 	!local CREATE_ASSIGNMENT = `
-		assignmentStatement       = astNewNode(AstStatement,  token, block)
-		assignment                = astNewNode(AstAssignment, token, assignmentStatement)
+		assignmentStatement       = astNewNode(AstStatement,  declStartToken, block)
+		assignment                = astNewNode(AstAssignment, declStartToken, assignmentStatement)
 		assignment.forDeclaration = true
+		assignment.declarations   = {}
 		assignmentStatement.what  = assignment
 
 		for i, decl in ipairs(declarations) do
@@ -984,6 +994,8 @@ function _G.parseDeclarationStatement(state, block, placeDeclared, declType)
 
 			decl.assignment         = assignment
 			decl.assignmentIndex    = i
+
+			table.insert(assignment.declarations, decl)
 		end
 	`
 
@@ -2079,7 +2091,7 @@ function _G.errorParsing(state, i, s, ...)
 	local path
 		=  tokens.file[i]
 		or tokens.file[1] -- Not great, but better than crashing.
-		or errorInternal(2, "No tokens.")
+		or errorInternal("No tokens.")
 
 	local buffer = state.fileBuffers[path] or errorInternal("No file buffer for '%s'.", path)
 
@@ -2097,7 +2109,7 @@ function _G.parserMessage(file, state, token, label, s, ...)
 	if type(file) ~= "userdata" then  return parserMessage(io.stdout, file, state, token, label, s, ...)  end
 
 	local tokens = state.tokens
-	local path   = tokens.file[token]      or errorInternal(2, "No tokens.")
+	local path   = tokens.file[token]      or errorInternal("No tokens.")
 	local buffer = state.fileBuffers[path] or errorInternal("No file buffer for '%s'.", path)
 	reportMessageInFile(file, buffer, path, tokens.position1[token], label, "Parser", s, ...)
 end
@@ -2107,7 +2119,7 @@ function _G.parserMessageLine(file, state, token, label, s, ...)
 	if type(file) ~= "userdata" then  return parserMessageLine(io.stdout, file, state, token, label, s, ...)  end
 
 	local tokens = state.tokens
-	local path   = tokens.file[token] or errorInternal(2, "No tokens.")
+	local path   = tokens.file[token] or errorInternal("No tokens.")
 	reportMessageOnLine(file, path, tokens.line1[token], label, "Parser", s, ...)
 end
 
@@ -2118,7 +2130,7 @@ function _G.errorParsingAfter(state, i, s, ...)
 	local path
 		=  tokens.file[i]
 		or tokens.file[1] -- Not great, but better than crashing.
-		or errorInternal(2, "No tokens.")
+		or errorInternal("No tokens.")
 
 	local buffer = state.fileBuffers[path] or errorInternal("No file buffer for '%s'.", path)
 
@@ -2145,11 +2157,35 @@ function _G.errorParsingAfterLast(state, ...)
 	errorParsingAfter(state, state.nextToken-1, ...)
 end
 
+
+
 function _G.errorUnhandledNodeType(node)
 	!if DEBUG then
 		astPrintTree(node)
 	!end
 	errorInternal(2, "Incomplete: Unhandled node type '%s'.", (AST_NODE_TYPE_NAMES[node.nodeType] or node.nodeType))
+end
+
+
+
+-- nodeError( compilationState, node, agent, formatString, ... )
+function _G.nodeError(state, node, agent, s, ...)
+	local tokens = state.tokens
+	local token  = node.token
+	local path   = tokens.file[token]      or errorInternal("No tokens.")
+	local buffer = state.fileBuffers[path] or errorInternal("No file buffer for '%s'.", path)
+	errorInFile(buffer, path, tokens.position1[token], agent, s, ...)
+end
+
+-- nodeMessage( [ outputFile=io.stdout, ] compilationState, node, label, agent, formatString, ... )
+function _G.nodeMessage(file, state, node, label, agent, s, ...)
+	if type(file) ~= "userdata" then  return nodeMessage(io.stdout, file, state, node, label, agent, s, ...)  end
+
+	local tokens = state.tokens
+	local token  = node.token
+	local path   = tokens.file[token]      or errorInternal("No tokens.")
+	local buffer = state.fileBuffers[path] or errorInternal("No file buffer for '%s'.", path)
+	reportMessageInFile(file, buffer, path, tokens.position1[token], label, agent, s, ...)
 end
 
 

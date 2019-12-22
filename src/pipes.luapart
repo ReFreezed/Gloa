@@ -1,0 +1,189 @@
+--[[============================================================
+--=
+--=  Pipes
+--=
+--=-------------------------------------------------------------
+--=
+--=  Glóa - a language that compiles into Lua
+--=  by Marcus 'ReFreezed' Thunström
+--=
+--==============================================================
+
+	addDependency
+	addToQueue, addToQueueRecursively, scheduleRemovalFromQueueRecursively, scheduleRemovalOfChildrenFromQueueRecursively, replaceQueuedNode
+	moveToNextPipe, moveTreeToNextPipe
+
+--============================================================]]
+
+
+
+local !struct"Dependency"{ -- @Cleanup: Rename to something with "wait"?
+	dependent  = NIL, -- Queued
+	dependType = 0,   -- DEPEND_DECLARATION|DEPEND_NODE_INFERRED|DEPEND_NODE_EMITTED
+	dependOn   = NIL, -- string|Queued  (The value depends on what dependType is.)
+}
+
+-- addDependency( state, dependent, DEPEND_DECLARATION,   name    )
+-- addDependency( state, dependent, DEPEND_NODE_INFERRED, astNode )
+-- addDependency( state, dependent, DEPEND_NODE_EMITTED,  astNode )
+function _G.addDependency(state, dependent, dependType, dependOn)
+	assert(not dependent.queued.waitingOn)
+
+	!if DEBUG then
+		if dependType == !(DEPEND_DECLARATION) then
+			assert(type(dependOn) == "string")
+		elseif dependType == !(DEPEND_NODE_INFERRED) then
+			assert(type(dependOn) == "table")
+		elseif dependType == !(DEPEND_NODE_EMITTED) then
+			assert(type(dependOn) == "table")
+		else
+			error(dependType)
+		end
+	!end
+
+	if isAny(dependType, !(DEPEND_NODE_INFERRED),!(DEPEND_NODE_EMITTED)) then
+		assert(dependent ~= dependOn)
+		dependOn = dependOn.queued
+	end
+
+	local dependency      = Dependency()
+	dependency.dependent  = dependent.queued
+	dependency.dependType = dependType
+	dependency.dependOn   = dependOn
+
+	dependent.queued.waitingOn = dependency
+
+	if itemWith3(state.dependencies, "dependent",dependency.dependent, "dependType",dependency.dependType, "dependOn",dependency.dependOn) then
+		printTraceback(io.stderr, 2)
+		printerr()
+		typeMessage(io.stderr, state, dependent, "Error", "Internal compiler error: Trying to add dependency twice.")
+		if isAny(dependType, !(DEPEND_NODE_INFERRED),!(DEPEND_NODE_EMITTED)) then
+			typeMessage(io.stderr, state, dependOn.node, "Info", "...depending on this.")
+		end
+		exitFailure()
+	end
+
+	table.insert(state.dependencies, dependency)
+
+	!if DEBUG then
+		--[[
+		if debug_onlyInferTypes then
+			io.stdout:write("DEPEND ")
+			astPrint(dependent)
+
+			io.stdout:write("    ON ", DEPEND_TITLES[dependType], " ")
+			if dependType == !(DEPEND_DECLARATION) then
+				print(dependOn)
+			elseif dependType == !(DEPEND_NODE_INFERRED) then
+				astPrint(dependOn.node)
+			elseif dependType == !(DEPEND_NODE_EMITTED) then
+				astPrint(dependOn.node)
+			else
+				print("? ("..tostring(dependOn)..")")
+			end
+		end
+		--]]
+	!end
+end
+
+
+
+local !struct"Queued"{
+	node      = NIL, -- AstNode
+	container = NIL,
+	key       = NIL,
+	pipe      = 0,
+	waitingOn = NIL, -- Dependency
+	removed   = false,
+}
+
+function _G.addToQueue(state, node, container, key, pipe)
+	-- astPrint(node)
+	!ASSERT `not node.queued`
+
+	local queued     = Queued()
+	queued.node      = node
+	queued.container = container
+	queued.key       = key
+	queued.pipe      = pipe
+
+	node.queued = queued
+	table.insert(state.queue, queued)
+
+	-- Make assignment targets in declaration statements wait for their declaration.
+	if
+		node.nodeType == !(nodeTypes.AstIdentifier)
+		and node.declaration
+		and node.parent.nodeType == !(nodeTypes.AstAssignment)
+		and node.parent.forDeclaration
+		and indexOf(node.parent.targets, node)
+	then
+		local ident = node
+		addDependency(state, ident, !(DEPEND_NODE_INFERRED), ident.declaration.name)
+	end
+end
+
+function _G.addToQueueRecursively(state, topNode)
+	astVisitAllNodesLeavesFirst(topNode, function(node, container, key)
+		addToQueue(state, node, container, key, !(PIPE_INFER))
+	end)
+end
+
+function _G.addUnqueuedChildrenToQueueRecursively(state, topNode)
+	astVisitAllNodesLeavesFirst(topNode, function(node, container, key)
+		if node == topNode then  return                           end
+		if node.queued     then  return !(VISIT_IGNORE_CHILDREN)  end
+		addToQueue(state, node, container, key, !(PIPE_INFER))
+	end)
+end
+
+function _G.scheduleRemovalFromQueueRecursively(state, topNode)
+	astVisitAllNodes(topNode, function(node)
+		node.queued.removed = true
+	end)
+end
+function _G.scheduleRemovalOfChildrenFromQueueRecursively(state, topNode)
+	astVisitAllNodes(topNode, function(node)
+		if node ~= topNode then
+			node.queued.removed = true
+		end
+	end)
+end
+
+function _G.replaceQueuedNode(state, nodeOld, nodeNew)
+	assert(not nodeNew.queued)
+
+	local queued   = nodeOld.queued or errorInternal()
+	queued.node    = nodeNew
+	nodeOld.queued = nil
+	nodeNew.queued = queued
+
+	if queued.container then
+		queued.container[queued.key] = nodeNew
+	end
+end
+
+
+
+function _G.moveToNextPipe(state, node, targetPipe)
+	local queued = node.queued
+
+	if targetPipe ~= queued.pipe+1 then
+		errorInternal(
+			"Trying to move %s node from pipe %d (%s) to %d (%s).",
+			AST_NODE_TYPE_NAMES[node.nodeType],
+			queued.pipe, (PIPE_TITLES[queued.pipe] or "*INVALID*"),
+			targetPipe,  (PIPE_TITLES[targetPipe]  or "*INVALID*")
+		)
+	end
+
+	queued.pipe = targetPipe
+end
+
+function _G.moveTreeToNextPipe(state, topNode, targetPipe)
+	astVisitAllNodes(topNode, function(node)
+		moveToNextPipe(state, node, targetPipe)
+	end)
+end
+
+

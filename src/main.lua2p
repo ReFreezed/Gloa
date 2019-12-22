@@ -30,6 +30,7 @@ do !(do) @insert "preprocessorStuffAndGlobals.luapart" !(end) end
 do !(do) @insert "functions.luapart" !(end) end
 do !(do) @insert "lexer.luapart"     !(end) end
 do !(do) @insert "parser.luapart"    !(end) end
+do !(do) @insert "pipes.luapart"     !(end) end
 do !(do) @insert "typer.luapart"     !(end) end
 do !(do) @insert "bytecode.luapart"  !(end) end
 
@@ -154,9 +155,9 @@ local !struct"CompilationState"{
 	dependencies   = {},
 
 	-- Bytecode:
-	bytecodes      = {},
-	constants      = {},
-	lastConstantId = 0,
+	constants       = {},
+	globalVariables = {},
+	bytecodes       = {}, -- Code for the interpreter to run.
 }
 
 local state  = CompilationState()
@@ -251,7 +252,7 @@ local queueSize  = 0
 !end
 
 !ifDEBUG`if not debug_onlyParse then`
-	local lastPipe = !(PIPE_DONE)
+	local lastPipe = !(PIPE_DONE-1)
 
 	!if DEBUG then
 		if debug_onlyInferTypes then  lastPipe = !(PIPE_INFER)  end
@@ -278,7 +279,7 @@ local queueSize  = 0
 		local waitCount    = 0
 		local didSomething = false
 
-		for _, queued in ipairs(state.queue) do -- Should we use ipairs() or ipairsr()?
+		for _, queued in ipairs(state.queue) do
 			if not queued.removed then
 				if queued.waitingOn then
 					local dependency = queued.waitingOn
@@ -296,6 +297,11 @@ local queueSize  = 0
 							queued.waitingOn = nil
 						end
 
+					elseif dependency.dependType == !(DEPEND_NODE_EMITTED) then
+						if dependency.dependOn.pipe > !(PIPE_BYTECODE) then
+							queued.waitingOn = nil
+						end
+
 					else
 						errorInternal("%d", dependency.dependType)
 					end
@@ -309,7 +315,8 @@ local queueSize  = 0
 					inferNode(state, queued.node)
 
 				elseif queued.pipe == !(PIPE_BYTECODE) then
-					-- @Incomplete: Bytecode.
+					didSomething = true
+					bcEmit(state, queued.node)
 
 				else
 					-- @Incomplete: More pipes?
@@ -386,7 +393,7 @@ local queueSize  = 0
 			end
 			--]]
 
-			-- [[ Report something waiting for something else.
+			-- [[ Report something waiting for something else to be inferred.
 			for _, queued in ipairsr(state.queue) do
 				local dependency = not queued.removed and queued.waitingOn
 
@@ -401,13 +408,37 @@ local queueSize  = 0
 			end
 			--]]
 
+			-- [[ Report something waiting for something else to emit code.
+			for _, queued in ipairsr(state.queue) do
+				local dependency = not queued.removed and queued.waitingOn
+
+				if dependency and dependency.dependType == !(DEPEND_NODE_EMITTED) then
+					local expr = dependency.dependOn.node
+
+					printerr()
+					astPrint(queued.node)
+					bcMessage(io.stderr, state, queued.node, "Error", "Internal compiler error: Failed emitting code for this.")
+					astPrint(expr)
+					bcMessage(io.stderr, state, expr,        "Info",  "...it is waiting for this to finish.")
+					exitFailure()
+				end
+			end
+			--]]
+
 			errorInternal("Pipes are stuck. Also failed to figure out where the issue actually is. Oops...")
 		end
 
-		-- Guard against an infinite loop.
-		if cycle == 100 then
-			errorInternal("[DEBUG] The pipes ran for too long. (waiting:%d)", waitCount)
-		end
+		!if DEBUG then
+			-- Guard against an infinite loop.
+			if cycle == 100 then
+				for _, queued in ipairs(state.queue) do
+					if queued.pipe <= lastPipe then
+						nodeError(state, queued.node, "DEBUG", "Pipes ran for too long. (waiting:%d)", waitCount)
+					end
+				end
+				errorInternal("[DEBUG] Pipes ran for too long. (waiting:%d)", waitCount)
+			end
+		!end
 	end
 !ifDEBUG`end`
 

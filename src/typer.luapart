@@ -9,8 +9,6 @@
 --=
 --==============================================================
 
-	addDependency
-	addToQueue, addToQueueRecursively, scheduleRemovalFromQueueRecursively, scheduleRemovalOfChildrenFromQueueRecursively, replaceQueuedNode
 	getAssignmentValue
 	getClosestScope, isScope*
 	getLiteralValueFromExpressionIfConstant
@@ -361,24 +359,13 @@ end
 
 
 
--- typeError( compilationState, node, formatString, ... )
 function _G.typeError(state, node, s, ...)
-	local tokens = state.tokens
-	local token  = node.token
-	local path   = tokens.file[token]      or errorInternal(2, "No tokens.")
-	local buffer = state.fileBuffers[path] or errorInternal("No file buffer for '%s'.", path)
-	errorInFile(buffer, path, tokens.position1[token], "Typer", s, ...)
+	return nodeError(state, node, "Typer", s, ...)
 end
 
 -- typeMessage( [ outputFile=io.stdout, ] compilationState, node, label, formatString, ... )
 function _G.typeMessage(file, state, node, label, s, ...)
-	if type(file) ~= "userdata" then  return typeMessage(io.stdout, file, state, node, label, s, ...)  end
-
-	local tokens = state.tokens
-	local token  = node.token
-	local path   = tokens.file[token]      or errorInternal(2, "No tokens.")
-	local buffer = state.fileBuffers[path] or errorInternal("No file buffer for '%s'.", path)
-	reportMessageInFile(file, buffer, path, tokens.position1[token], label, "Typer", s, ...)
+	return nodeMessage(file, state, node, label, "Typer", s, ...)
 end
 
 
@@ -418,155 +405,6 @@ function _G.getFriendlyTypeInfoName(typeInfo)
 	-- !(if DEBUG then)  name = name.."@"..typeInfo.id  !(end)
 
 	return name
-end
-
-
-
-local !struct"Dependency"{ -- @Cleanup: Rename to something with "wait"?
-	dependent  = NIL, -- Queued
-	dependType = 0,   -- DEPEND_DECLARATION|DEPEND_NODE_INFERRED
-	dependOn   = NIL, -- string|Queued  (The value depends on what dependType is.)
-}
-
--- addDependency( state, dependent, DEPEND_DECLARATION,   name    )
--- addDependency( state, dependent, DEPEND_NODE_INFERRED, astNode )
-function _G.addDependency(state, dependent, dependType, dependOn)
-	assert(not dependent.queued.waitingOn)
-
-	!if DEBUG then
-		if dependType == !(DEPEND_DECLARATION) then
-			assert(type(dependOn) == "string")
-		elseif dependType == !(DEPEND_NODE_INFERRED) then
-			assert(type(dependOn) == "table")
-		else
-			error(dependType)
-		end
-	!end
-
-	if dependType == !(DEPEND_NODE_INFERRED) then
-		assert(dependent ~= dependOn)
-		dependOn = dependOn.queued
-	end
-
-	local dependency      = Dependency()
-	dependency.dependent  = dependent.queued
-	dependency.dependType = dependType
-	dependency.dependOn   = dependOn
-
-	dependent.queued.waitingOn = dependency
-
-	if itemWith3(state.dependencies, "dependent",dependency.dependent, "dependType",dependency.dependType, "dependOn",dependency.dependOn) then
-		printTraceback(io.stderr, 2)
-		printerr()
-		typeMessage(io.stderr, state, dependent, "Error", "Internal compiler error: Trying to add dependency twice.")
-		if dependType == !(DEPEND_NODE_INFERRED) then
-			typeMessage(io.stderr, state, dependOn.node, "Info", "...depending on this.")
-		end
-		exitFailure()
-	end
-
-	table.insert(state.dependencies, dependency)
-
-	!if DEBUG then
-		--[[
-		if debug_onlyInferTypes then
-			io.stdout:write("DEPEND ")
-			astPrint(dependent)
-
-			io.stdout:write("    ON ", DEPEND_TITLES[dependType], " ")
-			if dependType == !(DEPEND_DECLARATION) then
-				print(dependOn)
-			elseif dependType == !(DEPEND_NODE_INFERRED) then
-				astPrint(dependOn.node)
-			else
-				print("? ("..tostring(dependOn)..")")
-			end
-		end
-		--]]
-	!end
-end
-
-
-
-local !struct"Queued"{
-	node      = NIL, -- AstNode
-	container = NIL,
-	key       = NIL,
-	pipe      = 0,
-	waitingOn = NIL, -- Dependency
-	removed   = false,
-}
-
-function _G.addToQueue(state, node, container, key, pipe)
-	-- astPrint(node)
-	!ASSERT `not node.queued`
-
-	local queued     = Queued()
-	queued.node      = node
-	queued.container = container
-	queued.key       = key
-	queued.pipe      = pipe
-
-	node.queued = queued
-	table.insert(state.queue, queued)
-
-	-- Make assignment targets in declaration statements wait for their declaration.
-	if
-		node.nodeType == !(nodeTypes.AstIdentifier)
-		and node.declaration
-		and node.parent.nodeType == !(nodeTypes.AstAssignment)
-		and node.parent.forDeclaration
-		and indexOf(node.parent.targets, node)
-	then
-		local ident = node
-		addDependency(state, ident, !(DEPEND_NODE_INFERRED), ident.declaration.name)
-	end
-end
-
-function _G.addToQueueRecursively(state, topNode)
-	astVisitAllNodesLeavesFirst(topNode, function(node, container, key)
-		addToQueue(state, node, container, key, !(PIPE_INFER))
-	end)
-end
-
-function _G.addUnqueuedChildrenToQueueRecursively(state, topNode)
-	astVisitAllNodesLeavesFirst(topNode, function(node, container, key)
-		if node == topNode then  return                           end
-		if node.queued     then  return !(VISIT_IGNORE_CHILDREN)  end
-		addToQueue(state, node, container, key, !(PIPE_INFER))
-	end)
-end
-
-function _G.scheduleRemovalFromQueueRecursively(state, topNode)
-	astVisitAllNodes(topNode, function(node)
-		node.queued.removed = true
-	end)
-end
-function _G.scheduleRemovalOfChildrenFromQueueRecursively(state, topNode)
-	astVisitAllNodes(topNode, function(node)
-		if node ~= topNode then
-			node.queued.removed = true
-		end
-	end)
-end
-
-function _G.replaceQueuedNode(state, nodeOld, nodeNew)
-	assert(not nodeNew.queued)
-
-	local queued   = nodeOld.queued or errorInternal()
-	queued.node    = nodeNew
-	nodeOld.queued = nil
-	nodeNew.queued = queued
-
-	if queued.container then
-		queued.container[queued.key] = nodeNew
-	end
-end
-
-
-function _G.moveToNextPipe(state, node) -- @Robustness: Make the target pipe an argument.
-	local queued = node.queued
-	queued.pipe  = queued.pipe+1
 end
 
 
@@ -627,7 +465,7 @@ end
 		end
 		ident.inferredType = identInDecl.inferredType
 
-		moveToNextPipe(state, ident)
+		moveToNextPipe(state, ident, !(PIPE_INFER+1))
 		return
 	end
 
@@ -642,7 +480,7 @@ end
 		end
 		ident.inferredType = identInDecl.inferredType
 
-		moveToNextPipe(state, ident)
+		moveToNextPipe(state, ident, !(PIPE_INFER+1))
 		return
 	end
 
@@ -836,7 +674,7 @@ end
 		end
 	!end
 
-	moveToNextPipe(state, ident)
+	moveToNextPipe(state, ident, !(PIPE_INFER+1))
 end
 
 !NODE_INFERRER `function nodeInferrers.AstType(state, typeNode)`
@@ -929,7 +767,7 @@ end
 	typeNode.inferredType    = typeInfo
 	typeNode.declaration     = decl
 
-	moveToNextPipe(state, typeNode)
+	moveToNextPipe(state, typeNode, !(PIPE_INFER+1))
 end
 
 !NODE_INFERRER `function nodeInferrers.AstCall(state, call)`
@@ -1002,7 +840,7 @@ end
 	end
 
 	call.inferredType = getTypeInfoForList(state, effectiveCalleeTypeInfo.argumentTypesOut)
-	moveToNextPipe(state, call)
+	moveToNextPipe(state, call, !(PIPE_INFER+1))
 end
 
 !NODE_INFERRER `function nodeInferrers.AstDeclaration(state, decl)`
@@ -1042,7 +880,7 @@ end
 		end
 	end
 
-	moveToNextPipe(state, decl)
+	moveToNextPipe(state, decl, !(PIPE_INFER+1))
 end
 
 -- !NODE_INFERRER `function nodeInferrers.AstVararg(state, vararg)`
@@ -1061,7 +899,7 @@ local LITERAL_TYPE_TO_BUILTIN_TYPE_NAME = !({
 
 	literal.inferredType = getTypeInfoForBuiltinType(state, typeName)
 
-	moveToNextPipe(state, literal)
+	moveToNextPipe(state, literal, !(PIPE_INFER+1))
 end
 
 !NODE_INFERRER `function nodeInferrers.AstUnary(state, unary)`
@@ -1100,7 +938,7 @@ end
 	end
 
 	unary.inferredType = typeInfo
-	moveToNextPipe(state, unary)
+	moveToNextPipe(state, unary, !(PIPE_INFER+1))
 
 	--
 	-- Inferring complete! Now fold the expression if it's constant.
@@ -1109,7 +947,7 @@ end
 	-- Not sure if all the following is necessary. Won't we be doing the same thing
 	-- when running bytecode? Is it faster to do this here?
 
-	local isConst, v = getLiteralValueFromExpressionIfConstant(state, unary.expression)
+	local isConst, literalValue = getLiteralValueFromExpressionIfConstant(state, unary.expression)
 	if not isConst then
 		-- void
 
@@ -1122,7 +960,7 @@ end
 			or typeInfo == getTypeInfoForBuiltinType(state, "float") and !(LITERAL_FLOAT)
 			or errorInternal(getFriendlyTypeInfoName(typeInfo))
 
-		literal.value        = !!(opArithmetic ~= "+" and opArithmetic or "") v
+		literal.value        = !!(opArithmetic ~= "+" and opArithmetic or "") literalValue
 		literal.inferredType = typeInfo
 
 		scheduleRemovalOfChildrenFromQueueRecursively(state, unary)
@@ -1132,7 +970,7 @@ end
 	elseif unary.operation == "not" then
 		local literal        = astNewNode(AstLiteral, unary.token, unary.parent)
 		literal.literalType  = !(LITERAL_BOOLEAN)
-		literal.value        = not v
+		literal.value        = not literalValue
 		literal.inferredType = typeInfo
 		scheduleRemovalOfChildrenFromQueueRecursively(state, unary)
 		replaceQueuedNode(state, unary, literal)
@@ -1234,7 +1072,7 @@ end
 	assert(typeInfo)
 	binary.inferredType = typeInfo
 
-	moveToNextPipe(state, binary)
+	moveToNextPipe(state, binary, !(PIPE_INFER+1))
 
 	--
 	-- Inferring complete! Now fold the expression if it's constant.
@@ -1321,7 +1159,7 @@ end
 	if arg.declaration.queued.pipe <= !(PIPE_INFER) then
 		!DEPEND_AND_RETURN(`arg`, DEPEND_NODE_INFERRED, `arg.declaration`)
 	end
-	moveToNextPipe(state, arg)
+	moveToNextPipe(state, arg, !(PIPE_INFER+1))
 end
 
 !NODE_INFERRER `function nodeInferrers.AstArguments(state, args)`
@@ -1331,7 +1169,7 @@ end
 		end
 	end
 
-	moveToNextPipe(state, args)
+	moveToNextPipe(state, args, !(PIPE_INFER+1))
 end
 
 !NODE_INFERRER `function nodeInferrers.AstLambda(state, lambda)`
@@ -1345,7 +1183,7 @@ end
 	-- Note: We don't require the body to inferred.
 
 	lambda.inferredType = getTypeInfoForLambda(state, lambda) or errorInternal()
-	moveToNextPipe(state, lambda)
+	moveToNextPipe(state, lambda, !(PIPE_INFER+1))
 end
 
 !NODE_INFERRER `function nodeInferrers.AstTypeOf(state, typeOf)`
@@ -1357,7 +1195,7 @@ end
 	end
 
 	typeOf.inferredType = getTypeInfoForBuiltinType(state, "type")
-	moveToNextPipe(state, typeOf)
+	moveToNextPipe(state, typeOf, !(PIPE_INFER+1))
 end
 
 !NODE_INFERRER `function nodeInferrers.AstCast(state, cast)`
@@ -1394,7 +1232,7 @@ end
 	end
 
 	cast.inferredType = castTypeInfo
-	moveToNextPipe(state, cast)
+	moveToNextPipe(state, cast, !(PIPE_INFER+1))
 end
 
 !NODE_INFERRER `function nodeInferrers.AstStatement(state, statement)`
@@ -1402,7 +1240,7 @@ end
 		!DEPEND_AND_RETURN(`statement`, DEPEND_NODE_INFERRED, `statement.what`)
 	end
 
-	moveToNextPipe(state, statement)
+	moveToNextPipe(state, statement, !(PIPE_INFER+1))
 end
 
 !NODE_INFERRER `function nodeInferrers.AstAssignment(state, assignment)`
@@ -1424,7 +1262,7 @@ end
 
 	-- @Incomplete: Check that !must args from functions have an assignment target.
 
-	moveToNextPipe(state, assignment)
+	moveToNextPipe(state, assignment, !(PIPE_INFER+1))
 end
 
 !NODE_INFERRER `function nodeInferrers.AstReturn(state, returnNode)`
@@ -1533,7 +1371,7 @@ end
 		end
 	end
 
-	moveToNextPipe(state, returnNode)
+	moveToNextPipe(state, returnNode, !(PIPE_INFER+1))
 end
 
 -- !NODE_INFERRER `function nodeInferrers.AstBreak(state, breakNode)`
@@ -1578,7 +1416,7 @@ end
 	import.fileScope = itemWith1(globalScope.fileScopes, "path", path) or errorInternal(path)
 
 	import.inferredType = getTypeInfoForBuiltinType(state, "namespace")
-	moveToNextPipe(state, import)
+	moveToNextPipe(state, import, !(PIPE_INFER+1))
 end
 
 -- !NODE_INFERRER `function nodeInferrers.AstIf(state, ifBranch)`
@@ -1622,7 +1460,7 @@ end
 	struct.representedType = structInfo
 	struct.inferredType    = getTypeInfoForBuiltinType(state, "type")
 
-	moveToNextPipe(state, struct)
+	moveToNextPipe(state, struct, !(PIPE_INFER+1))
 end
 
 !NODE_INFERRER `function nodeInferrers.AstEnum(state, enum)`
@@ -1656,15 +1494,15 @@ end
 	local enumInfo = newTypeInfo(TypeInfoEnum)
 
 	for i, decl in ipairs(enum.declarations) do
-		local valExpr = decl.assignment.values[1]
+		local valueExpr = decl.assignment.values[1]
 
-		if valExpr.inferredType ~= enumMemberInfo then
+		if valueExpr.inferredType ~= enumMemberInfo then
 			-- @Cleanup: Define isTypeCompatibleWith(typeToCheck, otherType) or something.
-			typeError(state, valExpr,
+			typeError(state, valueExpr,
 				"Incorrect value type for '%s'. (Wanted %s, got %s)",
 				decl.name.name,
 				getFriendlyTypeInfoName(enumMemberInfo),
-				getFriendlyTypeInfoName(valExpr.inferredType)
+				getFriendlyTypeInfoName(valueExpr.inferredType)
 			)
 		end
 
@@ -1680,7 +1518,7 @@ end
 	enum.representedType = enumInfo
 	enum.inferredType    = getTypeInfoForBuiltinType(state, "type")
 
-	moveToNextPipe(state, enum)
+	moveToNextPipe(state, enum, !(PIPE_INFER+1))
 end
 
 !NODE_INFERRER `function nodeInferrers.AstFileScope(state, fileScope)`
@@ -1692,7 +1530,7 @@ end
 
 	-- @Incomplete: fileScope.imports[]
 
-	moveToNextPipe(state, fileScope)
+	moveToNextPipe(state, fileScope, !(PIPE_INFER+1))
 end
 
 !NODE_INFERRER `function nodeInferrers.AstGlobalScope(state, globalScope)`
@@ -1704,7 +1542,7 @@ end
 
 	-- @Incomplete: globalScope.imports[] (if we're going to allow global imports)
 
-	moveToNextPipe(state, globalScope)
+	moveToNextPipe(state, globalScope, !(PIPE_INFER+1))
 end
 
 !NODE_INFERRER `function nodeInferrers.AstBlock(state, block)`
@@ -1714,7 +1552,7 @@ end
 		end
 	end
 
-	moveToNextPipe(state, block)
+	moveToNextPipe(state, block, !(PIPE_INFER+1))
 end
 
 function _G.inferNode(state, node)
@@ -1724,7 +1562,7 @@ end
 
 
 
--- expressionIsConstant, value = getLiteralValueFromExpressionIfConstant( compilationState, expression )
+-- expressionIsConstant, literalValue = getLiteralValueFromExpressionIfConstant( compilationState, expression )
 -- Note: It's assumed that the expression tree has all types figured out.
 function _G.getLiteralValueFromExpressionIfConstant(state, expr)
 	-- @Incomplete: Return an AstNode?
