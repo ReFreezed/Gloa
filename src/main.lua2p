@@ -27,12 +27,13 @@ io.stderr:setvbuf("no")
 
 !-- We want the resulting Glóa compiler to be a single file, so we use @insert instead of requiring modules here.
 do !(do) @insert "preprocessorStuffAndGlobals.luapart" !(end) end
-do !(do) @insert "functions.luapart" !(end) end
-do !(do) @insert "lexer.luapart"     !(end) end
-do !(do) @insert "parser.luapart"    !(end) end
-do !(do) @insert "pipes.luapart"     !(end) end
-do !(do) @insert "typer.luapart"     !(end) end
-do !(do) @insert "bytecode.luapart"  !(end) end
+do !(do) @insert "functions.luapart"     !(end) end
+do !(do) @insert "lexer.luapart"         !(end) end
+do !(do) @insert "parser.luapart"        !(end) end
+do !(do) @insert "pipes.luapart"         !(end) end
+do !(do) @insert "typer.luapart"         !(end) end
+do !(do) @insert "bytecode.luapart"      !(end) end
+do !(do) @insert "programWriter.luapart" !(end) end
 
 
 
@@ -140,28 +141,35 @@ end
 
 
 
-local !struct"CompilationState"{
-	fileBuffers    = {},
-	tokens         = nil,   -- Tokens (struct)
-
-	-- Parser:
-	globalScope    = NIL,   -- AstGlobalScope
-	nextToken      = 1,
-	soft           = false, -- Enabling this will make parsing functions return nil on error instead of triggering an actual error.
-
-	-- Typer:
-	allTypeInfos   = {},
-	queue          = {},
-	dependencies   = {},
-
-	-- Bytecode:
-	constants       = {},
-	globalVariables = {},
-	bytecodes       = {}, -- Code for the interpreter to run.
+local !struct"CompilationSettings"{
+	doOutputFile   = true,
+	outputFilePath = "",
 }
 
-local state  = CompilationState()
-state.tokens = Tokens()
+local !struct"CompilationState"{
+	fileBuffers   = {},
+	tokens        = nil,   -- Tokens (struct)
+	settings      = NIL,   -- CompilationSettings
+
+	-- Parser:
+	globalScope   = NIL,   -- AstGlobalScope
+	nextToken     = 1,
+	soft          = false, -- Enabling this will make parsing functions return nil on error instead of triggering an actual error.
+
+	-- Typer:
+	allTypeInfos  = {},
+	queue         = {},
+	dependencies  = {},
+
+	-- Bytecode:
+	constants     = {},
+	topScopeNames = {},
+	bytecodes     = {}, -- Code for the interpreter to run.
+}
+
+local state    = CompilationState()
+state.settings = CompilationSettings()
+state.tokens   = Tokens()
 
 
 
@@ -224,7 +232,8 @@ if pathsToCompile[2] then
 	errorLine(nil, "Can only compile one file at a time right now. (%d files were given.)", #pathsToCompile)
 end
 
-local thePath = pathsToCompile[1]
+local thePath                 = pathsToCompile[1]
+state.settings.outputFilePath = thePath:gsub("%.gloa", "")..".lua"
 
 if not silent then  print("Compiling "..thePath:gsub("^.*/", ""))  end
 
@@ -315,8 +324,9 @@ local queueSize  = 0
 					inferNode(state, queued.node)
 
 				elseif queued.pipe == !(PIPE_BYTECODE) then
-					didSomething = true
-					bcEmit(state, queued.node)
+					if not bcEmit(state, queued.node) then
+						didSomething = true
+					end
 
 				else
 					-- @Incomplete: More pipes?
@@ -430,12 +440,23 @@ local queueSize  = 0
 
 		!if DEBUG then
 			-- Guard against an infinite loop.
-			if cycle == 100 then
+			if cycle == 1000 then
+				local printCount = 0
+				printerr()
+
 				for _, queued in ipairs(state.queue) do
-					if queued.pipe <= lastPipe then
-						nodeError(state, queued.node, "DEBUG", "Pipes ran for too long. (waiting:%d)", waitCount)
+					if not queued.removed and queued.pipe <= lastPipe then
+						printCount = printCount+1
+
+						if printCount > 10 then
+							printerr("(...)")
+							break
+						end
+
+						nodeMessage(io.stderr, state, queued.node, "DEBUG", nil, "%s (%s)", AST_NODE_TYPE_NAMES[queued.node.nodeType], PIPE_TITLES[queued.pipe])
 					end
 				end
+
 				errorInternal("[DEBUG] Pipes ran for too long. (waiting:%d)", waitCount)
 			end
 		!end
@@ -446,10 +467,12 @@ local timeEndPipes = os.clock()
 
 
 
--- -- Generate bytecode.
--- !ifDEBUG`if not (debug_onlyParse or debug_onlyInferTypes) then`
--- 	bcGenerate(state, globalScope)
--- !ifDEBUG`end`
+-- Write program.
+assert(state.settings.outputFilePath ~= thePath)
+
+local timeStartOutput = os.clock()
+writeProgram(state)
+local timeEndOutput = os.clock()
 
 
 
@@ -462,9 +485,9 @@ local timeEndCompilation = os.clock()
 	printf("████    ████  ████  ██ Lexing:  %.3f sec", timeEndLexing      - timeStartLexing)
 	printf("██  ████  ██  ██  ████ Parsing: %.3f sec", timeEndParsing     - timeStartParsing)
 	printf("██  ████  ██    ██████ Pipes:   %.3f sec", timeEndPipes       - timeStartPipes)
-	printf("██  ████  ██  ██  ████ Queue:   %d",       queueSize)
-	printf("████    ████  ████  ██ Cycles:  %d",       pipeCycles)
-	printf("██████████████████████")
+	printf("██  ████  ██  ██  ████ Output:  %.3f sec", timeEndOutput      - timeStartOutput)
+	printf("████    ████  ████  ██ Queue:   %d",       queueSize)
+	printf("██████████████████████ Cycles:  %d",       pipeCycles)
 !else
 	if not silent then
 		printf("Compilation completed in %.3f seconds", timeEndCompilation-timeStartCompiling)

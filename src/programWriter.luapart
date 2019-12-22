@@ -1,0 +1,167 @@
+--[[============================================================
+--=
+--=  Program Writer
+--=
+--=-------------------------------------------------------------
+--=
+--=  Glóa - a language that compiles into Lua
+--=  by Marcus 'ReFreezed' Thunström
+--=
+--==============================================================
+
+	writeProgram
+
+--============================================================]]
+
+
+
+function _G.writeExpression(state, file, expr)
+	if expr.nodeType == !(nodeTypes.AstCall) then
+		local call   = expr
+		local callee = call.callee
+
+		if call.surroundedByParenthesis then  file:write("(")  end
+
+		if callee.nodeType == !(nodeTypes.AstIdentifier) then
+			assert(callee.declaration.valueConstant)
+			writeConstantValueOrReference(state, file, callee.declaration.valueConstant)
+		else
+			writeExpression(state, file, callee)
+		end
+
+		file:write("(")
+		for i, argExpr in ipairs(call.arguments) do
+			if i > 1 then  file:write(", ")  end
+			writeExpression(state, file, argExpr)
+		end
+		-- @Incomplete: Write arguments.
+		file:write(")")
+
+		if call.surroundedByParenthesis then  file:write(")")  end
+
+	else
+		errorUnhandledNodeType(expr)
+	end
+end
+function _G.writeFunction(state, file, lambda)
+	file:write("function()\n")
+
+	for _, statement in ipairs(lambda.body) do
+		local nodeType = statement.what.nodeType
+
+		if nodeType == !(nodeTypes.AstAssignment) then
+			local assignment = statement.what
+			errorUnhandledNodeType(assignment)
+
+		else
+			-- Assume the statement is an expression at this point.
+			file:write("\t")
+			writeExpression(state, file, statement.what)
+			file:write("\n")
+		end
+	end
+
+	file:write("end")
+end
+
+function _G.writeConstantValue(state, file, const)
+	local tag = const.valueType.tag
+
+	if tag == !(typeTags.TypeInfoBool) then
+		file:write(const.value and "true" or "false")
+
+	elseif tag == !(typeTags.TypeInfoInt) then
+		file:write(F("%d", const.value))
+
+	elseif tag == !(typeTags.TypeInfoNil) then
+		file:write("nil")
+
+	elseif tag == !(typeTags.TypeInfoFloat) then
+		file:write(F("%s", const.value)) -- @Robustness: Write with highest precision.
+
+	elseif tag == !(typeTags.TypeInfoString) then
+		file:write(F("%q", const.value))
+
+	elseif tag == !(typeTags.TypeInfoType) then
+		local typeInfo = const.value
+		file:write(F("%d", typeInfo.id))
+
+	elseif tag == !(typeTags.TypeInfoTable) then
+		errorInternal("@Incomplete: Write table.")
+
+	elseif tag == !(typeTags.TypeInfoArray) then
+		errorInternal("@Incomplete: Write array.")
+
+	elseif tag == !(typeTags.TypeInfoFunction) then
+		local lambda = const.value
+		writeFunction(state, file, lambda)
+
+	elseif tag == !(typeTags.TypeInfoStruct) then
+		errorInternal("@Incomplete: Write struct.")
+
+	elseif tag == !(typeTags.TypeInfoEnum) then
+		errorInternal("@Incomplete: Write enum.")
+
+	elseif isAny(tag, !(typeTags.TypeInfoAny),!(typeTags.TypeInfoNamespace),!(typeTags.TypeInfoVoid),!(typeTags.TypeInfoCompound),!(typeTags.TypeInfoList)) then
+		errorInternal("Cannot write invalid value type '%s'.", TYPE_TAG_NAMES[tag])
+	else
+		errorInternal("Incomplete: Handle constant value of type '%s'.", (TYPE_TAG_NAMES[tag] or "?"))
+	end
+end
+
+function _G.writeConstantValueOrReference(state, file, const)
+	if const.simple then
+		return writeConstantValue(state, file, const)
+	else
+		file:write(const.name)
+	end
+end
+
+function _G.writeProgram(state)
+	if not state.settings.doOutputFile then  return  end
+
+	local path = state.settings.outputFilePath
+	local file = assert(io.open(path, "w"))
+
+	-- Constants.
+	for _, const in ipairs(state.constants) do
+		if not const.simple then
+			file:write("local ", const.name, " = ")
+			writeConstantValue(state, file, const)
+			file:write("\n")
+		end
+	end
+
+	-- Top-level declarations.
+	if state.topScopeNames[1] then
+		file:write("local") -- Note: Glóa globals are not Lua globals.
+		for i, topScopeName in ipairs(state.topScopeNames) do
+			if i > 1 then  file:write(",")  end
+			file:write(" ", topScopeName)
+		end
+		file:write("\n")
+	end
+
+	-- Global assignments.
+	for _, decl in ipairs(state.globalScope.declarations) do
+		if decl.topScopeName ~= "" then
+			file:write(decl.topScopeName, " = ")
+			writeConstantValueOrReference(state, file, decl.valueConstant)
+			file:write("\n")
+		end
+	end
+	-- File-scope assignments.
+	for _, fileScope in ipairs(state.globalScope.fileScopes) do
+		for _, decl in ipairs(fileScope.declarations) do
+			if decl.topScopeName ~= "" then
+				file:write(decl.topScopeName, " = ")
+				writeConstantValueOrReference(state, file, decl.valueConstant)
+				file:write("\n")
+			end
+		end
+	end
+
+	file:close()
+end
+
+
