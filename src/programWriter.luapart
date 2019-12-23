@@ -9,11 +9,24 @@
 --=
 --==============================================================
 
-	writeProgram
+	writeProgram, write*
 
 --============================================================]]
 
 
+
+function _G.writeIdentifierName(state, file, ident)
+	local decl = ident.declaration
+	local name = decl.topScopeName
+
+	if name == "" then  name = decl.localName  end
+
+	if name == "" then
+		nodeError(state, ident, "ProgramWriter", "Internal compiler error: Missing name to write for '%s'.", ident.name)
+	end
+
+	file:write(name)
+end
 
 function _G.writeExpression(state, file, expr)
 	if expr.nodeType == !(nodeTypes.AstCall) then
@@ -39,22 +52,130 @@ function _G.writeExpression(state, file, expr)
 
 		if call.surroundedByParenthesis then  file:write(")")  end
 
+	elseif expr.nodeType == !(nodeTypes.AstUnary) then
+		local unary = expr
+		file:write("(", unary.operation)
+		writeExpression(state, file, unary.expression)
+		file:write(")")
+
+	elseif expr.nodeType == !(nodeTypes.AstBinary) then
+		local binary = expr
+		file:write("(")
+		writeExpression(state, file, binary.left)
+		file:write(" ", binary.operation, " ")
+		writeExpression(state, file, binary.right)
+		file:write(")")
+
+	elseif expr.nodeType == !(nodeTypes.AstLiteral) then
+		local literal = expr
+		writeConstantValue(state, file, literal.valueConstant)
+
+	elseif expr.nodeType == !(nodeTypes.AstIdentifier) then
+		local ident = expr
+		writeIdentifierName(state, file, ident)
+
 	else
 		errorUnhandledNodeType(expr)
 	end
 end
 function _G.writeFunction(state, file, lambda)
-	file:write("function()\n")
+	local localCount = 0
+	local inDecl     = false
+
+	file:write("function(")
+
+	if lambda.argumentsIn then
+		for i, arg in ipairs(lambda.argumentsIn) do
+			if i > 1 then  file:write(", ")  end
+
+			local decl     = arg.declaration
+			localCount     = localCount+1
+			decl.localName = "L"..localCount.."_"..decl.name.name
+
+			file:write(decl.localName)
+		end
+	end
+
+	file:write(")\n")
 
 	for _, statement in ipairs(lambda.body) do
 		local nodeType = statement.what.nodeType
 
-		if nodeType == !(nodeTypes.AstAssignment) then
+		if nodeType == !(nodeTypes.AstDeclaration) then
+			local decl     = statement.what
+			localCount     = localCount+1
+			decl.localName = "L"..localCount.."_"..decl.name.name
+
+			if decl.assignment then
+				inDecl = true
+				if decl.assignmentIndex == 1 then
+					file:write("\tlocal ")
+				end
+
+			else
+				local tag = decl.name.inferredType.tag
+				file:write("\tlocal ", decl.localName, " = ")
+
+				if tag == !(typeTags.TypeInfoBool) then
+					file:write("false")
+
+				elseif tag == !(typeTags.TypeInfoInt) then
+					file:write("0")
+
+				elseif tag == !(typeTags.TypeInfoNil) then
+					file:write("nil")
+
+				elseif tag == !(typeTags.TypeInfoFloat) then
+					file:write("0.0")
+
+				elseif tag == !(typeTags.TypeInfoString) then
+					file:write('""')
+
+				elseif tag == !(typeTags.TypeInfoType) then
+					file:write("0")
+
+				else
+					errorInternal("Incomplete: Default initial value for type '%s'.", (TYPE_TAG_NAMES[tag] or "?"))
+				end
+
+				file:write("\n")
+			end
+
+			-- The initial assignment, if there is one, should be written as the next statement (or after several declarations).
+
+		elseif nodeType == !(nodeTypes.AstAssignment) then
 			local assignment = statement.what
-			errorUnhandledNodeType(assignment)
+			assert(assignment.operation == "=", "@Incomplete: Support more than '='.")
+
+			if not inDecl then
+				file:write("\t")
+			end
+			for i, ident in ipairs(assignment.targets) do
+				if i > 1 then  file:write(", ")  end
+				writeIdentifierName(state, file, ident)
+			end
+			file:write(" ", assignment.operation, " ")
+			for i, expr in ipairs(assignment.values) do
+				if i > 1 then  file:write(", ")  end
+				writeExpression(state, file, expr)
+			end
+			file:write("\n")
+
+			inDecl = false
+
+		elseif nodeType == !(nodeTypes.AstReturn) then
+			local returnNode = statement.what
+
+			file:write("\treturn")
+			for i, expr in ipairs(returnNode.values) do
+				if i > 1 then  file:write(",")  end
+				file:write(" ")
+				writeExpression(state, file, expr)
+			end
+			file:write("\n")
 
 		else
-			-- Assume the statement is an expression at this point.
+			-- Assume the statement is an expression at this point and let writeExpression() deal with any errors.
 			file:write("\t")
 			writeExpression(state, file, statement.what)
 			file:write("\n")
@@ -77,7 +198,9 @@ function _G.writeConstantValue(state, file, const)
 		file:write("nil")
 
 	elseif tag == !(typeTags.TypeInfoFloat) then
-		file:write(F("%s", const.value)) -- @Robustness: Write with highest precision.
+		local floatStr = tostring(const.value) -- @Robustness: Preserve precision as well as possible.
+		if not floatStr:find(".", 1, true) then  floatStr = floatStr..".0"  end
+		file:write(floatStr)
 
 	elseif tag == !(typeTags.TypeInfoString) then
 		file:write(F("%q", const.value))
@@ -123,23 +246,53 @@ function _G.writeProgram(state)
 	local path = state.settings.outputFilePath
 	local file = assert(io.open(path, "w"))
 
-	-- Constants.
+	--
+	-- Forward declarations.
+	--
+
+	-- Constants, non-functions.
 	for _, const in ipairs(state.constants) do
-		if not const.simple then
+		if not const.simple and const.valueType.tag ~= !(typeTags.TypeInfoFunction) then
 			file:write("local ", const.name, " = ")
-			writeConstantValue(state, file, const)
+			writeConstantValue(state, file, const) -- Only functions need everything to be forward declared.
 			file:write("\n")
 		end
 	end
 
-	-- Top-level declarations.
-	if state.topScopeNames[1] then
-		file:write("local") -- Note: Glóa globals are not Lua globals.
-		for i, topScopeName in ipairs(state.topScopeNames) do
-			if i > 1 then  file:write(",")  end
-			file:write(" ", topScopeName)
+	if state.constants[1] or state.topScopeNames[1] then
+		local first = true
+		file:write("local ")
+
+		-- Constants, functions.
+		for _, const in ipairs(state.constants) do
+			if const.valueType.tag == !(typeTags.TypeInfoFunction) then
+				if not first then  file:write(", ")  end
+				first = false
+				file:write(const.name)
+			end
 		end
+
+		-- Top-level declarations. (Note: Glóa globals are not Lua globals.)
+		for _, topScopeName in ipairs(state.topScopeNames) do
+			if not first then  file:write(", ")  end
+			first = false
+			file:write(topScopeName)
+		end
+
 		file:write("\n")
+	end
+
+	--
+	-- Definitions.
+	--
+
+	-- Function definitions.
+	for _, const in ipairs(state.constants) do
+		if const.valueType.tag == !(typeTags.TypeInfoFunction) then
+			file:write(const.name, " = ")
+			writeConstantValue(state, file, const)
+			file:write("\n")
+		end
 	end
 
 	-- Global assignments.

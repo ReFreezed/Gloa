@@ -225,7 +225,7 @@ function _G.bcAllocateConstantValueIfNew(state, typeInfo, v)
 
 	local const     = Constant()
 	const.id        = i
-	const.name      = "CONST"..i
+	const.name      = "C"..i
 	const.valueType = typeInfo
 	const.value     = v
 	const.simple    = isSimple
@@ -242,7 +242,7 @@ end
 
 function _G.bcAllocateTopScopeNames(state, name)
 	local i                = #state.topScopeNames+1
-	local topScopeName     = "GLOBAL"..i.."_"..name -- @Incomplete: Handle Unicode characters.
+	local topScopeName     = "G"..i.."_"..name -- @Incomplete: Handle Unicode characters.
 	state.topScopeNames[i] = topScopeName
 	return topScopeName
 end
@@ -287,8 +287,11 @@ function _G.bcEmitForDeclarationStatement(state, statement)
 		local valueExpr, valueTypeInfo = getAssignmentValue(state, decl.name, decl.assignment.values, decl.assignmentIndex)
 
 		if valueExpr.nodeType == !(nodeTypes.AstLiteral) then
-			local literal      = valueExpr
-			decl.valueConstant = bcAllocateConstantValueIfNew(state, valueTypeInfo, literal.value)
+			local literal = valueExpr
+			if literal.queued.pipe <= !(PIPE_BYTECODE) then
+				!DEPEND_AND_RETURN(`statement`, DEPEND_NODE_EMITTED, `literal`)
+			end
+			decl.valueConstant = literal.valueConstant
 
 		elseif valueExpr.nodeType == !(nodeTypes.AstLambda) then
 			local lambda = valueExpr
@@ -343,8 +346,11 @@ function _G.bcEmitForDeclarationStatement(state, statement)
 			initialValueConst = declOther.valueConstant or errorInternal()
 
 		elseif valueExpr.nodeType == !(nodeTypes.AstLiteral) then
-			local literal     = valueExpr
-			initialValueConst = bcAllocateConstantValueIfNew(state, valueTypeInfo, literal.value)
+			local literal = valueExpr
+			if literal.queued.pipe <= !(PIPE_BYTECODE) then
+				!DEPEND_AND_RETURN(`statement`, DEPEND_NODE_EMITTED, `literal`)
+			end
+			initialValueConst = literal.valueConstant or errorInternal()
 
 		else
 			errorUnhandledNodeType(valueExpr)
@@ -356,7 +362,7 @@ function _G.bcEmitForDeclarationStatement(state, statement)
 
 	-- Dynamic variable.
 	else
-		-- void  (These will be handled by AstLambda, I think.)
+		errorInternal("Trying to emit code for declaration of dynamic variable outside a function.")
 	end
 end
 
@@ -387,48 +393,68 @@ function _G.bcEmitForCallStatement(state, statement)
 	moveUnmovedInTreeToNextPipe(state, statement, !(PIPE_BYTECODE+1))
 end
 
+function _G.bcEmitForReturnStatement(state, statement)
+	local returnNode = statement.what
+
+	-- @Incomplete: Emit code for return.
+
+	moveUnmovedInTreeToNextPipe(state, statement, !(PIPE_BYTECODE+1))
+end
+
+function _G.bcEmitForScopeStatement(state, statement)
+	local allEmitted = bcEmitForScope(state, statement.what)
+	if allEmitted then
+		moveToNextPipe(state, statement, !(PIPE_BYTECODE+1))
+	end
+end
+
+function _G.bcEmitForStatement(state, statement)
+	local nodeType = statement.what.nodeType
+
+	if     nodeType == !(nodeTypes.AstDeclaration) then  bcEmitForDeclarationStatement(state, statement)
+	elseif nodeType == !(nodeTypes.AstAssignment)  then  bcEmitForAssignmentStatement (state, statement)
+	elseif nodeType == !(nodeTypes.AstFileScope)   then  bcEmitForScopeStatement      (state, statement)
+	elseif nodeType == !(nodeTypes.AstCall)        then  bcEmitForCallStatement       (state, statement)
+	elseif nodeType == !(nodeTypes.AstReturn)      then  bcEmitForReturnStatement     (state, statement)
+	else
+		errorUnhandledNodeType(statement.what)
+	end
+end
+
+function _G.bcEmitForScope(state, scope)
+	local allEmitted = true
+
+	for _, statementInner in ipairs(scope) do
+		if not statementInner.queued.waitingOn then
+			if statementInner.queued.pipe <= !(PIPE_BYTECODE) then
+				bcEmitForStatement(state, statementInner)
+			end
+			if statementInner.queued.pipe <= !(PIPE_BYTECODE) then
+				allEmitted = false
+			end
+		end
+	end
+
+	if allEmitted then
+		moveToNextPipe(state, scope, !(PIPE_BYTECODE+1))
+	end
+	return allEmitted
+end
+
 -- ignored = bcEmit( state, node )
 function _G.bcEmit(state, node)
-	if node.nodeType == !(nodeTypes.AstStatement) then
-		local statement = node
-
-		if statement.what.nodeType == !(nodeTypes.AstDeclaration) then
-			bcEmitForDeclarationStatement(state, statement)
-
-		elseif statement.what.nodeType == !(nodeTypes.AstAssignment) then
-			bcEmitForAssignmentStatement(state, statement)
-
-		elseif statement.what.nodeType == !(nodeTypes.AstFileScope) then
-			local fileScope = statement.what
-
-			for _, statementInner in ipairs(fileScope) do
-				if statementInner.queued.pipe <= !(PIPE_BYTECODE) then
-					!DEPEND_AND_RETURN(`statement`, DEPEND_NODE_EMITTED, `statementInner.what`)
-				end
-			end
-
-			moveToNextPipe(state, fileScope, !(PIPE_BYTECODE+1))
-			moveToNextPipe(state, statement, !(PIPE_BYTECODE+1))
-
-		elseif statement.what.nodeType == !(nodeTypes.AstCall) then
-			bcEmitForCallStatement(state, statement)
-
-		else
-			errorUnhandledNodeType(statement.what)
-		end
-
-	elseif node.nodeType == !(nodeTypes.AstGlobalScope) then
+	if node.nodeType == !(nodeTypes.AstGlobalScope) then
 		local globalScope = node
+		bcEmitForScope(state, globalScope)
 
-		for _, statement in ipairs(globalScope) do
-			if statement.queued.pipe <= !(PIPE_BYTECODE) then
-				!DEPEND_AND_RETURN(`globalScope`, DEPEND_NODE_EMITTED, `statement.what`)
-			end
-		end
-
-		moveToNextPipe(state, globalScope, !(PIPE_BYTECODE+1))
+	elseif node.nodeType == !(nodeTypes.AstLiteral) then
+		local literal         = node
+		literal.valueConstant = bcAllocateConstantValueIfNew(state, literal.inferredType, literal.value)
+		moveToNextPipe(state, literal, !(PIPE_BYTECODE+1))
 
 	else
+		-- @Volatile situation here! @Robustness: Typer should move all relevant nodes to this pipe
+		-- and send the rest to PIPE_DONE (or something) so we don't have to ignore anything here.
 		return true
 	end
 

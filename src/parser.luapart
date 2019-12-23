@@ -131,6 +131,9 @@ _G.!structAst"AstVararg:_AstExpression"{
 _G.!structAst"AstLiteral:_AstExpression"{
 	literalType = 0,
 	value       = NIL, -- The value depends on what literalType is. Could be a number, string or whatever.
+
+	-- Bytecode phase:
+	valueConstant,
 }
 _G.!structAst"AstType:_AstExpression"{
 	isUserType        = false,
@@ -212,6 +215,7 @@ _G.!structAst"AstDeclaration:_AstNode"{
 	-- Bytecode phase:
 	valueConstant      = NIL,
 	topScopeName       = "",
+	localName          = "",
 }
 
 _G.!structAst"AstAssignment:_AstNode"{
@@ -908,10 +912,10 @@ function _G.parseDeclarationStatement(state, block, placeDeclared, declType)
 		!DO_OR_RETURN `parseNameList(state, block, declNames, nil)` -- Note: We update parent and placeDeclared here below.
 
 		for i, ident in ipairs(declNames) do
-			local statement         = astNewNode(AstStatement, state.nextToken, block)
+			local statement         = astNewNode(AstStatement, declStartToken, block)
 			declStatements[i]       = statement
 
-			local decl              = astNewNode(AstDeclaration, state.nextToken, statement)
+			local decl              = astNewNode(AstDeclaration, statement.token, statement)
 			decl.isGlobalOrExported = isGlobalOrExported
 			declarations[i]         = decl
 			statement.what          = decl
@@ -924,10 +928,10 @@ function _G.parseDeclarationStatement(state, block, placeDeclared, declType)
 		end
 
 	else
-		local statement = astNewNode(AstStatement, state.nextToken, block)
+		local statement = astNewNode(AstStatement, declStartToken, block)
 		table.insert(declStatements, statement)
 
-		local decl              = astNewNode(AstDeclaration, state.nextToken, statement)
+		local decl              = astNewNode(AstDeclaration, statement.token, statement)
 		decl.isGlobalOrExported = isGlobalOrExported
 		table.insert(declarations, decl)
 		statement.what          = decl
@@ -1418,7 +1422,7 @@ end
 function _G.parseBlock(state, parentNode)
 	-- Note: We assume the '{' has been consumed already.
 
-	local blockStartToken     = state.nextToken
+	local blockStartToken     = state.nextToken-1
 	local block               = astNewNode(AstBlock, blockStartToken, parentNode)
 
 	local statementStartToken = blockStartToken
