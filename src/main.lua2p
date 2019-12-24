@@ -163,6 +163,7 @@ local !struct"CompilationState"{
 
 	-- Bytecode:
 	constants     = {},
+	constantN     = 0,
 	topScopeNames = {},
 	bytecodes     = {}, -- Code for the interpreter to run.
 }
@@ -256,90 +257,93 @@ end
 local timeStartPipes = os.clock()
 
 !if DEBUG then
-local pipeCycles = 0
-local queueSize  = 0
+local pipeCycles   = 0
+local maxQueueSize = 0
 !end
 
 !ifDEBUG`if not debug_onlyParse then`
+	local queue    = state.queue
 	local lastPipe = !(PIPE_DONE-1)
 
 	!if DEBUG then
 		if debug_onlyInferTypes then  lastPipe = !(PIPE_INFER)  end
 	!end
 
-	local function getDeclaredIdentifierWaitingToBeDeclaredWithName(name, queuedToIgnore)
-		for _, queued in ipairs(state.queue) do
-			if queued ~= queuedToIgnore and not queued.removed and queued.waitingOn and queued.node.nodeType == !(nodeTypes.AstIdentifier) then
-				local ident = queued.node
-				if ident.parent == ident.declaration and ident.name == name then  return queued  end
-			end
-		end
-		return nil
-	end
-
 	addToQueueRecursively(state, globalScope)
 
 	for cycle = 1, math.huge do
 		!if DEBUG then
-			pipeCycles = pipeCycles+1
-			queueSize  = #state.queue
+			pipeCycles   = pipeCycles+1
+			maxQueueSize = math.max(maxQueueSize, #queue)
 		!end
 
 		local waitCount    = 0
 		local didSomething = false
+		local i            = 1
 
-		for _, queued in ipairs(state.queue) do
-			if not queued.removed then
-				if queued.waitingOn then
-					local dependency = queued.waitingOn
+		while true do
+			local queued
 
-					if dependency.dependType == !(DEPEND_DECLARATION) then
-						local name = dependency.dependOn
-						-- @Speed: Only call findDeclaration() if it's reported that a declaration with the awaited name has been added to the tree.
-						if findDeclaration(state, queued.node, name) then
-							queued.waitingOn = nil
-						end
+			while true do
+				queued = queue[i]
+				if not (queued and queued.unqueued) then  break  end
+				removeUnordered(queue, i)
+			end
+			if not queued then  break  end
 
-					elseif dependency.dependType == !(DEPEND_NODE_INFERRED) then
-						if dependency.dependOn.pipe > !(PIPE_INFER) then
-						-- if dependency.dependOn.node.inferredType then -- Invalid! dependOn.node is not necessarily an expression.
-							queued.waitingOn = nil
-						end
+			if queued.waitingOn then
+				local dependency = queued.waitingOn
 
-					elseif dependency.dependType == !(DEPEND_NODE_EMITTED) then
-						if dependency.dependOn.pipe > !(PIPE_BYTECODE) then
-							queued.waitingOn = nil
-						end
-
-					else
-						errorInternal("%d", dependency.dependType)
+				if dependency.dependType == !(DEPEND_DECLARATION) then
+					local name = dependency.dependOn
+					-- @Speed: Only call findDeclaration() if it's reported that a declaration with the awaited name has been added to the tree.
+					if findDeclaration(state, queued.node, name) then
+						queued.waitingOn = nil
 					end
-				end
 
-				if queued.waitingOn then
-					waitCount = waitCount+1
+				elseif dependency.dependType == !(DEPEND_NODE_INFERRED) then
+					if dependency.dependOn.pipeLastExited >= !(PIPE_INFER) then
+					-- if dependency.dependOn.node.inferredType then -- Invalid! dependOn.node is not necessarily an expression.
+						queued.waitingOn = nil
+					end
 
-				elseif queued.pipe == !(PIPE_INFER) then
-					didSomething = true
-					inferNode(state, queued.node)
-
-				elseif queued.pipe == !(PIPE_BYTECODE) then
-					if not bcEmit(state, queued.node) then
-						didSomething = true
+				elseif dependency.dependType == !(DEPEND_NODE_EMITTED) then
+					if dependency.dependOn.pipeLastExited >= !(PIPE_BYTECODE) then
+						queued.waitingOn = nil
 					end
 
 				else
-					-- @Incomplete: More pipes?
+					errorInternal("%d", dependency.dependType)
 				end
 			end
+
+			if queued.waitingOn then
+				waitCount = waitCount+1
+
+			!if DEBUG then
+			elseif queued.pipe > lastPipe then
+				-- void
+			!end
+
+			elseif queued.pipe == !(PIPE_INFER) then
+				didSomething = true
+				inferNode(state, queued.node)
+			elseif queued.pipe == !(PIPE_BYTECODE) then
+				didSomething = true
+				bcEmit(state, queued.node)
+			end
+
+			i = i+1
 		end
 
-		-- Pipes may have completed.
 		if waitCount == 0 then
+			-- Pipes may have completed.
 			local allDone = true
 
-			for _, queued in ipairs(state.queue) do
-				if not queued.removed and queued.pipe <= lastPipe then
+			for _, queued in ipairs(queue) do
+				if queued.unqueued then
+					-- void
+				elseif queued.pipeLastExited < lastPipe then
 					allDone = false
 					break
 				end
@@ -347,105 +351,18 @@ local queueSize  = 0
 
 			if allDone then  break  end
 
-		-- Pipes are stuck.
 		elseif not didSomething then
-			-- [[ Report undeclared identifier.
-			for _, queued in ipairs(state.queue) do
-				local dependency = not queued.removed and queued.waitingOn
-
-				if dependency and dependency.dependType == !(DEPEND_DECLARATION) then
-					local name = dependency.dependOn
-
-					if not getDeclaredIdentifierWaitingToBeDeclaredWithName(name, queued) then
-						typeError(state, queued.node, "Undeclared identifier '%s'.", name)
-					end
-				end
-			end
-			--]]
-
-			-- [[ Report identifier waiting for declaration to be inferred.
-			for _, queued in ipairs(state.queue) do
-				local dependency = not queued.removed and queued.waitingOn
-
-				if
-					dependency
-					and dependency.dependType             == !(DEPEND_NODE_INFERRED)
-					and queued.node.nodeType              == !(nodeTypes.AstIdentifier)
-					and dependency.dependOn.node.nodeType == !(nodeTypes.AstDeclaration)
-				then
-					local decl = dependency.dependOn.node
-
-					printerr()
-					typeMessage(io.stderr, state, decl,        "Error", "Failed inferring the type of this declaration.")
-					typeMessage(io.stderr, state, queued.node, "Info",  "...this identifier is waiting for the above to finish.")
-					exitFailure()
-				end
-			end
-			--]]
-
-			-- [[ Report about-to-be-declared identifier waiting for something.
-			for _, queued in ipairs(state.queue) do
-				local dependency = not queued.removed and queued.waitingOn
-
-				if
-					dependency
-					and dependency.dependType == !(DEPEND_NODE_INFERRED)
-					and queued.node.nodeType  == !(nodeTypes.AstIdentifier)
-					and queued.node.parent    == queued.node.declaration
-				then
-					local expr = dependency.dependOn.node
-
-					printerr()
-					typeMessage(io.stderr, state, expr,        "Error", "Failed inferring the type of this expression.")
-					typeMessage(io.stderr, state, queued.node, "Info",  "...this identifier is waiting for the above to finish.")
-					exitFailure()
-				end
-			end
-			--]]
-
-			-- [[ Report something waiting for something else to be inferred.
-			for _, queued in ipairsr(state.queue) do
-				local dependency = not queued.removed and queued.waitingOn
-
-				if dependency and dependency.dependType == !(DEPEND_NODE_INFERRED) then
-					local expr = dependency.dependOn.node
-
-					printerr()
-					typeMessage(io.stderr, state, expr,        "Error", "Failed inferring the type of this expression.")
-					typeMessage(io.stderr, state, queued.node, "Info",  "...this thing is waiting for the above to finish.")
-					exitFailure()
-				end
-			end
-			--]]
-
-			-- [[ Report something waiting for something else to emit code.
-			for _, queued in ipairs(state.queue) do
-				local dependency = not queued.removed and queued.waitingOn
-
-				if dependency and dependency.dependType == !(DEPEND_NODE_EMITTED) then
-					local expr = dependency.dependOn.node
-
-					printerr()
-					astPrint(queued.node)
-					bcMessage(io.stderr, state, queued.node, "Error", "Internal compiler error: Failed emitting code for %s.", AST_NODE_TYPE_NAMES[queued.node.nodeType])
-					astPrint(expr)
-					bcMessage(io.stderr, state, expr,        "Info",  "...it is waiting for this %s to finish.", AST_NODE_TYPE_NAMES[expr.nodeType])
-					exitFailure()
-				end
-			end
-			--]]
-
-			errorInternal("Pipes are stuck. Also failed to figure out where the issue actually is. Oops...")
+			errorPipesAreStuck(state)
 		end
 
 		!if DEBUG then
 			-- Guard against an infinite loop.
-			if cycle == 1000 then
+			if cycle == 100 then
 				local printCount = 0
 				printerr()
 
-				for _, queued in ipairs(state.queue) do
-					if not queued.removed and queued.pipe <= lastPipe then
+				for _, queued in ipairs(queue) do
+					if not queued.unqueued and queued.pipeLastExited < lastPipe then
 						printCount = printCount+1
 
 						if printCount > 10 then
@@ -453,14 +370,20 @@ local queueSize  = 0
 							break
 						end
 
-						nodeMessage(io.stderr, state, queued.node, "DEBUG", nil, "%s (%s)", AST_NODE_TYPE_NAMES[queued.node.nodeType], PIPE_TITLES[queued.pipe])
+						nodeMessage(
+							io.stderr, state, queued.node, "DEBUG", nil,
+							"%s (exited:%s, pipe:%s)",
+							AST_NODE_TYPE_NAMES[queued.node.nodeType],
+							PIPE_TITLES[queued.pipeLastExited],
+							PIPE_TITLES[queued.pipe]
+						)
 					end
 				end
 
 				errorInternal("[DEBUG] Pipes ran for too long. (waiting:%d)", waitCount)
 			end
 		!end
-	end
+	end--for cycle
 !ifDEBUG`end`
 
 local timeEndPipes = os.clock()
@@ -486,7 +409,7 @@ local timeEndCompilation = os.clock()
 	printf("██  ████  ██  ██  ████ Parsing: %.3f sec", timeEndParsing     - timeStartParsing)
 	printf("██  ████  ██    ██████ Pipes:   %.3f sec", timeEndPipes       - timeStartPipes)
 	printf("██  ████  ██  ██  ████ Output:  %.3f sec", timeEndOutput      - timeStartOutput)
-	printf("████    ████  ████  ██ Queue:   %d",       queueSize)
+	printf("████    ████  ████  ██ Queue:   %d",       maxQueueSize)
 	printf("██████████████████████ Cycles:  %d",       pipeCycles)
 !else
 	if not silent then

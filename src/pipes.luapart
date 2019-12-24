@@ -10,8 +10,9 @@
 --==============================================================
 
 	addDependency
-	addToQueue, addToQueueRecursively, scheduleRemovalFromQueueRecursively, scheduleRemovalOfChildrenFromQueueRecursively, replaceQueuedNode
-	moveToNextPipe, moveTreeToNextPipe, moveUnmovedInTreeToNextPipe
+	addToQueue, addToQueueRecursively, unqueue, unqueueChildrenRecursively, replaceQueuedNode
+	errorPipesAreStuck
+	moveToPipe, moveToNextPipe, moveTreeToNextPipe
 
 --============================================================]]
 
@@ -89,23 +90,26 @@ end
 
 
 local !struct"Queued"{
-	node      = NIL, -- AstNode
-	container = NIL,
-	key       = NIL,
-	pipe      = 0,
-	waitingOn = NIL, -- Dependency
-	removed   = false,
+	node           = NIL, -- AstNode
+	container      = NIL,
+	key            = NIL,
+	pipe           = PIPE_NONE,
+	pipeLastExited = PIPE_NONE, -- @Cleanup: Rename to pipeHighestExited
+	waitingOn      = NIL, -- Dependency
+	unqueued       = false,
 }
 
-function _G.addToQueue(state, node, container, key, pipe)
+-- addToQueue( state, node, container=nil, key=nil, pipe [, pipeLastExited=pipe-1 ] )
+function _G.addToQueue(state, node, container, key, pipe, pipeLastExited)
 	-- astPrint(node)
 	!ASSERT `not node.queued`
 
-	local queued     = Queued()
-	queued.node      = node
-	queued.container = container
-	queued.key       = key
-	queued.pipe      = pipe
+	local queued          = Queued()
+	queued.node           = node
+	queued.container      = container
+	queued.key            = key
+	queued.pipe           = pipe
+	queued.pipeLastExited = math.max(pipeLastExited or pipe-1, !(PIPE_NONE))
 
 	node.queued = queued
 	table.insert(state.queue, queued)
@@ -123,33 +127,42 @@ function _G.addToQueue(state, node, container, key, pipe)
 	end
 end
 
-function _G.addToQueueRecursively(state, topNode)
+-- addToQueueRecursively( state, topNode [, pipe=PIPE_INFER ] )
+function _G.addToQueueRecursively(state, topNode, pipe)
+	pipe = pipe or !(PIPE_INFER)
+
 	astVisitAllNodesLeavesFirst(topNode, function(node, container, key)
-		addToQueue(state, node, container, key, !(PIPE_INFER))
+		addToQueue(state, node, container, key, pipe)
 	end)
 end
 
-function _G.addUnqueuedChildrenToQueueRecursively(state, topNode)
+-- addUnqueuedChildrenToQueueRecursively( state, topNode [, pipe=PIPE_INFER ] )
+function _G.addUnqueuedChildrenToQueueRecursively(state, topNode, pipe)
+	pipe = pipe or !(PIPE_INFER)
+
 	astVisitAllNodesLeavesFirst(topNode, function(node, container, key)
 		if node == topNode then  return                           end
 		if node.queued     then  return !(VISIT_IGNORE_CHILDREN)  end
-		addToQueue(state, node, container, key, !(PIPE_INFER))
+		addToQueue(state, node, container, key, pipe)
 	end)
 end
 
-function _G.scheduleRemovalFromQueueRecursively(state, topNode)
-	astVisitAllNodes(topNode, function(node)
-		node.queued.removed = true
-	end)
+function _G.unqueue(state, node)
+	local queued          = node.queued
+	queued.pipeLastExited = math.max(queued.pipeLastExited, queued.pipe)
+	queued.pipe           = !(PIPE_NONE)
+	queued.unqueued       = true
 end
-function _G.scheduleRemovalOfChildrenFromQueueRecursively(state, topNode)
+
+function _G.unqueueChildrenRecursively(state, topNode)
 	astVisitAllNodes(topNode, function(node)
 		if node ~= topNode then
-			node.queued.removed = true
+			node.queued.unqueued = true
 		end
 	end)
 end
 
+-- Note: nodeOld doesn't have to be queued right now - it just needs a Queued. (Sometimes we just want to make use of queued.container/key. @Cleanup)
 function _G.replaceQueuedNode(state, nodeOld, nodeNew)
 	assert(not nodeNew.queued)
 
@@ -161,23 +174,42 @@ function _G.replaceQueuedNode(state, nodeOld, nodeNew)
 	if queued.container then
 		queued.container[queued.key] = nodeNew
 	end
+
+	nodeOld.replacedBy = nodeNew
+	nodeNew.replacing  = nodeOld
+
+	!if DEBUG then
+		-- [[
+		if debug_onlyInferTypes then
+			io.stdout:write("replace: ") ; astPrint(nodeOld)
+			io.stdout:write("   with: ") ; astPrint(nodeNew)
+		end
+		--]]
+	!end
 end
 
 
+
+function _G.moveToPipe(state, node, targetPipe)
+	local queued          = node.queued
+	queued.pipeLastExited = math.max(queued.pipeLastExited, queued.pipe)
+	queued.pipe           = targetPipe
+end
 
 function _G.moveToNextPipe(state, node, targetPipe)
 	local queued = node.queued
 
 	if targetPipe ~= queued.pipe+1 then
 		errorInternal(
-			"Trying to move %s node from pipe %d (%s) to %d (%s).",
+			2, "Trying to move %s node from pipe %d (%s) to %d (%s).",
 			AST_NODE_TYPE_NAMES[node.nodeType],
 			queued.pipe, (PIPE_TITLES[queued.pipe] or "*INVALID*"),
 			targetPipe,  (PIPE_TITLES[targetPipe]  or "*INVALID*")
 		)
 	end
 
-	queued.pipe = targetPipe
+	queued.pipeLastExited = math.max(queued.pipeLastExited, queued.pipe)
+	queued.pipe           = targetPipe
 end
 
 function _G.moveTreeToNextPipe(state, topNode, targetPipe)
@@ -186,12 +218,106 @@ function _G.moveTreeToNextPipe(state, topNode, targetPipe)
 	end)
 end
 
-function _G.moveUnmovedInTreeToNextPipe(state, topNode, targetPipe) -- This is used as a @Hack everywhere... @Cleanup
-	astVisitAllNodes(topNode, function(node)
-		if node.queued.pipe == targetPipe then  return VISIT_IGNORE_CHILDREN  end
 
-		moveToNextPipe(state, node, targetPipe)
-	end)
+
+function _G.errorPipesAreStuck(state)
+	-- [[ Report undeclared identifier.
+	local function getDeclaredIdentifierWaitingToBeDeclaredWithName(name, queuedToIgnore)
+		for _, queued in ipairs(state.queue) do
+			if queued ~= queuedToIgnore and not queued.unqueued and queued.waitingOn and queued.node.nodeType == !(nodeTypes.AstIdentifier) then
+				local ident = queued.node
+				if ident.parent == ident.declaration and ident.name == name then  return queued  end
+			end
+		end
+		return nil
+	end
+
+	for _, queued in ipairs(state.queue) do
+		local dependency = not queued.unqueued and queued.waitingOn
+
+		if dependency and dependency.dependType == !(DEPEND_DECLARATION) then
+			local name = dependency.dependOn
+
+			if not getDeclaredIdentifierWaitingToBeDeclaredWithName(name, queued) then
+				typeError(state, queued.node, "Undeclared identifier '%s'.", name)
+			end
+		end
+	end
+	--]]
+
+	-- [[ Report identifier waiting for declaration to be inferred.
+	for _, queued in ipairs(state.queue) do
+		local dependency = not queued.unqueued and queued.waitingOn
+
+		if
+			dependency
+			and dependency.dependType             == !(DEPEND_NODE_INFERRED)
+			and queued.node.nodeType              == !(nodeTypes.AstIdentifier)
+			and dependency.dependOn.node.nodeType == !(nodeTypes.AstDeclaration)
+		then
+			local decl = dependency.dependOn.node
+
+			printerr()
+			typeMessage(io.stderr, state, decl,        "Error", "Failed inferring the type of this declaration.")
+			typeMessage(io.stderr, state, queued.node, "Info",  "...this identifier is waiting for the above to finish.")
+			exitFailure()
+		end
+	end
+	--]]
+
+	-- [[ Report about-to-be-declared identifier waiting for something.
+	for _, queued in ipairs(state.queue) do
+		local dependency = not queued.unqueued and queued.waitingOn
+
+		if
+			dependency
+			and dependency.dependType == !(DEPEND_NODE_INFERRED)
+			and queued.node.nodeType  == !(nodeTypes.AstIdentifier)
+			and queued.node.parent    == queued.node.declaration
+		then
+			local expr = dependency.dependOn.node
+
+			printerr()
+			typeMessage(io.stderr, state, expr,        "Error", "Failed inferring the type of this expression.")
+			typeMessage(io.stderr, state, queued.node, "Info",  "...this identifier is waiting for the above to finish.")
+			exitFailure()
+		end
+	end
+	--]]
+
+	-- [[ Report something waiting for something else to be inferred.
+	for _, queued in ipairsr(state.queue) do
+		local dependency = not queued.unqueued and queued.waitingOn
+
+		if dependency and dependency.dependType == !(DEPEND_NODE_INFERRED) then
+			local expr = dependency.dependOn.node
+
+			printerr()
+			typeMessage(io.stderr, state, expr,        "Error", "Failed inferring the type of this expression.")
+			typeMessage(io.stderr, state, queued.node, "Info",  "...this thing is waiting for the above to finish.")
+			exitFailure()
+		end
+	end
+	--]]
+
+	-- [[ Report something waiting for something else to emit code.
+	for _, queued in ipairs(state.queue) do
+		local dependency = not queued.unqueued and queued.waitingOn
+
+		if dependency and dependency.dependType == !(DEPEND_NODE_EMITTED) then
+			local expr = dependency.dependOn.node
+
+			printerr()
+			astPrint(queued.node)
+			bcMessage(io.stderr, state, queued.node, "Error", "Internal compiler error: Failed emitting code for %s.", AST_NODE_TYPE_NAMES[queued.node.nodeType])
+			astPrint(expr)
+			bcMessage(io.stderr, state, expr,        "Info",  "...it is waiting for this %s to finish.", AST_NODE_TYPE_NAMES[expr.nodeType])
+			exitFailure()
+		end
+	end
+	--]]
+
+	errorInternal("Pipes are stuck. Also failed to figure out where the issue actually is. Oops...")
 end
 
 

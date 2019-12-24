@@ -175,6 +175,12 @@ end
 
 
 
+function _G.isTypeSimple(typeInfo)
+	return isAny(typeInfo.tag, !(typeTags.TypeInfoBool),!(typeTags.TypeInfoInt),!(typeTags.TypeInfoNil),!(typeTags.TypeInfoFloat),!(typeTags.TypeInfoString),!(typeTags.TypeInfoType))
+end
+
+
+
 local !struct"Constant"{
 	id        = 0,
 	name      = "",
@@ -188,7 +194,7 @@ local !struct"Constant"{
 -- constant, isNew = bcAllocateConstantValueIfNew( state, typeInfo,          value          )
 function _G.bcAllocateConstantValueIfNew(state, typeInfo, v)
 	local tag      = typeInfo.tag
-	local isSimple = isAny(tag, !(typeTags.TypeInfoBool),!(typeTags.TypeInfoInt),!(typeTags.TypeInfoNil),!(typeTags.TypeInfoFloat),!(typeTags.TypeInfoString),!(typeTags.TypeInfoType))
+	local isSimple = isTypeSimple(typeInfo)
 
 	if not isSimple and isAny(tag, !(typeTags.TypeInfoAny),!(typeTags.TypeInfoNamespace),!(typeTags.TypeInfoVoid),!(typeTags.TypeInfoCompound),!(typeTags.TypeInfoList)) then
 		errorInternal("Invalid type '%s' for constant.", (TYPE_TAG_NAMES[tag] or "?"))
@@ -225,17 +231,21 @@ function _G.bcAllocateConstantValueIfNew(state, typeInfo, v)
 
 	local const     = Constant()
 	const.id        = i
-	const.name      = "C"..i
 	const.valueType = typeInfo
 	const.value     = v
 	const.simple    = isSimple
 
+	if not isSimple then
+		state.constantN = state.constantN+1
+		const.name      = "C"..state.constantN -- Simple constants don't need a name as we write those values directly.
+	end
+
 	state.constants[i] = const
 
-	if tag == !(typeTags.TypeInfoFunction) then
-		local lambda = v
-		bcEmitForLambdaBody(state, lambda)
-	end
+	-- if tag == !(typeTags.TypeInfoFunction) then
+	-- 	local lambda = v
+	-- 	bcEmitForLambda(state, lambda)
+	-- end
 
 	return const, true
 end
@@ -258,7 +268,7 @@ local function DEPEND_AND_RETURN_FALSE(dependentCode, dependType, dependOnCode)
 end
 )
 
-function _G.bcEmitForLambdaBody(state, lambda)
+function _G.bcEmitForLambda(state, lambda)
 	-- @Incomplete
 	-- @Incomplete
 	-- @Incomplete
@@ -274,7 +284,7 @@ function _G.bcEmitForLambdaBody(state, lambda)
 	table.insert(bcs, returnValuePosition1) -- A
 	table.insert(bcs, returnValueCount)     -- B
 
-	moveUnmovedInTreeToNextPipe(state, lambda, !(PIPE_BYTECODE+1))
+	unqueue(state, lambda)
 end
 
 function _G.bcEmitForDeclarationStatement(state, statement)
@@ -288,21 +298,15 @@ function _G.bcEmitForDeclarationStatement(state, statement)
 
 		if valueExpr.nodeType == !(nodeTypes.AstLiteral) then
 			local literal = valueExpr
-			if literal.queued.pipe <= !(PIPE_BYTECODE) then
-				!DEPEND_AND_RETURN(`statement`, DEPEND_NODE_EMITTED, `literal`)
-			end
 			decl.valueConstant = literal.valueConstant
 
 		elseif valueExpr.nodeType == !(nodeTypes.AstLambda) then
 			local lambda = valueExpr
 			assert(lambda.body) -- valueExpr should have been an AstType if there was no body.
 
-			if lambda.body.queued.pipe < !(PIPE_BYTECODE) then
-				!DEPEND_AND_RETURN(`statement`, DEPEND_NODE_EMITTED, `lambda.body`)
-			end
-
 			local const, isNew = bcAllocateConstantValueIfNew(state, valueTypeInfo, lambda)
 			if isNew then  const.name = const.name.."_"..decl.name.name  end
+
 			decl.valueConstant = const
 
 		elseif valueExpr.nodeType == !(nodeTypes.AstStruct) then
@@ -317,8 +321,6 @@ function _G.bcEmitForDeclarationStatement(state, statement)
 		else
 			errorUnhandledNodeType(valueExpr)
 		end
-
-		moveUnmovedInTreeToNextPipe(state, statement, !(PIPE_BYTECODE+1))
 		return
 	end
 
@@ -336,20 +338,12 @@ function _G.bcEmitForDeclarationStatement(state, statement)
 		if valueExpr.nodeType == !(nodeTypes.AstIdentifier) then
 			local ident     = valueExpr
 			local declOther = ident.declaration
-
-			if declOther.queued.pipe <= !(PIPE_BYTECODE) then
-				!DEPEND_AND_RETURN(`statement`, DEPEND_NODE_EMITTED, `declOther`)
-			end
-
 			assert(declOther.isConstant) -- Should have given an error in the typer.
 
 			initialValueConst = declOther.valueConstant or errorInternal()
 
 		elseif valueExpr.nodeType == !(nodeTypes.AstLiteral) then
-			local literal = valueExpr
-			if literal.queued.pipe <= !(PIPE_BYTECODE) then
-				!DEPEND_AND_RETURN(`statement`, DEPEND_NODE_EMITTED, `literal`)
-			end
+			local literal     = valueExpr
 			initialValueConst = literal.valueConstant or errorInternal()
 
 		else
@@ -358,7 +352,6 @@ function _G.bcEmitForDeclarationStatement(state, statement)
 
 		decl.valueConstant = initialValueConst
 		decl.topScopeName  = bcAllocateTopScopeNames(state, decl.name.name)
-		moveTreeToNextPipe(state, statement, !(PIPE_BYTECODE+1)) -- Won't include the assignment statement.
 
 	-- Dynamic variable.
 	else
@@ -368,44 +361,19 @@ end
 
 function _G.bcEmitForAssignmentStatement(state, statement)
 	local assignment = statement.what
-
-	if assignment.forDeclaration then
-		for _, decl in ipairs(assignment.declarations) do
-			if decl.queued.pipe <= !(PIPE_BYTECODE) then
-				!DEPEND_AND_RETURN(`statement`, DEPEND_NODE_EMITTED, `decl`)
-			end
-		end
-	end
-
 	-- @Incomplete: Emit code for assignment.
-
-	moveUnmovedInTreeToNextPipe(state, statement, !(PIPE_BYTECODE+1))
 end
 
 function _G.bcEmitForCallStatement(state, statement)
 	local call   = statement.what
 	local callee = call.callee
-
 	assert(callee.nodeType == !(nodeTypes.AstIdentifier))
-
 	-- @Incomplete: Emit code for call.
-
-	moveUnmovedInTreeToNextPipe(state, statement, !(PIPE_BYTECODE+1))
 end
 
 function _G.bcEmitForReturnStatement(state, statement)
 	local returnNode = statement.what
-
 	-- @Incomplete: Emit code for return.
-
-	moveUnmovedInTreeToNextPipe(state, statement, !(PIPE_BYTECODE+1))
-end
-
-function _G.bcEmitForScopeStatement(state, statement)
-	local allEmitted = bcEmitForScope(state, statement.what)
-	if allEmitted then
-		moveToNextPipe(state, statement, !(PIPE_BYTECODE+1))
-	end
 end
 
 function _G.bcEmitForStatement(state, statement)
@@ -413,52 +381,58 @@ function _G.bcEmitForStatement(state, statement)
 
 	if     nodeType == !(nodeTypes.AstDeclaration) then  bcEmitForDeclarationStatement(state, statement)
 	elseif nodeType == !(nodeTypes.AstAssignment)  then  bcEmitForAssignmentStatement (state, statement)
-	elseif nodeType == !(nodeTypes.AstFileScope)   then  bcEmitForScopeStatement      (state, statement)
 	elseif nodeType == !(nodeTypes.AstCall)        then  bcEmitForCallStatement       (state, statement)
 	elseif nodeType == !(nodeTypes.AstReturn)      then  bcEmitForReturnStatement     (state, statement)
+	elseif nodeType == !(nodeTypes.AstFileScope)   then  -- void
 	else
 		errorUnhandledNodeType(statement.what)
 	end
 end
 
 function _G.bcEmitForScope(state, scope)
-	local allEmitted = true
+	local scopeReadyForBytecode = true
 
-	for _, statementInner in ipairs(scope) do
-		if not statementInner.queued.waitingOn then
-			if statementInner.queued.pipe <= !(PIPE_BYTECODE) then
-				bcEmitForStatement(state, statementInner)
-			end
-			if statementInner.queued.pipe <= !(PIPE_BYTECODE) then
-				allEmitted = false
-			end
+	astVisitAllNodes(scope, function(node)
+		if node == scope then  return  end
+
+		if node.nodeType == !(nodeTypes.AstBlock)      then  return VISIT_IGNORE_CHILDREN  end -- (Hmm, I feel like this isn't quite right behavior...)
+		if node.nodeType == !(nodeTypes.AstFileScope)  then  return VISIT_IGNORE_CHILDREN  end -- Should only happen for AstGlobalScope.
+
+		if node.queued.unqueued then  return  end -- Assume that unqueued nodes are done. We could probably make this clearer.
+
+		if node.queued.pipeLastExited < !(PIPE_BYTECODE) then
+			-- @Speed: We should probably addDependency() here.
+			scopeReadyForBytecode = false
+			return VISIT_BREAK
 		end
+	end)
+
+	if not scopeReadyForBytecode then  return  end
+
+	for _, statement in ipairs(scope) do
+		bcEmitForStatement(state, statement)
 	end
 
-	if allEmitted then
-		moveToNextPipe(state, scope, !(PIPE_BYTECODE+1))
-	end
-	return allEmitted
+	unqueue(state, scope)
 end
 
--- ignored = bcEmit( state, node )
 function _G.bcEmit(state, node)
-	if node.nodeType == !(nodeTypes.AstGlobalScope) then
-		local globalScope = node
-		bcEmitForScope(state, globalScope)
+	if isAny(node.nodeType, !(nodeTypes.AstGlobalScope),!(nodeTypes.AstFileScope)) then
+		local scope = node
+		bcEmitForScope(state, scope)
 
 	elseif node.nodeType == !(nodeTypes.AstLiteral) then
 		local literal         = node
 		literal.valueConstant = bcAllocateConstantValueIfNew(state, literal.inferredType, literal.value)
-		moveToNextPipe(state, literal, !(PIPE_BYTECODE+1))
+		unqueue(state, literal)
+
+	elseif node.nodeType == !(nodeTypes.AstLambda) then
+		local lambda = node
+		bcEmitForLambda(state, lambda)
 
 	else
-		-- @Volatile situation here! @Robustness: Typer should move all relevant nodes to this pipe
-		-- and send the rest to PIPE_DONE (or something) so we don't have to ignore anything here.
-		return true
+		errorUnhandledNodeType(node)
 	end
-
-	return false
 	--[[
 	AstIdentifier AstType AstCall AstDeclaration AstVararg AstLiteral AstUnary AstBinary AstTable AstArgument
 	AstArguments AstLambda AstTypeOf AstCast AstStatement AstAssignment AstReturn AstBreak AstContinue AstDefer

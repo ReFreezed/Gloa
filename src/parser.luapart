@@ -107,11 +107,13 @@ end
 )
 
 !struct"_AstNode"{
-	nodeType = 0,
-	s        = 0,   -- Serial number.
-	parent   = NIL, -- AstNode
-	token    = 1,
-	-- Pipe phase:
+	nodeType   = 0,
+	s          = 0,   -- Serial number.
+	parent     = NIL, -- AstNode
+	token      = 1,
+	replacedBy = NIL, -- AstNode
+	replacing  = NIL, -- AstNode
+	-- Pipe phases:
 	queued   = NIL, -- Queued
 }
 
@@ -2235,7 +2237,9 @@ do
 
 			if node.nodeType == !(nodeTypes.AstIdentifier) then
 				local ident = node
-				write(" (", ident.name, ")\n")
+				write(" (", ident.name)
+				if ident.inferredType then  write(", ", getFriendlyTypeInfoName(ident.inferredType))  end
+				write(")\n")
 
 			elseif node.nodeType == !(nodeTypes.AstBinary) then
 				local binOp = node
@@ -2618,15 +2622,24 @@ end
 
 
 function _G.astCopy(node)
-	-- @Incomplete: Copy/create new queued? Maybe that should be done by the caller?
+	-- Note: We don't touch any queued.
 	local copy
 
 	if node.nodeType == !(nodeTypes.AstIdentifier) then
 		local ident        = node
 		copy               = astNewNode(AstIdentifier, ident.token, ident.parent)
+		copy.inferredType  = ident.inferredType
 		copy.name          = ident.name
 		copy.placeDeclared = ident.placeDeclared
 		copy.declaration   = ident.declaration
+
+	elseif node.nodeType == !(nodeTypes.AstLiteral) then
+		local literal      = node
+		copy               = astNewNode(AstLiteral, literal.token, literal.parent)
+		copy.inferredType  = literal.inferredType
+		copy.literalType   = literal.literalType
+		copy.value         = literal.value
+		copy.valueConstant = literal.valueConstant
 
 	else
 		errorUnhandledNodeType(node)
