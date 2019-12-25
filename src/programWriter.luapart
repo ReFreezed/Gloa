@@ -47,7 +47,6 @@ function _G.writeExpression(state, file, expr)
 			if i > 1 then  file:write(", ")  end
 			writeExpression(state, file, argExpr)
 		end
-		-- @Incomplete: Write arguments.
 		file:write(")")
 
 		if call.surroundedByParenthesis then  file:write(")")  end
@@ -74,99 +73,105 @@ function _G.writeExpression(state, file, expr)
 		local ident = expr
 		writeIdentifierName(state, file, ident)
 
+	elseif expr.nodeType == !(nodeTypes.AstType) then
+		local typeNode = expr
+		file:write(F("%d", typeNode.representedType.id)) -- @Cleanup: We probably have a constant for the type ID to use with writeConstantValue() here, but who cares...
+
 	else
 		errorUnhandledNodeType(expr)
 	end
 end
-function _G.writeFunction(state, file, lambda)
-	local localCount = 0
-	local inDecl     = false
 
-	file:write("function(")
+-- writeImperativeBlock( state, file, block [, indentation=1, nextLocalNumber=1 ] )
+function _G.writeImperativeBlock(state, file, block, indent, nextLocalN)
+	indent     = indent     or 1
+	nextLocalN = nextLocalN or 1
 
-	if lambda.argumentsIn then
-		for i, arg in ipairs(lambda.argumentsIn) do
-			if i > 1 then  file:write(", ")  end
+	local indentStr = ("\t"):rep(indent)
 
-			local decl     = arg.declaration
-			localCount     = localCount+1
-			decl.localName = "L"..localCount.."_"..decl.name.name
-
-			file:write(decl.localName)
-		end
+	if not block[1] then
+		file:write(indentStr, "-- Empty block.\n")
+		return
 	end
 
-	file:write(")\n")
-
-	for _, statement in ipairs(lambda.body) do
+	for _, statement in ipairs(block) do
 		local nodeType = statement.what.nodeType
 
 		if nodeType == !(nodeTypes.AstDeclaration) then
-			local decl     = statement.what
-			localCount     = localCount+1
-			decl.localName = "L"..localCount.."_"..decl.name.name
+			local decl = statement.what
 
-			if decl.assignment then
-				inDecl = true
-				if decl.assignmentIndex == 1 then
-					file:write("\tlocal ")
-				end
+			if decl.isConstant then
+				skipNextAssignment = true
 
 			else
-				local tag = decl.name.inferredType.tag
-				file:write("\tlocal ", decl.localName, " = ")
+				decl.localName = "L"..nextLocalN.."_"..decl.name.name
+				nextLocalN     = nextLocalN+1
 
-				if tag == !(typeTags.TypeInfoBool) then
-					file:write("false")
-
-				elseif tag == !(typeTags.TypeInfoInt) then
-					file:write("0")
-
-				elseif tag == !(typeTags.TypeInfoNil) then
-					file:write("nil")
-
-				elseif tag == !(typeTags.TypeInfoFloat) then
-					file:write("0.0")
-
-				elseif tag == !(typeTags.TypeInfoString) then
-					file:write('""')
-
-				elseif tag == !(typeTags.TypeInfoType) then
-					file:write("0")
+				if decl.assignment then
+					inDecl = true
+					if decl.assignmentIndex == 1 then
+						file:write(indentStr, "local ")
+					end
 
 				else
-					errorInternal("Incomplete: Default initial value for type '%s'.", (TYPE_TAG_NAMES[tag] or "?"))
+					local tag = decl.name.inferredType.tag
+					file:write(indentStr, "local ", decl.localName, " = ")
+
+					if tag == !(typeTags.TypeInfoBool) then
+						file:write("false")
+
+					elseif tag == !(typeTags.TypeInfoInt) then
+						file:write("0")
+
+					elseif tag == !(typeTags.TypeInfoNil) then
+						file:write("nil")
+
+					elseif tag == !(typeTags.TypeInfoFloat) then
+						file:write("0.0")
+
+					elseif tag == !(typeTags.TypeInfoString) then
+						file:write('""')
+
+					elseif tag == !(typeTags.TypeInfoType) then
+						file:write("0")
+
+					else
+						errorInternal("Incomplete: Default initial value for type '%s'.", (TYPE_TAG_NAMES[tag] or "?"))
+					end
+
+					file:write("\n")
 				end
 
+				-- The initial assignment, if there is one, should be written as the next statement (or after several declarations).
+			end
+
+		elseif nodeType == !(nodeTypes.AstAssignment) then
+			if not skipNextAssignment then
+				local assignment = statement.what
+				assert(assignment.operation == "=", "@Incomplete: Support more than '='.")
+
+				if not inDecl then
+					file:write(indentStr)
+				end
+				for i, ident in ipairs(assignment.targets) do
+					if i > 1 then  file:write(", ")  end
+					writeIdentifierName(state, file, ident)
+				end
+				file:write(" ", assignment.operation, " ")
+				for i, expr in ipairs(assignment.values) do
+					if i > 1 then  file:write(", ")  end
+					writeExpression(state, file, expr)
+				end
 				file:write("\n")
 			end
 
-			-- The initial assignment, if there is one, should be written as the next statement (or after several declarations).
-
-		elseif nodeType == !(nodeTypes.AstAssignment) then
-			local assignment = statement.what
-			assert(assignment.operation == "=", "@Incomplete: Support more than '='.")
-
-			if not inDecl then
-				file:write("\t")
-			end
-			for i, ident in ipairs(assignment.targets) do
-				if i > 1 then  file:write(", ")  end
-				writeIdentifierName(state, file, ident)
-			end
-			file:write(" ", assignment.operation, " ")
-			for i, expr in ipairs(assignment.values) do
-				if i > 1 then  file:write(", ")  end
-				writeExpression(state, file, expr)
-			end
-			file:write("\n")
-
-			inDecl = false
+			inDecl             = false
+			skipNextAssignment = false
 
 		elseif nodeType == !(nodeTypes.AstReturn) then
 			local returnNode = statement.what
 
-			file:write("\treturn")
+			file:write(indentStr, "return")
 			for i, expr in ipairs(returnNode.values) do
 				if i > 1 then  file:write(",")  end
 				file:write(" ")
@@ -176,10 +181,35 @@ function _G.writeFunction(state, file, lambda)
 
 		else
 			-- Assume the statement is an expression at this point and let writeExpression() deal with any errors.
-			file:write("\t")
+			file:write(indentStr)
 			writeExpression(state, file, statement.what)
 			file:write("\n")
 		end
+	end
+end
+
+function _G.writeFunction(state, file, lambda)
+	local inDecl = false
+
+	file:write("function(")
+
+	if lambda.argumentsIn then
+		for i, arg in ipairs(lambda.argumentsIn) do
+			if i > 1 then  file:write(", ")  end
+
+			local decl     = arg.declaration
+			decl.localName = "A"..i.."_"..decl.name.name
+
+			file:write(decl.localName)
+		end
+	end
+
+	file:write(")\n")
+
+	if lambda.body[1] then
+		writeImperativeBlock(state, file, lambda.body)
+	else
+		file:write("\t-- Empty function.\n")
 	end
 
 	file:write("end")
@@ -295,6 +325,9 @@ function _G.writeProgram(state)
 		end
 	end
 
+	!local ENTRY_POINT_NAME = "main" -- @Incomplete: Configurable entry point name.
+	local mainFuncDecl      = nil
+
 	-- Global assignments.
 	for _, decl in ipairs(state.globalScope.declarations) do
 		if decl.topScopeName ~= "" then
@@ -302,6 +335,7 @@ function _G.writeProgram(state)
 			writeConstantValueOrReference(state, file, decl.valueConstant)
 			file:write("\n")
 		end
+		if decl.name.name == !(ENTRY_POINT_NAME) then  mainFuncDecl = decl  end
 	end
 	-- File-scope assignments.
 	for _, fileScope in ipairs(state.globalScope.fileScopes) do
@@ -311,8 +345,48 @@ function _G.writeProgram(state)
 				writeConstantValueOrReference(state, file, decl.valueConstant)
 				file:write("\n")
 			end
+			if decl.name.name == !(ENTRY_POINT_NAME) then  mainFuncDecl = decl  end
 		end
 	end
+
+	--
+	-- Program entry point.
+	--
+
+	if not mainFuncDecl then
+		local filePaths = {}
+		for i, fileScope in ipairs(state.globalScope.fileScopes) do
+			filePaths[i] = fileScope.path
+		end
+		errorLine(
+			"ProgramWriter",
+			!("Missing program entry point ('"..ENTRY_POINT_NAME.."' function) in top-level scope in loaded files:\n- %s"),
+			table.concat(filePaths, "\n- ")
+		)
+
+	elseif not mainFuncDecl.isConstant then
+		nodeError(
+			state, mainFuncDecl.name, "ProgramWriter",
+			!("Declared name '"..ENTRY_POINT_NAME.."' must be a constant.")
+		)
+
+	elseif mainFuncDecl.name.inferredType.tag ~= !(typeTags.TypeInfoFunction) then
+		nodeError(
+			state, mainFuncDecl.assignment.values[mainFuncDecl.assignmentIndex], "ProgramWriter",
+			!("Declared name '"..ENTRY_POINT_NAME.."' must be a function to represent the entry point of the program.")
+		)
+
+	elseif mainFuncDecl.name.inferredType.argumentTypesIn[1] then
+		local lambda = getAssignmentValue(state, mainFuncDecl.name, mainFuncDecl.assignment.values, mainFuncDecl.assignmentIndex)
+		nodeError(state, lambda.argumentsIn, "ProgramWriter", "Program entry point function must not take any arguments.")
+
+	elseif mainFuncDecl.name.inferredType.argumentTypesOut[1] then
+		local lambda = getAssignmentValue(state, mainFuncDecl.name, mainFuncDecl.assignment.values, mainFuncDecl.assignmentIndex)
+		nodeError(state, lambda.argumentsOut, "ProgramWriter", "Program entry point function must not return any values.")
+	end
+
+	writeConstantValueOrReference(state, file, mainFuncDecl.valueConstant)
+	file:write("()\n")
 
 	file:close()
 end
