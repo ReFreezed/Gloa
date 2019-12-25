@@ -9,6 +9,7 @@
 --=
 --==============================================================
 
+	bcAllocate*
 	bcEmit*
 	bcError, bcMessage
 
@@ -171,22 +172,20 @@ local BC_CODES = {
 for bcode, bcodeName in ipairs(BC_CODES) do
 	_G[bcodeName] = bcode
 end
+
+local function DEPEND_AND_RETURN(dependentCode, dependType, dependOnCode, returnValueCode)
+	__LUA("addDependency(state, ",dependentCode,", ",toLua(dependType),", ",dependOnCode,") ; return ", returnValueCode)
+end
 )
 
 
 
-function _G.isTypeSimple(typeInfo)
-	return isAny(typeInfo.tag, !(typeTags.TypeInfoBool),!(typeTags.TypeInfoInt),!(typeTags.TypeInfoNil),!(typeTags.TypeInfoFloat),!(typeTags.TypeInfoString),!(typeTags.TypeInfoType))
-end
-
-
-
 local !struct"Constant"{
-	id        = 0,
-	name      = "",
-	valueType = NIL, -- TypeInfo
-	value     = NIL,
-	simple    = false,
+	name         = "",  -- Only used for constants that are objects.
+	nameTampered = false,
+	valueType    = NIL, -- TypeInfo
+	value        = NIL,
+	isObject     = false,
 }
 
 -- constant, isNew = bcAllocateConstantValueIfNew( state, simpleTypeInfo,    literalValue   )
@@ -199,6 +198,7 @@ function _G.bcAllocateConstantValueIfNew(state, typeInfo, v)
 	if not isSimple and isAny(tag, !(typeTags.TypeInfoAny),!(typeTags.TypeInfoNamespace),!(typeTags.TypeInfoVoid),!(typeTags.TypeInfoCompound),!(typeTags.TypeInfoList)) then
 		errorInternal("Invalid type '%s' for constant.", (TYPE_TAG_NAMES[tag] or "?"))
 	end
+	local isObject = not isSimple
 
 	for _, const in ipairs(state.constants) do
 		if const.valueType ~= typeInfo then
@@ -230,43 +230,87 @@ function _G.bcAllocateConstantValueIfNew(state, typeInfo, v)
 	local i = #state.constants+1
 
 	local const     = Constant()
-	const.id        = i
 	const.valueType = typeInfo
 	const.value     = v
-	const.simple    = isSimple
+	const.isObject  = isObject
 
-	if not isSimple then
+	if isObject then
 		state.constantN = state.constantN+1
-		const.name      = "C"..state.constantN -- Simple constants don't need a name as we write those values directly.
+		const.name      = "C"..state.constantN -- Simple constants (like ints) don't need a referencable name as we write those values directly everywhere.
 	end
 
 	state.constants[i] = const
 
-	-- if tag == !(typeTags.TypeInfoFunction) then
-	-- 	local lambda = v
-	-- 	bcEmitForLambda(state, lambda)
-	-- end
-
 	return const, true
+end
+
+-- constant, isNew = bcAllocateConstantValueForExpressionIfNew( state, expression, dependent )
+-- Returns nil on failure and the dependent is now waiting.
+function _G.bcAllocateConstantValueForExpressionIfNew(state, expr, dependent)
+	local typeInfo = expr.inferredType
+
+	if expr.nodeType == !(nodeTypes.AstLiteral) then
+		local literal = expr
+		local const   = literal.valueConstant
+
+		if not const then
+			!DEPEND_AND_RETURN(`dependent`, DEPEND_NODE_EMITTED, `literal`, `nil`)
+		end
+
+		return const, false
+
+	elseif expr.nodeType == !(nodeTypes.AstType) then
+		local typeNode = expr
+		local typeInfo = getTypeInfoForBuiltinType(state, "int")
+		local typeId   = typeNode.representedType.id
+		return bcAllocateConstantValueIfNew(state, typeInfo, typeId) -- Glóa types are represented as ints in Lua.
+
+	elseif expr.nodeType == !(nodeTypes.AstLambda) then
+		local lambda = expr
+		assert(lambda.body) -- We should never get here for lambdas with bodies, I don't think.
+
+		return bcAllocateConstantValueIfNew(state, typeInfo, lambda)
+
+	elseif expr.nodeType == !(nodeTypes.AstStruct) then
+		local struct = expr
+
+		-- @Incomplete: Wait for statements to get inferred (when we got struct self-referencing working).
+
+		local const, isNew = bcAllocateConstantValueIfNew(state, typeInfo, struct)
+		if isNew then
+			const.name         = const.name.."_"..struct.name
+			const.nameTampered = true
+		end
+
+		return const, isNew
+
+	elseif expr.nodeType == !(nodeTypes.AstIdentifier) then
+		local ident = expr
+		local decl  = ident.declaration
+
+		if decl.queued.pipe <= !(PIPE_BYTECODE) then
+			!DEPEND_AND_RETURN(`dependent`, DEPEND_NODE_EMITTED, `decl`, `nil`)
+		end
+
+		assert(decl.assignment) -- Should have given an error in the typer.
+
+		local valueExpr = getAssignmentValue(state, decl.name, decl.assignment.values, decl.assignmentIndex)
+		return bcAllocateConstantValueForExpressionIfNew(state, valueExpr, dependent)
+
+	else
+		errorUnhandledNodeType(expr)
+	end
+	errorInternal()
 end
 
 function _G.bcAllocateTopScopeNames(state, name)
 	local i                = #state.topScopeNames+1
-	local topScopeName     = "G"..i.."_"..name -- @Incomplete: Handle Unicode characters.
+	local topScopeName     = "G"..i.."_"..name:gsub("[^%w_]+", "_") -- @Incomplete: Handle Unicode characters better. @Incomplete: Handle Unicode characters everywhere.
 	state.topScopeNames[i] = topScopeName
 	return topScopeName
 end
 
 
-
-!(
-local function DEPEND_AND_RETURN(dependentCode, dependType, dependOnCode)
-	__LUA("addDependency(state, ",dependentCode,", ",toLua(dependType),", ",dependOnCode,") ; return")
-end
-local function DEPEND_AND_RETURN_FALSE(dependentCode, dependType, dependOnCode)
-	__LUA("addDependency(state, ",dependentCode,", ",toLua(dependType),", ",dependOnCode,") ; return false")
-end
-)
 
 function _G.bcEmitForLambda(state, lambda)
 	-- @Incomplete
@@ -284,151 +328,49 @@ function _G.bcEmitForLambda(state, lambda)
 	table.insert(bcs, returnValuePosition1) -- A
 	table.insert(bcs, returnValueCount)     -- B
 
-	unqueue(state, lambda)
+	moveToPipe(state, lambda, !(PIPE_DONE))
 end
 
-function _G.bcEmitForDeclarationStatement(state, statement)
-	local decl = statement.what
-
-	-- Constant.
-	if decl.isConstant then
-		assert(decl.assignment) -- Should have given an error during parsing.
-
-		local valueExpr, valueTypeInfo = getAssignmentValue(state, decl.name, decl.assignment.values, decl.assignmentIndex)
-
-		if valueExpr.nodeType == !(nodeTypes.AstLiteral) then
-			local literal = valueExpr
-			decl.valueConstant = literal.valueConstant
-
-		elseif valueExpr.nodeType == !(nodeTypes.AstLambda) then
-			local lambda = valueExpr
-			assert(lambda.body) -- valueExpr should have been an AstType if there was no body.
-
-			local const, isNew = bcAllocateConstantValueIfNew(state, valueTypeInfo, lambda)
-			if isNew then  const.name = const.name.."_"..decl.name.name  end
-
-			decl.valueConstant = const
-
-		elseif valueExpr.nodeType == !(nodeTypes.AstStruct) then
-			local struct = valueExpr
-
-			-- @Incomplete: Wait for statements to get inferred (I think is needed) when we got struct self-referencing working.
-
-			local const, isNew = bcAllocateConstantValueIfNew(state, valueTypeInfo, struct) -- We could probably use valueTypeInfo/struct.inferredType as the value.
-			if isNew then  const.name = const.name.."_"..struct.name  end
-			decl.valueConstant = const
-
-		else
-			errorUnhandledNodeType(valueExpr)
-		end
-		return
-	end
-
-	local scope = getClosestScope(statement)
-
-	-- Static variable.
-	if isScopeDeclarative(scope) then
+function _G.bcEmitForDeclaration(state, decl)
+	if decl.isConstant or isScopeDeclarative(getClosestScope(decl)) then
 		if not decl.assignment then
 			errorInternal("@Incomplete: Default values.")
 		end
 
-		local valueExpr, valueTypeInfo = getAssignmentValue(state, decl.name, decl.assignment.values, decl.assignmentIndex)
-		local initialValueConst
+		local valueExpr = getAssignmentValue(state, decl.name, decl.assignment.values, decl.assignmentIndex)
+		local const     = bcAllocateConstantValueForExpressionIfNew(state, valueExpr, decl)
 
-		if valueExpr.nodeType == !(nodeTypes.AstIdentifier) then
-			local ident     = valueExpr
-			local declOther = ident.declaration
-			assert(declOther.isConstant) -- Should have given an error in the typer.
+		if not const then  return  end
 
-			initialValueConst = declOther.valueConstant or errorInternal()
+		decl.valueConstant = const
 
-		elseif valueExpr.nodeType == !(nodeTypes.AstLiteral) then
-			local literal     = valueExpr
-			initialValueConst = literal.valueConstant or errorInternal()
-
-		else
-			errorUnhandledNodeType(valueExpr)
+		if decl.isConstant then
+			if not const.nameTampered then
+				const.name         = const.name.."_"..decl.name.name
+				const.nameTampered = true
+			end
+		elseif isAny(getClosestScope(decl).nodeType, !(nodeTypes.AstGlobalScope),!(nodeTypes.AstFileScope)) then
+			decl.topScopeName = bcAllocateTopScopeNames(state, decl.name.name)
 		end
-
-		decl.valueConstant = initialValueConst
-		decl.topScopeName  = bcAllocateTopScopeNames(state, decl.name.name)
-
-	-- Dynamic variable.
-	else
-		errorInternal("Trying to emit code for declaration of dynamic variable outside a function.")
-	end
-end
-
-function _G.bcEmitForAssignmentStatement(state, statement)
-	local assignment = statement.what
-	-- @Incomplete: Emit code for assignment.
-end
-
-function _G.bcEmitForCallStatement(state, statement)
-	local call   = statement.what
-	local callee = call.callee
-	assert(callee.nodeType == !(nodeTypes.AstIdentifier))
-	-- @Incomplete: Emit code for call.
-end
-
-function _G.bcEmitForReturnStatement(state, statement)
-	local returnNode = statement.what
-	-- @Incomplete: Emit code for return.
-end
-
-function _G.bcEmitForStatement(state, statement)
-	local nodeType = statement.what.nodeType
-
-	if     nodeType == !(nodeTypes.AstDeclaration) then  bcEmitForDeclarationStatement(state, statement)
-	elseif nodeType == !(nodeTypes.AstAssignment)  then  bcEmitForAssignmentStatement (state, statement)
-	elseif nodeType == !(nodeTypes.AstCall)        then  bcEmitForCallStatement       (state, statement)
-	elseif nodeType == !(nodeTypes.AstReturn)      then  bcEmitForReturnStatement     (state, statement)
-	elseif nodeType == !(nodeTypes.AstFileScope)   then  -- void
-	else
-		errorUnhandledNodeType(statement.what)
-	end
-end
-
-function _G.bcEmitForScope(state, scope)
-	local scopeReadyForBytecode = true
-
-	astVisitAllNodes(scope, function(node)
-		if node == scope then  return  end
-
-		if node.nodeType == !(nodeTypes.AstBlock)      then  return VISIT_IGNORE_CHILDREN  end -- (Hmm, I feel like this isn't quite right behavior...)
-		if node.nodeType == !(nodeTypes.AstFileScope)  then  return VISIT_IGNORE_CHILDREN  end -- Should only happen for AstGlobalScope.
-
-		if node.queued.unqueued then  return  end -- Assume that unqueued nodes are done. We could probably make this clearer.
-
-		if node.queued.pipeLastExited < !(PIPE_BYTECODE) then
-			-- @Speed: We should probably addDependency() here.
-			scopeReadyForBytecode = false
-			return VISIT_BREAK
-		end
-	end)
-
-	if not scopeReadyForBytecode then  return  end
-
-	for _, statement in ipairs(scope) do
-		bcEmitForStatement(state, statement)
 	end
 
-	unqueue(state, scope)
+	moveToPipe(state, decl, !(PIPE_DONE))
 end
 
 function _G.bcEmit(state, node)
-	if isAny(node.nodeType, !(nodeTypes.AstGlobalScope),!(nodeTypes.AstFileScope)) then
-		local scope = node
-		bcEmitForScope(state, scope)
-
-	elseif node.nodeType == !(nodeTypes.AstLiteral) then
+	if node.nodeType == !(nodeTypes.AstLiteral) then
 		local literal         = node
 		literal.valueConstant = bcAllocateConstantValueIfNew(state, literal.inferredType, literal.value)
-		unqueue(state, literal)
+		moveToPipe(state, literal, !(PIPE_DONE))
 
 	elseif node.nodeType == !(nodeTypes.AstLambda) then
 		local lambda = node
+		assert(lambda.body)
 		bcEmitForLambda(state, lambda)
+
+	elseif node.nodeType == !(nodeTypes.AstDeclaration) then
+		local decl = node
+		bcEmitForDeclaration(state, decl)
 
 	else
 		errorUnhandledNodeType(node)

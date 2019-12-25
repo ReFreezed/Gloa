@@ -10,10 +10,11 @@
 --==============================================================
 
 	getAssignmentValue
-	getClosestScope, isScope*
+	getClosestScope, isScope, isScopeDeclarative, isScopeImperative
 	getLiteralValueFromExpressionIfConstant
 	getTypeInfo*
 	inferNode
+	isTypeSimple
 	typeError, typeMessage
 
 --============================================================]]
@@ -486,8 +487,8 @@ end
 		end
 		ident.inferredType = identInDecl.inferredType
 
-		unqueue(state, ident)
-		simplifyExpressionIfConstant(state, ident)
+		moveToPipe(state, ident, !(PIPE_DONE))
+		simplifyExpressionIfConstant(state, ident) -- @Check: Are we in the right pipe after simplification?
 		return
 	end
 
@@ -502,7 +503,7 @@ end
 		end
 		ident.inferredType = identInDecl.inferredType
 
-		unqueue(state, ident)
+		moveToPipe(state, ident, !(PIPE_DONE))
 		return
 	end
 
@@ -696,7 +697,7 @@ end
 		end
 	!end
 
-	unqueue(state, ident)
+	moveToPipe(state, ident, !(PIPE_DONE))
 end
 
 !NODE_INFERRER `function nodeInferrers.AstType(state, typeNode)`
@@ -789,7 +790,7 @@ end
 	typeNode.inferredType    = typeInfo
 	typeNode.declaration     = decl
 
-	unqueue(state, typeNode)
+	moveToPipe(state, typeNode, !(PIPE_DONE))
 end
 
 !NODE_INFERRER `function nodeInferrers.AstCall(state, call)`
@@ -862,11 +863,12 @@ end
 	end
 
 	call.inferredType = getTypeInfoForList(state, effectiveCalleeTypeInfo.argumentTypesOut)
-	unqueue(state, call)
+
+	moveToPipe(state, call, !(PIPE_DONE))
 end
 
 !NODE_INFERRER `function nodeInferrers.AstDeclaration(state, decl)`
-	if decl.assignment and decl.assignment.queued.pipeLastExited < !(PIPE_INFER) then
+	if decl.assignment and decl.assignment.queued.pipe <= !(PIPE_INFER) then
 		!DEPEND_AND_RETURN(`decl`, DEPEND_NODE_INFERRED, `decl.assignment`)
 	end
 
@@ -889,8 +891,9 @@ end
 
 		if scopeIsDeclarative or decl.isConstant then
 			local valueExpr = getAssignmentValue(state, ident, decl.assignment.values, decl.assignmentIndex)
+			local isConst   = getLiteralValueFromExpressionIfConstant(state, valueExpr)
 
-			if not getLiteralValueFromExpressionIfConstant(state, valueExpr) then
+			if not isConst then
 				typeError(
 					state, astGetExpressionVisuallyFurthestToTheLeft(valueExpr),
 					"Value for declared %s '%s' is not a constant expression.%s",
@@ -902,7 +905,7 @@ end
 		end
 	end
 
-	unqueue(state, decl)
+	moveToPipe(state, decl, !(PIPE_BYTECODE))
 end
 
 -- !NODE_INFERRER `function nodeInferrers.AstVararg(state, vararg)`
@@ -974,7 +977,7 @@ end
 
 	local isConst, literalValue = getLiteralValueFromExpressionIfConstant(state, unary.expression)
 	if not isConst then
-		unqueue(state, unary)
+		moveToPipe(state, unary, !(PIPE_DONE))
 
 	!for _, opArithmetic in ipairs{"+","-"} do
 	elseif unary.operation == !(opArithmetic) then
@@ -988,8 +991,7 @@ end
 		literal.value        = !!(opArithmetic ~= "+" and opArithmetic or "") literalValue
 		literal.inferredType = typeInfo
 
-		unqueueChildrenRecursively(state, unary)
-		replaceQueuedNode(state, unary, literal)
+		replaceQueuedNodeAndUnqueueOldTree(state, unary, literal)
 		moveToPipe(state, literal, !(PIPE_BYTECODE))
 	!end
 
@@ -998,8 +1000,7 @@ end
 		literal.literalType  = !(LITERAL_BOOLEAN)
 		literal.value        = not literalValue
 		literal.inferredType = typeInfo
-		unqueueChildrenRecursively(state, unary)
-		replaceQueuedNode(state, unary, literal)
+		replaceQueuedNodeAndUnqueueOldTree(state, unary, literal)
 		moveToPipe(state, literal, !(PIPE_BYTECODE))
 
 	elseif unary.operation == "#" then
@@ -1108,7 +1109,7 @@ end
 	local isConstL, valueL = getLiteralValueFromExpressionIfConstant(state, binary.left)
 	local isConstR, valueR = getLiteralValueFromExpressionIfConstant(state, binary.right)
 	if not (isConstL and isConstR) then
-		unqueue(state, binary)
+		moveToPipe(state, binary, !(PIPE_DONE))
 
 	!for _, opArithmeticKeepType in ipairs{"+","-","*","^","%"} do
 	elseif binary.operation == !(opArithmeticKeepType) then
@@ -1122,8 +1123,7 @@ end
 		literal.value        = valueL !!(opArithmeticKeepType) valueR
 		literal.inferredType = typeInfo
 
-		unqueueChildrenRecursively(state, binary)
-		replaceQueuedNode(state, binary, literal)
+		replaceQueuedNodeAndUnqueueOldTree(state, binary, literal)
 		moveToPipe(state, literal, !(PIPE_BYTECODE))
 	!end
 
@@ -1132,8 +1132,7 @@ end
 		literal.literalType  = !(LITERAL_FLOAT)
 		literal.value        = valueL/valueR
 		literal.inferredType = typeInfo
-		unqueueChildrenRecursively(state, binary)
-		replaceQueuedNode(state, binary, literal)
+		replaceQueuedNodeAndUnqueueOldTree(state, binary, literal)
 		moveToPipe(state, literal, !(PIPE_BYTECODE))
 
 	elseif binary.operation == "//" then
@@ -1141,8 +1140,7 @@ end
 		literal.literalType  = !(LITERAL_INTEGER)
 		literal.value        = math.floor(valueL/valueR) -- Do we need to floor valueL and valueR before the division too?
 		literal.inferredType = typeInfo
-		unqueueChildrenRecursively(state, binary)
-		replaceQueuedNode(state, binary, literal)
+		replaceQueuedNodeAndUnqueueOldTree(state, binary, literal)
 		moveToPipe(state, literal, !(PIPE_BYTECODE))
 
 	!for _, opComparison in ipairs{"<",">","<=",">=","==","~=","and","or"} do
@@ -1151,8 +1149,7 @@ end
 		literal.literalType  = !(LITERAL_BOOLEAN)
 		literal.value        = valueL !!(opComparison) valueR
 		literal.inferredType = typeInfo
-		unqueueChildrenRecursively(state, binary)
-		replaceQueuedNode(state, binary, literal)
+		replaceQueuedNodeAndUnqueueOldTree(state, binary, literal)
 		moveToPipe(state, literal, !(PIPE_BYTECODE))
 	!end
 
@@ -1161,8 +1158,7 @@ end
 		literal.literalType  = !(LITERAL_BOOLEAN)
 		literal.value        = valueL..valueR -- @Speed: Concatinate more than two values at a time. (Probably need to update parsing stage.)
 		literal.inferredType = typeInfo
-		unqueueChildrenRecursively(state, binary)
-		replaceQueuedNode(state, binary, literal)
+		replaceQueuedNodeAndUnqueueOldTree(state, binary, literal)
 		moveToPipe(state, literal, !(PIPE_BYTECODE))
 
 	elseif binary.operation == "." then
@@ -1183,27 +1179,26 @@ end
 -- end
 
 !NODE_INFERRER `function nodeInferrers.AstArgument(state, arg)`
-	if arg.declaration.queued.pipeLastExited < !(PIPE_INFER) then
+	if arg.declaration.queued.pipe <= !(PIPE_INFER) then
 		!DEPEND_AND_RETURN(`arg`, DEPEND_NODE_INFERRED, `arg.declaration`)
 	end
-	unqueue(state, arg)
+	moveToPipe(state, arg, !(PIPE_DONE))
 end
 
 !NODE_INFERRER `function nodeInferrers.AstArguments(state, args)`
 	for _, arg in ipairs(args) do
-		if arg.queued.pipeLastExited < !(PIPE_INFER) then
+		if arg.queued.pipe <= !(PIPE_INFER) then
 			!DEPEND_AND_RETURN(`args`, DEPEND_NODE_INFERRED, `arg`)
 		end
 	end
-
-	unqueue(state, args)
+	moveToPipe(state, args, !(PIPE_DONE))
 end
 
 !NODE_INFERRER `function nodeInferrers.AstLambda(state, lambda)`
-	if lambda.argumentsIn and lambda.argumentsIn.queued.pipeLastExited < !(PIPE_INFER) then
+	if lambda.argumentsIn and lambda.argumentsIn.queued.pipe <= !(PIPE_INFER) then
 		!DEPEND_AND_RETURN(`lambda`, DEPEND_NODE_INFERRED, `lambda.argumentsIn`)
 	end
-	if lambda.argumentsOut and lambda.argumentsOut.queued.pipeLastExited < !(PIPE_INFER) then
+	if lambda.argumentsOut and lambda.argumentsOut.queued.pipe <= !(PIPE_INFER) then
 		!DEPEND_AND_RETURN(`lambda`, DEPEND_NODE_INFERRED, `lambda.argumentsOut`)
 	end
 
@@ -1214,7 +1209,7 @@ end
 	if lambda.body then
 		moveToNextPipe(state, lambda, !(PIPE_BYTECODE))
 	else
-		unqueue(state, lambda)
+		moveToPipe(state, lambda, !(PIPE_DONE))
 	end
 end
 
@@ -1227,8 +1222,9 @@ end
 	end
 
 	typeOf.inferredType = getTypeInfoForBuiltinType(state, "type")
-	unqueue(state, typeOf)
-	simplifyTypeExpression(state, typeOf, typeOf.expression.inferredType)
+
+	moveToPipe(state, typeOf, !(PIPE_DONE))
+	simplifyTypeExpression(state, typeOf, typeOf.expression.inferredType) -- @Check: Are we in the right pipe after simplification?
 end
 
 !NODE_INFERRER `function nodeInferrers.AstCast(state, cast)`
@@ -1265,16 +1261,16 @@ end
 	end
 
 	cast.inferredType = castTypeInfo
-	unqueue(state, cast)
+
+	moveToPipe(state, cast, !(PIPE_DONE))
 	-- @Incomplete: Simplify casted constants.
 end
 
 !NODE_INFERRER `function nodeInferrers.AstStatement(state, statement)`
-	if statement.what.queued.pipeLastExited < !(PIPE_INFER) then
+	if statement.what.queued.pipe <= !(PIPE_INFER) then
 		!DEPEND_AND_RETURN(`statement`, DEPEND_NODE_INFERRED, `statement.what`)
 	end
-
-	unqueue(state, statement)
+	moveToPipe(state, statement, !(PIPE_DONE))
 end
 
 !NODE_INFERRER `function nodeInferrers.AstAssignment(state, assignment)`
@@ -1296,7 +1292,7 @@ end
 
 	-- @Incomplete: Check that !must args from functions have an assignment target.
 
-	unqueue(state, assignment)
+	moveToPipe(state, assignment, !(PIPE_DONE))
 end
 
 !NODE_INFERRER `function nodeInferrers.AstReturn(state, returnNode)`
@@ -1405,7 +1401,7 @@ end
 		end
 	end
 
-	unqueue(state, returnNode)
+	moveToPipe(state, returnNode, !(PIPE_DONE))
 end
 
 -- !NODE_INFERRER `function nodeInferrers.AstBreak(state, breakNode)`
@@ -1450,8 +1446,7 @@ end
 	import.fileScope    = itemWith1(globalScope.fileScopes, "path", path) or errorInternal(path)
 	import.inferredType = getTypeInfoForBuiltinType(state, "namespace")
 
-	unqueue(state, import)
-	-- moveToNextPipe(state, import, !(PIPE_BYTECODE))
+	moveToPipe(state, import, !(PIPE_DONE))
 end
 
 -- !NODE_INFERRER `function nodeInferrers.AstIf(state, ifBranch)`
@@ -1473,7 +1468,7 @@ end
 
 !NODE_INFERRER `function nodeInferrers.AstStruct(state, struct)`
 	for _, statement in ipairs(struct) do
-		if statement.queued.pipeLastExited < !(PIPE_INFER) then
+		if statement.queued.pipe <= !(PIPE_INFER) then
 			!DEPEND_AND_RETURN(`struct`, DEPEND_NODE_INFERRED, `statement`)
 		end
 	end
@@ -1494,13 +1489,13 @@ end
 	struct.representedType = structInfo
 	struct.inferredType    = getTypeInfoForBuiltinType(state, "type")
 
-	unqueue(state, struct) -- @Temp until struct bodies are decoupled from the "header".
+	moveToPipe(state, struct, !(PIPE_DONE)) -- @Temp until struct bodies are decoupled from the "header".
 	-- moveToNextPipe(state, struct, !(PIPE_BYTECODE))
 end
 
 !NODE_INFERRER `function nodeInferrers.AstEnum(state, enum)`
 	for _, statement in ipairs(enum) do
-		if statement.queued.pipeLastExited < !(PIPE_INFER) then
+		if statement.queued.pipe <= !(PIPE_INFER) then
 			!DEPEND_AND_RETURN(`enum`, DEPEND_NODE_INFERRED, `statement`)
 		end
 	end
@@ -1551,43 +1546,43 @@ end
 	enum.representedType = enumInfo
 	enum.inferredType    = getTypeInfoForBuiltinType(state, "type")
 
-	unqueue(state, enum) -- @Temp until enum bodies are decoupled from the "header" (right?).
+	moveToPipe(state, enum, !(PIPE_DONE)) -- @Temp until enum bodies are decoupled from the "header" (right?).
 	-- moveToNextPipe(state, enum, !(PIPE_BYTECODE))
 end
 
 !NODE_INFERRER `function nodeInferrers.AstFileScope(state, fileScope)`
 	for _, statement in ipairs(fileScope) do
-		if statement.queued.pipeLastExited < !(PIPE_INFER) then
+		if statement.queued.pipe <= !(PIPE_INFER) then
 			!DEPEND_AND_RETURN(`fileScope`, DEPEND_NODE_INFERRED, `statement`)
 		end
 	end
 
 	-- @Incomplete: fileScope.imports[]
 
-	moveToNextPipe(state, fileScope, !(PIPE_BYTECODE))
+	moveToPipe(state, fileScope, !(PIPE_DONE))
+	-- moveToNextPipe(state, fileScope, !(PIPE_BYTECODE))
 end
 
 !NODE_INFERRER `function nodeInferrers.AstGlobalScope(state, globalScope)`
 	for _, statement in ipairs(globalScope) do
-		if statement.queued.pipeLastExited < !(PIPE_INFER) then
+		if statement.queued.pipe <= !(PIPE_INFER) then
 			!DEPEND_AND_RETURN(`globalScope`, DEPEND_NODE_INFERRED, `statement`)
 		end
 	end
 
 	-- @Incomplete: globalScope.imports[] (if we're going to allow global imports)
 
-	moveToNextPipe(state, globalScope, !(PIPE_BYTECODE))
+	moveToPipe(state, globalScope, !(PIPE_DONE))
+	-- moveToNextPipe(state, globalScope, !(PIPE_BYTECODE))
 end
 
 !NODE_INFERRER `function nodeInferrers.AstBlock(state, block)`
 	for _, statement in ipairs(block) do
-		if statement.queued.pipeLastExited < !(PIPE_INFER) then
+		if statement.queued.pipe <= !(PIPE_INFER) then
 			!DEPEND_AND_RETURN(`block`, DEPEND_NODE_INFERRED, `statement`)
 		end
 	end
-
-	unqueue(state, block) -- OK? AstBlocks are always part of AstLambdas, which are still in the queue.
-	-- moveToNextPipe(state, block, !(PIPE_BYTECODE))
+	moveToPipe(state, block, !(PIPE_DONE))
 end
 
 function _G.inferNode(state, node)
@@ -1788,7 +1783,6 @@ function _G.simplifyTypeExpression(state, expr, typeInfoRepresented)
 	local typeNode            = astNewNode(AstType, expr.token, expr.parent)
 	local isBuiltin, typeName = isTypeBuiltin(typeInfoRepresented)
 
-	typeNode.token           = expr.token
 	typeNode.isUserType      = not isBuiltin
 	typeNode.inferredType    = typeInfo
 	typeNode.representedType = typeInfoRepresented
@@ -1803,16 +1797,12 @@ function _G.simplifyTypeExpression(state, expr, typeInfoRepresented)
 			local lambda = getAssignmentValue(state, decl.name, decl.assignment.values, decl.assignmentIndex)
 			assert(lambda.nodeType == !(nodeTypes.AstLambda))
 			assert(not lambda.body)
-
-			-- @Robustness: We should really copy the lambda here.
-			-- Right now this lambda will be referenced in two or more places.
-			typeNode.functionSignature = lambda
-
+			typeNode.functionSignature = astCopy(lambda) -- Do we need to update the location info of the lambda to where typeNode/expr is?
 		else
 			local funcSig              = typeInfoRepresented
 			typeNode.functionSignature = createLambdaFromSignature(state, funcSig, typeNode)
-			addUnqueuedChildrenToQueueRecursively(state, typeNode, !(PIPE_BYTECODE)) -- Needed? I think so.
 		end
+		addUnqueuedChildrenToQueueRecursively(state, typeNode, !(PIPE_BYTECODE)) -- Needed? I think so.
 
 	elseif typeInfoRepresented.tag == !(typeTags.TypeInfoStruct) then
 		local structInfo  = typeInfoRepresented
@@ -1826,8 +1816,7 @@ function _G.simplifyTypeExpression(state, expr, typeInfoRepresented)
 		errorInternal("Incomplete: Handle type tag '%s'.", TYPE_TAG_NAMES[typeInfoRepresented.tag])
 	end
 
-	unqueueChildrenRecursively(state, expr)
-	replaceQueuedNode(state, expr, typeNode)
+	replaceQueuedNodeAndUnqueueOldTree(state, expr, typeNode)
 end
 
 function _G.simplifyExpressionIfConstant(state, expr)
@@ -1859,8 +1848,16 @@ function _G.simplifyExpressionIfConstant(state, expr)
 	local copy = astCopy(valueExpr)
 	copy.token = expr.token
 
-	replaceQueuedNode(state, expr, copy)
+	replaceQueuedNodeAndUnqueueOldTree(state, expr, copy)
 	moveToPipe(state, copy, !(PIPE_BYTECODE))
+end
+
+
+
+-- Values of simple types are non-objects (e.g. ints) in the outputted Lua code.
+-- Note: Glóa types are represented as ints in Lua.
+function _G.isTypeSimple(typeInfo)
+	return isAny(typeInfo.tag, !(typeTags.TypeInfoBool),!(typeTags.TypeInfoInt),!(typeTags.TypeInfoNil),!(typeTags.TypeInfoFloat),!(typeTags.TypeInfoString),!(typeTags.TypeInfoType))
 end
 
 

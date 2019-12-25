@@ -10,7 +10,7 @@
 --==============================================================
 
 	addDependency
-	addToQueue, addToQueueRecursively, unqueue, unqueueChildrenRecursively, replaceQueuedNode
+	addToQueue, addToQueueRecursively, unqueue, unqueueChildrenRecursively, replaceQueuedNode, replaceQueuedNodeAndUnqueueOldTree
 	errorPipesAreStuck
 	moveToPipe, moveToNextPipe, moveTreeToNextPipe
 
@@ -28,17 +28,30 @@ local !struct"Dependency"{ -- @Cleanup: Rename to something with "wait"?
 -- addDependency( state, dependent, DEPEND_NODE_INFERRED, astNode )
 -- addDependency( state, dependent, DEPEND_NODE_EMITTED,  astNode )
 function _G.addDependency(state, dependent, dependType, dependOn)
-	assert(not dependent.queued.waitingOn)
+	local dependency = dependent.queued.waitingOn
+
+	if dependency then
+		printTraceback(io.stderr, 2)
+		printerr()
+
+		astPrint(dependent)
+		nodeMessage(io.stderr, state, dependent, "Error", "Pipes", "Internal compiler error: Dependent already waiting for something.")
+
+		if isAny(dependency.dependType, !(DEPEND_NODE_INFERRED),!(DEPEND_NODE_EMITTED)) then
+			astPrint(dependency.dependOn.node)
+			nodeMessage(io.stderr, state, dependency.dependOn.node, "Info", "Pipes", "...it's waiting on this.")
+		end
+
+		exitFailure()
+	end
 
 	!if DEBUG then
 		if dependType == !(DEPEND_DECLARATION) then
 			assert(type(dependOn) == "string")
-		elseif dependType == !(DEPEND_NODE_INFERRED) then
-			assert(type(dependOn) == "table")
-		elseif dependType == !(DEPEND_NODE_EMITTED) then
+		elseif isAny(dependType, !(DEPEND_NODE_INFERRED),!(DEPEND_NODE_EMITTED)) then
 			assert(type(dependOn) == "table")
 		else
-			error(dependType)
+			errorInternal("%d", dependType)
 		end
 	!end
 
@@ -47,7 +60,7 @@ function _G.addDependency(state, dependent, dependType, dependOn)
 		dependOn = dependOn.queued
 	end
 
-	local dependency      = Dependency()
+	dependency            = Dependency()
 	dependency.dependent  = dependent.queued
 	dependency.dependType = dependType
 	dependency.dependOn   = dependOn
@@ -57,10 +70,13 @@ function _G.addDependency(state, dependent, dependType, dependOn)
 	if itemWith3(state.dependencies, "dependent",dependency.dependent, "dependType",dependency.dependType, "dependOn",dependency.dependOn) then
 		printTraceback(io.stderr, 2)
 		printerr()
-		typeMessage(io.stderr, state, dependent, "Error", "Internal compiler error: Trying to add dependency twice.")
+
+		nodeMessage(io.stderr, state, dependent, "Error", "Pipes", "Internal compiler error: Trying to add dependency twice.")
+
 		if isAny(dependType, !(DEPEND_NODE_INFERRED),!(DEPEND_NODE_EMITTED)) then
-			typeMessage(io.stderr, state, dependOn.node, "Info", "...depending on this.")
+			nodeMessage(io.stderr, state, dependOn.node, "Info", "Pipes", "...depending on this.")
 		end
+
 		exitFailure()
 	end
 
@@ -90,26 +106,26 @@ end
 
 
 local !struct"Queued"{
-	node           = NIL, -- AstNode
-	container      = NIL,
-	key            = NIL,
-	pipe           = PIPE_NONE,
-	pipeLastExited = PIPE_NONE, -- @Cleanup: Rename to pipeHighestExited
-	waitingOn      = NIL, -- Dependency
-	unqueued       = false,
+	node              = NIL, -- AstNode
+	container         = NIL,
+	key               = NIL,
+	pipe              = PIPE_NONE,
+	pipeHighestExited = PIPE_NONE,
+	waitingOn         = NIL, -- Dependency
+	unqueued          = false,
 }
 
--- addToQueue( state, node, container=nil, key=nil, pipe [, pipeLastExited=pipe-1 ] )
-function _G.addToQueue(state, node, container, key, pipe, pipeLastExited)
+-- addToQueue( state, node, container=nil, key=nil, pipe [, pipeHighestExited=pipe-1 ] )
+function _G.addToQueue(state, node, container, key, pipe, pipeHighestExited)
 	-- astPrint(node)
 	!ASSERT `not node.queued`
 
-	local queued          = Queued()
-	queued.node           = node
-	queued.container      = container
-	queued.key            = key
-	queued.pipe           = pipe
-	queued.pipeLastExited = math.max(pipeLastExited or pipe-1, !(PIPE_NONE))
+	local queued     = Queued()
+	queued.node      = node
+	queued.container = container
+	queued.key       = key
+	queued.pipe      = pipe
+	queued.pipeHighestExited = math.max(pipeHighestExited or pipe-1, !(PIPE_NONE))
 
 	node.queued = queued
 	table.insert(state.queue, queued)
@@ -147,13 +163,6 @@ function _G.addUnqueuedChildrenToQueueRecursively(state, topNode, pipe)
 	end)
 end
 
-function _G.unqueue(state, node)
-	local queued          = node.queued
-	queued.pipeLastExited = math.max(queued.pipeLastExited, queued.pipe)
-	queued.pipe           = !(PIPE_NONE)
-	queued.unqueued       = true
-end
-
 function _G.unqueueChildrenRecursively(state, topNode)
 	astVisitAllNodes(topNode, function(node)
 		if node ~= topNode then
@@ -162,7 +171,8 @@ function _G.unqueueChildrenRecursively(state, topNode)
 	end)
 end
 
--- Note: nodeOld doesn't have to be queued right now - it just needs a Queued. (Sometimes we just want to make use of queued.container/key. @Cleanup)
+-- Note: nodeOld doesn't have to be queued right now - it just needs a Queued object reference.
+-- (@Cleanup: Sometimes we just want to make use of queued.container/key.)
 function _G.replaceQueuedNode(state, nodeOld, nodeNew)
 	assert(not nodeNew.queued)
 
@@ -188,12 +198,17 @@ function _G.replaceQueuedNode(state, nodeOld, nodeNew)
 	!end
 end
 
+function _G.replaceQueuedNodeAndUnqueueOldTree(state, nodeOld, nodeNew)
+	unqueueChildrenRecursively(state, nodeOld)
+	replaceQueuedNode(state, nodeOld, nodeNew)
+end
+
 
 
 function _G.moveToPipe(state, node, targetPipe)
-	local queued          = node.queued
-	queued.pipeLastExited = math.max(queued.pipeLastExited, queued.pipe)
-	queued.pipe           = targetPipe
+	local queued             = node.queued
+	queued.pipeHighestExited = math.max(queued.pipeHighestExited, queued.pipe)
+	queued.pipe              = targetPipe
 end
 
 function _G.moveToNextPipe(state, node, targetPipe)
@@ -208,8 +223,8 @@ function _G.moveToNextPipe(state, node, targetPipe)
 		)
 	end
 
-	queued.pipeLastExited = math.max(queued.pipeLastExited, queued.pipe)
-	queued.pipe           = targetPipe
+	queued.pipeHighestExited = math.max(queued.pipeHighestExited, queued.pipe)
+	queued.pipe              = targetPipe
 end
 
 function _G.moveTreeToNextPipe(state, topNode, targetPipe)
