@@ -1714,11 +1714,9 @@ end
 
 
 
--- expression = parseExpression( compilationState, parentNode [, minOperatorPrecedence, expectLeftValue=false ] )
-function _G.parseExpression(state, parentNode, minOpPrecedence, expectLeftValue)
-	-- @Robustness: Check that parents are set correctly everywhere in here.
-
-	minOpPrecedence = minOpPrecedence or 0
+-- expression = parseExpression( compilationState, parentNode [, previousOperatorPrecedence, expectLeftValue=false ] )
+function _G.parseExpression(state, parentNode, prevOpPrecedence, expectLeftValue)
+	prevOpPrecedence = prevOpPrecedence or 0
 
 	local tokType,  tokValue, exprStartToken = consumeNextToken(state)
 	local tokType2, tokValue2                = peekNextToken(state, 1)
@@ -1944,14 +1942,13 @@ function _G.parseExpression(state, parentNode, minOpPrecedence, expectLeftValue)
 		if not tokType then
 			break
 
-		-- Arithmetic opration, comparison or string concatination.
-		-- @Incomplete: Combine string concatinations in some way?
-		elseif (
-			isToken(tokType,tokValue, !(TOKEN_KEYWORD),"and","or")
-			or isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),
-				"+","-","*","/","//","^","%","<",">","<=",">=","==","~=",".."
-			)
-		) and OPERATOR_PRECEDENCE[tokValue] >= minOpPrecedence then
+		-- Left-associative operations.
+		elseif
+			(
+				isToken(tokType,tokValue, !(TOKEN_KEYWORD),"and","or")
+				or isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"+","-","*","/","//","%","<",">","<=",">=","==","~=")
+			) and OPERATOR_PRECEDENCE[tokValue] > prevOpPrecedence
+		then
 			consumeNextToken(state)
 
 			local binOp                 = astNewNode(AstBinary, token, parentNode)
@@ -1961,10 +1958,25 @@ function _G.parseExpression(state, parentNode, minOpPrecedence, expectLeftValue)
 			expr.parent                 = binOp
 			expr                        = binOp
 
+		-- Right-associative operations.
+		-- @Incomplete: Combine string concatinations in some way?
+		elseif
+			isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"^","..")
+			and OPERATOR_PRECEDENCE[tokValue] > prevOpPrecedence
+		then
+			consumeNextToken(state)
+
+			local binOp                 = astNewNode(AstBinary, token, parentNode)
+			binOp.operation             = tokValue
+			binOp.left                  = expr
+			!SET_OR_RETURN `binOp.right = parseExpression(state, binOp, OPERATOR_PRECEDENCE[tokValue]-1)` -- The -1 makes this right-associative.
+			expr.parent                 = binOp
+			expr                        = binOp
+
 		-- Table lookup or similar using '.'.
 		elseif
 			isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),".")
-			and OPERATOR_PRECEDENCE["."] > minOpPrecedence -- Note: Not using >= here.
+			and OPERATOR_PRECEDENCE["."] > prevOpPrecedence
 		then
 			consumeNextToken(state)
 
@@ -1991,7 +2003,7 @@ function _G.parseExpression(state, parentNode, minOpPrecedence, expectLeftValue)
 		-- Table lookup or similar using '['.
 		elseif
 			isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"[")
-			and OPERATOR_PRECEDENCE["."] > minOpPrecedence -- Note: Not using >= here.
+			and OPERATOR_PRECEDENCE["."] > prevOpPrecedence
 		then
 			consumeNextToken(state)
 
@@ -2011,7 +2023,7 @@ function _G.parseExpression(state, parentNode, minOpPrecedence, expectLeftValue)
 		-- Function call.
 		elseif
 			isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"(")
-			and OPERATOR_PRECEDENCE.call >= minOpPrecedence
+			and OPERATOR_PRECEDENCE.call > prevOpPrecedence
 		then
 			!SET_OR_RETURN `expr = parseCall(state, parentNode, false, expr, false)`
 
@@ -2021,7 +2033,7 @@ function _G.parseExpression(state, parentNode, minOpPrecedence, expectLeftValue)
 				isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"!")
 				and isToken(tokType2,tokValue2, !(TOKEN_PUNCTUATION),"(")
 			)
-			and OPERATOR_PRECEDENCE.call >= minOpPrecedence
+			and OPERATOR_PRECEDENCE.call > prevOpPrecedence
 		then
 			tokType, tokValue = peekLastToken(state)
 

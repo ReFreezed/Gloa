@@ -76,6 +76,14 @@ function _G.writeExpression(state, file, expr)
 	elseif expr.nodeType == !(nodeTypes.AstType) then
 		local typeNode = expr
 		file:write(F("%d", typeNode.representedType.id)) -- @Cleanup: We probably have a constant for the type ID to use with writeConstantValue() here, but who cares...
+		if state.settings.outputDebugInfo then
+			file:write("--[[", getFriendlyTypeInfoName(typeNode.representedType):gsub("%]", "%0 "), "]]")
+		end
+
+	elseif expr.nodeType == !(nodeTypes.AstLambda) then
+		local lambda   = expr
+		local constant = itemWith1(state.constants, "valueType", lambda.inferredType) or errorInternal()
+		writeConstantValueOrReference(state, file, constant)
 
 	else
 		errorUnhandledNodeType(expr)
@@ -87,10 +95,13 @@ function _G.writeImperativeBlock(state, file, block, indent, nextLocalN)
 	indent     = indent     or 1
 	nextLocalN = nextLocalN or 1
 
-	local indentStr = ("\t"):rep(indent)
+	local outputDebugInfo = state.settings.outputDebugInfo
+	local indentStr       = ("\t"):rep(indent)
 
 	if not block[1] then
-		file:write(indentStr, "-- Empty block.\n")
+		if state.settings.outputDebugInfo then
+			file:write(indentStr, "-- Empty block.\n")
+		end
 		return
 	end
 
@@ -104,7 +115,7 @@ function _G.writeImperativeBlock(state, file, block, indent, nextLocalN)
 				skipNextAssignment = true
 
 			else
-				decl.localName = "L"..nextLocalN.."_"..decl.name.name
+				decl.localName = outputDebugInfo and "L"..nextLocalN.."_"..decl.name.name or "L"..nextLocalN
 				nextLocalN     = nextLocalN+1
 
 				if decl.assignment then
@@ -198,7 +209,7 @@ function _G.writeFunction(state, file, lambda)
 			if i > 1 then  file:write(", ")  end
 
 			local decl     = arg.declaration
-			decl.localName = "A"..i.."_"..decl.name.name
+			decl.localName = state.settings.outputDebugInfo and "A"..i.."_"..decl.name.name or "A"..i
 
 			file:write(decl.localName)
 		end
@@ -208,7 +219,7 @@ function _G.writeFunction(state, file, lambda)
 
 	if lambda.body[1] then
 		writeImperativeBlock(state, file, lambda.body)
-	else
+	elseif state.settings.outputDebugInfo then
 		file:write("\t-- Empty function.\n")
 	end
 
@@ -238,6 +249,9 @@ function _G.writeConstantValue(state, file, const)
 	elseif tag == !(typeTags.TypeInfoType) then
 		local typeInfo = const.value
 		file:write(F("%d", typeInfo.id))
+		if state.settings.outputDebugInfo then
+			file:write("--[[", getFriendlyTypeInfoName(typeInfo):gsub("%]", "%0 "), "]]")
+		end
 
 	elseif tag == !(typeTags.TypeInfoTable) then
 		errorInternal("@Incomplete: Write table.")

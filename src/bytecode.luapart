@@ -273,7 +273,7 @@ function _G.bcAllocateConstantValueForExpressionIfNew(state, expr, dependent)
 
 	elseif expr.nodeType == !(nodeTypes.AstLambda) then
 		local lambda = expr
-		assert(lambda.body) -- We should never get here for lambdas with bodies, I don't think.
+		assert(lambda.body) -- We should never get here for lambdas without bodies as those would have been AstTypes.
 
 		return bcAllocateConstantValueIfNew(state, typeInfo, lambda)
 
@@ -283,7 +283,7 @@ function _G.bcAllocateConstantValueForExpressionIfNew(state, expr, dependent)
 		-- @Incomplete: Wait for statements to get inferred (when we got struct self-referencing working).
 
 		local const, isNew = bcAllocateConstantValueIfNew(state, typeInfo, struct)
-		if isNew then
+		if isNew and state.settings.outputDebugInfo then
 			const.name         = const.name.."_"..struct.name
 			const.nameTampered = true
 		end
@@ -310,8 +310,11 @@ function _G.bcAllocateConstantValueForExpressionIfNew(state, expr, dependent)
 end
 
 function _G.bcAllocateTopScopeNames(state, name)
-	local i                = #state.topScopeNames+1
-	local topScopeName     = "G"..i.."_"..name:gsub("[^%w_]+", "_") -- @Incomplete: Handle Unicode characters better. @Incomplete: Handle Unicode characters everywhere.
+	local i = #state.topScopeNames+1
+
+	-- @Incomplete: Handle Unicode characters better. @Incomplete: Handle Unicode characters everywhere.
+	local topScopeName = state.settings.outputDebugInfo and "G"..i.."_"..name:gsub("[^%w_]+", "_") or "G"..i
+
 	state.topScopeNames[i] = topScopeName
 	return topScopeName
 end
@@ -319,6 +322,8 @@ end
 
 
 function _G.bcEmitForLambda(state, lambda)
+	bcAllocateConstantValueIfNew(state, lambda.inferredType, lambda)
+
 	-- @Incomplete
 	-- @Incomplete
 	-- @Incomplete
@@ -351,7 +356,7 @@ function _G.bcEmitForDeclaration(state, decl)
 		decl.valueConstant = const
 
 		if decl.isConstant then
-			if not const.nameTampered then
+			if not const.nameTampered and state.settings.outputDebugInfo then
 				const.name         = const.name.."_"..decl.name.name
 				const.nameTampered = true
 			end

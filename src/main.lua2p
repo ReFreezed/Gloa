@@ -41,6 +41,7 @@ do !(do) @insert "programWriter.luapart" !(end) end
 local pathsToCompile    = {}
 local disableGc         = false
 local silent            = false
+local outputDebugInfo   = false
 
 !if DEBUG then
 _G.debug_onlyParse      = false
@@ -89,6 +90,10 @@ do
 
 		elseif arg == "--silent" then
 			silent = true
+			i = i+1
+
+		elseif arg == "--debug" then
+			outputDebugInfo = true
 			i = i+1
 
 		!if DEBUG then
@@ -142,8 +147,9 @@ end
 
 
 local !struct"CompilationSettings"{
-	doOutputFile   = true,
-	outputFilePath = "",
+	doOutputFile    = true,
+	outputFilePath  = "",
+	outputDebugInfo = false,
 }
 
 local !struct"CompilationState"{
@@ -169,9 +175,12 @@ local !struct"CompilationState"{
 	bytecodes     = {},    -- Code for the interpreter to run.
 }
 
+local settings           = CompilationSettings()
+settings.outputDebugInfo = outputDebugInfo
+
 local state    = CompilationState()
-state.settings = CompilationSettings()
 state.tokens   = Tokens()
+state.settings = settings
 
 
 
@@ -395,7 +404,11 @@ local timeEndPipes = os.clock()
 assert(state.settings.outputFilePath ~= thePath)
 
 local timeStartOutput = os.clock()
-writeProgram(state)
+
+!ifDEBUG`if not (debug_onlyParse or debug_onlyInferTypes) then`
+	writeProgram(state)
+!ifDEBUG`end`
+
 local timeEndOutput = os.clock()
 
 
