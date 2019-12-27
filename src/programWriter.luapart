@@ -9,6 +9,7 @@
 --=
 --==============================================================
 
+	unicodeToLuaIdentifier
 	writeProgram, write*
 
 --============================================================]]
@@ -28,7 +29,7 @@ function _G.writeIdentifierName(state, file, ident)
 	file:write(name)
 end
 
-function _G.writeExpression(state, file, expr)
+function _G.writeExpression(state, file, expr, indent, nextLocalN)
 	if expr.nodeType == !(nodeTypes.AstCall) then
 		local call   = expr
 		local callee = call.callee
@@ -39,13 +40,13 @@ function _G.writeExpression(state, file, expr)
 			assert(callee.declaration.valueConstant)
 			writeConstantValueOrReference(state, file, callee.declaration.valueConstant)
 		else
-			writeExpression(state, file, callee)
+			writeExpression(state, file, callee, indent, nextLocalN)
 		end
 
 		file:write("(")
 		for i, argExpr in ipairs(call.arguments) do
 			if i > 1 then  file:write(", ")  end
-			writeExpression(state, file, argExpr)
+			writeExpression(state, file, argExpr, indent, nextLocalN)
 		end
 		file:write(")")
 
@@ -54,15 +55,15 @@ function _G.writeExpression(state, file, expr)
 	elseif expr.nodeType == !(nodeTypes.AstUnary) then
 		local unary = expr
 		file:write("(", unary.operation)
-		writeExpression(state, file, unary.expression)
+		writeExpression(state, file, unary.expression, indent, nextLocalN)
 		file:write(")")
 
 	elseif expr.nodeType == !(nodeTypes.AstBinary) then
 		local binary = expr
 		file:write("(")
-		writeExpression(state, file, binary.left)
+		writeExpression(state, file, binary.left, indent, nextLocalN)
 		file:write(" ", binary.operation, " ")
-		writeExpression(state, file, binary.right)
+		writeExpression(state, file, binary.right, indent, nextLocalN)
 		file:write(")")
 
 	elseif expr.nodeType == !(nodeTypes.AstLiteral) then
@@ -85,16 +86,20 @@ function _G.writeExpression(state, file, expr)
 		local constant = itemWith1(state.constants, "valueType", lambda.inferredType) or errorInternal()
 		writeConstantValueOrReference(state, file, constant)
 
+	elseif expr.nodeType == !(nodeTypes.AstBlock) then
+		local block     = expr
+		local indentStr = ("\t"):rep(indent)
+		file:write("do\n")
+		writeImperativeBlock(state, file, block, indent+1, nextLocalN)
+		file:write(indentStr, "end")
+
 	else
 		errorUnhandledNodeType(expr)
 	end
 end
 
--- writeImperativeBlock( state, file, block [, indentation=1, nextLocalNumber=1 ] )
+-- writeImperativeBlock( state, file, block, indentation, nextLocalNumber )
 function _G.writeImperativeBlock(state, file, block, indent, nextLocalN)
-	indent     = indent     or 1
-	nextLocalN = nextLocalN or 1
-
 	local outputDebugInfo = state.settings.outputDebugInfo
 	local indentStr       = ("\t"):rep(indent)
 
@@ -115,7 +120,7 @@ function _G.writeImperativeBlock(state, file, block, indent, nextLocalN)
 				skipNextAssignment = true
 
 			else
-				decl.localName = outputDebugInfo and "L"..nextLocalN.."_"..decl.name.name or "L"..nextLocalN
+				decl.localName = outputDebugInfo and "L"..nextLocalN.."_"..unicodeToLuaIdentifier(decl.name.name) or "L"..nextLocalN
 				nextLocalN     = nextLocalN+1
 
 				if decl.assignment then
@@ -171,7 +176,7 @@ function _G.writeImperativeBlock(state, file, block, indent, nextLocalN)
 				file:write(" ", assignment.operation, " ")
 				for i, expr in ipairs(assignment.values) do
 					if i > 1 then  file:write(", ")  end
-					writeExpression(state, file, expr)
+					writeExpression(state, file, expr, indent, nextLocalN)
 				end
 				file:write("\n")
 			end
@@ -186,14 +191,17 @@ function _G.writeImperativeBlock(state, file, block, indent, nextLocalN)
 			for i, expr in ipairs(returnNode.values) do
 				if i > 1 then  file:write(",")  end
 				file:write(" ")
-				writeExpression(state, file, expr)
+				writeExpression(state, file, expr, indent, nextLocalN)
 			end
 			file:write("\n")
+
+		elseif nodeType == !(nodeTypes.AstImport) then
+			-- void  (Ignore import statements.)
 
 		else
 			-- Assume the statement is an expression at this point and let writeExpression() deal with any errors.
 			file:write(indentStr)
-			writeExpression(state, file, statement.what)
+			writeExpression(state, file, statement.what, indent, nextLocalN)
 			file:write("\n")
 		end
 	end
@@ -209,7 +217,7 @@ function _G.writeFunction(state, file, lambda)
 			if i > 1 then  file:write(", ")  end
 
 			local decl     = arg.declaration
-			decl.localName = state.settings.outputDebugInfo and "A"..i.."_"..decl.name.name or "A"..i
+			decl.localName = state.settings.outputDebugInfo and "A"..i.."_"..unicodeToLuaIdentifier(decl.name.name) or "A"..i
 
 			file:write(decl.localName)
 		end
@@ -218,7 +226,7 @@ function _G.writeFunction(state, file, lambda)
 	file:write(")\n")
 
 	if lambda.body[1] then
-		writeImperativeBlock(state, file, lambda.body)
+		writeImperativeBlock(state, file, lambda.body, 1, 1)
 	elseif state.settings.outputDebugInfo then
 		file:write("\t-- Empty function.\n")
 	end
@@ -403,6 +411,17 @@ function _G.writeProgram(state)
 	file:write("()\n")
 
 	file:close()
+end
+
+
+
+local UNICODE_TO_ASCII = @insert "unicodeConversions.luapart"
+
+function _G.unicodeToLuaIdentifier(name)
+	name = name:gsub(!(UTF8_CHARACTER_PATTERN), function(c)
+		return (#c == 1 and c) or UNICODE_TO_ASCII[c] or "_"
+	end)
+	return name
 end
 
 
