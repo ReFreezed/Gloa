@@ -288,7 +288,14 @@ function _G.findDeclaration(state, startNode, name, declToIgnore)
 			end
 		end
 
-		--[[ @Incomplete: Look in imports.
+		-- @Speed: Don't re-check already checked declarations. (Any potential speed-up may be neglectable though. Need to test with a bigger program.)
+		for _, decl in ipairs(scope.declarationsInTree[name] or EMPTY_TABLE) do
+			if decl ~= declToIgnore and isDeclarationVisibleToNode(decl, startNode) then
+				return decl
+			end
+		end
+
+		--[[ @Incomplete: Look through the scope's imports.
 		for _, import in ipairs(scope.imports) do
 			if import.fileScope then
 				for _, decl in ipairs(import.fileScope.declarations) do
@@ -300,7 +307,7 @@ function _G.findDeclaration(state, startNode, name, declToIgnore)
 		end
 		--]]
 
-		-- @Incomplete: Look through usings for the scope.
+		-- @Incomplete: Look through the scope's usings.
 	end
 
 	return nil
@@ -310,37 +317,44 @@ function _G.isDeclarationVisibleToNode(decl, node)
 	if decl.isGlobalOrExported then  return true  end
 
 	local nodeScope, nodeScopeChild = getClosestScope(node)
-	local canSeeImperativeVariables = not decl.isConstant
+	local canSeeImperativeVariables = not decl.isConstant -- It doesn't matter if this is true and we're in a declarative scope because we check that in the loop below.
 
 	while true do
-		if isScopeDeclarative(nodeScope) then
-			if indexOf(nodeScope.declarations, decl) then  return true  end
+		if not indexOf(nodeScope.declarations, decl) then
+			-- void  (Keep looking through parent scopes and update canSeeImperativeVariables as we go.)
+
+		elseif decl.isConstant or isScopeDeclarative(nodeScope) then
+			return true
+
+		elseif not canSeeImperativeVariables then
+			return false
 
 		elseif isAny(nodeScope.nodeType, !(nodeTypes.AstFor),!(nodeTypes.AstLambda)) then -- These are really a combination of declarative and imperative scopes.
-			if canSeeImperativeVariables and indexOf(nodeScope.declarations, decl) then  return true  end
+			return true
 
 		elseif nodeScope.nodeType == !(nodeTypes.AstBlock) then
-			local block           = nodeScope
-			local imperativeIndex = indexOf(block, nodeScopeChild) or errorInternal()
+			local block = nodeScope
 
-			for i, declInNodeParent in ipairs(block.declarations) do
-				if declInNodeParent.isConstant or (canSeeImperativeVariables and i < imperativeIndex) then
-					if astHasParent(decl.name, declInNodeParent) then  return true  end
-				end
-			end
+			local declScope, declScopeChild = getClosestScope(decl)
+			!ASSERT `declScope == block`
+
+			local imperativeIndexForDecl = indexOf(block, declScopeChild) or errorInternal()
+			local imperativeIndexForNode = indexOf(block, nodeScopeChild) or errorInternal()
+
+			return (imperativeIndexForDecl < imperativeIndexForNode)
 
 		else
 			errorUnhandledNodeType(nodeScope)
 		end
 
-		if nodeScope.nodeType == !(nodeTypes.AstLambda) then
+		if canSeeImperativeVariables and nodeScope.nodeType == !(nodeTypes.AstLambda) then
 			-- Lambdas act as the only boundary between imperative and declarative
 			-- scopes right now. Maybe this will change in the future? 2019-12-07
 			canSeeImperativeVariables = false
 		end
 
 		nodeScope, nodeScopeChild = getClosestScope(nodeScope)
-		if not nodeScope then  return false  end
+		if not nodeScope then  return false  end -- This shouldn't happen I don't think, unless decl and node is not part of the same tree.
 	end
 end
 
@@ -552,18 +566,54 @@ end
 			-- void  (Members never shadow anything.)
 
 		elseif not decl.canShadow then
+			local identEarly        = declExisting.name
+			local identLate         = ident
+			local extraMessageEarly = ""
+			local extraMessageLate  = ""
+
+			-- Globals before locals.
+			if identEarly.declaration.isGlobalOrExported ~= identLate.declaration.isGlobalOrExported then
+				if identLate.declaration.isGlobalOrExported then
+					identEarly, identLate = identLate, identEarly
+				end
+
+			-- Constants before variables.
+			elseif identEarly.declaration.isConstant ~= identLate.declaration.isConstant then
+				if identLate.declaration.isConstant then
+					identEarly, identLate = identLate, identEarly
+				end
+
+				if isScopeImperative(getClosestScope(identLate.declaration)) then
+					extraMessageEarly = " (Note that constants in imperative scopes are visible to the whole scope, unlike variables.)"
+				end
+
+			-- Low depth before high depth.
+			-- Early in file before late in file.
+			else
+				local depthEarly = astGetDepth(identEarly)
+				local depthLate  = astGetDepth(identLate)
+
+				if depthLate < depthEarly or (depthLate == depthEarly and identLate.token < identEarly.token) then
+					-- @Incomplete: Explicitly handle the identifiers being declared in different files. (May be unnecessary.)
+					identEarly, identLate = identLate, identEarly
+				end
+
+				if identEarly.declaration.isConstant and isScopeImperative(getClosestScope(identEarly.declaration)) then
+					extraMessageEarly = " (Note that constants in imperative scopes are visible to the whole scope.)"
+				end
+			end
+
 			printerr()
-			typeMessage(io.stderr, state, ident,             "Error", "'%s' has already been declared.", ident.name)
-			typeMessage(io.stderr, state, declExisting.name, "Info",  "...it was declared here.")
+			typeMessage(io.stderr, state, identLate,  "Error", "'%s' has already been declared.%s", ident.name, extraMessageLate)
+			typeMessage(io.stderr, state, identEarly, "Info",  "...it was declared here.%s", extraMessageEarly)
 			exitFailure()
 
 		elseif
 			scope == getClosestScope(declExisting)
 			or (
 				-- We do not allow declarations on lambda bodies to shadow the lambda's arguments.
-				-- @Robustness: Check the reverse is always true.
 				scope.nodeType == !(nodeTypes.AstBlock)
-				and getClosestScope(scope).nodeType == !(nodeTypes.AstLambda) -- @Cleanup: Store each node's enclosing scope on each respective node.
+				and getClosestScope(scope).nodeType == !(nodeTypes.AstLambda)
 				and getClosestScope(scope) == getClosestScope(declExisting)
 			)
 		then
@@ -575,29 +625,20 @@ end
 		else
 			-- void  (We're validly shadowing something in an outer scope.)
 		end
-
-		-- Make sure new globals are not shadowing any locals.
-		if decl.isGlobalOrExported then
-			local parentScope = scope
-			repeat
-				local declExisting = parentScope.definedLocals[ident.name]
-
-				if declExisting and declExisting ~= decl then
-					printerr()
-					typeMessage(io.stderr, state, declExisting.name, "Error", "'%s' is shadowing a global.", ident.name)
-					typeMessage(io.stderr, state, ident,             "Info",  "...the global was declared here.")
-					exitFailure()
-				end
-
-				parentScope = getClosestScope(parentScope)
-			until not parentScope
-		end
 	end
 
 	if not (isLambdaArgOut or decl.canShadow) then
 		local parentScope = scope
 		repeat
-			parentScope.definedLocals[ident.name] = decl -- @Speed: Can we store this on the global scope only? I think so! 2019-12-21
+			local declarationsInTree = parentScope.declarationsInTree[ident.name]
+
+			if not declarationsInTree then
+				declarationsInTree = {}
+				parentScope.declarationsInTree[ident.name] = declarationsInTree
+			end
+
+			table.insert(declarationsInTree, decl)
+
 			parentScope = getClosestScope(parentScope)
 		until not parentScope
 	end
