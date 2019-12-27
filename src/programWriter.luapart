@@ -135,22 +135,16 @@ function _G.writeImperativeBlock(state, file, block, indent, nextLocalN)
 
 					if tag == !(typeTags.TypeInfoBool) then
 						file:write("false")
-
 					elseif tag == !(typeTags.TypeInfoInt) then
 						file:write("0")
-
 					elseif tag == !(typeTags.TypeInfoNil) then
 						file:write("nil")
-
 					elseif tag == !(typeTags.TypeInfoFloat) then
 						file:write("0.0")
-
 					elseif tag == !(typeTags.TypeInfoString) then
 						file:write('""')
-
 					elseif tag == !(typeTags.TypeInfoType) then
-						file:write("0")
-
+						file:write("0") -- @Robustness: Maybe 'type' variables should have no defult value and this should be an error.
 					else
 						errorInternal("Incomplete: Default initial value for type '%s'.", (TYPE_TAG_NAMES[tag] or "?"))
 					end
@@ -187,13 +181,20 @@ function _G.writeImperativeBlock(state, file, block, indent, nextLocalN)
 		elseif nodeType == !(nodeTypes.AstReturn) then
 			local returnNode = statement.what
 
-			file:write(indentStr, "return")
-			for i, expr in ipairs(returnNode.values) do
-				if i > 1 then  file:write(",")  end
-				file:write(" ")
-				writeExpression(state, file, expr, indent, nextLocalN)
+			if block.parent.nodeType == !(nodeTypes.AstLambda) and not returnNode.values[1] then
+				if state.settings.outputDebugInfo then
+					file:write(indentStr, "-- Return.\n")
+				end
+
+			else
+				file:write(indentStr, "return")
+				for i, expr in ipairs(returnNode.values) do
+					if i > 1 then  file:write(",")  end
+					file:write(" ")
+					writeExpression(state, file, expr, indent, nextLocalN)
+				end
+				file:write("\n")
 			end
-			file:write("\n")
 
 		elseif nodeType == !(nodeTypes.AstImport) then
 			-- void  (Ignore import statements.)

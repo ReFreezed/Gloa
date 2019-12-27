@@ -173,8 +173,10 @@ for bcode, bcodeName in ipairs(BC_CODES) do
 	_G[bcodeName] = bcode
 end
 
+-- DEPEND_AND_RETURN( dependentCode, dependType, dependOnCode [, returnValueCode="" ] )
 local function DEPEND_AND_RETURN(dependentCode, dependType, dependOnCode, returnValueCode)
-	__LUA("addDependency(state, ",dependentCode,", ",toLua(dependType),", ",dependOnCode,") ; return ", returnValueCode)
+	returnValueCode = (returnValueCode or "")
+	__LUA("addDependency(state, ",dependentCode,", ",toLua(dependType),", ",dependOnCode,") ; return ",returnValueCode)
 end
 )
 
@@ -320,20 +322,79 @@ end
 
 
 
+--[[
+local function createNodeWithDefaultValueForType(state, parent, typeInfo)
+	local tag = typeInfo.tag
+
+	if BUILTIN_TYPE_TAG_TO_LITERAL_TYPE[tag] then
+		local literal        = astNewNode(AstLiteral, parent.token, parent)
+		literal.literalType  = BUILTIN_TYPE_TAG_TO_LITERAL_TYPE[tag]
+		literal.inferredType = typeInfo
+
+		if tag == !(typeTags.TypeInfoBool) then
+			literal.value = false
+		elseif tag == !(typeTags.TypeInfoInt) then
+			literal.value = 0
+		elseif tag == !(typeTags.TypeInfoNil) then
+			literal.value = nil
+		elseif tag == !(typeTags.TypeInfoFloat) then
+			literal.value = 0
+		elseif tag == !(typeTags.TypeInfoString) then
+			literal.value = ""
+		else
+			errorInternal("%d", tag)
+		end
+
+		return literal
+
+	else
+		errorInternal("Incomplete: Handle type tag '%s'.", (TYPE_TAG_NAMES[tag] or "?"))
+	end
+end
+--]]
+
 function _G.bcEmitForLambda(state, lambda)
 	bcAllocateConstantValueIfNew(state, lambda.inferredType, lambda)
 
-	-- @Incomplete
-	-- @Incomplete
-	-- @Incomplete
+	local body = lambda.body
 
+	if body and body.queued.pipe <= !(PIPE_BYTECODE) then
+		!DEPEND_AND_RETURN(`lambda`, DEPEND_NODE_EMITTED, `body`)
+	end
+
+	-- Ensure there's return statements at the end of the lambda body.
+	local lastStatement = body[#body]
+
+	if not (lastStatement and lastStatement.what.nodeType == !(nodeTypes.AstReturn)) then
+		if lambda.inferredType.argumentTypesOut[1] then
+			bcError(state, body, "Expected a return statement at the end of the function body.") -- @Polish: Better error arrow position.
+		end
+
+		local statement  = astNewNode(AstStatement, lambda.bodyEndToken, body)
+		local returnNode = astNewNode(AstReturn,    statement.token,     statement)
+		statement.what   = returnNode
+
+		--[[ We don't have default return values (yet?).
+		for i, argTypeInfo in ipairs(lambda.inferredType.argumentTypesOut) do
+			local valueExpr = createNodeWithDefaultValueForType(state, returnNode, argTypeInfo)
+			returnNode.values[i] = valueExpr
+		end
+		--]]
+
+		addToQueueRecursively(state, statement, !(PIPE_DONE))
+		table.insert(body, statement)
+	end
+
+	-- @Incomplete: Insert defer blocks at the end of the block they're in and
+	-- before return/continue/break statements. (Probably not needed until we're
+	-- actualy generating bytecode.)
+
+	-- @Incomplete: Generate bytecode.
 	local bcs = lambda.bytecodes
 
 	-- TEMP:
-
 	local returnValuePosition1 = 0
 	local returnValueCount     = 0
-
 	table.insert(bcs, !(BC_RETURN))         -- [A B] return R(A), ..., R(A+B-1)
 	table.insert(bcs, returnValuePosition1) -- A
 	table.insert(bcs, returnValueCount)     -- B
