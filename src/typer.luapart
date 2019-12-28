@@ -219,29 +219,69 @@ function _G.getTypeInfoForLambda(state, lambda)
 	return funcSig
 end
 
-function _G.doesTypeListHaveSignature(typeList, listSig)
-	if #typeList ~= #listSig then  return false   end
-
-	for i = 1, #typeList do
-		if typeList[i] ~= listSig[i] then  return false  end
-	end
-
-	return true
-end
-
-function _G.getTypeInfoForList(state, typeList)
+function _G.getTypeInfoForList(state, typeInfos)
 	-- Have we encountered an equal signature before?
 	for _, typeInfoCached in ipairs(state.allTypeInfos) do
-		if typeInfoCached.tag == !(typeTags.TypeInfoList) and doesTypeListHaveSignature(typeList, typeInfoCached) then
+		if typeInfoCached.tag == !(typeTags.TypeInfoList) and areArraysEqual(typeInfos, typeInfoCached) then
 			return typeInfoCached
 		end
 	end
 
 	local listSig = newTypeInfo(TypeInfoList)
-	copyToArray(typeList, listSig)
+	copyToArray(typeInfos, listSig)
 	table.insert(state.allTypeInfos, listSig)
 
 	return listSig
+end
+
+-- Note: typeInfos is expected to be sorted by type ID.
+function _G.getTypeInfoForCompoundType(state, typeInfos)
+	-- Have we encountered an equal signature before?
+	for _, typeInfoCached in ipairs(state.allTypeInfos) do
+		if typeInfoCached.tag == !(typeTags.TypeInfoCompound) and areArraysEqual(typeInfos, typeInfoCached) then
+			return typeInfoCached
+		end
+	end
+
+	local compound = newTypeInfo(TypeInfoCompound)
+	copyToArray(typeInfos, compound)
+	table.insert(state.allTypeInfos, compound)
+
+	return compound
+end
+
+
+
+-- Note: The expression must already be inferred!
+function _G.getTypeRepresentedByExpression(expr)
+	if expr.inferredType.tag ~= !(typeTags.TypeInfoType) then
+		return nil
+
+	elseif expr.nodeType == !(nodeTypes.AstType) then
+		local typeNode = expr
+		return typeNode.representedType
+	elseif expr.nodeType == !(nodeTypes.AstStruct) then
+		local struct = expr
+		return struct.representedType
+	elseif expr.nodeType == !(nodeTypes.AstEnum) then
+		local enum = expr
+		return enum.representedType
+
+	elseif expr.nodeType == !(nodeTypes.AstTypeOf) then
+		local typeOf = expr
+		return typeOf.expression.inferredType
+	elseif expr.nodeType == !(nodeTypes.AstCast) then
+		local cast = expr
+		return cast.expression.inferredType
+
+	elseif expr.nodeType == !(nodeTypes.AstIdentifier) then
+		local identOther = expr
+		assert(identOther.inferredType)
+		return identOther.declaration.valueTypeInfo -- May be nil.
+
+	else
+		errorUnhandledNodeType(expr)
+	end
 end
 
 
@@ -435,6 +475,16 @@ function _G.getFriendlyTypeInfoName(typeInfo)
 		name = typeTextsOut[1]
 			and F("function(%s)->(%s)", table.concat(typeTextsIn, ","), table.concat(typeTextsOut, ","))
 			or  F("function(%s)->void", table.concat(typeTextsIn, ","))
+
+	elseif typeInfo.tag == !(typeTags.TypeInfoCompound) then
+		local compound  = typeInfo
+		local typeTexts = {}
+
+		for i, compoundItem in ipairs(compound) do
+			typeTexts[i] = getFriendlyTypeInfoName(compoundItem)
+		end
+
+		name = table.concat(typeTexts, "|")
 	end
 
 	if name == "" then
@@ -651,59 +701,41 @@ end
 
 	-- Compound type.
 	if decl.types[2] then
-		errorInternal("@Incomplete: Compound types.")
+		-- Note: It's ok that these share the same table!
+		local typeInfos    = {}        -- Keys are numbers.
+		local typeInfosIds = typeInfos -- Keys are AstNode.
+		local duplicates   = typeInfos -- Keys are TypeInfo.
+
+		for _, typeExpr in ipairs(decl.types) do
+			local typeInfoRepresented = getTypeRepresentedByExpression(typeExpr) or errorInternal()
+
+			if duplicates[typeInfoRepresented] then
+				printerr()
+				typeMessage(io.stderr, state, typeExpr,                        "Error", "Duplicate type specified in compound type.")
+				typeMessage(io.stderr, state, duplicates[typeInfoRepresented], "Info",  "...this is the same type. (%s)", getFriendlyTypeInfoName(typeInfoRepresented))
+				exitFailure()
+			end
+
+			table.insert(typeInfos, typeInfoRepresented)
+			typeInfosIds[typeExpr]          = typeInfoRepresented.id
+			duplicates[typeInfoRepresented] = typeExpr
+		end
+
+		table.sort(decl.types, function(a, b)  return typeInfosIds[a] < typeInfosIds[b]  end) -- @Cleanup: This is probably unnecessary.
+		table.sort(typeInfos,  function(a, b)  return a.id            < b.id             end)
+
+		typeInfo = getTypeInfoForCompoundType(state, typeInfos)
 
 	-- Single type.
 	elseif decl.types[1] then
 		local typeExpr = decl.types[1]
-
-		if typeExpr.nodeType == !(nodeTypes.AstType) then
-			local typeNode = typeExpr
-			typeInfo       = typeNode.representedType
-
-		elseif typeExpr.nodeType == !(nodeTypes.AstTypeOf) then
-			local typeOf   = typeExpr
-			typeInfo       = typeOf.expression.inferredType
-
-		else
-			errorUnhandledNodeType(typeExpr)
-		end
+		typeInfo       = getTypeRepresentedByExpression(typeExpr)
 
 	-- Infer type from value.
 	else
 		local valueExpr, valueTypeInfo = getAssignmentValue(state, ident, assignment.values, decl.assignmentIndex)
-		typeInfo                       = valueTypeInfo
-
-		if typeInfo ~= getTypeInfoForBuiltinType(state, "type") then
-			-- void
-
-		elseif valueExpr.nodeType == !(nodeTypes.AstType) then
-			local typeNode  = valueExpr
-			typeInfoForDecl = typeNode.representedType
-
-		elseif valueExpr.nodeType == !(nodeTypes.AstIdentifier) then
-			local identOther = valueExpr
-			if not identOther.inferredType then
-				errorInternal() -- The assignment should already be inferred. We already checked that!
-				-- !DEPEND_AND_RETURN(`ident`, DEPEND_NODE_INFERRED, `identOther`)
-			end
-			typeInfoForDecl = identOther.declaration.valueTypeInfo -- May be nil.
-
-		elseif valueExpr.nodeType == !(nodeTypes.AstTypeOf) then
-			local typeOf    = valueExpr
-			typeInfoForDecl = typeOf.expression.inferredType
-
-		elseif valueExpr.nodeType == !(nodeTypes.AstStruct) then
-			local struct    = valueExpr
-			typeInfoForDecl = struct.representedType
-
-		elseif valueExpr.nodeType == !(nodeTypes.AstEnum) then
-			local enum      = valueExpr
-			typeInfoForDecl = enum.representedType
-
-		else
-			errorUnhandledNodeType(valueExpr)
-		end
+		typeInfo        = valueTypeInfo
+		typeInfoForDecl = getTypeRepresentedByExpression(valueExpr)
 	end
 
 	if assignment and decl.types[1] then
@@ -893,16 +925,17 @@ end
 	for i, argExpr in ipairs(call.arguments) do
 		local typeInfoWanted = effectiveCalleeTypeInfo.argumentTypesIn[i]
 
-		if argExpr.inferredType ~= typeInfoWanted then
-			-- @Cleanup: Define isTypeCompatibleWith(typeToCheck, otherType) or something.
+		if not isTypeCompatibleWith(argExpr.inferredType, typeInfoWanted) then
 			-- @UX: Tell the name of the argument. (Probably only possible for constants, and maybe not all. Not sure!)
 			typeError(
 				state, astGetExpressionVisuallyFurthestToTheLeft(argExpr),
-				"Wrong type for argument #%d. (Wanted %s, got %s)",
+				"Type mismatch for argument #%d. (Wanted %s, got %s)",
 				i,
 				getFriendlyTypeInfoName(typeInfoWanted),
 				getFriendlyTypeInfoName(argExpr.inferredType)
 			)
+		elseif argExpr.inferredType ~= typeInfoWanted then
+			-- @Incomplete: Add cast.
 		end
 	end
 
@@ -1068,12 +1101,12 @@ end
 		!DEPEND_AND_RETURN(`binary`, DEPEND_NODE_INFERRED, `binary.right`)
 	end
 
-	-- @Cleanup: Define isTypeCompatibleWith(typeToCheck, otherType) or something.
-	-- For now, both sides need to be the same exact type.
+	-- @Incomplete: Use isTypeCompatibleWith(). For now, both sides need to be
+	-- the same exact type. (Or maybe we shouldn't for binary operations?)
 	if typeInfoL ~= typeInfoR then
 		typeError(
 			state, binary,
-			"Binary operation (%s): Operands are different types. (Left is %s, right is %s)",
+			"Binary operation (%s): Type mismatch for operands. (Left is %s, right is %s)",
 			binary.operation,
 			getFriendlyTypeInfoName(typeInfoL),
 			getFriendlyTypeInfoName(typeInfoR)
@@ -1279,27 +1312,25 @@ end
 		!DEPEND_AND_RETURN(`cast`, DEPEND_NODE_INFERRED, `cast.expression`)
 	end
 
-	local castTypeInfo
+	local castTypeInfo = getTypeRepresentedByExpression(cast.targetType) or errorInternal()
 
-	if cast.targetType.nodeType == !(nodeTypes.AstType) then
-		local typeNode = cast.targetType
-		castTypeInfo   = typeNode.representedType
-	elseif cast.targetType.nodeType == !(nodeTypes.AstTypeOf) then
-		local typeOf   = cast.targetType
-		castTypeInfo   = typeOf.expression.inferredType
-	else
-		errorUnhandledNodeType(cast.targetType)
-	end
+	if castTypeInfo == cast.expression.inferredType then
+		-- @Incomplete: Remove unnecessary cast.
 
-	if isAny(castTypeInfo, getTypeInfoForBuiltinType(state, "float"),getTypeInfoForBuiltinType(state, "int")) then
-		if not isAny(cast.expression.inferredType, getTypeInfoForBuiltinType(state, "float"),getTypeInfoForBuiltinType(state, "int")) then
-			typeError(
-				state, cast.expression,
-				"Cannot cast from %s to %s.",
-				getFriendlyTypeInfoName(cast.expression.inferredType),
-				getFriendlyTypeInfoName(castTypeInfo)
-			)
-		end
+	elseif
+		isAny(castTypeInfo,                 getTypeInfoForBuiltinType(state, "float"),getTypeInfoForBuiltinType(state, "int")) and
+		isAny(cast.expression.inferredType, getTypeInfoForBuiltinType(state, "float"),getTypeInfoForBuiltinType(state, "int"))
+	then
+		-- void
+
+	elseif isTypeBuiltin(castTypeInfo) or isTypeBuiltin(cast.expression.inferredType) then
+		typeError(
+			state, cast.expression,
+			"Cannot cast from %s to %s.",
+			getFriendlyTypeInfoName(cast.expression.inferredType),
+			getFriendlyTypeInfoName(castTypeInfo)
+		)
+
 	else
 		errorUnhandledNodeType(cast)
 	end
@@ -1408,14 +1439,15 @@ end
 			local callOutArgIndex = i-#returnNode.values+1
 			local typeInfo        = listSig[callOutArgIndex]
 
-			if typeInfo ~= argTypesOut[i] then
-				-- @Cleanup: Define isTypeCompatibleWith(typeToCheck, otherType) or something.
+			if not isTypeCompatibleWith(typeInfo, argTypesOut[i]) then
 				typeError(state, lastValueExpr,
-					"Return value #%d from call is of incorrect type. (Wanted %s, got %s)",
+					"Type mismatch for return value #%d from call. (Wanted %s, got %s)",
 					callOutArgIndex,
 					getFriendlyTypeInfoName(argTypesOut[i]),
 					getFriendlyTypeInfoName(typeInfo)
 				)
+			elseif typeInfo ~= argTypesOut[i] then
+				-- @Incomplete: Add cast.
 			end
 		end
 	end
@@ -1434,14 +1466,15 @@ end
 			end
 		end
 
-		if typeInfo ~= argTypesOut[i] then
-			-- @Cleanup: Define isTypeCompatibleWith(typeToCheck, otherType) or something.
+		if not isTypeCompatibleWith(typeInfo, argTypesOut[i]) then
 			typeError(state, astGetExpressionVisuallyFurthestToTheLeft(expr),
-				"Return value #%d is of incorrect type. (Wanted %s, got %s)",
+				"Type mismatch for return value #%d. (Wanted %s, got %s)",
 				i,
 				getFriendlyTypeInfoName(argTypesOut[i]),
 				getFriendlyTypeInfoName(typeInfo)
 			)
+		elseif typeInfo ~= argTypesOut[i] then
+			-- @Incomplete: Add cast.
 		end
 	end
 
@@ -1570,14 +1603,15 @@ end
 	for i, decl in ipairs(enum.declarations) do
 		local valueExpr = decl.assignment.values[1]
 
-		if valueExpr.inferredType ~= enumMemberInfo then
-			-- @Cleanup: Define isTypeCompatibleWith(typeToCheck, otherType) or something.
+		if not isTypeCompatibleWith(valueExpr.inferredType, enumMemberInfo) then
 			typeError(state, valueExpr,
-				"Incorrect value type for '%s'. (Wanted %s, got %s)",
+				"Value type mismatch for '%s'. (Wanted %s, got %s)",
 				decl.name.name,
 				getFriendlyTypeInfoName(enumMemberInfo),
 				getFriendlyTypeInfoName(valueExpr.inferredType)
 			)
+		elseif valueExpr.inferredType ~= enumMemberInfo then
+			-- @Incomplete: Add cast.
 		end
 
 		local member        = TypeInfoEnumMember()
@@ -1671,6 +1705,8 @@ function _G.getLiteralValueFromExpressionIfConstant(state, expr)
 			return true, math.floor(v)
 		elseif cast.inferredType == getTypeInfoForBuiltinType(state, "float") then
 			return true, v
+		elseif cast.inferredType == getTypeInfoForBuiltinType(state, "type") then
+			return true, nil -- Should we return the type ID?
 		else
 			errorInternal("Unhandled cast type: %s", getFriendlyTypeInfoName(cast.inferredType))
 		end
@@ -1697,12 +1733,11 @@ function _G.getAssignmentValue(state, ident, values, i, typeInfoExpected)
 
 	-- Non-call value or value not last in list.
 	if valueExpr and not (valueExpr.nodeType == !(nodeTypes.AstCall) and not valueExpr.surroundedByParenthesis) then
-		if typeInfoExpected and valueExpr.inferredType ~= typeInfoExpected then
-			-- @Cleanup: Define isTypeCompatibleWith(typeToCheck, otherType) or something.
+		if typeInfoExpected and not isTypeCompatibleWith(valueExpr.inferredType, typeInfoExpected) then
 			if valueExpr.inferredType.tag ~= typeInfoExpected.tag then
 				typeError(
 					state, valueExpr,
-					"Value and type mismatch. ('%s' is %s, value is %s)",
+					"Type and value type mismatch. ('%s' is %s, value is %s)",
 					ident.name,
 					getFriendlyTypeInfoName(typeInfoExpected),
 					getFriendlyTypeInfoName(valueExpr.inferredType)
@@ -1720,12 +1755,12 @@ function _G.getAssignmentValue(state, ident, values, i, typeInfoExpected)
 			elseif typeInfoExpected.tag == !(typeTags.TypeInfoStruct) then
 				typeError(
 					state, valueExpr,
-					"Value and type mismatch. Expected a struct initializer for %s.",
+					"Type and value type mismatch. Expected a struct initializer for %s.",
 					getFriendlyTypeInfoName(typeInfoExpected)
 				)
 
 			else
-				typeError(state, valueExpr, "Value and type mismatch.")
+				typeError(state, valueExpr, "Type and value type mismatch.")
 			end
 		end
 
@@ -1741,9 +1776,9 @@ function _G.getAssignmentValue(state, ident, values, i, typeInfoExpected)
 		call = values[lastIndex]
 
 		if call.nodeType ~= !(nodeTypes.AstCall) then
-			typeError(state, call, "Expected a function call. Missing a value for '%s'.", ident.name)
+			typeError(state, call, "Expected a potential function call as the last expression in the list. Missing a value for '%s' (name #%d).", ident.name, i)
 		elseif call.surroundedByParenthesis then
-			typeError(state, ident, "Missing a value for '%s'.", ident.name)
+			typeError(state, ident, "Missing a value for '%s' (name #%d).", ident.name, i)
 		end
 	end
 
@@ -1909,6 +1944,31 @@ end
 -- Note: Glóa types are represented as ints in Lua.
 function _G.isTypeSimple(typeInfo)
 	return isAny(typeInfo.tag, !(typeTags.TypeInfoBool),!(typeTags.TypeInfoInt),!(typeTags.TypeInfoNil),!(typeTags.TypeInfoFloat),!(typeTags.TypeInfoString),!(typeTags.TypeInfoType))
+end
+
+
+
+function _G.isTypeCompatibleWith(typeToCheck, otherType)
+	if typeToCheck == otherType then  return true  end
+
+	-- Everything is compatible with the *any* type. The user better know what they're doing!
+	if otherType.tag == !(typeTags.TypeInfoAny) then  return true  end
+
+	-- Ints are always compatible with floats (but the opposite is false).
+	-- This should be safe as all numbers are 64-bit floats in Lua 5.1 (I think).
+	-- @Robustness: Keep this rule?
+	if typeToCheck.tag == !(typeTags.TypeInfoInt) and otherType.tag == !(typeTags.TypeInfoFloat) then  return true  end
+
+	if otherType.tag == !(typeTags.TypeInfoCompound) then
+		local compound = otherType
+		for _, compoundItem in ipairs(compound) do
+			if isTypeCompatibleWith(typeToCheck, compoundItem) then  return true  end
+		end
+	end
+
+	-- @Incomplete: Handle typeToCheck being a compound type.
+
+	return false
 end
 
 

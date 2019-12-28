@@ -134,14 +134,13 @@ _G.!structAst"AstVararg:_AstExpression"{
 _G.!structAst"AstLiteral:_AstExpression"{
 	literalType = 0,
 	value       = NIL, -- The value depends on what literalType is. Could be a number, string or whatever.
-
 	-- Bytecode phase:
 	valueConstant,
 }
 _G.!structAst"AstType:_AstExpression"{
 	isUserType        = false,
 	typeName          = "",
-	functionSignature = NIL, -- AstLambda without a body. This is used to create the actual function type.
+	functionSignature = NIL, -- AstLambda without a body. This is used to create the actual function type.  @Cleanup: Rename to 'lambdaHeader' or something.
 	arrayItemType     = NIL, -- AstType
 	arguments         = NIL, -- []AstExpression  (Is set for parameterized structs.)
 	-- Type phase:
@@ -423,7 +422,7 @@ function _G.parseType(state, parentNode)
 		return typeNode
 	end
 
-	local isBuiltinType = isTokenBuiltinType(tokType, tokValue)
+	local isBuiltinType = isTokenBuiltinType(tokType, tokValue) or isToken(tokType,tokValue, !(TOKEN_KEYWORD),"nil")
 	local typeNode
 
 	if isBuiltinType or tokType == !(TOKEN_IDENTIFIER) then
@@ -469,20 +468,6 @@ function _G.parsePipeSeparatedTypes(state, parentNode, typeNodes)
 		if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"|") then
 			consumeNextToken(state)
 			tokType, tokValue, token = peekNextToken(state)
-
-			if isToken(tokType,tokValue, !(TOKEN_KEYWORD),"nil") then
-				consumeNextToken(state)
-
-				typeNode          = astNewNode(AstType, token, parentNode)
-				typeNode.typeName = "nil"
-				table.insert(typeNodes, typeNode)
-
-				break
-
-			else
-				-- Continue the loop.
-			end
-
 		else
 			break
 		end
@@ -696,12 +681,12 @@ function _G.parseArguments(state, parentNode, isInput, placeDeclared)
 				!SET_OR_RETURN `local expr = parseExpression(state, assignment)` -- @Speed: Parse once then just copy the first one.
 				assignment.values[1]       = expr
 
-				--
+				--[[
 				-- If the value is nil then we make sure 'nil' is one of the types.
 				--
 				-- @Robustness: One of the types may be an alias for the nil type, which means this
 				-- may cause an error in the typer when we check for duplicate specified types. We
-				-- should probably do this in the typer instead.
+				-- should probably do this in the typer instead. @Incomplete
 				--
 				if
 					i == 1
@@ -713,6 +698,7 @@ function _G.parseArguments(state, parentNode, isInput, placeDeclared)
 					typeNode.typeName = "nil"
 					table.insert(decl.types, typeNode)
 				end
+				--]]
 			end
 		end
 
