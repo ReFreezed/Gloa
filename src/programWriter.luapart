@@ -104,11 +104,13 @@ function _G.writeImperativeBlock(state, file, block, indent, nextLocalN)
 	local indentStr       = ("\t"):rep(indent)
 
 	if not block[1] then
-		if state.settings.outputDebugInfo then
+		if outputDebugInfo then
 			file:write(indentStr, "-- Empty block.\n")
 		end
 		return
 	end
+
+	local inDecl = false
 
 	for _, statement in ipairs(block) do
 		local nodeType = statement.what.nodeType
@@ -182,8 +184,8 @@ function _G.writeImperativeBlock(state, file, block, indent, nextLocalN)
 			local returnNode = statement.what
 
 			if block.parent.nodeType == !(nodeTypes.AstLambda) and not returnNode.values[1] then
-				if state.settings.outputDebugInfo then
-					file:write(indentStr, "-- Return.\n")
+				if outputDebugInfo then
+					file:write(indentStr, "-- return\n")
 				end
 
 			else
@@ -209,7 +211,15 @@ function _G.writeImperativeBlock(state, file, block, indent, nextLocalN)
 end
 
 function _G.writeFunction(state, file, lambda)
-	local inDecl = false
+	if lambda.bodyIsForeign then
+		if lambda.foreignSource == "lua" then
+			assert(lambda.foreignSourceName ~= "")
+			file:write(lambda.foreignSourceName) -- Too straightforward?
+		else
+			errorInternal(lambda.foreignSource)
+		end
+		return
+	end
 
 	file:write("function(")
 

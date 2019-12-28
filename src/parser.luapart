@@ -283,11 +283,17 @@ _G.!structAst"AstEnum:_AstBlockExpression"{
 	memberType = NIL, -- AstType
 }
 _G.!structAst"AstLambda:_AstBlockExpression"{
-	_scopeType   = "imperative",
-	argumentsIn  = NIL, -- AstArguments
-	argumentsOut = NIL, -- AstArguments
-	body         = NIL, -- AstBlock  (If this is nil then the lambda is a function signature.)
-	bodyEndToken = 1,   -- For better error messages.
+	_scopeType        = "imperative",
+
+	argumentsIn       = NIL, -- AstArguments
+	argumentsOut      = NIL, -- AstArguments
+
+	body              = NIL, -- AstBlock  (If this is nil then the lambda is a function signature. If bodyIsForeign is set then this is a dummy block.)
+	bodyIsForeign     = false,
+	foreignSource     = "",
+	foreignSourceName = "",
+
+	bodyEndToken      = 1,   -- For better error messages.
 
 	-- Bytecode phase:
 	bytecodes = {},     -- Filled if we're not a function signature.
@@ -1709,6 +1715,31 @@ function _G.parseLambda(state, parentNode, allowBody)
 			consumeNextToken(state)
 			!SET_OR_RETURN `lambda.body = parseBlock(state, lambda)`
 			lambda.bodyEndToken = state.nextToken-1 -- The '}'.
+
+		elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"foreign") then
+			consumeNextToken(state)
+
+			lambda.body          = astNewNode(AstBlock, state.nextToken-1, lambda) -- Dummy block.
+			lambda.bodyIsForeign = true
+
+			tokType, tokValue = consumeNextToken(state)
+			if not isToken(tokType,tokValue, !(TOKEN_IDENTIFIER)) then
+				!ERROR_OR_RETURN `errorParsingLast(state, "Expected foreign source. (The only valid value right now is: lua)")`
+			elseif tokValue ~= "lua" then
+				!ERROR_OR_RETURN `errorParsingLast(state, "Invalid source '%s'. (The only valid value right now is: lua)", tokValue)`
+			end
+			lambda.foreignSource = tokValue
+
+			tokType, tokValue = peekNextToken(state)
+			if isToken(tokType,tokValue, !(TOKEN_STRING)) then
+				consumeNextToken(state)
+				lambda.foreignSourceName = tokValue
+			else
+				-- void  (lambda.foreignSourceName will be the name of whatever declared constant the lambda is attached to.)
+				!ERROR_OR_RETURN `errorParsingAfterLast(state, "@Incomplete: Infer lambda.foreignSourceName")` -- TEMP
+			end
+
+			lambda.bodyEndToken = state.nextToken-1
 		end
 
 	else
