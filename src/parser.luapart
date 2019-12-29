@@ -85,8 +85,11 @@ local function structAst(nameAndParent)
 		fields._scopeType = nil
 
 		if not name:find"^_" then
-			nodeTypeN         = nodeTypeN+1
-			fields._overrides = {nodeType=nodeTypeN}
+			nodeTypeN                = nodeTypeN+1
+
+			local overrides          = fields._overrides or {}
+			overrides.nodeType       = nodeTypeN
+			fields._overrides        = overrides
 
 			nodeTypes[name]          = nodeTypeN
 			nodeTypeNames[nodeTypeN] = name
@@ -128,7 +131,8 @@ _G.!structAst"AstIdentifier:_AstExpression"{
 	-- Type phase:
 	declaration = NIL, -- AstDeclaration
 }
-_G.!structAst"AstVararg:_AstExpression"{
+_G.!structAst"AstVararg:AstIdentifier"{
+	_overrides              = {name="..."},
 	surroundedByParenthesis = false,
 }
 _G.!structAst"AstLiteral:_AstExpression"{
@@ -622,7 +626,11 @@ function _G.parseArguments(state, parentNode, isInput, placeDeclared)
 
 			else
 				gotVararg = true
-				decl.name = astNewNode(AstVararg, token, decl)
+
+				local vararg         = astNewNode(AstVararg, token, decl)
+				vararg.placeDeclared = placeDeclared
+				vararg.declaration   = decl
+				decl.name            = vararg
 			end
 
 			tokType, tokValue = consumeNextToken(state)
