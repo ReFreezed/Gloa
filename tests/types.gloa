@@ -36,6 +36,10 @@ local double41, double42 : type_of(double22) = 1, 2
 local NilType :: !type nil -- Note: The nil type is only really useful in compound types, where !type is not needed.
 local iCanOnlyBeNil : NilType = nil
 
+-- @Incomplete:
+-- local StringOrNil :: !type string|nil
+-- local maybeString:StringOrNil = nil
+
 --====== Things that should result in an error. ======--
 
 -- local bad:int  = "foo" -- Type/value type mismatch.
@@ -66,6 +70,10 @@ local iCanOnlyBeNil : NilType = nil
 
 -- local bad2 :: nope -- (Test that the error message is good.)
 -- local bad1 :: bad2
+
+-- @Incomplete:
+-- local Compound :: !type string|nil
+-- local bad:Compound : "" -- Constants cannot be compound types.
 --]]
 
 
@@ -175,7 +183,10 @@ local funcErrors :: () {
 	-- local func :: (a:Bad) -> int { return a } -- Wrong type.
 
 	-- local func : () -> int
-	-- func = () -> int { return func() } -- func is not const, thus invisible here. @UX: Improve error message.
+	-- func = () -> int { return func() } -- func is not const, thus invisible in the body. @UX: Improve error message.
+
+	-- local func :: () {}
+	-- func(func()) -- Function returns nothing. (Could work here, but looks weird!)
 }
 --]]
 
@@ -250,6 +261,18 @@ local EIGHT : int : cast(int) (2.0 ^ 2.0) * 2
 local TAU   :     : 3.14 * cast(type_of(5.0)) (EIGHT // 4)
 
 -- @Incomplete: Look-ups.
+
+local testCasts :: () {
+	-- @Incomplete: Casting compound types.
+	-- local dummy:int|nil = 0
+	-- local Dummy :: type_of(dummy)
+	-- -- local Dummy :: !type int|nil -- @Incomplete: Handle pipes here.
+	-- local getCompound :: () -> Dummy { return 5 }
+	-- -- local getCompound :: () -> int|nil { return 5 } -- @Incomplete: Handle pipes here.
+	-- local x      = cast(int) getCompound()
+	-- local xMaybe = cast(Dummy) x
+	-- -- local xMaybe = cast(int|nil) x -- @Incomplete: Handle pipes here.
+}
 
 --====== Things that should result in an error. ======--
 
@@ -345,10 +368,10 @@ local useImportedNamespace :: () {
 
 
 
--- [[ Compound types and vararg.
+-- [[ Lists of things.
 --------------------------------
 
-local special :: () {
+local lists :: () {
 	local printString :: (s:string) -> void !foreign lua "print"
 	printString("Hello, Lua!")
 
@@ -356,8 +379,9 @@ local special :: () {
 	printAny("Hello, Lua!")
 	printAny(123)
 
-	local maybeInt1 : int|nil = 0
-	-- local maybeInt2 : type_of(maybeInt1) = 0 -- @Incomplete
+	local maybeInt1        : int|nil                   = 0
+	local maybeInt2        : type_of(maybeInt1)        = 0
+	local maybeIntOrString : type_of(maybeInt1)|string = ""
 
 	local printStringOrInt :: (v:string|int) -> void !foreign lua "print"
 	printStringOrInt("Hello, Lua!")
@@ -372,6 +396,33 @@ local special :: () {
 
 	local getValues :: () -> string, int { return "GET", 100 }
 	print(true, getValues())
+
+	local getVararg :: () -> (...:int) { return 1, 2, 3 }
+	local takeThreeMaybe :: (x,y,z:int|nil) {}
+	takeThreeMaybe(10, getVararg(), 30)
+	takeThreeMaybe(10, 20, (getVararg()))
+
+	local getAtLeastOne :: () -> (x:int, ...:int) { return 1, 2, 3 }
+	local takeExactlyThree :: (x:int, y:int, z:int) {}
+	takeExactlyThree(10, 20, (getAtLeastOne()))
+	takeExactlyThree(10, getAtLeastOne(), 30)
+
+	local takeAndReturnVararg :: (...:int) -> (...:int) {
+		local a1, a2 = ...
+		local b1, b2 = 1, ...
+		local c1, c2 = 1, (...)
+		local d1, d2 = ..., 2
+		local e1, e2 = (...), 2
+		local typeOfVararg = type_of(...) -- Should be int|nil.
+		return ...
+	}
+	local x, y = takeAndReturnVararg(1, 2, 3)
+	local typeOfX :: type_of(x) -- Should be int|nil.
+	local typeOfY :: type_of(y) -- Should be int|nil.
+	local takeOneIntMaybe :: (x:int|nil) {}
+	takeOneIntMaybe(x)
+	takeOneIntMaybe(y)
+	takeAndReturnVararg(x, y, x, y)
 }
 
 --====== Things that should result in an error. ======--
@@ -383,7 +434,17 @@ local special :: () {
 
 -- local bad:int|nil -- Missing required value.
 
-local specialErrors :: () {
+local listErrors :: () {
+	-- local a   : bool|int       = true
+	-- local bad : type_of(a)|int = 0 -- Duplicate type 'int'.
+
+	-- local a   : bool|int       = true
+	-- local bad : int|type_of(a) = 0 -- Duplicate type 'int'.
+
+	-- local a   :   bool|int            = true
+	-- local b   : string|int            = 0
+	-- local bad : type_of(a)|type_of(b) = "" -- Duplicate type 'int'.
+
 	-- local print :: (...:string) -> void !foreign lua "print"
 	-- local func  :: () {}
 	-- print("a", func()) -- Nothing returned.
@@ -391,6 +452,27 @@ local specialErrors :: () {
 	-- local print :: (...:string) -> void !foreign lua "print"
 	-- local func  :: () -> string, int { return "GET", 100 }
 	-- print("a", func()) -- Type mismatch of 2nd returned value.
+
+	-- local func :: (...:int) {
+	-- 	local bad1, bad2 = (...) -- No value for 'bad2'.
+	-- }
+}
+
+local varargAndReturnErrors :: () -> bool, int, string {
+	-- local func :: () -> int, int { return 1, 1 }
+	-- do return true, func() -- Type mismatch for value 3 (call value 2).
+
+	-- local func :: (b:bool, ...:int) {}
+	-- local bad  :: () -> int, string { return 1, "" }
+	-- func(true, bad()) -- Type mismatch for argument 3 (call value 2).
+
+	-- local func :: (x:int, y:int, z:int) {}
+	-- local bad  :: () -> (...:int) { return 1, 2, 3 }
+	-- func(0, bad()) -- Non-vararg function cannot take varargs.
+
+	-- local bad  :: () -> (...:int) { return 1, 2 }
+	-- local func :: (x:int, y:int) {}
+	-- func(10, (bad())) -- Returned vararg gets adjusted to int|nil which func() does not accept.
 }
 --]]
 

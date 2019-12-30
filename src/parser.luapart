@@ -173,6 +173,8 @@ _G.!structAst"AstCall:_AstExpression"{
 }
 _G.!structAst"AstTypeOf:_AstExpression"{
 	expression = NIL,
+	-- Type phase:
+	representedType = NIL,
 }
 _G.!structAst"AstCast:_AstExpression"{
 	targetType = NIL, -- AstType
@@ -1176,23 +1178,26 @@ function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 	elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"return") then
 		consumeNextToken(state)
 
-		local returnNode = astNewNode(AstReturn, statement.token, statement)
+		local returnNode  = astNewNode(AstReturn, statement.token, statement)
+		tokType, tokValue = peekNextToken(state)
 
-		--
-		-- Note: Considering this following ambigous situation we have to check whether any values should be returned.
-		-- As a bonus we also figure if we're even inside a function, though I'm not sure this'll work when we have static code. @Robustness
-		--
-		--     if x return
-		--     func() -- Returned expression, or separate statement after 'if'?
-		--
-		local lambda = astFindParent(statement, !(nodeTypes.AstLambda))
-		if not lambda then
-			-- This shouldn't happen as this function shouldn't be called by anything that does not parse return statements.
-			!ERROR_OR_RETURN_FALSE `errorParsingNext(state, "Not inside a function.")`
-		end
+		if not isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"}") then
+			--
+			-- Note: Considering this following @Ambigous situation we have to check whether any values should be returned.
+			-- As a bonus we also figure if we're even inside a function, though I'm not sure this'll work when we have static code. @Robustness
+			--
+			--   if x return
+			--   func() -- Returned expression, or separate statement after 'if'?
+			--
+			local lambda = astFindParent(statement, !(nodeTypes.AstLambda))
+			if not lambda then
+				-- This shouldn't happen as this function shouldn't be called by anything that does not parse return statements.
+				!ERROR_OR_RETURN_FALSE `errorParsingNext(state, "Not inside a function.")`
+			end
 
-		if lambda.argumentsOut and lambda.argumentsOut[1] then
-			!DO_OR_RETURN_FALSE `parseExpressionList(state, returnNode, returnNode.values)`
+			if lambda.argumentsOut and lambda.argumentsOut[1] then
+				!DO_OR_RETURN_FALSE `parseExpressionList(state, returnNode, returnNode.values)`
+			end
 		end
 
 		statement.what = returnNode

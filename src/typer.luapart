@@ -12,9 +12,10 @@
 	getAssignmentValue
 	getClosestScope, isScope, isScopeDeclarative, isScopeImperative
 	getLiteralValueFromExpressionIfConstant
-	getTypeInfo*
 	inferNode
-	isTypeSimple
+	isTypeSimple, isTypeCompatibleWith
+	newTypeInfo, isTypeBuiltin, getTypeInfo*
+	normalizeVarargItemType
 	typeError, typeMessage
 
 --============================================================]]
@@ -267,6 +268,7 @@ do
 	end
 
 	function _G.getTypeInfoForVararg(state, itemType)
+		itemType = normalizeVarargItemType(state, itemType)
 		return getTypeInfoForArrayOrVararg(state, itemType, !(typeTags.TypeInfoVararg), TypeInfoVararg)
 	end
 end
@@ -287,10 +289,10 @@ function _G.getTypeRepresentedByExpression(expr)
 	elseif expr.nodeType == !(nodeTypes.AstEnum) then
 		local enum = expr
 		return enum.representedType
-
 	elseif expr.nodeType == !(nodeTypes.AstTypeOf) then
 		local typeOf = expr
-		return typeOf.expression.inferredType
+		return typeOf.representedType
+
 	elseif expr.nodeType == !(nodeTypes.AstCast) then
 		local cast = expr
 		return cast.expression.inferredType
@@ -505,15 +507,19 @@ function _G.getFriendlyTypeInfoName(typeInfo)
 			typeTexts[i] = getFriendlyTypeInfoName(compoundItem)
 		end
 
-		name = table.concat(typeTexts, "|")
+		!if DEBUG then
+			name = "["..table.concat(typeTexts, "|").."]" -- asdf
+		!else
+			name = table.concat(typeTexts, "|")
+		!end
 
 	elseif typeInfo.tag == !(typeTags.TypeInfoArray) then
 		local arraySig = typeInfo
 		name           = "[]"..getFriendlyTypeInfoName(arraySig.itemType)
 
 	elseif typeInfo.tag == !(typeTags.TypeInfoVararg) then
-		local vararg = typeInfo
-		name         = "...vararg("..getFriendlyTypeInfoName(vararg.itemType)..")"
+		local varargSig = typeInfo
+		name            = "..."..getFriendlyTypeInfoName(varargSig.itemType)
 	end
 
 	if name == "" then
@@ -735,27 +741,71 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 	-- Compound type.
 	if decl.types[2] then
 		-- Note: It's ok that these share the same table!
-		local typeInfos    = {}        -- Keys are numbers.
-		local typeInfosIds = typeInfos -- Keys are AstNode.
-		local duplicates   = typeInfos -- Keys are TypeInfo.
+		local typeInfos  = {}        -- Keys are numbers.
+		local typeIds    = typeInfos -- Keys are AstNode.
+		local duplicates = typeInfos -- Keys are TypeInfo.
+
+		local isFromCompound = {}
 
 		for _, typeExpr in ipairs(decl.types) do
+			!(
+			local ERROR_DUPLICATE_TYPE_CODE = `
+				printerr()
+				typeMessage(io.stderr, state, typeExpr, "Error", "Duplicate type specified in $siteTitle.")
+				if isFromCompound[$typeInfoVar] then
+					typeMessage(
+						io.stderr, state, duplicates[$typeInfoVar],
+						"Info", "...this sub-compound type contains the same type. (%s)",
+						getFriendlyTypeInfoName($typeInfoVar)
+					)
+				else
+					typeMessage(
+						io.stderr, state, duplicates[$typeInfoVar],
+						"Info", "...this is the same type. (%s)",
+						getFriendlyTypeInfoName($typeInfoVar)
+					)
+				end
+				exitFailure()
+			`
+			local function ERROR_DUPLICATE_TYPE(siteTitle, typeInfoVar)
+				local lua = ERROR_DUPLICATE_TYPE_CODE:gsub("$(%w+)", {
+					siteTitle   = siteTitle,
+					typeInfoVar = typeInfoVar,
+				})
+				__LUA(lua)
+			end
+			)
+
 			local typeInfoRepresented = getTypeRepresentedByExpression(typeExpr) or errorInternal()
 
-			if duplicates[typeInfoRepresented] then
-				printerr()
-				typeMessage(io.stderr, state, typeExpr,                        "Error", "Duplicate type specified in compound type.")
-				typeMessage(io.stderr, state, duplicates[typeInfoRepresented], "Info",  "...this is the same type. (%s)", getFriendlyTypeInfoName(typeInfoRepresented))
-				exitFailure()
-			end
+			if typeInfoRepresented.tag == !(typeTags.TypeInfoCompound) then
+				-- Unpack the sub-compound type so we don't end up with compound types of other compound types.
+				local compound = typeInfoRepresented
 
-			table.insert(typeInfos, typeInfoRepresented)
-			typeInfosIds[typeExpr]          = typeInfoRepresented.id
-			duplicates[typeInfoRepresented] = typeExpr
+				for _, compoundItem in ipairs(compound) do
+					if duplicates[compoundItem] then
+						!ERROR_DUPLICATE_TYPE("compound type (through sub-compound type)", `compoundItem`)
+					end
+
+					table.insert(typeInfos, compoundItem)
+					typeIds[typeExpr]            = compoundItem.id
+					duplicates[compoundItem]     = typeExpr -- @UX: Should we ignore duplicate nil types?
+					isFromCompound[compoundItem] = true
+				end
+
+			else
+				if duplicates[typeInfoRepresented] then
+					!ERROR_DUPLICATE_TYPE("compound type", `typeInfoRepresented`)
+				end
+
+				table.insert(typeInfos, typeInfoRepresented)
+				typeIds[typeExpr]               = typeInfoRepresented.id
+				duplicates[typeInfoRepresented] = typeExpr -- @UX: Should we ignore duplicate nil types?
+			end
 		end
 
-		table.sort(decl.types, function(a, b)  return typeInfosIds[a] < typeInfosIds[b]  end) -- @Cleanup: This is probably unnecessary.
-		table.sort(typeInfos,  function(a, b)  return a.id            < b.id             end)
+		table.sort(decl.types, function(a, b)  return typeIds[a] < typeIds[b]  end) -- @Cleanup @Speed: This is probably unnecessary.
+		table.sort(typeInfos,  function(a, b)  return a.id       < b.id        end)
 
 		typeInfo = getTypeInfoForCompoundType(state, typeInfos)
 
@@ -918,6 +968,171 @@ end
 	moveToPipe(state, typeNode, !(PIPE_DONE))
 end
 
+local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, typeInfos)
+	--[[
+		Situations:
+
+		two :: (x:int,   y:int) -> (x:int    y:int) -- accept in/out 2
+		var :: (x:int, ...:int) -> (x:int, ...:int) -- accept in/out 1+vararg
+		return  x, (two())  --- request 2
+		func(   x, (two())  )-- request 2
+		return  x, (var())  --- request 2
+		func(   x, (var())  )-- request 2
+		return  x, (...)    --- request 2  (Note: The vararg can result in nil.)
+		func(   x, (...)    )-- request 2  (Note: The vararg can result in nil.)
+		return  x, two()    --- request 1+list(2)
+		func(   x, two()    )-- request 1+list(2)
+		return  x, ...      --- request 1+vararg
+		func(   x, ...      )-- request 1+vararg
+		return  x, var()    --- request 1+list(1+vararg)
+		func(   x, var()    )-- request 1+list(1+vararg)
+	]]
+
+	-- Get requested count.
+	local valueExprLast = getLast(values)
+	local valueCount    = #values
+	local requestedMin  = valueCount
+	local requestedMax  = valueCount
+	local slotsToCheck  = valueCount -- Assuming the requested count is accepted.
+
+	if valueExprLast then
+		if valueExprLast.nodeType == !(nodeTypes.AstCall) then
+			local valueCall = valueExprLast
+
+			if not valueCall.surroundedByParenthesis then
+				local calleeTypeInfo = valueCall.callee.inferredType
+
+				if calleeTypeInfo.tag == !(typeTags.TypeInfoList) then
+					local listSig  = calleeTypeInfo
+					calleeTypeInfo = listSig[1] or errorInternal() -- The error should have happened when inferring AstCall.
+				end
+
+				assert(calleeTypeInfo.tag == !(typeTags.TypeInfoFunction))
+
+				local argTypesOut = calleeTypeInfo.argumentTypesOut
+				local argCount    = #argTypesOut
+
+				if argCount == 0 then
+					typeError(state, valueCall, "Function call returns nothing. (Expected at least one value.)")
+				end
+
+				local returnsVararg = argCount > 0 and argTypesOut[argCount].tag == !(typeTags.TypeInfoVararg)
+				local returnsMin    = returnsVararg and argCount-1 or argCount
+				local returnsMax    = returnsVararg and math.huge  or argCount
+
+				requestedMin = valueCount-1+returnsMin
+				requestedMax = valueCount-1+returnsMax
+				slotsToCheck = valueCount-1+argCount
+			end
+
+		elseif valueExprLast.nodeType == !(nodeTypes.AstVararg) then
+			local valueVararg = valueExprLast
+
+			if not valueVararg.surroundedByParenthesis then
+				requestedMin = valueCount - 1
+				requestedMax = math.huge
+				slotsToCheck = valueCount
+			end
+		end
+	end
+
+	-- Get accepted count.
+	-- @Incomplete: Consider optional arguments for calls.
+	local typeInfoCount   = #typeInfos
+	local acceptingVararg = typeInfoCount > 0 and typeInfos[typeInfoCount].tag == !(typeTags.TypeInfoVararg)
+	local acceptedMin     = acceptingVararg and typeInfoCount-1 or typeInfoCount
+	local acceptedMax     = acceptingVararg and math.huge       or typeInfoCount
+
+	-- io.stdout:write(F("requested %.0f-%.0f, accepted %.0f-%.0f  ", requestedMin, requestedMax, acceptedMin, acceptedMax)) ; astPrint(callOrReturnNode)
+
+	-- Too few values.
+	-- @UX: Better error message if the last value is a call (without parenthesis).
+	if requestedMin < acceptedMin then
+		local exprForError = values[1] and astGetExpressionVisuallyFurthestToTheLeft(values[1]) or callOrReturnNode
+		local thingsStr    = callOrReturnNode.nodeType == !(nodeTypes.AstCall) and "arguments" or "values to return"
+		local gotStr       = requestedMax ~= math.huge and F("%d", requestedMin) or requestedMin == 0 and "variable amount" or F("%d + variable amount", requestedMin)
+		typeError(state, exprForError, "Missing %s. (Wanted %d, got %s)", thingsStr, acceptedMin, gotStr)
+
+	-- Too many values.
+	-- @UX: Better error message if the last value is a call (without parenthesis).
+	elseif requestedMax > acceptedMax then
+		!ASSERT `not acceptingVararg`
+
+		local firstExtraValueExpr = values[math.min(acceptedMax+1, valueCount)]
+		local exprForError        = astGetExpressionVisuallyFurthestToTheLeft(firstExtraValueExpr)
+		local thingsStr           = callOrReturnNode.nodeType == !(nodeTypes.AstCall) and "arguments" or "values to return"
+		local gotStr              = requestedMax == math.huge and "variable amount" or F("%d", requestedMax)
+
+		typeError(state, exprForError, "Too many %s. (Wanted %d, got %s)", thingsStr, acceptedMax, gotStr)
+	end
+
+	for slot = 1, slotsToCheck do
+		local valueIndex      = math.min(slot, valueCount)
+		local valueExpr       = values[valueIndex]
+		local valueTypeInfo   = valueExpr.inferredType
+
+		local typeInfoIndex   = math.min(slot, typeInfoCount)
+		local typeInfoToMatch = typeInfos[typeInfoIndex]
+
+		if typeInfoToMatch.tag == !(typeTags.TypeInfoVararg) then
+			typeInfoToMatch = typeInfoToMatch.itemType
+		end
+
+		-- Function call (0..inf values).
+		if valueTypeInfo.tag == !(typeTags.TypeInfoList) then
+			local listSig         = valueTypeInfo
+			local callOutArgIndex = slot-valueIndex+1
+			valueTypeInfo         = listSig[callOutArgIndex]
+
+			if not valueTypeInfo then
+				typeError(state, valueExpr, "Function call returns nothing. (Expected at least one value.)") -- Note: "Nothing" is not the same as vararg of zero length.
+			end
+
+			if valueTypeInfo.tag == !(typeTags.TypeInfoVararg) then
+				local varargSig = valueTypeInfo
+				valueTypeInfo   = varargSig.itemType
+			end
+
+			if not isTypeCompatibleWith(valueTypeInfo, typeInfoToMatch) then
+				-- @UX: Tell the name of the call/return argument. (For calls, probably only possible for constants, and maybe not all. Not sure! Returns just depend on the output arguments being named.)
+				-- @UX: Tell the name of the value call's argument. (Probably only possible for constants, and maybe not all. Not sure!)
+				typeError(
+					state, valueExpr,
+					"Type mismatch for %s #%d (return value #%d from call). (Wanted %s, got %s)",
+					callOrReturnNode.nodeType == !(nodeTypes.AstCall) and "argument" or "return value",
+					slot,
+					callOutArgIndex,
+					getFriendlyTypeInfoName(typeInfoToMatch),
+					getFriendlyTypeInfoName(valueTypeInfo)
+				)
+			elseif valueTypeInfo ~= typeInfoToMatch then
+				-- @Incomplete: Add cast.
+			end
+
+		else
+			-- Vararg (0..inf values).
+			if valueTypeInfo.tag == !(typeTags.TypeInfoVararg) then
+				local varargSig = valueTypeInfo
+				valueTypeInfo   = varargSig.itemType
+			end
+
+			-- Other (1 value).
+			if not isTypeCompatibleWith(valueTypeInfo, typeInfoToMatch) then
+				typeError(
+					state, astGetExpressionVisuallyFurthestToTheLeft(valueExpr),
+					"Type mismatch for %s #%d. (Wanted %s, got %s)",
+					callOrReturnNode.nodeType == !(nodeTypes.AstCall) and "argument" or "return value",
+					slot,
+					getFriendlyTypeInfoName(typeInfoToMatch),
+					getFriendlyTypeInfoName(valueTypeInfo)
+				)
+			elseif valueTypeInfo ~= typeInfoToMatch then
+				-- @Incomplete: Add cast.
+			end
+		end
+	end
+end
+
 !NODE_INFERRER `function nodeInferrers.AstCall(state, call)`
 	if not call.callee.inferredType then
 		!DEPEND_AND_RETURN(`call`, DEPEND_NODE_INFERRED, `call.callee`)
@@ -955,85 +1170,7 @@ end
 	end
 
 	assert(calleeTypeInfo.tag == !(typeTags.TypeInfoFunction)) -- @Incomplete: Handle parameterized structs.
-
-	-- @Cleanup: This code is similar to the code for AstReturn. (In fact, it's the exact same thing,
-	-- except AstCall is for input arguments and AstReturn is for output arguments.) :MatchingValueListToArguments
-
-	local argTypesIn  = calleeTypeInfo.argumentTypesIn
-	local argCount    = #argTypesIn
-	local hasVararg   = argCount > 0 and argTypesIn[argCount].tag == !(typeTags.TypeInfoVararg)
-	local argCountMin = hasVararg and argCount-1 or argCount -- Note: Varargs can have zero length.
-	local argCountMax = hasVararg and math.huge  or argCount
-
-	-- @Incomplete: Check for optional arguments.
-	if #call.arguments < argCountMin then
-		typeError(state, call, "Missing arguments.")
-	elseif #call.arguments > argCountMax then
-		!ASSERT `not hasVararg`
-		typeError(state, astGetExpressionVisuallyFurthestToTheLeft(call.arguments[argCount+1]), "Too many arguments.")
-	end
-
-	local function checkArgument(argIndex, argTypeInfo, argExpr, callOutArgIndex)
-		local typeInfoWanted = argTypesIn[math.min(argIndex, argCount)] -- Note: Varargs are always the last argument.
-		if typeInfoWanted.tag == !(typeTags.TypeInfoVararg) then
-			typeInfoWanted = typeInfoWanted.itemType
-		end
-
-		if not isTypeCompatibleWith(argTypeInfo, typeInfoWanted) then
-			-- @UX: Tell the name of the argument. (Probably only possible for constants, and maybe not all. Not sure!)
-			if callOutArgIndex then
-				local argCall = argExpr
-				typeError(
-					state, argCall,
-					"Type mismatch for argument #%d (return value #%d from call). (Wanted %s, got %s)",
-					argIndex,
-					callOutArgIndex,
-					getFriendlyTypeInfoName(typeInfoWanted),
-					getFriendlyTypeInfoName(argTypeInfo)
-				)
-			else
-				typeError(
-					state, astGetExpressionVisuallyFurthestToTheLeft(argExpr),
-					"Type mismatch for argument #%d. (Wanted %s, got %s)",
-					argIndex,
-					getFriendlyTypeInfoName(typeInfoWanted),
-					getFriendlyTypeInfoName(argTypeInfo)
-				)
-			end
-		elseif argTypeInfo ~= typeInfoWanted then
-			-- @Incomplete: Add cast.
-		end
-	end
-
-	-- Check additional values returned by the last value if it's call.
-	local argExprLast = getLast(call.arguments)
-
-	if argExprLast and argExprLast.nodeType == !(nodeTypes.AstCall) and not argExprLast.surroundedByParenthesis then
-		local argCall   = argExprLast
-		local argOffset = #call.arguments-1
-
-		for callOutArgIndex, argTypeInfo in ipairs(argCall.callee.inferredType.argumentTypesOut) do
-			local argIndex = callOutArgIndex+argOffset
-			checkArgument(argIndex, argTypeInfo, argCall, callOutArgIndex)
-		end
-	end
-
-	-- Check apparent arguments.
-	for argIndex, argExpr in ipairs(call.arguments) do
-		local argTypeInfo = argExpr.inferredType
-
-		if argExpr.nodeType == !(nodeTypes.AstCall) then
-			local listSig = argTypeInfo
-			argTypeInfo   = listSig[1]
-
-			if not argTypeInfo then
-				local argCall = argExpr
-				typeError(state, argCall, "Function call returns nothing. (Expected at least one value.)")
-			end
-		end
-
-		checkArgument(argIndex, argTypeInfo, argExpr, nil)
-	end
+	checkIfValuesMatchArgumentTypes(state, call, call.arguments, calleeTypeInfo.argumentTypesIn)
 
 	call.inferredType = getTypeInfoForList(state, calleeTypeInfo.argumentTypesOut)
 
@@ -1064,94 +1201,7 @@ end
 		!DEPEND_AND_RETURN(`returnNode`, DEPEND_NODE_INFERRED, `lambda`)
 	end
 
-	--
-	-- From now on we check that the correct stuff is returned.
-	--
-	-- @Incomplete: Support varargs.
-	--
-	-- @Cleanup: Use getAssignmentValue() or something here?
-	-- Also see :MatchingValueListToArguments.
-	--
-
-	local argTypesOut      = lambda.inferredType.argumentTypesOut
-	local lastValueExpr    = getLast(returnNode.values)
-	local returnValueCount = #returnNode.values
-
-	local lastValueIsListToUnpack
-		=   lastValueExpr ~= nil
-		and lastValueExpr.nodeType == !(nodeTypes.AstCall)
-		and not lastValueExpr.surroundedByParenthesis
-		and lastValueExpr.inferredType.tag == !(typeTags.TypeInfoList)
-
-	if lastValueIsListToUnpack then
-		local listSig    = lastValueExpr.inferredType
-		returnValueCount = returnValueCount - 1 + #listSig
-	end
-
-	if returnValueCount == #argTypesOut then
-		-- void
-
-	-- Too few values.
-	elseif returnValueCount < #argTypesOut then
-		-- @UX: Show a better message if lastValueExpr is a function call (not wrapped in parenthesis).
-		typeError(state, returnNode, "Too few values to return. (Expected %d, got %d)", #argTypesOut, returnValueCount)
-
-	-- Too many values.
-	elseif not lastValueIsListToUnpack then
-		local expr = astGetExpressionVisuallyFurthestToTheLeft(returnNode.values[#argTypesOut+1])
-		typeError(state, expr, "Too many values to return. (Expected %d, got %d)", #argTypesOut, returnValueCount)
-	else
-		local callOutArgCount = #returnNode.values-1
-		local listSig         = lastValueExpr.inferredType
-		typeError(state, lastValueExpr, "Too many values returned from call. (Expected %d, got %d)", #argTypesOut-callOutArgCount, #listSig)
-	end
-
-	if lastValueIsListToUnpack then
-		local listSig = lastValueExpr.inferredType
-
-		for i = #returnNode.values, returnValueCount do
-			local callOutArgIndex = i-#returnNode.values+1
-			local typeInfo        = listSig[callOutArgIndex]
-
-			if not isTypeCompatibleWith(typeInfo, argTypesOut[i]) then
-				typeError(state, lastValueExpr,
-					"Type mismatch for return value #%d from call. (Wanted %s, got %s)",
-					callOutArgIndex,
-					getFriendlyTypeInfoName(argTypesOut[i]),
-					getFriendlyTypeInfoName(typeInfo)
-				)
-			elseif typeInfo ~= argTypesOut[i] then
-				-- @Incomplete: Add cast.
-			end
-		end
-	end
-
-	for i = 1, #returnNode.values - (lastValueIsListToUnpack and 1 or 0) do
-		local expr     = returnNode.values[i]
-		local typeInfo = expr.inferredType
-
-		if expr.nodeType == !(nodeTypes.AstCall) then
-			local listSig = typeInfo
-			typeInfo      = listSig[1]
-
-			if not typeInfo then
-				local call = expr
-				typeError(state, call, "Function call returns nothing. (Expected at least one value.)")
-			end
-		end
-
-		if not isTypeCompatibleWith(typeInfo, argTypesOut[i]) then
-			typeError(state, astGetExpressionVisuallyFurthestToTheLeft(expr),
-				"Type mismatch for return value #%d. (Wanted %s, got %s)",
-				i,
-				getFriendlyTypeInfoName(argTypesOut[i]),
-				getFriendlyTypeInfoName(typeInfo)
-			)
-		elseif typeInfo ~= argTypesOut[i] then
-			-- @Incomplete: Add cast.
-		end
-	end
-
+	checkIfValuesMatchArgumentTypes(state, returnNode, returnNode.values, lambda.inferredType.argumentTypesOut)
 	moveToPipe(state, returnNode, !(PIPE_DONE))
 end
 
@@ -1501,15 +1551,20 @@ end
 !NODE_INFERRER `function nodeInferrers.AstTypeOf(state, typeOf)`
 	if not typeOf.expression.inferredType then
 		!DEPEND_AND_RETURN(`typeOf`, DEPEND_NODE_INFERRED, `typeOf.expression`)
-
-	elseif typeOf.expression.inferredType == getTypeInfoForBuiltinType(state, "namespace") then
+	elseif typeOf.expression.inferredType.tag == !(typeTags.TypeInfoNamespace) then
 		typeError(state, typeOf.expression, "Namespaces don't have a type.")
 	end
 
-	typeOf.inferredType = getTypeInfoForBuiltinType(state, "type")
+	typeOf.inferredType    = getTypeInfoForBuiltinType(state, "type")
+	typeOf.representedType = typeOf.expression.inferredType
+
+	if typeOf.representedType.tag == !(typeTags.TypeInfoVararg) then
+		local varargSig        = typeOf.representedType
+		typeOf.representedType = varargSig.itemType
+	end
 
 	moveToPipe(state, typeOf, !(PIPE_DONE))
-	simplifyTypeExpression(state, typeOf, typeOf.expression.inferredType) -- @Check: Are we in the right pipe after simplification?
+	simplifyTypeExpression(state, typeOf, typeOf.representedType) -- @Check: Are we in the right pipe after simplification?
 end
 
 !NODE_INFERRER `function nodeInferrers.AstCast(state, cast)`
@@ -1521,21 +1576,37 @@ end
 	end
 
 	local castTypeInfo = getTypeRepresentedByExpression(cast.targetType) or errorInternal()
+	local exprTypeInfo = cast.expression.inferredType
 
-	if castTypeInfo == cast.expression.inferredType then
+	if exprTypeInfo.tag == !(typeTags.TypeInfoList) then
+		local listSig = exprTypeInfo
+		exprTypeInfo  = listSig[1]
+	end
+	if exprTypeInfo.tag == !(typeTags.TypeInfoVararg) then
+		local varargSig = exprTypeInfo
+		exprTypeInfo    = varargSig.itemType
+	end
+
+	if castTypeInfo == exprTypeInfo then
 		-- @Incomplete: Remove unnecessary cast.
 
 	elseif
-		isAny(castTypeInfo,                 getTypeInfoForBuiltinType(state, "float"),getTypeInfoForBuiltinType(state, "int")) and
-		isAny(cast.expression.inferredType, getTypeInfoForBuiltinType(state, "float"),getTypeInfoForBuiltinType(state, "int"))
+		isAny(castTypeInfo, getTypeInfoForBuiltinType(state, "float"),getTypeInfoForBuiltinType(state, "int")) and
+		isAny(exprTypeInfo, getTypeInfoForBuiltinType(state, "float"),getTypeInfoForBuiltinType(state, "int"))
 	then
 		-- void
 
-	elseif isTypeBuiltin(castTypeInfo) or isTypeBuiltin(cast.expression.inferredType) then
+	elseif castTypeInfo.tag == !(typeTags.TypeInfoCompound) then
+		typeError(state, cast.targetType, "@Incomplete: Handle casting to compound type.")
+
+	elseif exprTypeInfo.tag == !(typeTags.TypeInfoCompound) then
+		typeError(state, astGetExpressionVisuallyFurthestToTheLeft(cast.expression), "@Incomplete: Handle casting from compound type.")
+
+	elseif isTypeBuiltin(castTypeInfo) or isTypeBuiltin(exprTypeInfo) then
 		typeError(
 			state, cast.expression,
 			"Cannot cast from %s to %s.",
-			getFriendlyTypeInfoName(cast.expression.inferredType),
+			getFriendlyTypeInfoName(exprTypeInfo),
 			getFriendlyTypeInfoName(castTypeInfo)
 		)
 
@@ -1826,18 +1897,31 @@ end
 
 -- expression, typeInfo = getAssignmentValue( state, identifier, values, i [, expectedTypeInfo=any ] )
 function _G.getAssignmentValue(state, ident, values, i, typeInfoExpected)
+	-- @Cleanup: This function could use some it!
+
 	local valueExpr = values[i]
 
-	-- Non-call value or value not last in list.
-	if valueExpr and not (valueExpr.nodeType == !(nodeTypes.AstCall) and not valueExpr.surroundedByParenthesis) then
-		if typeInfoExpected and not isTypeCompatibleWith(valueExpr.inferredType, typeInfoExpected) then
-			if valueExpr.inferredType.tag ~= typeInfoExpected.tag then
+	-- Non-call non-vararg value or value not last in list.
+	if
+		valueExpr and not (
+			(valueExpr.nodeType == !(nodeTypes.AstCall)   and not valueExpr.surroundedByParenthesis) or
+			(valueExpr.nodeType == !(nodeTypes.AstVararg) and not valueExpr.surroundedByParenthesis)
+		)
+	then
+		local valueTypeInfo = valueExpr.inferredType
+
+		if valueTypeInfo.tag == !(typeTags.TypeInfoVararg) then
+			valueTypeInfo = valueTypeInfo.itemType
+		end
+
+		if typeInfoExpected and not isTypeCompatibleWith(valueTypeInfo, typeInfoExpected) then
+			if valueTypeInfo.tag ~= typeInfoExpected.tag then
 				typeError(
 					state, valueExpr,
 					"Type and value type mismatch. ('%s' is %s, value is %s)",
 					ident.name,
 					getFriendlyTypeInfoName(typeInfoExpected),
-					getFriendlyTypeInfoName(valueExpr.inferredType)
+					getFriendlyTypeInfoName(valueTypeInfo)
 				)
 
 			elseif typeInfoExpected.tag == !(typeTags.TypeInfoFunction) then
@@ -1846,7 +1930,7 @@ function _G.getAssignmentValue(state, ident, values, i, typeInfoExpected)
 					"Function signature is different from the type of '%s'. (Wanted %s, got %s)",
 					ident.name,
 					getFriendlyTypeInfoName(typeInfoExpected),
-					getFriendlyTypeInfoName(valueExpr.inferredType)
+					getFriendlyTypeInfoName(valueTypeInfo)
 				)
 
 			elseif typeInfoExpected.tag == !(typeTags.TypeInfoStruct) then
@@ -1861,7 +1945,16 @@ function _G.getAssignmentValue(state, ident, values, i, typeInfoExpected)
 			end
 		end
 
-		return valueExpr, valueExpr.inferredType
+		return valueExpr, valueTypeInfo
+	end
+
+	-- Vararg.
+	if values[1] and (valueExpr or values[#values]).nodeType == !(nodeTypes.AstVararg) then
+		local vararg = valueExpr or values[#values]
+		if not (valueExpr or not vararg.surroundedByParenthesis) then
+			typeError(state, ident, "Missing a value for '%s' (name #%d).", ident.name, i)
+		end
+		return vararg, vararg.inferredType.itemType
 	end
 
 	-- Value list ending in a call (hopefully).
@@ -1893,8 +1986,18 @@ function _G.getAssignmentValue(state, ident, values, i, typeInfoExpected)
 	end
 
 	local typeInfoForOutArg = listSig[argIndex]
-	if not typeInfoForOutArg then
+
+	if typeInfoForOutArg then
+		-- void
+	elseif listSig[1] and listSig[#listSig].tag == !(typeTags.TypeInfoVararg) then
+		typeInfoForOutArg = listSig[#listSig]
+	else
 		typeError(state, call, "Function does not return anything for '%s' (return value #%d).", ident.name, argIndex)
+	end
+
+	if typeInfoForOutArg.tag == !(typeTags.TypeInfoVararg) then
+		local varargSig   = listSig[#listSig]
+		typeInfoForOutArg = varargSig.itemType
 	end
 
 	if typeInfoExpected and typeInfoForOutArg ~= typeInfoExpected then
@@ -1966,6 +2069,14 @@ function _G.simplifyTypeExpression(state, expr, typeInfoRepresented)
 	if isBuiltin then
 		typeNode.typeName = typeName
 
+	elseif typeInfoRepresented.tag == !(typeTags.TypeInfoStruct) then
+		local structInfo  = typeInfoRepresented
+		typeNode.typeName = structInfo.name
+
+	elseif typeInfoRepresented.tag == !(typeTags.TypeInfoEnum) then
+		local enumInfo    = typeInfoRepresented
+		typeNode.typeName = enumInfo.name
+
 	elseif typeInfoRepresented.tag == !(typeTags.TypeInfoFunction) then
 		local decl = typeInfo.declaration
 
@@ -1987,14 +2098,8 @@ function _G.simplifyTypeExpression(state, expr, typeInfoRepresented)
 			end
 		end)
 
-	elseif typeInfoRepresented.tag == !(typeTags.TypeInfoStruct) then
-		local structInfo  = typeInfoRepresented
-		typeNode.typeName = structInfo.name
-
-	elseif typeInfoRepresented.tag == !(typeTags.TypeInfoEnum) then
-		local enumInfo    = typeInfoRepresented
-		typeNode.typeName = enumInfo.name
-
+	elseif isAny(typeInfoRepresented.tag, !(typeTags.TypeInfoVararg),!(typeTags.TypeInfoCompound)) then
+		-- void
 	else
 		errorInternal("Incomplete: Handle type tag '%s'.", TYPE_TAG_NAMES[typeInfoRepresented.tag])
 	end
@@ -2043,8 +2148,6 @@ function _G.isTypeSimple(typeInfo)
 	return isAny(typeInfo.tag, !(typeTags.TypeInfoBool),!(typeTags.TypeInfoInt),!(typeTags.TypeInfoNil),!(typeTags.TypeInfoFloat),!(typeTags.TypeInfoString),!(typeTags.TypeInfoType))
 end
 
-
-
 function _G.isTypeCompatibleWith(typeToCheck, otherType)
 	if typeToCheck == otherType then  return true  end
 
@@ -2066,6 +2169,31 @@ function _G.isTypeCompatibleWith(typeToCheck, otherType)
 	-- @Incomplete: Handle typeToCheck being a compound type.
 
 	return false
+end
+
+
+
+do
+	local function compareIdsOfTypes(a, b)
+		return a.id < b.id
+	end
+
+	function _G.normalizeVarargItemType(state, itemType)
+		if itemType.tag == !(typeTags.TypeInfoNil) then  return itemType  end
+
+		if itemType.tag ~= !(typeTags.TypeInfoCompound) then
+			local typeInfos = {itemType, getTypeInfoForBuiltinType(state, "nil")}
+			table.sort(typeInfos, compareIdsOfTypes)
+			return getTypeInfoForCompoundType(state, typeInfos)
+		end
+
+		local compound = itemType
+		if indexOf(compound, getTypeInfoForBuiltinType(state, "nil")) then  return compound  end
+
+		local typeInfos = {getTypeInfoForBuiltinType(state, "nil"), unpack(compound)}
+		table.sort(typeInfos, compareIdsOfTypes)
+		return getTypeInfoForCompoundType(state, typeInfos)
+	end
 end
 
 
