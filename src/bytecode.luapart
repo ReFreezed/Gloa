@@ -285,9 +285,14 @@ function _G.bcAllocateConstantValueForExpressionIfNew(state, expr, dependent)
 		-- @Incomplete: Wait for statements to get inferred (when we got struct self-referencing working).
 
 		local const, isNew = bcAllocateConstantValueIfNew(state, typeInfo, struct)
+
 		if isNew and state.settings.outputDebugInfo then
-			const.name         = const.name.."_"..unicodeToLuaIdentifier(struct.name)
-			const.nameTampered = true
+			local structInfo = struct.representedType
+
+			if structInfo.name ~= "" then
+				const.name         = const.name.."_"..unicodeToLuaIdentifier(structInfo.name)
+				const.nameTampered = true
+			end
 		end
 
 		return const, isNew
@@ -410,23 +415,22 @@ end
 
 function _G.bcEmitForDeclaration(state, decl)
 	if decl.isConstant or isScopeDeclarative(getClosestScope(decl)) then
-		if not decl.assignment then
-			errorInternal("@Incomplete: Default values.")
-		end
+		if decl.assignment then
+			local valueExpr = getAssignmentValue(state, decl.name, decl.assignment.values, decl.assignmentIndex)
+			local const     = bcAllocateConstantValueForExpressionIfNew(state, valueExpr, decl)
+			if not const then  return  end -- A dependency was added and we're now waiting.
 
-		local valueExpr = getAssignmentValue(state, decl.name, decl.assignment.values, decl.assignmentIndex)
-		local const     = bcAllocateConstantValueForExpressionIfNew(state, valueExpr, decl)
+			decl.valueConstant = const
 
-		if not const then  return  end
-
-		decl.valueConstant = const
-
-		if decl.isConstant then
-			if not const.nameTampered and state.settings.outputDebugInfo then
-				const.name         = const.name.."_"..unicodeToLuaIdentifier(decl.name.name)
-				const.nameTampered = true
+			if decl.isConstant then
+				if not const.nameTampered and state.settings.outputDebugInfo then
+					const.name         = const.name.."_"..unicodeToLuaIdentifier(decl.name.name)
+					const.nameTampered = true
+				end
+			elseif isAny(getClosestScope(decl).nodeType, !(nodeTypes.AstGlobalScope),!(nodeTypes.AstFileScope)) then
+				decl.topScopeName = bcAllocateTopScopeName(state, decl.name.name)
 			end
-		elseif isAny(getClosestScope(decl).nodeType, !(nodeTypes.AstGlobalScope),!(nodeTypes.AstFileScope)) then
+		else
 			decl.topScopeName = bcAllocateTopScopeName(state, decl.name.name)
 		end
 	end

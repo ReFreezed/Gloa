@@ -96,6 +96,7 @@ local !struct"TypeInfoStructMember"{
 	typeInfo = NIL,
 }
 local !structTypeInfo"TypeInfoStruct:_TypeInfo"{
+	astNode               = NIL, -- AstStruct
 	name                  = "",  -- Filled in during definition.
 	arguments             = {},  -- []TypeInfo  @Incomplete: Polymorphism.  @Cleanup: Use TypeInfoList here.
 	members               = {},  -- []TypeInfoStructMember
@@ -106,6 +107,7 @@ local !struct"TypeInfoEnumMember"{
 	name = "",
 }
 local !structTypeInfo"TypeInfoEnum:_TypeInfo"{
+	astNode  = NIL, -- AstStruct
 	name     = "",
 	typeInfo = NIL, -- Must be one of these primitive types: int, string, type, bool or float.
 	members  = {},  -- []TypeInfoEnumMember
@@ -124,7 +126,6 @@ _G.TYPE_TAG_NAMES = !(typeTagNames)
 
 
 -- typeInfo = newTypeInfo( TypeInfoCreator [, declaration=internal ] )
--- typeInfo = newTypeInfo( TypeInfoCreator [, definition=internal ] )  @Depricated
 do
 	local lastTypeId = 0
 
@@ -135,7 +136,7 @@ do
 
 		local typeInfo       = TypeInfoCreator()
 		typeInfo.id          = lastTypeId
-		typeInfo.declaration = decl
+		typeInfo.declaration = decl -- @Cleanup: Is typeInfo.declaration used/wanted anywhere?
 
 		--[[
 		if lastTypeId == 22 then
@@ -839,6 +840,7 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 	if vararg then  assert(not typeInfoForDecl)  end
 
 	-- print(typeInfoForDecl and getFriendlyTypeInfoName(typeInfoForDecl))
+
 	if not typeInfoForDecl then
 		-- void
 
@@ -1777,7 +1779,8 @@ end
 		end
 	end
 
-	local structInfo = newTypeInfo(TypeInfoStruct)
+	local structInfo   = newTypeInfo(TypeInfoStruct)
+	structInfo.astNode = struct
 
 	for i, decl in ipairs(struct.declarations) do
 		local member          = TypeInfoStructMember()
@@ -1825,7 +1828,8 @@ end
 		end
 	end
 
-	local enumInfo = newTypeInfo(TypeInfoEnum)
+	local enumInfo   = newTypeInfo(TypeInfoEnum)
+	enumInfo.astNode = enum
 
 	for i, decl in ipairs(enum.declarations) do
 		local valueExpr = decl.assignment.values[1]
@@ -2174,7 +2178,7 @@ function _G.simplifyExpressionIfConstant(state, expr)
 		local ident = expr
 		decl = ident.declaration or errorInternal()
 	else
-		decl = typeInfo.declaration -- Nil for built-in types (and function signatures?).
+		decl = typeInfo.declaration -- Nil for built-in types (and function signatures?). (Actually, I don't think typeInfo.declaration is ever set. @Cleanup)
 		if not decl then  return  end
 	end
 	if not decl.isConstant then  return  end

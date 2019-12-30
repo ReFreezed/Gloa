@@ -29,7 +29,7 @@ function _G.writeIdentifierName(state, file, ident)
 	file:write(name)
 end
 
-function _G.writeExpression(state, file, expr, indent, nextLocalN)
+function _G.writeExpression(state, file, expr)
 	if expr.nodeType == !(nodeTypes.AstCall) then
 		local call   = expr
 		local callee = call.callee
@@ -40,13 +40,13 @@ function _G.writeExpression(state, file, expr, indent, nextLocalN)
 			assert(callee.declaration.valueConstant)
 			writeConstantValueOrReference(state, file, callee.declaration.valueConstant)
 		else
-			writeExpression(state, file, callee, indent, nextLocalN)
+			writeExpression(state, file, callee)
 		end
 
 		file:write("(")
 		for i, argExpr in ipairs(call.arguments) do
 			if i > 1 then  file:write(", ")  end
-			writeExpression(state, file, argExpr, indent, nextLocalN)
+			writeExpression(state, file, argExpr)
 		end
 		file:write(")")
 
@@ -55,15 +55,15 @@ function _G.writeExpression(state, file, expr, indent, nextLocalN)
 	elseif expr.nodeType == !(nodeTypes.AstUnary) then
 		local unary = expr
 		file:write("(", unary.operation)
-		writeExpression(state, file, unary.expression, indent, nextLocalN)
+		writeExpression(state, file, unary.expression)
 		file:write(")")
 
 	elseif expr.nodeType == !(nodeTypes.AstBinary) then
 		local binary = expr
 		file:write("(")
-		writeExpression(state, file, binary.left, indent, nextLocalN)
+		writeExpression(state, file, binary.left)
 		file:write(" ", binary.operation, " ")
-		writeExpression(state, file, binary.right, indent, nextLocalN)
+		writeExpression(state, file, binary.right)
 		file:write(")")
 
 	elseif expr.nodeType == !(nodeTypes.AstLiteral) then
@@ -92,6 +92,59 @@ function _G.writeExpression(state, file, expr, indent, nextLocalN)
 
 	else
 		errorUnhandledNodeType(expr)
+	end
+end
+
+local function findDeclarationInStructOrEnum(state, structOrEnum, name)
+	for _, decl in ipairs(structOrEnum.declarations) do
+		if decl.name.name == name then  return decl  end
+	end
+	return nil
+end
+
+function _G.writeDefaultValueForType(state, file, typeInfo)
+	local tag = typeInfo.tag
+
+	if tag == !(typeTags.TypeInfoBool) then
+		file:write("false")
+	elseif tag == !(typeTags.TypeInfoInt) then
+		file:write("0")
+	elseif tag == !(typeTags.TypeInfoNil) then
+		file:write("nil")
+	elseif tag == !(typeTags.TypeInfoFloat) then
+		file:write("0.0")
+	elseif tag == !(typeTags.TypeInfoString) then
+		file:write('""')
+	elseif tag == !(typeTags.TypeInfoType) then
+		file:write("0") -- @Robustness: Maybe 'type' variables should have no defult value and this should be an error.
+
+	elseif tag == !(typeTags.TypeInfoStruct) then
+		local structInfo = typeInfo
+		file:write("{")
+
+		for i, member in ipairs(structInfo.members) do
+			if i > 1 then  file:write(",")  end
+
+			if member.name:find"^[%a_][%w_]*$" then
+				file:write(member.name)
+			else
+				file:write(F("[%q]", member.name))
+			end
+			file:write("=")
+
+			local assignment = findDeclarationInStructOrEnum(state, structInfo.astNode, member.name).assignment
+			if assignment then
+				local valueExpr = assignment.values[1] or errorInternal()
+				writeExpression(state, file, valueExpr)
+			else
+				writeDefaultValueForType(state, file, member.typeInfo)
+			end
+		end
+
+		file:write("}")
+
+	else
+		errorInternal("Incomplete: Default initial value for type '%s'.", (TYPE_TAG_NAMES[tag] or "?"))
 	end
 end
 
@@ -131,23 +184,7 @@ function _G.writeImperativeBlock(state, file, block, indent, nextLocalN)
 				else
 					local tag = decl.name.inferredType.tag
 					file:write(indentStr, "local ", decl.localName, " = ")
-
-					if tag == !(typeTags.TypeInfoBool) then
-						file:write("false")
-					elseif tag == !(typeTags.TypeInfoInt) then
-						file:write("0")
-					elseif tag == !(typeTags.TypeInfoNil) then
-						file:write("nil")
-					elseif tag == !(typeTags.TypeInfoFloat) then
-						file:write("0.0")
-					elseif tag == !(typeTags.TypeInfoString) then
-						file:write('""')
-					elseif tag == !(typeTags.TypeInfoType) then
-						file:write("0") -- @Robustness: Maybe 'type' variables should have no defult value and this should be an error.
-					else
-						errorInternal("Incomplete: Default initial value for type '%s'.", (TYPE_TAG_NAMES[tag] or "?"))
-					end
-
+					writeDefaultValueForType(state, file, decl.name.inferredType)
 					file:write("\n")
 				end
 
@@ -169,7 +206,7 @@ function _G.writeImperativeBlock(state, file, block, indent, nextLocalN)
 				file:write(" ", assignment.operation, " ")
 				for i, expr in ipairs(assignment.values) do
 					if i > 1 then  file:write(", ")  end
-					writeExpression(state, file, expr, indent, nextLocalN)
+					writeExpression(state, file, expr)
 				end
 				file:write(";\n") -- The ';' removes ambiguity is some cases.
 			end
@@ -190,7 +227,7 @@ function _G.writeImperativeBlock(state, file, block, indent, nextLocalN)
 				for i, expr in ipairs(returnNode.values) do
 					if i > 1 then  file:write(",")  end
 					file:write(" ")
-					writeExpression(state, file, expr, indent, nextLocalN)
+					writeExpression(state, file, expr)
 				end
 				file:write("\n")
 			end
@@ -205,7 +242,7 @@ function _G.writeImperativeBlock(state, file, block, indent, nextLocalN)
 			-- @Optimize: Don't output empty branches.
 			local ifBranch = statement.what
 			file:write(indentStr, "if ")
-			writeExpression(state, file, ifBranch.condition, indent, nextLocalN)
+			writeExpression(state, file, ifBranch.condition)
 			file:write(" then\n")
 
 			writeImperativeBlock(state, file, ifBranch.branchTrue, indent+1, nextLocalN)
@@ -221,7 +258,7 @@ function _G.writeImperativeBlock(state, file, block, indent, nextLocalN)
 			-- @Optimize: Don't output an empty body.
 			local whileLoop = statement.what
 			file:write(indentStr, "while ")
-			writeExpression(state, file, whileLoop.condition, indent, nextLocalN)
+			writeExpression(state, file, whileLoop.condition)
 			file:write(" do\n")
 
 			writeImperativeBlock(state, file, whileLoop.body, indent+1, nextLocalN)
@@ -234,7 +271,7 @@ function _G.writeImperativeBlock(state, file, block, indent, nextLocalN)
 		else
 			-- Assume the statement is an expression at this point and let writeExpression() deal with any errors.
 			file:write(indentStr)
-			writeExpression(state, file, statement.what, indent, nextLocalN)
+			writeExpression(state, file, statement.what)
 			file:write(";\n") -- The ';' removes ambiguity is some cases.
 		end
 	end
