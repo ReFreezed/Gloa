@@ -505,8 +505,9 @@ function _G.getFriendlyTypeInfoName(typeInfo)
 			typeTexts[i] = getFriendlyTypeInfoName(compoundItem)
 		end
 
-		!if DEBUG then
-			name = "["..table.concat(typeTexts, "|").."]" -- asdf
+		!if false then
+		-- !if DEBUG then
+			name = "["..table.concat(typeTexts, "|").."]"
 		!else
 			name = table.concat(typeTexts, "|")
 		!end
@@ -538,10 +539,17 @@ local function DEPEND_AND_RETURN(dependentCode, dependType, dependOnCode)
 	__LUA("addDependency(state, ",dependentCode,", ",toLua(dependType),", ",dependOnCode,") ; return")
 end
 
+local nodeNames = {}
+
 local function NODE_INFERRER(funcHeaderCode)
 	local replacements
 
 	funcHeaderCode, replacements = funcHeaderCode:gsub("function +nodeInferrers%.(Ast%w+)", function(nodeName)
+		if nodeNames[nodeName] then
+			error("Duplicate node inferrer: "..nodeName)
+		end
+		nodeNames[nodeName] = true
+
 		local nodeType = nodeTypes[nodeName] or error(nodeName)
 		return "nodeInferrers[--[["..nodeName.."]]"..nodeType.."] = function"
 	end)
@@ -1170,7 +1178,8 @@ end
 	assert(calleeTypeInfo.tag == !(typeTags.TypeInfoFunction)) -- @Incomplete: Handle parameterized structs.
 	checkIfValuesMatchArgumentTypes(state, call, call.arguments, calleeTypeInfo.argumentTypesIn)
 
-	call.inferredType = getTypeInfoForList(state, calleeTypeInfo.argumentTypesOut)
+	call.inferredType              = getTypeInfoForList(state, calleeTypeInfo.argumentTypesOut)
+	call.couldBeTypeWithParameters = false
 
 	moveToPipe(state, call, !(PIPE_DONE))
 end
@@ -1355,6 +1364,29 @@ end
 	end
 	if not typeInfoR then
 		!DEPEND_AND_RETURN(`binary`, DEPEND_NODE_INFERRED, `binary.right`)
+	end
+
+	-- @Cleanup: We do this stuff in a lot of places!
+	do
+		if typeInfoL.tag == !(typeTags.TypeInfoList) then
+			local listSig = typeInfoL
+			typeInfoL     = listSig[1]
+			if not typeInfoL then  typeError(state, binary.left, "Function call returns nothing. (Expected at least one value.)")  end
+		end
+		if typeInfoL.tag == !(typeTags.TypeInfoVararg) then
+			local vararg = typeInfoL
+			typeInfoL    = vararg.itemType
+		end
+
+		if typeInfoR.tag == !(typeTags.TypeInfoList) then
+			local listSig = typeInfoR
+			typeInfoR     = listSig[1]
+			if not typeInfoR then  typeError(state, binary.right, "Function call returns nothing. (Expected at least one value.)")  end
+		end
+		if typeInfoR.tag == !(typeTags.TypeInfoVararg) then
+			local vararg = typeInfoR
+			typeInfoR    = vararg.itemType
+		end
 	end
 
 	-- @Incomplete: Use isTypeCompatibleWith(). For now, both sides need to be
@@ -1692,16 +1724,45 @@ end
 	moveToPipe(state, import, !(PIPE_DONE))
 end
 
--- !NODE_INFERRER `function nodeInferrers.AstIf(state, ifBranch)`
--- 	ifBranch.condition
--- 	ifBranch.branchTrue
--- 	ifBranch.branchFalse
--- end
+local function inferIfOrWhile(state, ifOrWhile)
+	local typeInfo = ifOrWhile.condition.inferredType
+	if not typeInfo then
+		!DEPEND_AND_RETURN(`ifOrWhile`, DEPEND_NODE_INFERRED, `ifOrWhile.condition`)
+	end
 
--- !NODE_INFERRER `function nodeInferrers.AstWhile(state, whileLoop)`
---  whileLoop.condition
---  whileLoop.body
--- end
+	if typeInfo.tag == !(typeTags.TypeInfoList) then
+		local listSig = typeInfo
+		typeInfo      = listSig[1]
+
+		if not typeInfo then
+			typeError(state, ifOrWhile.condition, "Function call returns nothing. (Expected a boolean.)")
+		end
+	end
+
+	if typeInfo.tag == !(typeTags.TypeInfoVararg) then
+		errorUnhandledNodeType(ifOrWhile.condition)
+	end
+
+	-- @Incomplete: Make if conditions better! Handle compound types and stuff in a nice way!
+	if typeInfo.tag ~= !(typeTags.TypeInfoBool) then
+		typeError(
+			state, astGetExpressionVisuallyFurthestToTheLeft(ifOrWhile.condition),
+			"Expected condition expression to result in a boolean. (Got %s)",
+			getFriendlyTypeInfoName(typeInfo)
+		)
+	end
+
+	-- @Optimize: Remove/replace the branch if the condition is statically known.
+
+	moveToPipe(state, ifOrWhile, !(PIPE_DONE))
+end
+
+!NODE_INFERRER `function nodeInferrers.AstIf(state, ifBranch)`
+	inferIfOrWhile(state, ifBranch)
+end
+!NODE_INFERRER `function nodeInferrers.AstWhile(state, whileLoop)`
+	inferIfOrWhile(state, whileLoop)
+end
 
 -- !NODE_INFERRER `function nodeInferrers.AstFor(state, forLoop)`
 -- 	forLoop.names[]

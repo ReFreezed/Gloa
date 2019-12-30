@@ -86,12 +86,9 @@ function _G.writeExpression(state, file, expr, indent, nextLocalN)
 		local constant = itemWith1(state.constants, "valueType", lambda.inferredType) or errorInternal()
 		writeConstantValueOrReference(state, file, constant)
 
-	elseif expr.nodeType == !(nodeTypes.AstBlock) then
-		local block     = expr
-		local indentStr = ("\t"):rep(indent)
-		file:write("do\n")
-		writeImperativeBlock(state, file, block, indent+1, nextLocalN)
-		file:write(indentStr, "end")
+	elseif expr.nodeType == !(nodeTypes.AstVararg) then
+		local vararg = expr
+		file:write(vararg.surroundedByParenthesis and "(...)" or "...")
 
 	else
 		errorUnhandledNodeType(expr)
@@ -198,6 +195,39 @@ function _G.writeImperativeBlock(state, file, block, indent, nextLocalN)
 				file:write("\n")
 			end
 
+		elseif nodeType == !(nodeTypes.AstBlock) then
+			local block = statement.what
+			file:write(indentStr, "do\n")
+			writeImperativeBlock(state, file, block, indent+1, nextLocalN)
+			file:write(indentStr, "end\n")
+
+		elseif nodeType == !(nodeTypes.AstIf) then
+			-- @Optimize: Don't output empty branches.
+			local ifBranch = statement.what
+			file:write(indentStr, "if ")
+			writeExpression(state, file, ifBranch.condition, indent, nextLocalN)
+			file:write(" then\n")
+
+			writeImperativeBlock(state, file, ifBranch.branchTrue, indent+1, nextLocalN)
+
+			if ifBranch.branchFalse then
+				file:write(indentStr, "else\n")
+				writeImperativeBlock(state, file, ifBranch.branchFalse, indent+1, nextLocalN)
+			end
+
+			file:write(indentStr, "end\n")
+
+		elseif nodeType == !(nodeTypes.AstWhile) then
+			-- @Optimize: Don't output an empty body.
+			local whileLoop = statement.what
+			file:write(indentStr, "while ")
+			writeExpression(state, file, whileLoop.condition, indent, nextLocalN)
+			file:write(" do\n")
+
+			writeImperativeBlock(state, file, whileLoop.body, indent+1, nextLocalN)
+
+			file:write(indentStr, "end\n")
+
 		elseif nodeType == !(nodeTypes.AstImport) then
 			-- void  (Ignore import statements.)
 
@@ -227,8 +257,13 @@ function _G.writeFunction(state, file, lambda)
 		for i, arg in ipairs(lambda.argumentsIn) do
 			if i > 1 then  file:write(", ")  end
 
-			local decl     = arg.declaration
-			decl.localName = state.settings.outputDebugInfo and "A"..i.."_"..unicodeToLuaIdentifier(decl.name.name) or "A"..i
+			local decl = arg.declaration
+
+			if decl.name.nodeType == !(nodeTypes.AstVararg) then
+				decl.localName = "..."
+			else
+				decl.localName = state.settings.outputDebugInfo and "A"..i.."_"..unicodeToLuaIdentifier(decl.name.name) or "A"..i
+			end
 
 			file:write(decl.localName)
 		end
