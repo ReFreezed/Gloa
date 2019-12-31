@@ -1450,15 +1450,11 @@ end
 		typeInfo = getTypeInfoForBuiltinType(state, "bool")
 
 	-- String concatination.
-	elseif isAny(binary.operation, "..") then
+	elseif binary.operation == ".." then
 		if typeInfoL ~= getTypeInfoForBuiltinType(state, "string") then
 			typeError(state, binary.left, "String concatination expected a string. (Got %s)", getFriendlyTypeInfoName(typeInfoL))
 		end
 		typeInfo = getTypeInfoForBuiltinType(state, "string")
-
-	-- Lookup, or similar.
-	elseif isAny(binary.operation, ".") then
-		errorInternal("@Incomplete: Handle '.' operator.")
 
 	else
 		errorUnhandledNodeType(binary)
@@ -1522,20 +1518,107 @@ end
 
 	elseif binary.operation == ".." then
 		local literal        = astNewNode(AstLiteral, binary.token, binary.parent)
-		literal.literalType  = !(LITERAL_BOOLEAN)
+		literal.literalType  = !(LITERAL_STRING)
 		literal.value        = valueL..valueR -- @Speed: Concatinate more than two values at a time. (Probably need to update parsing stage.)
 		literal.inferredType = typeInfo
 		replaceQueuedNodeAndUnqueueOldTree(state, binary, literal)
 		moveToPipe(state, literal, !(PIPE_BYTECODE))
-
-	elseif binary.operation == "." then
-		errorUnhandledNodeType(binary)
 
 	else
 		errorUnhandledNodeType(binary)
 	end
 
 	-- astPrintTree(binary.parent)
+end
+
+!NODE_INFERRER `function nodeInferrers.AstLookup(state, lookup)`
+	local typeInfoObject = lookup.object.inferredType
+	local typeInfoMember = lookup.member.inferredType
+
+	if not typeInfoObject then
+		!DEPEND_AND_RETURN(`lookup`, DEPEND_NODE_INFERRED, `lookup.object`)
+	end
+	if not typeInfoMember then
+		!DEPEND_AND_RETURN(`lookup`, DEPEND_NODE_INFERRED, `lookup.member`)
+	end
+
+	-- @Cleanup: We do this stuff in a lot of places!
+	do
+		if typeInfoObject.tag == !(typeTags.TypeInfoList) then
+			local listSig = typeInfoObject
+			typeInfoObject     = listSig[1]
+			if not typeInfoObject then  typeError(state, lookup.object, "Function call returns nothing. (Expected at least one value.)")  end
+		end
+		if typeInfoObject.tag == !(typeTags.TypeInfoVararg) then
+			local vararg = typeInfoObject
+			typeInfoObject    = vararg.itemType
+		end
+
+		if typeInfoMember.tag == !(typeTags.TypeInfoList) then
+			local listSig  = typeInfoMember
+			typeInfoMember = listSig[1]
+			if not typeInfoMember then  typeError(state, lookup.member, "Function call returns nothing. (Expected at least one value.)")  end
+		end
+		if typeInfoMember.tag == !(typeTags.TypeInfoVararg) then
+			local vararg   = typeInfoMember
+			typeInfoMember = vararg.itemType
+		end
+	end
+
+	-- local isDirectObj   = lookup.object.inferredType == typeInfoObject
+	-- local isDirectField = lookup.member.inferredType == typeInfoMember
+
+	local isLeftValue         = lookup.parent.nodeType == !(nodeTypes.AstAssignment) and indexOf(lookup.parent.targets, lookup) ~= nil
+	local typeInfoRepresented = getTypeRepresentedByExpression(lookup.object)
+
+	if typeInfoObject.tag == !(typeTags.TypeInfoStruct) or (typeInfoRepresented and typeInfoRepresented.tag == !(typeTags.TypeInfoStruct)) then
+		local literal    = lookup.member
+		local structInfo = typeInfoRepresented or typeInfoObject
+
+		if not (literal.nodeType == !(nodeTypes.AstLiteral) and literal.literalType == !(LITERAL_STRING)) then
+			typeError(state, astGetExpressionVisuallyFurthestToTheLeft(literal), "Expected struct member name.")
+		end
+
+		local memberName = literal.value
+		local decl       = findDeclarationInScope(state, structInfo.astNode, memberName)
+
+		if not decl then
+			typeError(state, literal, "'%s' is not a member of %s.", memberName, getFriendlyTypeInfoName(structInfo))
+		elseif isLeftValue and decl.isConstant then
+			typeError(state, literal, "Cannot assign value to constant %s.%s .", getFriendlyTypeInfoName(structInfo), memberName)
+		end
+
+		lookup.inferredType = decl.name.inferredType or errorInternal()
+
+		if not decl.isConstant then
+			moveToPipe(state, lookup, !(PIPE_DONE))
+			return
+		end
+
+		local valueExpr = getAssignmentValue(state, decl.name, decl.assignment.values, decl.assignmentIndex)
+		local replacement
+
+		if valueExpr.nodeType == !(nodeTypes.AstLiteral) then
+			replacement       = astCopy(valueExpr)
+			replacement.token = lookup.member.token
+		else
+			errorUnhandledNodeType(valueExpr)
+		end
+
+		assert(replacement) -- Constants must be simplified!
+
+		replaceQueuedNodeAndUnqueueOldTree(state, lookup, replacement)
+		moveToPipe(state, replacement, !(PIPE_BYTECODE))
+
+	elseif typeInfoObject.tag == !(typeTags.TypeInfoEnum) then
+		errorUnhandledNodeType(lookup.object)
+
+	elseif typeInfoObject.tag == !(typeTags.TypeInfoTable) then
+		errorUnhandledNodeType(lookup.object)
+
+	else
+		errorUnhandledNodeType(lookup.object)
+	end
 end
 
 -- !NODE_INFERRER `function nodeInferrers.AstTable(state, tableNode)`
@@ -1660,20 +1743,30 @@ end
 end
 
 !NODE_INFERRER `function nodeInferrers.AstAssignment(state, assignment)`
-	for _, ident in ipairs(assignment.targets) do
-		if not ident.inferredType then
-			!DEPEND_AND_RETURN(`assignment`, DEPEND_NODE_INFERRED, `ident`)
+	for _, targetExpr in ipairs(assignment.targets) do
+		if not targetExpr.inferredType then
+			!DEPEND_AND_RETURN(`assignment`, DEPEND_NODE_INFERRED, `targetExpr`)
 		end
 	end
-
 	for _, expr in ipairs(assignment.values) do
 		if not expr.inferredType then
 			!DEPEND_AND_RETURN(`assignment`, DEPEND_NODE_INFERRED, `expr`)
 		end
 	end
 
-	for i, ident in ipairs(assignment.targets) do
-		getAssignmentValue(state, ident, assignment.values, i, ident.inferredType)
+	-- Validate targets.
+	for _, targetExpr in ipairs(assignment.targets) do
+		if not isAny(targetExpr.nodeType, !(nodeTypes.AstIdentifier),!(nodeTypes.AstLookup)) then
+			!if DEBUG then
+				astPrint(targetExpr)
+			!end
+			typeError(state, astGetExpressionVisuallyFurthestToTheLeft(targetExpr), "Invalid assignment target. Expected a variable name or field.")
+		end
+	end
+
+	-- Validate values.
+	for i, targetExpr in ipairs(assignment.targets) do
+		getAssignmentValue(state, targetExpr, assignment.values, i, targetExpr.inferredType)
 	end
 
 	-- @Incomplete: Check that !must args from functions have an assignment target.
@@ -1942,11 +2035,14 @@ function _G.getLiteralValueFromExpressionIfConstant(state, expr)
 			errorInternal("Unhandled cast type: %s", getFriendlyTypeInfoName(cast.inferredType))
 		end
 
-	elseif isAny(expr.nodeType, !(nodeTypes.AstBinary),!(nodeTypes.AstBinary)) then
+	elseif isAny(expr.nodeType, !(nodeTypes.AstUnary),!(nodeTypes.AstBinary)) then
 		return false, nil -- We don't check child nodes as those should have been folded into 'expr' where this function is called.
 
 	elseif expr.nodeType == !(nodeTypes.AstCall) then
 		return false, nil -- Calls are always a runtime operation.
+
+	elseif expr.nodeType == !(nodeTypes.AstLookup) then
+		return false, nil -- Lookups resolving to constants should have simplified to something else already.
 
 	elseif expr.nodeType == !(nodeTypes.AstImport) then
 		return true, nil -- Namespaces, just like types, are always constant.
@@ -1958,9 +2054,21 @@ end
 
 
 
--- expression, typeInfo = getAssignmentValue( state, identifier, values, i [, expectedTypeInfo=any ] )
-function _G.getAssignmentValue(state, ident, values, i, typeInfoExpected)
-	-- @Cleanup: This function could use some it!
+-- expression, typeInfo = getAssignmentValue( state, assignmentTarget, values, valueIndex [, expectedTypeInfo=any ] )
+function _G.getAssignmentValue(state, targetExpr, values, i, typeInfoExpected)
+	-- This function could use some @Cleanup!
+
+	!local TARGET_NAME = F(
+		[[(
+			targetExpr.nodeType == %d and " ('"..targetExpr.name.."')" or
+			targetExpr.nodeType == %d and targetExpr.member.nodeType == %d and targetExpr.member.literalType == %d and " ('"..targetExpr.member.value.."')" or
+			""
+		)]],
+		nodeTypes.AstIdentifier,
+		nodeTypes.AstLookup,
+		nodeTypes.AstLiteral,
+		LITERAL_STRING
+	)
 
 	local valueExpr = values[i]
 
@@ -1981,8 +2089,9 @@ function _G.getAssignmentValue(state, ident, values, i, typeInfoExpected)
 			if valueTypeInfo.tag ~= typeInfoExpected.tag then
 				typeError(
 					state, valueExpr,
-					"Type and value type mismatch. ('%s' is %s, value is %s)",
-					ident.name,
+					"Value type mismatch for assignment target #%d%s. (Wanted %s, got %s)",
+					i,
+					!!(TARGET_NAME),
 					getFriendlyTypeInfoName(typeInfoExpected),
 					getFriendlyTypeInfoName(valueTypeInfo)
 				)
@@ -1990,8 +2099,9 @@ function _G.getAssignmentValue(state, ident, values, i, typeInfoExpected)
 			elseif typeInfoExpected.tag == !(typeTags.TypeInfoFunction) then
 				typeError(
 					state, valueExpr,
-					"Function signature is different from the type of '%s'. (Wanted %s, got %s)",
-					ident.name,
+					"Function signature is different from assignment target #%d%s. (Wanted %s, got %s)",
+					i,
+					!!(TARGET_NAME),
 					getFriendlyTypeInfoName(typeInfoExpected),
 					getFriendlyTypeInfoName(valueTypeInfo)
 				)
@@ -1999,7 +2109,9 @@ function _G.getAssignmentValue(state, ident, values, i, typeInfoExpected)
 			elseif typeInfoExpected.tag == !(typeTags.TypeInfoStruct) then
 				typeError(
 					state, valueExpr,
-					"Type and value type mismatch. Expected a struct initializer for %s.",
+					"Value type mismatch for assignment target #%d%s. Expected a struct initializer.",
+					i,
+					!!(TARGET_NAME),
 					getFriendlyTypeInfoName(typeInfoExpected)
 				)
 
@@ -2014,9 +2126,11 @@ function _G.getAssignmentValue(state, ident, values, i, typeInfoExpected)
 	-- Vararg.
 	if values[1] and (valueExpr or values[#values]).nodeType == !(nodeTypes.AstVararg) then
 		local vararg = valueExpr or values[#values]
+
 		if not (valueExpr or not vararg.surroundedByParenthesis) then
-			typeError(state, ident, "Missing a value for '%s' (name #%d).", ident.name, i)
+			typeError(state, targetExpr, "Missing a value for assignment target #%d%s.", i, !!(TARGET_NAME))
 		end
+
 		return vararg, vararg.inferredType.itemType
 	end
 
@@ -2029,9 +2143,9 @@ function _G.getAssignmentValue(state, ident, values, i, typeInfoExpected)
 		call = values[lastIndex]
 
 		if call.nodeType ~= !(nodeTypes.AstCall) then
-			typeError(state, call, "Expected a potential function call as the last expression in the list. Missing a value for '%s' (name #%d).", ident.name, i)
+			typeError(state, call, "Expected a potential function call as the last expression in the list. Missing a value for assignment target #%d%s.", i, !!(TARGET_NAME))
 		elseif call.surroundedByParenthesis then
-			typeError(state, ident, "Missing a value for '%s' (name #%d).", ident.name, i)
+			typeError(state, targetExpr, "Missing a value for assignment target #%d%s.", i, !!(TARGET_NAME))
 		end
 	end
 
@@ -2055,7 +2169,7 @@ function _G.getAssignmentValue(state, ident, values, i, typeInfoExpected)
 	elseif listSig[1] and listSig[#listSig].tag == !(typeTags.TypeInfoVararg) then
 		typeInfoForOutArg = listSig[#listSig]
 	else
-		typeError(state, call, "Function does not return anything for '%s' (return value #%d).", ident.name, argIndex)
+		typeError(state, call, "Function does not return anything for assignment target #%d%s (return value #%d).", i, !!(TARGET_NAME), argIndex)
 	end
 
 	if typeInfoForOutArg.tag == !(typeTags.TypeInfoVararg) then
@@ -2064,14 +2178,15 @@ function _G.getAssignmentValue(state, ident, values, i, typeInfoExpected)
 	end
 
 	if typeInfoExpected and typeInfoForOutArg ~= typeInfoExpected then
-		local calleeName = (call.callee.nodeType == !(nodeTypes.AstIdentifier) and call.callee.name or "?")
+		local calleeName = (call.callee.nodeType == !(nodeTypes.AstIdentifier) and " of '"..call.callee.name.."'" or "")
 		typeError(
 			state, call,
-			"The type of return value #%d of '%s' (%s) does not match the type of '%s' (%s).",
+			"The type of return value #%d%s (%s) does not match the type of assignment target #%d%s (%s).",
 			argIndex,
 			calleeName,
 			getFriendlyTypeInfoName(typeInfoForOutArg),
-			ident.name,
+			i,
+			!!(TARGET_NAME),
 			getFriendlyTypeInfoName(typeInfoExpected)
 		)
 	end
@@ -2257,6 +2372,15 @@ do
 		table.sort(typeInfos, compareIdsOfTypes)
 		return getTypeInfoForCompoundType(state, typeInfos)
 	end
+end
+
+
+
+function _G.findDeclarationInScope(state, scope, name)
+	for _, decl in ipairs(scope.declarations) do
+		if decl.name.name == name then  return decl  end
+	end
+	return nil
 end
 
 

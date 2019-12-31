@@ -29,6 +29,20 @@ function _G.writeIdentifierName(state, file, ident)
 	file:write(name)
 end
 
+local function writeStringConcatination(state, file, binary)
+	if binary.left.nodeType == !(nodeTypes.AstBinary) and binary.left.operation == ".." then
+		writeStringConcatination(state, file, binary.left)
+	else
+		writeExpression(state, file, binary.left)
+	end
+	file:write(" .. ")
+	if binary.right.nodeType == !(nodeTypes.AstBinary) and binary.right.operation == ".." then
+		writeStringConcatination(state, file, binary.right)
+	else
+		writeExpression(state, file, binary.right)
+	end
+end
+
 function _G.writeExpression(state, file, expr)
 	if expr.nodeType == !(nodeTypes.AstCall) then
 		local call   = expr
@@ -61,9 +75,14 @@ function _G.writeExpression(state, file, expr)
 	elseif expr.nodeType == !(nodeTypes.AstBinary) then
 		local binary = expr
 		file:write("(")
-		writeExpression(state, file, binary.left)
-		file:write(" ", binary.operation, " ")
-		writeExpression(state, file, binary.right)
+		if binary.operation == ".." then
+			-- This makes sure consecutive string concatinations appear as one operation without any parenthesis.
+			writeStringConcatination(state, file, binary)
+		else
+			writeExpression(state, file, binary.left)
+			file:write(" ", binary.operation, " ")
+			writeExpression(state, file, binary.right)
+		end
 		file:write(")")
 
 	elseif expr.nodeType == !(nodeTypes.AstLiteral) then
@@ -90,16 +109,34 @@ function _G.writeExpression(state, file, expr)
 		local vararg = expr
 		file:write(vararg.surroundedByParenthesis and "(...)" or "...")
 
+	elseif expr.nodeType == !(nodeTypes.AstLookup) then
+		local lookup = expr
+
+		if isAny(lookup.object.inferredType.tag, !(typeTags.TypeInfoStruct),!(typeTags.TypeInfoTable)) then
+			writeExpression(state, file, lookup.object)
+
+			if lookup.member.nodeType == !(nodeTypes.AstLiteral) and lookup.member.literalType == !(LITERAL_STRING) and lookup.member.value:find"^[%a_][%w_]*$" then
+				local stringLiteral = lookup.member
+				file:write(".", stringLiteral.value)
+			else
+				file:write("[")
+				writeExpression(state, file, lookup.member)
+				file:write("]")
+			end
+
+		elseif lookup.object.inferredType.tag == !(typeTags.TypeInfoEnum) then
+			-- We shouldn't ever get here as all enum member references should have been replaced
+			-- by constants. (I think... Or maybe we want to keep the lookup node for enums? Actually,
+			-- that's probably the correct thing to do!)
+			errorUnhandledNodeType(lookup.object)
+
+		else
+			errorUnhandledNodeType(lookup.object)
+		end
+
 	else
 		errorUnhandledNodeType(expr)
 	end
-end
-
-local function findDeclarationInStructOrEnum(state, structOrEnum, name)
-	for _, decl in ipairs(structOrEnum.declarations) do
-		if decl.name.name == name then  return decl  end
-	end
-	return nil
 end
 
 function _G.writeDefaultValueForType(state, file, typeInfo)
@@ -132,7 +169,7 @@ function _G.writeDefaultValueForType(state, file, typeInfo)
 			end
 			file:write("=")
 
-			local assignment = findDeclarationInStructOrEnum(state, structInfo.astNode, member.name).assignment
+			local assignment = findDeclarationInScope(state, structInfo.astNode, member.name).assignment
 			if assignment then
 				local valueExpr = assignment.values[1] or errorInternal()
 				writeExpression(state, file, valueExpr)
@@ -199,9 +236,9 @@ function _G.writeImperativeBlock(state, file, block, indent, nextLocalN)
 				if not inDecl then
 					file:write(indentStr)
 				end
-				for i, ident in ipairs(assignment.targets) do
+				for i, targetExpr in ipairs(assignment.targets) do
 					if i > 1 then  file:write(", ")  end
-					writeIdentifierName(state, file, ident)
+					writeExpression(state, file, targetExpr)
 				end
 				file:write(" ", assignment.operation, " ")
 				for i, expr in ipairs(assignment.values) do

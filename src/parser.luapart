@@ -160,6 +160,10 @@ _G.!structAst"AstBinary:_AstExpression"{
 	left      = NIL, -- AstExpression
 	right     = NIL, -- AstExpression
 }
+_G.!structAst"AstLookup:_AstExpression"{
+	object = NIL, -- AstExpression
+	member = NIL, -- AstExpression
+}
 local !struct"TableField"{ key=NIL, value=NIL }
 _G.!structAst"AstTable:_AstExpression"{
 	-- [1]=tableField1, ...
@@ -1104,11 +1108,8 @@ function _G.parseAssignment(state, parentNode)
 	!DO_OR_RETURN `parseExpressionList(state, assignment, assignment.targets, true)`
 
 	for i, expr in ipairs(assignment.targets) do
-		if not (
-			expr.nodeType == !(nodeTypes.AstIdentifier)
-			or (expr.nodeType == !(nodeTypes.AstBinary) and expr.operation == ".")
-		) then
-			!ERROR_OR_RETURN `errorParsing(state, expr.token, "Expected assignment expression to resolve into a variable or table field.")`
+		if not isAny(expr.nodeType, !(nodeTypes.AstIdentifier),!(nodeTypes.AstLookup)) then
+			!ERROR_OR_RETURN `errorParsing(state, expr.token, "Expected assignment target expression to resolve into a variable or lookup.")`
 		end
 	end
 
@@ -2009,52 +2010,50 @@ function _G.parseExpression(state, parentNode, prevOpPrecedence, expectLeftValue
 			expr.parent                 = binOp
 			expr                        = binOp
 
-		-- Table lookup or similar using '.'.
+		-- Lookup using '.'.
 		elseif
 			isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),".")
-			and OPERATOR_PRECEDENCE["."] > prevOpPrecedence
+			and OPERATOR_PRECEDENCE.lookup > prevOpPrecedence
 		then
 			consumeNextToken(state)
 
-			local binOp     = astNewNode(AstBinary, token, parentNode)
-			binOp.operation = "."
+			local lookup = astNewNode(AstLookup, token, parentNode)
 
 			tokType, tokValue, token = consumeNextToken(state)
 			if tokType ~= !(TOKEN_IDENTIFIER) then
 				!ERROR_OR_RETURN `errorParsingLast(state, "Expected an identifier.")`
 			end
 
-			local literal       = astNewNode(AstLiteral, token, binOp)
+			local literal       = astNewNode(AstLiteral, token, lookup)
 			literal.literalType = !(LITERAL_STRING)
 			literal.value       = tokValue
 
-			binOp.left          = expr
-			binOp.right         = literal
+			lookup.object       = expr
+			lookup.member       = literal
 
-			expr.parent         = binOp
-			expr                = binOp
+			expr.parent         = lookup
+			expr                = lookup
 
 			nextCanBeMethodCall = true
 
-		-- Table lookup or similar using '['.
+		-- Lookup using '['.
 		elseif
 			isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"[")
-			and OPERATOR_PRECEDENCE["."] > prevOpPrecedence
+			and OPERATOR_PRECEDENCE.lookup > prevOpPrecedence
 		then
 			consumeNextToken(state)
 
-			local binOp                 = astNewNode(AstBinary, token, parentNode)
-			binOp.operation             = "."
-			binOp.left                  = expr
-			!SET_OR_RETURN `binOp.right = parseExpression(state, binOp, OPERATOR_PRECEDENCE[tokValue])`
+			local lookup                  = astNewNode(AstLookup, token, parentNode)
+			lookup.object                 = expr
+			!SET_OR_RETURN `lookup.member = parseExpression(state, lookup, OPERATOR_PRECEDENCE[tokValue])`
 
 			tokType, tokValue = consumeNextToken(state)
 			if not isToken(tokType,tokValue, !(TOKEN_PUNCTUATION), "]") then
 				!ERROR_OR_RETURN `errorParsingLast(state, "Expected ']'.")`
 			end
 
-			expr.parent = binOp
-			expr        = binOp
+			expr.parent = lookup
+			expr        = lookup
 
 		-- Function call.
 		elseif
@@ -2093,14 +2092,14 @@ function _G.parseExpression(state, parentNode, prevOpPrecedence, expectLeftValue
 			if encounteredParenthesis then
 				!ERROR_OR_RETURN `errorParsing(state, exprStartToken, "Unexpected parenthesis around identifier.")` -- :ParenthesisAmbiguityError
 			end
-		elseif expr.nodeType == !(nodeTypes.AstBinary) and expr.operation == "." then
+		elseif expr.nodeType == !(nodeTypes.AstLookup) then
 			-- void
 		else
 			tokType, tokValue = peekNextToken(state)
 			if isTokenAssigning(tokType, tokValue) then
 				!ERROR_OR_RETURN `errorParsingAfterLast(
 					state,
-					"Expected '.' and a table field name as an assignment target to the left of '%s'. Ambigous expression.",
+					"Expected '.' and a field name as an assignment target to the left of '%s'. Ambigous expression.",
 					tokValue
 				)`
 			else
@@ -2289,6 +2288,13 @@ do
 				if ident.inferredType then  write(", ", getFriendlyTypeInfoName(ident.inferredType))  end
 				write(")\n")
 
+			elseif node.nodeType == !(nodeTypes.AstUnary) then
+				local unaryOp = node
+				write(" (", unaryOp.operation, ")")
+				!!(CHILD_PRINT_START)
+				if unaryOp.expression then  printNode(unaryOp.expression, indent+1, printed, printChildren)  end
+				!!(CHILD_PRINT_END)
+
 			elseif node.nodeType == !(nodeTypes.AstBinary) then
 				local binOp = node
 				write(" (", binOp.operation, ")")
@@ -2298,11 +2304,16 @@ do
 				if binOp.right then  printNode(binOp.right, indent+1, printed, printChildren)  end
 				!!(CHILD_PRINT_END)
 
-			elseif node.nodeType == !(nodeTypes.AstUnary) then
-				local unaryOp = node
-				write(" (", unaryOp.operation, ")")
+			elseif node.nodeType == !(nodeTypes.AstLookup) then
+				local lookup = node
+				write(" (")
+				write(lookup.object and lookup.object.inferredType and getFriendlyTypeInfoName(getTypeRepresentedByExpression(lookup.object) or lookup.object.inferredType) or "?")
+				write(".")
+				write(lookup.member and lookup.member.nodeType == !(nodeTypes.AstLiteral) and tostring(lookup.member.value) or "?")
+				write(")")
 				!!(CHILD_PRINT_START)
-				if unaryOp.expression then  printNode(unaryOp.expression, indent+1, printed, printChildren)  end
+				if lookup.object then  printNode(lookup.object, indent+1, printed, printChildren)  end
+				if lookup.member then  printNode(lookup.member, indent+1, printed, printChildren)  end
 				!!(CHILD_PRINT_END)
 
 			elseif node.nodeType == !(nodeTypes.AstDeclaration) then
@@ -2621,6 +2632,7 @@ do
 			end
 		elseif node.nodeType == !(nodeTypes.AstUnary)       then  !visitIfNotNil"node"{"expression"}
 		elseif node.nodeType == !(nodeTypes.AstBinary)      then  !visitIfNotNil"node"{"left","right"}
+		elseif node.nodeType == !(nodeTypes.AstLookup)      then  !visitIfNotNil"node"{"object","member"}
 		elseif node.nodeType == !(nodeTypes.AstTable)       then
 			for _, tableField in ipairs(node) do
 				!visitIfNotNil"tableField"{"key","value"}
@@ -2710,6 +2722,10 @@ function _G.astGetExpressionVisuallyFurthestToTheLeft(expr, onlyFollowCalls)
 	elseif expr.nodeType == !(nodeTypes.AstBinary) then
 		local binary = expr
 		return astGetExpressionVisuallyFurthestToTheLeft(binary.left, false)
+
+	elseif expr.nodeType == !(nodeTypes.AstLookup) then
+		local lookup = expr
+		return astGetExpressionVisuallyFurthestToTheLeft(lookup.object, false)
 
 	else
 		return expr

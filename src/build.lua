@@ -57,6 +57,8 @@ local pp                    = chunk()
 pp.metaEnvironment.DEBUG    = debugMode
 pp.metaEnvironment.DEBUGGER = debugMode and debugger
 
+pp.metaEnvironment.F = string.format
+
 local luaSegments = {}
 function pp.metaEnvironment.preprocessorOutputAtTopOfFile(lua)
 	table.insert(luaSegments, lua)
