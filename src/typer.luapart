@@ -60,20 +60,18 @@ local !structTypeInfo"TypeInfoFloat:_TypeInfo"{}
 local !structTypeInfo"TypeInfoString:_TypeInfo"{}
 local !structTypeInfo"TypeInfoTable:_TypeInfo"{}
 local !structTypeInfo"TypeInfoType:_TypeInfo"{}
-local !structTypeInfo"TypeInfoNamespace:_TypeInfo"{}
 local !structTypeInfo"TypeInfoVoid:_TypeInfo"{}
 
 _G.!(local )!!SIMPLE_TYPE_TAG = {
 	-- These small type infos don't have any extra information.
-	[typeTags.TypeInfoAny]       = true,
-	[typeTags.TypeInfoBool]      = true,
-	[typeTags.TypeInfoInt]       = true,
-	[typeTags.TypeInfoNil]       = true,
-	[typeTags.TypeInfoFloat]     = true,
-	[typeTags.TypeInfoString]    = true,
-	[typeTags.TypeInfoTable]     = true,
-	[typeTags.TypeInfoType]      = true,
-	[typeTags.TypeInfoNamespace] = true,
+	[typeTags.TypeInfoAny]    = true,
+	[typeTags.TypeInfoBool]   = true,
+	[typeTags.TypeInfoInt]    = true,
+	[typeTags.TypeInfoNil]    = true,
+	[typeTags.TypeInfoFloat]  = true,
+	[typeTags.TypeInfoString] = true,
+	[typeTags.TypeInfoTable]  = true,
+	[typeTags.TypeInfoType]   = true,
 }
 
 local !structTypeInfo"TypeInfoArray:_TypeInfo"{
@@ -107,10 +105,14 @@ local !struct"TypeInfoEnumMember"{
 	name = "",
 }
 local !structTypeInfo"TypeInfoEnum:_TypeInfo"{
-	astNode  = NIL, -- AstStruct
+	astNode  = NIL, -- AstEnum
 	name     = "",
 	typeInfo = NIL, -- Must be one of these primitive types: int, string, type, bool or float.
 	members  = {},  -- []TypeInfoEnumMember
+}
+
+local !structTypeInfo"TypeInfoNamespace:_TypeInfo"{
+	scope = NIL, -- AstBlock (or substruct.)
 }
 
 local !structTypeInfo"TypeInfoCompound:_TypeInfo"{
@@ -152,16 +154,15 @@ do
 	local builtinTypeInfos = {}
 
 	local BUILTIN_TYPE_STRUCTS = {
-		["any"]       = TypeInfoAny,
-		["bool"]      = TypeInfoBool,
-		["int"]       = TypeInfoInt,
-		["nil"]       = TypeInfoNil,
-		["float"]     = TypeInfoFloat,
-		["string"]    = TypeInfoString,
-		["table"]     = TypeInfoTable,
-		["type"]      = TypeInfoType,      -- The result of e.g. type_of(int) or type_of(type_of(myVariable)).
-		["namespace"] = TypeInfoNamespace, -- Imports/loads.
-		["void"]      = TypeInfoVoid,      -- Barely used, if at all.
+		["any"]    = TypeInfoAny,
+		["bool"]   = TypeInfoBool,
+		["int"]    = TypeInfoInt,
+		["nil"]    = TypeInfoNil,
+		["float"]  = TypeInfoFloat,
+		["string"] = TypeInfoString,
+		["table"]  = TypeInfoTable,
+		["type"]   = TypeInfoType, -- The result of e.g. type_of(int) or type_of(type_of(myVariable)).
+		["void"]   = TypeInfoVoid, -- Barely used, if at all.
 	}
 
 	function _G.getTypeInfoForBuiltinType(state, typeName)
@@ -181,16 +182,15 @@ do
 	-- bool, typeName = isTypeBuiltin( typeInfo )
 	function _G.isTypeBuiltin(typeInfo)
 		!ASSERT `typeInfo`
-		if typeInfo == builtinTypeInfos["any"]       then  return true, "any"        end
-		if typeInfo == builtinTypeInfos["bool"]      then  return true, "bool"       end
-		if typeInfo == builtinTypeInfos["int"]       then  return true, "int"        end
-		if typeInfo == builtinTypeInfos["nil"]       then  return true, "nil"        end
-		if typeInfo == builtinTypeInfos["float"]     then  return true, "float"      end
-		if typeInfo == builtinTypeInfos["string"]    then  return true, "string"     end
-		if typeInfo == builtinTypeInfos["table"]     then  return true, "table"      end
-		if typeInfo == builtinTypeInfos["type"]      then  return true, "type"       end
-		if typeInfo == builtinTypeInfos["namespace"] then  return true, "namespace"  end
-		if typeInfo == builtinTypeInfos["void"]      then  return true, "void"       end
+		if typeInfo == builtinTypeInfos["any"]    then  return true, "any"     end
+		if typeInfo == builtinTypeInfos["bool"]   then  return true, "bool"    end
+		if typeInfo == builtinTypeInfos["int"]    then  return true, "int"     end
+		if typeInfo == builtinTypeInfos["nil"]    then  return true, "nil"     end
+		if typeInfo == builtinTypeInfos["float"]  then  return true, "float"   end
+		if typeInfo == builtinTypeInfos["string"] then  return true, "string"  end
+		if typeInfo == builtinTypeInfos["table"]  then  return true, "table"   end
+		if typeInfo == builtinTypeInfos["type"]   then  return true, "type"    end
+		if typeInfo == builtinTypeInfos["void"]   then  return true, "void"    end
 		return false, ""
 	end
 end
@@ -272,6 +272,22 @@ do
 	end
 end
 
+function _G.getTypeInfoForNamespace(state, scope)
+	!ASSERT `scope`
+
+	for _, typeInfoCached in ipairs(state.allTypeInfos) do
+		if typeInfoCached.tag == !(typeTags.TypeInfoNamespace) and scope == typeInfoCached.scope then
+			return typeInfoCached
+		end
+	end
+
+	local namespace = newTypeInfo(TypeInfoNamespace)
+	namespace.scope = scope
+	table.insert(state.allTypeInfos, namespace)
+
+	return namespace
+end
+
 
 
 -- Note: The expression must already be inferred!
@@ -341,12 +357,9 @@ function _G.isScopeImperative (scope)  return SCOPE_SET_IMPERATIVE [scope.nodeTy
 
 -- declaration = findDeclaration( state, startNode, name [, declarationToIgnore ] )
 function _G.findDeclaration(state, startNode, name, declToIgnore)
-	local scope = startNode
+	local scope = isScope(startNode) and startNode or getClosestScope(startNode)
 
-	while true do
-		scope = getClosestScope(scope)
-		if not scope then  break  end
-
+	while scope do
 		for _, decl in ipairs(scope.declarations) do
 			if decl ~= declToIgnore and decl.name.name == name and isDeclarationVisibleToNode(decl, startNode) then
 				return decl
@@ -354,25 +367,47 @@ function _G.findDeclaration(state, startNode, name, declToIgnore)
 		end
 
 		-- @Speed: Don't re-check already checked declarations. (Any potential speed-up may be neglectable though. Need to test with a bigger program.)
+
+		for _, import in ipairs(scope.imports) do
+			if import.fileScope then
+				for _, decl in ipairs(import.fileScope.declarations) do
+					if decl ~= declToIgnore and decl.isGlobalOrExported and decl.name.name == name then
+						return decl
+					end
+				end
+			end
+		end
+
+		-- @Incomplete: Look through the scope's usings.
+
 		for _, decl in ipairs(scope.declarationsInTree[name] or EMPTY_TABLE) do
 			if decl ~= declToIgnore and isDeclarationVisibleToNode(decl, startNode) then
 				return decl
 			end
 		end
 
-		--[[ @Incomplete: Look through the scope's imports.
-		for _, import in ipairs(scope.imports) do
-			if import.fileScope then
-				for _, decl in ipairs(import.fileScope.declarations) do
-					if decl ~= declToIgnore and decl.name.name == name and decl.isGlobalOrExported then
-						return decl
-					end
-				end
-			end
+		-- Don't cross any module boundary!
+		if scope.nodeType == !(nodeTypes.AstFileScope) and scope.isModule then
+			break
 		end
-		--]]
 
-		-- @Incomplete: Look through the scope's usings.
+		scope = getClosestScope(scope)
+	end
+
+	return nil
+end
+
+function _G.findDeclarationInScope(state, scope, name, onlyLookInExportsIfScopeIsModule)
+	!ASSERT `type(onlyLookInExportsIfScopeIsModule) == "boolean"`
+
+	if onlyLookInExportsIfScopeIsModule and scope.nodeType == !(nodeTypes.AstFileScope) and scope.isModule then
+		for _, decl in ipairs(scope.declarations) do
+			if decl.isGlobalOrExported and decl.name.name == name then  return decl  end
+		end
+	else
+		for _, decl in ipairs(scope.declarations) do
+			if decl.name.name == name then  return decl  end
+		end
 	end
 
 	return nil
@@ -536,8 +571,11 @@ end
 local nodeInferrers = {}
 
 !(
-local function DEPEND_AND_RETURN(dependentCode, dependType, dependOnCode)
-	__LUA("addDependency(state, ",dependentCode,", ",toLua(dependType),", ",dependOnCode,") ; return")
+-- DEPEND_AND_RETURN( dependentCode, dependType, dependOnCode [, extraDataCode ] )
+local function DEPEND_AND_RETURN(dependentCode, dependType, dependOnCode, extraDataCode)
+	__LUA("addDependency(state, ",dependentCode,", ",toLua(dependType),", ",dependOnCode)
+	if extraDataCode then  __LUA(", ",extraDataCode)  end
+	__LUA(") ; return")
 end
 
 local nodeNames = {}
@@ -728,6 +766,7 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 
 	if not (isLambdaArgOut or decl.canShadow or vararg) then -- Should vararg do this? I think it's not needed.
 		local parentScope = scope
+
 		repeat
 			local declarationsInTree = parentScope.declarationsInTree[ident.name]
 
@@ -737,6 +776,8 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 			end
 
 			table.insert(declarationsInTree, decl)
+
+			if parentScope.nodeType == !(nodeTypes.AstFileScope) and parentScope.isModule then  break  end
 
 			parentScope = getClosestScope(parentScope)
 		until not parentScope
@@ -1565,8 +1606,8 @@ end
 		end
 	end
 
-	-- local isDirectObj   = lookup.object.inferredType == typeInfoObject
-	-- local isDirectField = lookup.member.inferredType == typeInfoMember
+	local isDirectObj    = lookup.object.inferredType == typeInfoObject
+	local isDirectMember = lookup.member.inferredType == typeInfoMember
 
 	local isLeftValue         = lookup.parent.nodeType == !(nodeTypes.AstAssignment) and indexOf(lookup.parent.targets, lookup) ~= nil
 	local typeInfoRepresented = getTypeRepresentedByExpression(lookup.object)
@@ -1580,7 +1621,7 @@ end
 		end
 
 		local memberName = literal.value
-		local decl       = findDeclarationInScope(state, structInfo.astNode, memberName)
+		local decl       = findDeclarationInScope(state, structInfo.astNode, memberName, false)
 
 		if not decl then
 			typeError(state, literal, "'%s' is not a member of %s.", memberName, getFriendlyTypeInfoName(structInfo))
@@ -1601,6 +1642,7 @@ end
 		if valueExpr.nodeType == !(nodeTypes.AstLiteral) then
 			replacement       = astCopy(valueExpr)
 			replacement.token = lookup.member.token
+			addUnqueuedChildrenToQueueRecursively(state, replacement, !(PIPE_BYTECODE))
 		else
 			errorUnhandledNodeType(valueExpr)
 		end
@@ -1615,6 +1657,34 @@ end
 
 	elseif typeInfoObject.tag == !(typeTags.TypeInfoTable) then
 		errorUnhandledNodeType(lookup.object)
+
+	elseif typeInfoObject.tag == !(typeTags.TypeInfoNamespace) then
+		assert(isDirectObj)
+		assert(isDirectMember)
+
+		local namespace = typeInfoObject
+		local literal   = lookup.member
+
+		if not (literal.nodeType == !(nodeTypes.AstLiteral) and literal.literalType == !(LITERAL_STRING)) then
+			typeError(state, astGetExpressionVisuallyFurthestToTheLeft(literal), "Expected a name.")
+		end
+
+		local name = literal.value
+		local decl = findDeclarationInScope(state, namespace.scope, name, true)
+
+		if not decl then
+			!DEPEND_AND_RETURN(`lookup`, DEPEND_DECLARATION, `name`, `namespace.scope`)
+		elseif not decl.name.inferredType then
+			!DEPEND_AND_RETURN(`lookup`, DEPEND_NODE_INFERRED, `decl.name`)
+		end
+
+		local ident         = astCopy(decl.name)
+		ident.parent        = lookup.parent
+		ident.placeDeclared = nil
+
+		-- addUnqueuedChildrenToQueueRecursively(state, ident, !(PIPE_BYTECODE)) -- Not needed for identifiers.
+		replaceQueuedNodeAndUnqueueOldTree(state, lookup, ident)
+		-- Stay in the current pipe so we get simplified.
 
 	else
 		errorUnhandledNodeType(lookup.object)
@@ -1791,7 +1861,7 @@ end
 	if import.isLoad then
 		path = import.importName
 	else
-		typeError(state, import, "@Incomplete: !import")
+		path = DIR_HERE.."/modules/"..import.importName..".gloa"
 	end
 
 	local globalScope = state.globalScope
@@ -1799,22 +1869,26 @@ end
 	if not state.fileBuffers[path] then
 		-- @Incomplete: Include times in compilation stats.
 		local timeStartLexing, timeEndLexing = readAndTokenizeFile(state, path)
-		assert(state.fileBuffers[path], path)
+		!ASSERT `state.fileBuffers[path], path`
 
 		local timeStartParsing = os.clock()
-		local fileScope        = parseFileScope(state, globalScope, path)
+		local fileScope        = parseFileScope(state, globalScope, path, (not import.isLoad), import.importName)
 		local timeEndParsing   = os.clock()
 
 		if peekNextToken(state) then
 			errorParsingNext(state, "Expected the end of the file.")
 		end
 
-		astMoveGlobalDeclarationsToGlobalScope(state, fileScope)
+		if import.isLoad then
+			astMoveGlobalDeclarationsToGlobalScope(state, fileScope)
+		else
+			table.insert(globalScope.fileScopes, fileScope) -- @Cleanup: Don't do this in astMoveGlobalDeclarationsToGlobalScope()!
+		end
 		addToQueueRecursively(state, fileScope)
 	end
 
 	import.fileScope    = itemWith1(globalScope.fileScopes, "path", path) or errorInternal(path)
-	import.inferredType = getTypeInfoForBuiltinType(state, "namespace")
+	import.inferredType = getTypeInfoForNamespace(state, import.fileScope)
 
 	moveToPipe(state, import, !(PIPE_DONE))
 end
@@ -1959,10 +2033,7 @@ end
 		end
 	end
 
-	-- @Incomplete: fileScope.imports[]
-
 	moveToPipe(state, fileScope, !(PIPE_DONE))
-	-- moveToNextPipe(state, fileScope, !(PIPE_BYTECODE))
 end
 
 !NODE_INFERRER `function nodeInferrers.AstGlobalScope(state, globalScope)`
@@ -1972,10 +2043,7 @@ end
 		end
 	end
 
-	-- @Incomplete: globalScope.imports[] (if we're going to allow global imports)
-
 	moveToPipe(state, globalScope, !(PIPE_DONE))
-	-- moveToNextPipe(state, globalScope, !(PIPE_BYTECODE))
 end
 
 !NODE_INFERRER `function nodeInferrers.AstBlock(state, block)`
@@ -2372,15 +2440,6 @@ do
 		table.sort(typeInfos, compareIdsOfTypes)
 		return getTypeInfoForCompoundType(state, typeInfos)
 	end
-end
-
-
-
-function _G.findDeclarationInScope(state, scope, name)
-	for _, decl in ipairs(scope.declarations) do
-		if decl.name.name == name then  return decl  end
-	end
-	return nil
 end
 
 

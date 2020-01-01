@@ -13,6 +13,7 @@
 	astFindParent, astFindCommonParent, astHasParent
 	astGetDepth
 	astGetExpressionVisuallyFurthestToTheLeft, astGetCalleeVisuallyFurthestToTheLeft
+	astIsOrIsInModule
 	astMoveGlobalDeclarationsToGlobalScope
 	astNewNode
 	astPrint, astPrintTree
@@ -256,15 +257,16 @@ _G.!structAst"AstDefer:_AstNode"{
 _G.!structAst"AstBlock:_AstNode"{
 	_scopeType   = "imperative",
 	declarations = {}, -- []AstDeclaration  (Note that inner blocks have their own declarations.)
-	imports      = {}, -- []AstImport
+	imports      = {}, -- []AstImport       (Excluding loads.)
 	-- [1]=statement1, ...
 	-- Type phase:
 	declarationsInTree = {}, -- Includes all child scopes. Does not include shadows.
 }
 _G.!structAst"AstFileScope:AstBlock"{
 	_scopeType = "declarative",
-	isModule   = false,
 	path       = "",
+	isModule   = false,
+	moduleName = "",
 }
 _G.!structAst"AstGlobalScope:AstBlock"{
 	_scopeType     = "declarative",
@@ -909,10 +911,28 @@ function _G.parseDeclarationStatement(state, block, placeDeclared, declType)
 
 	if declType == !(DECLARATION_NORMAL) then
 		local tokType, tokValue = consumeNextToken(state)
-		if not isToken(tokType,tokValue, !(TOKEN_KEYWORD),"local","global","export") then
+
+		if tokType ~= !(TOKEN_KEYWORD) then
+			!ERROR_OR_RETURN `errorParsingLast(state, "Expected 'local'.")`
+
+		elseif tokValue == "local" then
+			-- void
+
+		elseif tokValue == "global" then
+			if astIsOrIsInModule(block) then
+				!ERROR_OR_RETURN `errorParsingLast(state, "Modules cannot declare globals.")`
+			end
+			isGlobalOrExported = true
+
+		elseif tokValue == "export" then
+			if not astIsOrIsInModule(block) then
+				!ERROR_OR_RETURN `errorParsingLast(state, "Only modules can export declarations.")`
+			end
+			isGlobalOrExported = true
+
+		else
 			!ERROR_OR_RETURN `errorParsingLast(state, "Expected 'local'.")`
 		end
-		isGlobalOrExported = isAny(tokValue, "global","export")
 	end
 
 	local nameListStartToken = state.nextToken
@@ -1032,6 +1052,12 @@ function _G.parseDeclarationStatement(state, block, placeDeclared, declType)
 		else
 			!SET_OR_RETURN `local expr = parseExpression(state, assignment)`
 			table.insert(assignment.values, expr)
+		end
+
+		for _, expr in ipairs(assignment.values) do
+			if expr.nodeType == !(nodeTypes.AstImport) then
+				!ERROR_OR_RETURN `errorParsing(state, expr.token, "References to imported namespaces must be constant.")`
+			end
 		end
 
 	-- Constant.
@@ -1382,7 +1408,12 @@ function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 		statement.what                     = forLoop
 
 	elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"import","load") then
-		!SET_OR_RETURN_FALSE `statement.what = parseImportOrLoad(state, statement)`
+		!SET_OR_RETURN_FALSE `local import = parseImportOrLoad(state, statement)`
+		statement.what                     = import
+
+		if not import.isLoad then
+			table.insert(block.imports, import)
+		end
 
 	else
 		state.soft     = true
@@ -1503,6 +1534,9 @@ function _G.parseImportOrLoad(state, parentNode)
 	else
 		!ERROR_OR_RETURN `errorParsingLast(state, "Expected '!load' or '!import'.")`
 	end
+	if import.isLoad and astIsOrIsInModule(import) then
+		!ERROR_OR_RETURN `errorParsingNext(state, "Modules cannot use !load.")`
+	end
 
 	local tokType, tokValue = consumeNextToken(state)
 	if tokType ~= !(TOKEN_STRING) then
@@ -1513,9 +1547,11 @@ function _G.parseImportOrLoad(state, parentNode)
 	return import
 end
 
-function _G.parseFileScope(state, parentNode, path)
-	local fileScope = astNewNode(AstFileScope, state.nextToken, parentNode)
-	fileScope.path  = path
+function _G.parseFileScope(state, parentNode, path, isModule, moduleName)
+	local fileScope      = astNewNode(AstFileScope, state.nextToken, parentNode)
+	fileScope.path       = path
+	fileScope.isModule   = isModule
+	fileScope.moduleName = moduleName
 
 	while true do
 		local tokType, tokValue, token = peekNextToken(state)
@@ -1526,7 +1562,15 @@ function _G.parseFileScope(state, parentNode, path)
 		elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"import","load") then
 			-- @Incomplete: Warn about duplicate imports? Maybe not necessay as things will only ever be imported once anyway.
 			!SET_OR_RETURN `local import = parseImportOrLoad(state, fileScope)`
-			table.insert(fileScope.imports, import)
+
+			local statement = astNewNode(AstStatement, import.token, fileScope)
+			statement.what  = import
+			import.parent   = statement
+			table.insert(fileScope, statement)
+
+			if not import.isLoad then
+				table.insert(fileScope.imports, import)
+			end
 
 		elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"local","global","export") then
 			!DO_OR_RETURN `parseDeclarationStatement(state, fileScope, nil)`
@@ -1565,7 +1609,7 @@ function _G.parseGlobalScope(state, firstFilePath)
 	state.globalScope          = globalScope
 
 	local statement            = astNewNode(AstStatement, state.nextToken, globalScope)
-	local firstFileScope       = parseFileScope(state, statement, firstFilePath)
+	local firstFileScope       = parseFileScope(state, statement, firstFilePath, false, "")
 	statement.what             = firstFileScope
 	globalScope.firstFileScope = firstFileScope
 
@@ -1949,7 +1993,9 @@ function _G.parseExpression(state, parentNode, prevOpPrecedence, expectLeftValue
 		expr = literal
 
 	-- Import/load.
-	elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"import","load") then
+	elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"load") then
+		!ERROR_OR_RETURN `errorParsingLast(state, "!load must be a full statement. It cannot be part of an expression.")`
+	elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"import") then
 		putBackLastToken(state)
 		!SET_OR_RETURN `expr = parseImportOrLoad(state, parentNode)`
 		-- !ERROR_OR_RETURN `errorParsingLast(state, "Invalid place for '!%s'.", tokValue)`
@@ -2524,7 +2570,6 @@ do
 					local struct = node
 					printNodeList(struct.arguments, indent+1, printed, printChildren)
 				end
-				if node.imports then  printNodeList(node.imports, indent+1, printed, printChildren)  end
 				printNodeList(node, indent+1, printed, printChildren)
 				!!(CHILD_PRINT_END)
 
@@ -2576,6 +2621,13 @@ function _G.astHasParent(node, parent)
 		if not node       then  return false  end
 		if node == parent then  return true   end
 	end
+end
+
+
+
+function _G.astIsOrIsInModule(node)
+	local fileScope = (node.nodeType == !(nodeTypes.AstFileScope) and node or astFindParent(node, !(nodeTypes.AstFileScope)))
+	return fileScope ~= nil and fileScope.isModule
 end
 
 
@@ -2654,11 +2706,11 @@ do
 		elseif node.nodeType == !(nodeTypes.AstIf)          then  !visitIfNotNil"node"{"condition","branchTrue","branchFalse"}
 		elseif node.nodeType == !(nodeTypes.AstWhile)       then  !visitIfNotNil"node"{"condition","body"}
 		elseif node.nodeType == !(nodeTypes.AstFor)         then  !visitList"node"{"names","expressions"} ; visitIfNotNil"node"{"body"}
-		elseif node.nodeType == !(nodeTypes.AstBlock)       then  !visitList"node"{"imports",""}
-		elseif node.nodeType == !(nodeTypes.AstFileScope)   then  !visitList"node"{"imports",""}
-		elseif node.nodeType == !(nodeTypes.AstGlobalScope) then  !visitList"node"{"imports",""}
-		elseif node.nodeType == !(nodeTypes.AstStruct)      then  !visitIfNotNil"node"{"arguments"}  ; visitList"node"{"imports",""}
-		elseif node.nodeType == !(nodeTypes.AstEnum)        then  !visitIfNotNil"node"{"memberType"} ; visitList"node"{"imports",""}
+		elseif node.nodeType == !(nodeTypes.AstBlock)       then  !visitList"node"{""}
+		elseif node.nodeType == !(nodeTypes.AstFileScope)   then  !visitList"node"{""}
+		elseif node.nodeType == !(nodeTypes.AstGlobalScope) then  !visitList"node"{""}
+		elseif node.nodeType == !(nodeTypes.AstStruct)      then  !visitIfNotNil"node"{"arguments"}  ; visitList"node"{""}
+		elseif node.nodeType == !(nodeTypes.AstEnum)        then  !visitIfNotNil"node"{"memberType"} ; visitList"node"{""}
 		else
 			errorUnhandledNodeType(node)
 		end

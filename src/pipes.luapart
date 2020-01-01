@@ -24,10 +24,10 @@ local !struct"Dependency"{ -- @Cleanup: Rename to something with "wait"?
 	dependOn   = NIL, -- string|Queued  (The value depends on what dependType is.)
 }
 
--- addDependency( state, dependent, DEPEND_DECLARATION,   name    )
+-- addDependency( state, dependent, DEPEND_DECLARATION,   name [, scope ] )
 -- addDependency( state, dependent, DEPEND_NODE_INFERRED, astNode )
 -- addDependency( state, dependent, DEPEND_NODE_EMITTED,  astNode )
-function _G.addDependency(state, dependent, dependType, dependOn)
+function _G.addDependency(state, dependent, dependType, dependOn, extraData)
 	local dependency = dependent.queued.waitingOn
 
 	if dependency then
@@ -48,6 +48,7 @@ function _G.addDependency(state, dependent, dependType, dependOn)
 	!if DEBUG then
 		if dependType == !(DEPEND_DECLARATION) then
 			assert(type(dependOn) == "string")
+			assert(extraData == nil or type(extraData) == "table")
 		elseif isAny(dependType, !(DEPEND_NODE_INFERRED),!(DEPEND_NODE_EMITTED)) then
 			assert(type(dependOn) == "table")
 		else
@@ -64,6 +65,7 @@ function _G.addDependency(state, dependent, dependType, dependOn)
 	dependency.dependent  = dependent.queued
 	dependency.dependType = dependType
 	dependency.dependOn   = dependOn
+	dependency.extraData  = extraData
 
 	dependent.queued.waitingOn = dependency
 
@@ -237,7 +239,7 @@ end
 
 function _G.errorPipesAreStuck(state)
 	-- [[ Report undeclared identifier.
-	local function getDeclaredIdentifierWaitingToBeDeclaredWithName(name, queuedToIgnore)
+	local function getDeclaredIdentifierWaitingToBeDeclaredWithName(name, queuedToIgnore) -- @Cleanup: What is this even?!?!
 		for _, queued in ipairs(state.queue) do
 			if queued ~= queuedToIgnore and not queued.unqueued and queued.waitingOn and queued.node.nodeType == !(nodeTypes.AstIdentifier) then
 				local ident = queued.node
@@ -254,10 +256,32 @@ function _G.errorPipesAreStuck(state)
 			local name = dependency.dependOn
 
 			if not getDeclaredIdentifierWaitingToBeDeclaredWithName(name, queued) then
+				local node = queued.node
+
 				if name == "..." then
-					typeError(state, queued.node, "This is not inside a function that takes a vararg.")
+					typeError(state, node, "This is not inside a function that takes a vararg.")
+
+				elseif node.nodeType == !(nodeTypes.AstLookup) then
+					local lookup = node
+
+					if lookup.object.inferredType.scope.nodeType == !(nodeTypes.AstFileScope) then
+						local fileScope = lookup.object.inferredType.scope
+						typeError(
+							state, node.member,
+							"Undeclared identifier '%s' in %s '%s'.",
+							name,
+							fileScope.isModule and "module"             or "the file scope of",
+							fileScope.isModule and fileScope.moduleName or fileScope.path
+						)
+					else
+						printerr()
+						typeMessage(io.stderr, state, lookup.member,                    "Error", "Undeclared identifier '%s'.", name)
+						typeMessage(io.stderr, state, lookup.object.inferredType.scope, "Info",  "...this is the namespace.")
+						exitFailure()
+					end
+
 				else
-					typeError(state, queued.node, "Undeclared identifier '%s'.", name)
+					typeError(state, node, "Undeclared identifier '%s'.", name)
 				end
 			end
 		end

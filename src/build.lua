@@ -17,6 +17,7 @@ local pathPp      = DIR_HERE.."/../lib/preprocess.lua" -- @Incomplete: Include L
 local silent      = false
 local debugMode   = false
 local debugger    = false
+local dirGloa     = "" -- Empty means automatic value at runtime.
 local i           = 1
 
 while args[i] do
@@ -42,6 +43,10 @@ while args[i] do
 		debugger    = true
 		i           = i+1
 
+	elseif arg == "--gloadir" then
+		dirGloa     = args[i+1] or error("[GloaBuildArgs] Expected value after "..arg..".")
+		i           = i+2
+
 	else
 		error("[GloaBuildArgs] Unknown argument: "..arg)
 	end
@@ -53,9 +58,11 @@ if not silent then  print("Building Glóa...")  end
 local chunk, err = loadfile(pathPp)
 if not chunk then  error("Could not load LuaPreprocess from '"..pathPp.."'. ("..err..")")  end
 
-local pp                    = chunk()
+local pp = chunk()
+
 pp.metaEnvironment.DEBUG    = debugMode
 pp.metaEnvironment.DEBUGGER = debugMode and debugger
+pp.metaEnvironment.GLOA_DIR = debugMode and dirGloa or ""
 
 pp.metaEnvironment.F = string.format
 
