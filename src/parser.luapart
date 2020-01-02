@@ -20,7 +20,7 @@
 	astVisitAllNodes, astVisitAllNodesLeavesFirst
 	errorParsing*, parserMessage*
 	errorUnhandledNodeType
-	nodeError, nodeMessage
+	nodeError, nodeMessage, where
 	parse*
 
 --============================================================]]
@@ -164,6 +164,8 @@ _G.!structAst"AstBinary:_AstExpression"{
 _G.!structAst"AstLookup:_AstExpression"{
 	object = NIL, -- AstExpression
 	member = NIL, -- AstExpression
+	-- Type phase:
+	representedType = NIL, -- TypeInfo  (Not used anywhere. 2020-01-02)
 }
 local !struct"TableField"{ key=NIL, value=NIL }
 _G.!structAst"AstTable:_AstExpression"{
@@ -1947,7 +1949,7 @@ function _G.parseExpression(state, parentNode, prevOpPrecedence, expectLeftValue
 			!ERROR_OR_RETURN `errorParsingAfterPrevious(state, "Expected ')'.")`
 		end
 
-		!SET_OR_RETURN `cast.expression = parseExpression(state, cast, math.huge)` -- @Incomplete: Give casting an operator precedence.
+		!SET_OR_RETURN `cast.expression = parseExpression(state, cast, OPERATOR_PRECEDENCE.cast)`
 		expr                            = cast
 
 	-- Type.
@@ -2288,6 +2290,11 @@ function _G.nodeMessage(file, state, node, label, agent, s, ...)
 	local path   = tokens.file[token]      or errorInternal("No tokens.")
 	local buffer = state.fileBuffers[path] or errorInternal("No file buffer for '%s'.", path)
 	reportMessageInFile(file, buffer, path, tokens.position1[token], label, agent, s, ...)
+end
+
+function _G.where(state, node)
+	!ASSERT `node` -- I keep forgetting the state argument...
+	nodeMessage(io.stdout, state, node, "Debug", nil, "Here!")
 end
 
 
@@ -2737,27 +2744,49 @@ function _G.astCopy(node)
 	-- Note: We don't touch any queued.
 	local copy
 
+	-- @Cleanup: Make preprocessor structs more declarative and better so we can generate this function instead of doing all this stuff manually...
+
 	if node.nodeType == !(nodeTypes.AstIdentifier) then
 		local ident        = node
 		copy               = astNewNode(AstIdentifier, ident.token, ident.parent)
-		copy.inferredType  = ident.inferredType
 		copy.name          = ident.name
 		copy.placeDeclared = ident.placeDeclared
 		copy.declaration   = ident.declaration
+		copy.inferredType  = ident.inferredType
 
 	elseif node.nodeType == !(nodeTypes.AstLiteral) then
 		local literal      = node
 		copy               = astNewNode(AstLiteral, literal.token, literal.parent)
-		copy.inferredType  = literal.inferredType
 		copy.literalType   = literal.literalType
 		copy.value         = literal.value
+		copy.inferredType  = literal.inferredType
 		copy.valueConstant = literal.valueConstant
+
+	elseif node.nodeType == !(nodeTypes.AstType) then
+		local typeNode         = node
+		copy                   = astNewNode(AstType, typeNode.token, typeNode.parent)
+		copy.isUserType        = typeNode.isUserType
+		copy.typeName          = typeNode.typeName
+		copy.functionSignature = typeNode.functionSignature and astCopy(typeNode.functionSignature)
+		copy.arrayItemType     = typeNode.arrayItemType     and astCopy(typeNode.arrayItemType)
+		copy.arguments         = typeNode.arguments         and astCopyArray(typeNode.arguments)
+		copy.inferredType      = typeNode.inferredType
+		copy.representedType   = typeNode.representedType
+		copy.declaration       = typeNode.declaration
 
 	else
 		errorUnhandledNodeType(node)
 	end
 
 	return copy or errorInternal()
+end
+
+function astCopyArray(nodes)
+	local copy = {}
+	for i, node in ipairs(nodes) do
+		copy[i] = astCopy(node)
+	end
+	return copy
 end
 
 

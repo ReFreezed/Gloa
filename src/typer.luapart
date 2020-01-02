@@ -13,6 +13,7 @@
 	getClosestScope, isScope, isScopeDeclarative, isScopeImperative
 	getLiteralValueFromExpressionIfConstant
 	inferNode
+	isPartOfAnyDeclaration
 	isTypeSimple, isTypeCompatibleWith
 	newTypeInfo, isTypeBuiltin, getTypeInfo*
 	normalizeVarargItemType
@@ -105,10 +106,10 @@ local !struct"TypeInfoEnumMember"{
 	name = "",
 }
 local !structTypeInfo"TypeInfoEnum:_TypeInfo"{
-	astNode  = NIL, -- AstEnum
-	name     = "",
-	typeInfo = NIL, -- Must be one of these primitive types: int, string, type, bool or float.
-	members  = {},  -- []TypeInfoEnumMember
+	astNode        = NIL, -- AstEnum
+	name           = "",
+	memberTypeInfo = NIL, -- Must be one of these primitive types: int, string, type, bool or float.
+	members        = {},  -- []TypeInfoEnumMember
 }
 
 local !structTypeInfo"TypeInfoNamespace:_TypeInfo"{
@@ -292,10 +293,9 @@ end
 
 -- Note: The expression must already be inferred!
 function _G.getTypeRepresentedByExpression(expr)
-	if expr.inferredType.tag ~= !(typeTags.TypeInfoType) then
-		return nil
+	!ASSERT `expr.inferredType`
 
-	elseif expr.nodeType == !(nodeTypes.AstType) then
+	if expr.nodeType == !(nodeTypes.AstType) then
 		local typeNode = expr
 		return typeNode.representedType
 	elseif expr.nodeType == !(nodeTypes.AstStruct) then
@@ -307,18 +307,25 @@ function _G.getTypeRepresentedByExpression(expr)
 	elseif expr.nodeType == !(nodeTypes.AstTypeOf) then
 		local typeOf = expr
 		return typeOf.representedType
+	elseif expr.nodeType == !(nodeTypes.AstLookup) then -- Not sure if this is needed. @Cleanup
+		local lookup = expr
+		return lookup.representedType -- May be nil.
 
 	elseif expr.nodeType == !(nodeTypes.AstCast) then
 		local cast = expr
-		return cast.expression.inferredType
+		return
+			cast.targetType.inferredType.tag == !(typeTags.TypeInfoType)
+			and getTypeRepresentedByExpression(cast.expression)
+			or  nil
 
 	elseif expr.nodeType == !(nodeTypes.AstIdentifier) then
-		local identOther = expr
-		assert(identOther.inferredType)
-		return identOther.declaration.valueTypeInfo -- May be nil.
+		local ident = expr
+		return ident.declaration.valueTypeInfo -- May be nil.
 
-	else
+	elseif expr.inferredType.tag == !(typeTags.TypeInfoType) then
 		errorUnhandledNodeType(expr)
+	else
+		return nil
 	end
 end
 
@@ -599,7 +606,7 @@ local function NODE_INFERRER(funcHeaderCode)
 end
 )
 
-local function isPartOfAnyDeclaration(identOrVararg)
+function _G.isPartOfAnyDeclaration(identOrVararg)
 	local parent = identOrVararg.parent
 
 	if parent.nodeType == !(nodeTypes.AstDeclaration) then
@@ -676,14 +683,27 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 		end
 	end
 
-	-- No more dependencies after this point!
-
 	local scope = getClosestScope(decl)
 	if not scope then
+		astPrint(identOrVararg)
+		printTraceback(io.stderr)
 		typeError(state, identOrVararg, "Internal compiler error: Could not find what scope '%s' is in.", identOrVararg.name)
 	end
 
-	local isMember = isAny(scope.nodeType, !(nodeTypes.AstStruct),!(nodeTypes.AstEnum))
+	local isEnumMember = scope.nodeType == !(nodeTypes.AstEnum)
+	local isMember     = isEnumMember or scope.nodeType == !(nodeTypes.AstStruct)
+
+	if isEnumMember then
+		local enum     = scope
+		local enumInfo = enum.representedType
+
+		if not enumInfo then
+			-- AstEnum is the only scope that gets inferred before it's declarations.
+			!DEPEND_AND_RETURN(`identOrVararg`, DEPEND_NODE_INFERRED, `enum`)
+		end
+	end
+
+	-- No more dependencies after this point!
 
 	local isLambdaArgOut = (
 		not isMember
@@ -699,8 +719,8 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 		if not declExisting then
 			-- void
 
-		elseif isMember and scope ~= getClosestScope(declExisting) then
-			-- void  (Members never shadow anything.)
+		elseif isMember and not decl.isConstant and scope ~= getClosestScope(declExisting) then
+			-- void  (Variable members never shadow anything.)
 
 		elseif not decl.canShadow then
 			local identEarly        = declExisting.name
@@ -784,7 +804,6 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 	end
 
 	local typeInfo
-	local typeInfoForDecl = nil
 
 	-- Compound type.
 	if decl.types[2] then
@@ -866,40 +885,76 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 	else
 		assert(not vararg)
 
-		local valueExpr, valueTypeInfo = getAssignmentValue(state, ident, assignment.values, decl.assignmentIndex)
-		typeInfo        = valueTypeInfo
-		typeInfoForDecl = getTypeRepresentedByExpression(valueExpr)
-	end
-
-	-- Validate that the assigned value is the same type as the declared name.
-	-- (Not needed for vararg as those only exist as arguments and don't have default values.)
-	if assignment and decl.types[1] and ident then
-		getAssignmentValue(state, ident, assignment.values, decl.assignmentIndex, typeInfo)
+		local _, valueTypeInfo = getAssignmentValue(state, ident, assignment.values, decl.assignmentIndex)
+		typeInfo               = valueTypeInfo
 	end
 
 	assert(typeInfo)
-	if vararg then  assert(not typeInfoForDecl)  end
+	local typeInfoForDecl = nil
 
-	-- print(typeInfoForDecl and getFriendlyTypeInfoName(typeInfoForDecl))
+	if decl.isConstant then
+		local valueExpr, valueTypeInfo = getAssignmentValue(state, ident, assignment.values, decl.assignmentIndex)
+		typeInfoForDecl = getTypeRepresentedByExpression(valueExpr)
 
-	if not typeInfoForDecl then
-		-- void
+		if isEnumMember then
+			-- Note: AstEnum already validated that valueTypeInfo is compatible with the enum.
+			local enum     = scope
+			local enumInfo = enum.representedType
+			typeInfo       = enumInfo -- Kind of a @Hack, but maybe it's fine for enum members!
 
-	elseif typeInfoForDecl.tag == !(typeTags.TypeInfoStruct) then
-		local structInfo = typeInfoForDecl
-		structInfo.name  = ident.name
+			if enumInfo.memberTypeInfo.tag == !(typeTags.TypeInfoType) then
+				-- This means you can for example say: local myVar:MyEnum.MY_TYPE
+				assert(typeInfoForDecl)
+			end
+		end
 
-	elseif typeInfoForDecl.tag == !(typeTags.TypeInfoEnum) then
-		local enumInfo = typeInfoForDecl
-		enumInfo.name  = ident.name
+		if typeInfo.tag == !(typeTags.TypeInfoType) then
+			if not typeInfoForDecl then
+				astPrint(valueExpr)
+				printTraceback(io.stderr)
+				typeError(state, valueExpr, "Internal compiler error: Missing what type this constant expression represents.")
+			end
+
+		elseif typeInfo.tag == !(typeTags.TypeInfoEnum) then -- @Robustness: Actually detect whether we have a type enum and include it here above.
+			-- void  (For now we may or may not have a type enum and typeInfoForDecl.)
+
+		else
+			assert(not typeInfoForDecl)
+		end
+
+		-- @Robustness: Here we set the name of structs and enums. Is this a good place to do that?
+		if not typeInfoForDecl then
+			-- void
+
+		elseif typeInfoForDecl.tag == !(typeTags.TypeInfoStruct) then
+			local structInfo = typeInfoForDecl
+			if structInfo.name == "" then -- Is this detection ok? Need testing or another solution.
+				structInfo.name = ident.name
+			end
+
+		elseif typeInfoForDecl.tag == !(typeTags.TypeInfoEnum) then
+			local enumInfo = typeInfoForDecl
+			if enumInfo.name == "" then -- Is this detection ok? Need testing or another solution.
+				enumInfo.name = ident.name
+			end
+		end
+	end
+
+	-- Validate that the assigned value is the same type as the declared name.
+	--
+	-- (Not needed for vararg as those only exist as arguments and don't have default values.
+	-- Also, this doesn't run for enum members as those declarations never have any specified types.)
+	--
+	if assignment and decl.types[1] and ident then
+		getAssignmentValue(state, ident, assignment.values, decl.assignmentIndex, typeInfo)
 	end
 
 	if vararg then
 		typeInfo = getTypeInfoForVararg(state, typeInfo)
 	end
 
-	decl.valueTypeInfo         = typeInfoForDecl -- May be nil.  @Cleanup: Move this code to AstDeclaration?
 	identOrVararg.inferredType = typeInfo
+	decl.valueTypeInfo         = typeInfoForDecl -- May be nil.  @Cleanup: Move this and relevant code to AstDeclaration?
 
 	!if DEBUG then
 		if debug_onlyInferTypes then
@@ -966,11 +1021,20 @@ end
 			!DEPEND_AND_RETURN(`typeNode`, DEPEND_NODE_INFERRED, `decl.name`)
 		end
 
-		typeInfoRepresented = decl.valueTypeInfo -- May be nil.
-		typeInfo            = decl.name.inferredType
-		assert(typeInfo)
+		typeInfoRepresented = decl.valueTypeInfo -- May be nil, in which case we'll get an error here below.
+		typeInfo            = decl.name.inferredType or errorInternal()
 
-		if typeInfo ~= getTypeInfoForBuiltinType(state, "type") then
+		-- Type enum members can be used as types, as a special case.
+		if decl.isConstant and typeInfo.tag == !(typeTags.TypeInfoEnum) then
+			local enum     = typeInfo.astNode     or errorInternal()
+			local enumInfo = enum.representedType or errorInternal()
+
+			if enumInfo.memberTypeInfo.tag == !(typeTags.TypeInfoType) then
+				typeInfo = getTypeInfoForBuiltinType(state, "type")
+			end
+		end
+
+		if typeInfo.tag ~= !(typeTags.TypeInfoType) then
 			printerr()
 			typeMessage(io.stderr, state, typeNode, "Error", "'%s' is not a type. (It is %s)", typeNode.typeName, getFriendlyTypeInfoName(typeInfo))
 			printDeclarationChain(io.stderr, state, decl, typeNode.typeName)
@@ -1007,11 +1071,8 @@ end
 		end
 	end
 
-	assert(typeInfoRepresented)
-	assert(typeInfo)
-
-	typeNode.representedType = typeInfoRepresented
-	typeNode.inferredType    = typeInfo
+	typeNode.representedType = typeInfoRepresented or errorInternal()
+	typeNode.inferredType    = typeInfo            or errorInternal()
 	typeNode.declaration     = decl
 
 	moveToPipe(state, typeNode, !(PIPE_DONE))
@@ -1612,26 +1673,38 @@ end
 	local isLeftValue         = lookup.parent.nodeType == !(nodeTypes.AstAssignment) and indexOf(lookup.parent.targets, lookup) ~= nil
 	local typeInfoRepresented = getTypeRepresentedByExpression(lookup.object)
 
+	if typeInfoObject.tag == !(typeTags.TypeInfoTable) then
+		errorUnhandledNodeType(lookup.object)
+		return
+	end
+
+	-- Every remaining lookup requires a constant string on the right side.
+	local memberLiteral = lookup.member
+	if not (memberLiteral.nodeType == !(nodeTypes.AstLiteral) and memberLiteral.literalType == !(LITERAL_STRING)) then
+		typeError(state, astGetExpressionVisuallyFurthestToTheLeft(memberLiteral), "Expected a name constant.")
+	end
+	local memberName = memberLiteral.value
+	if not memberName:find"^[%a_\128-\255][%w_\128-\255]*$" then
+		typeError(state, memberLiteral, "Bad format or invalid characters in name '%s'.", memberName)
+	end
+
+	-- @Cleanup @Robustness: The way we move things in pipes (after astCopy() and elsewhere)
+	-- is not very good. Should maybe define moveToNextRelevantPipe(state, node).
+
 	if typeInfoObject.tag == !(typeTags.TypeInfoStruct) or (typeInfoRepresented and typeInfoRepresented.tag == !(typeTags.TypeInfoStruct)) then
-		local literal    = lookup.member
 		local structInfo = typeInfoRepresented or typeInfoObject
-
-		if not (literal.nodeType == !(nodeTypes.AstLiteral) and literal.literalType == !(LITERAL_STRING)) then
-			typeError(state, astGetExpressionVisuallyFurthestToTheLeft(literal), "Expected struct member name.")
-		end
-
-		local memberName = literal.value
 		local decl       = findDeclarationInScope(state, structInfo.astNode, memberName, false)
 
 		if not decl then
-			typeError(state, literal, "'%s' is not a member of %s.", memberName, getFriendlyTypeInfoName(structInfo))
+			typeError(state, memberLiteral, "'%s' is not a member of %s.", memberName, getFriendlyTypeInfoName(structInfo))
 		elseif isLeftValue and decl.isConstant then
-			typeError(state, literal, "Cannot assign value to constant %s.%s .", getFriendlyTypeInfoName(structInfo), memberName)
+			typeError(state, memberLiteral, "Cannot assign value to constant %s.%s .", getFriendlyTypeInfoName(structInfo), memberName)
 		end
 
-		lookup.inferredType = decl.name.inferredType or errorInternal()
-
 		if not decl.isConstant then
+			lookup.inferredType    = decl.name.inferredType or errorInternal()
+			lookup.representedType = decl.valueTypeInfo -- May be nil.
+
 			moveToPipe(state, lookup, !(PIPE_DONE))
 			return
 		end
@@ -1643,6 +1716,12 @@ end
 			replacement       = astCopy(valueExpr)
 			replacement.token = lookup.member.token
 			addUnqueuedChildrenToQueueRecursively(state, replacement, !(PIPE_BYTECODE))
+
+		elseif valueExpr.nodeType == !(nodeTypes.AstType) then
+			replacement       = astCopy(valueExpr)
+			replacement.token = lookup.member.token
+			addUnqueuedChildrenToQueueRecursively(state, replacement, !(PIPE_DONE))
+
 		else
 			errorUnhandledNodeType(valueExpr)
 		end
@@ -1650,41 +1729,49 @@ end
 		assert(replacement) -- Constants must be simplified!
 
 		replaceQueuedNodeAndUnqueueOldTree(state, lookup, replacement)
-		moveToPipe(state, replacement, !(PIPE_BYTECODE))
+		moveToPipe(state, replacement, !(PIPE_DONE))
 
-	elseif typeInfoObject.tag == !(typeTags.TypeInfoEnum) then
-		errorUnhandledNodeType(lookup.object)
-
-	elseif typeInfoObject.tag == !(typeTags.TypeInfoTable) then
-		errorUnhandledNodeType(lookup.object)
-
-	elseif typeInfoObject.tag == !(typeTags.TypeInfoNamespace) then
-		assert(isDirectObj)
-		assert(isDirectMember)
-
-		local namespace = typeInfoObject
-		local literal   = lookup.member
-
-		if not (literal.nodeType == !(nodeTypes.AstLiteral) and literal.literalType == !(LITERAL_STRING)) then
-			typeError(state, astGetExpressionVisuallyFurthestToTheLeft(literal), "Expected a name.")
-		end
-
-		local name = literal.value
-		local decl = findDeclarationInScope(state, namespace.scope, name, true)
+	elseif typeInfoObject.tag == !(typeTags.TypeInfoEnum) or (typeInfoRepresented and typeInfoRepresented.tag == !(typeTags.TypeInfoEnum)) then
+		local enumInfo = typeInfoRepresented or typeInfoObject
+		local decl     = findDeclarationInScope(state, enumInfo.astNode, memberName, false)
 
 		if not decl then
-			!DEPEND_AND_RETURN(`lookup`, DEPEND_DECLARATION, `name`, `namespace.scope`)
-		elseif not decl.name.inferredType then
-			!DEPEND_AND_RETURN(`lookup`, DEPEND_NODE_INFERRED, `decl.name`)
+			typeError(state, memberLiteral, "'%s' is not a member of %s.", memberName, getFriendlyTypeInfoName(enumInfo))
+		elseif isLeftValue then
+			typeError(state, memberLiteral, "Cannot assign values to enum members. (Enum is %s)", getFriendlyTypeInfoName(enumInfo))
 		end
 
+		assert(decl.isConstant)
+
 		local ident         = astCopy(decl.name)
+		ident.token         = lookup.token
 		ident.parent        = lookup.parent
 		ident.placeDeclared = nil
 
 		-- addUnqueuedChildrenToQueueRecursively(state, ident, !(PIPE_BYTECODE)) -- Not needed for identifiers.
 		replaceQueuedNodeAndUnqueueOldTree(state, lookup, ident)
-		-- Stay in the current pipe so we get simplified.
+		-- Stay in the current pipe so we get simplified. (Needed? Or maybe we can @Speed things up here?)
+
+	elseif typeInfoObject.tag == !(typeTags.TypeInfoNamespace) then
+		assert(isDirectObj)
+
+		local namespace = typeInfoObject
+		local decl      = findDeclarationInScope(state, namespace.scope, memberName, true)
+
+		if not decl then
+			!DEPEND_AND_RETURN(`lookup`, DEPEND_DECLARATION, `memberName`, `namespace.scope`)
+		elseif not decl.name.inferredType then
+			!DEPEND_AND_RETURN(`lookup`, DEPEND_NODE_INFERRED, `decl.name`)
+		end
+
+		local ident         = astCopy(decl.name)
+		ident.token         = lookup.token
+		ident.parent        = lookup.parent
+		ident.placeDeclared = nil
+
+		-- addUnqueuedChildrenToQueueRecursively(state, ident, !(PIPE_BYTECODE)) -- Not needed for identifiers.
+		replaceQueuedNodeAndUnqueueOldTree(state, lookup, ident)
+		-- Stay in the current pipe so we get simplified. (Needed? Or maybe we can @Speed things up here?)
 
 	else
 		errorUnhandledNodeType(lookup.object)
@@ -1775,11 +1862,20 @@ end
 	if castTypeInfo == exprTypeInfo then
 		-- @Incomplete: Remove unnecessary cast.
 
+	elseif isTypeCompatibleWith(exprTypeInfo, castTypeInfo) then
+		-- void  (Valid cast.)
+
 	elseif
-		isAny(castTypeInfo, getTypeInfoForBuiltinType(state, "float"),getTypeInfoForBuiltinType(state, "int")) and
-		isAny(exprTypeInfo, getTypeInfoForBuiltinType(state, "float"),getTypeInfoForBuiltinType(state, "int"))
+		isAny(castTypeInfo.tag, !(typeTags.TypeInfoFloat),!(typeTags.TypeInfoInt)) and
+		isAny(exprTypeInfo.tag, !(typeTags.TypeInfoFloat),!(typeTags.TypeInfoInt))
 	then
-		-- void
+		-- void  (Valid cast.)
+
+	elseif exprTypeInfo.tag == !(typeTags.TypeInfoEnum) and castTypeInfo == exprTypeInfo.memberTypeInfo then
+		-- void  (Enum members can cast to the real member type.)
+
+	elseif exprTypeInfo.tag == !(typeTags.TypeInfoEnum) and isTypeCompatibleWith(castTypeInfo, exprTypeInfo.memberTypeInfo) then
+		-- @Incomplete: Wrap this cast in another cast.
 
 	elseif castTypeInfo.tag == !(typeTags.TypeInfoCompound) then
 		typeError(state, cast.targetType, "@Incomplete: Handle casting to compound type.")
@@ -1789,7 +1885,7 @@ end
 
 	elseif isTypeBuiltin(castTypeInfo) or isTypeBuiltin(exprTypeInfo) then
 		typeError(
-			state, cast.expression,
+			state, astGetExpressionVisuallyFurthestToTheLeft(cast.expression),
 			"Cannot cast from %s to %s.",
 			getFriendlyTypeInfoName(exprTypeInfo),
 			getFriendlyTypeInfoName(castTypeInfo)
@@ -1802,7 +1898,7 @@ end
 	cast.inferredType = castTypeInfo
 
 	moveToPipe(state, cast, !(PIPE_DONE))
-	-- @Incomplete: Simplify casted constants.
+	-- simplifyExpressionIfConstant(state, cast) -- @Incomplete: Simplify casted constants.
 end
 
 !NODE_INFERRER `function nodeInferrers.AstStatement(state, statement)`
@@ -1827,16 +1923,20 @@ end
 	-- Validate targets.
 	for _, targetExpr in ipairs(assignment.targets) do
 		if not isAny(targetExpr.nodeType, !(nodeTypes.AstIdentifier),!(nodeTypes.AstLookup)) then
-			!if DEBUG then
-				astPrint(targetExpr)
-			!end
+			!ifDEBUG`astPrint(targetExpr)`
 			typeError(state, astGetExpressionVisuallyFurthestToTheLeft(targetExpr), "Invalid assignment target. Expected a variable name or field.")
 		end
 	end
 
 	-- Validate values.
-	for i, targetExpr in ipairs(assignment.targets) do
-		getAssignmentValue(state, targetExpr, assignment.values, i, targetExpr.inferredType)
+	-- Note: Enum member values are already validated by the enum itself.
+	local declScope        = assignment.forDeclaration and getClosestScope(assignment) or nil
+	local isEnumMemberDecl = declScope ~= nil and declScope.nodeType == !(nodeTypes.AstEnum)
+
+	if not isEnumMemberDecl then
+		for i, targetExpr in ipairs(assignment.targets) do
+			getAssignmentValue(state, targetExpr, assignment.values, i, targetExpr.inferredType)
+		end
 	end
 
 	-- @Incomplete: Check that !must args from functions have an assignment target.
@@ -1969,7 +2069,19 @@ end
 
 !NODE_INFERRER `function nodeInferrers.AstEnum(state, enum)`
 	for _, statement in ipairs(enum) do
-		if statement.queued.pipe <= !(PIPE_INFER) then
+		if statement.what.nodeType == !(nodeTypes.AstDeclaration) then
+			-- Ignore declarations. We only need the assigned values to be inferred.
+
+		elseif statement.what.nodeType == !(nodeTypes.AstAssignment) and statement.what.forDeclaration then
+			-- We only need the assigned values to be inferred.
+			local assignment = statement.what
+			local valueExpr  = assignment.values[1] -- Note: Struct member declarations only have one name per assignment.
+
+			if not valueExpr.inferredType then
+				!DEPEND_AND_RETURN(`enum`, DEPEND_NODE_INFERRED, `valueExpr`)
+			end
+
+		elseif statement.queued.pipe <= !(PIPE_INFER) then
 			!DEPEND_AND_RETURN(`enum`, DEPEND_NODE_INFERRED, `statement`)
 		end
 	end
@@ -1982,8 +2094,7 @@ end
 		enumMemberInfo = getTypeInfoForBuiltinType(state, enum.memberType.typeName)
 	else
 		-- Just use the type of the first member as the wanted type for the enum.
-		-- Note: Struct member declarations only have one name.
-		enumMemberInfo = enum.declarations[1].name.inferredType
+		enumMemberInfo = enum.declarations[1].assignment.values[1].inferredType
 		if not isAny(enumMemberInfo,
 			getTypeInfoForBuiltinType(state, "int"),
 			getTypeInfoForBuiltinType(state, "string"),
@@ -1995,8 +2106,9 @@ end
 		end
 	end
 
-	local enumInfo   = newTypeInfo(TypeInfoEnum)
-	enumInfo.astNode = enum
+	local enumInfo          = newTypeInfo(TypeInfoEnum)
+	enumInfo.astNode        = enum
+	enumInfo.memberTypeInfo = enumMemberInfo or errorInternal()
 
 	for i, decl in ipairs(enum.declarations) do
 		local valueExpr = decl.assignment.values[1]
@@ -2011,6 +2123,9 @@ end
 		elseif valueExpr.inferredType ~= enumMemberInfo then
 			-- @Incomplete: Add cast.
 		end
+
+		-- Note: valueExpr may not be a constant expression, but the
+		-- declaration will check that after this enum gets inferred.
 
 		local member        = TypeInfoEnumMember()
 		member.name         = decl.name.name
@@ -2110,7 +2225,14 @@ function _G.getLiteralValueFromExpressionIfConstant(state, expr)
 		return false, nil -- Calls are always a runtime operation.
 
 	elseif expr.nodeType == !(nodeTypes.AstLookup) then
-		return false, nil -- Lookups resolving to constants should have simplified to something else already.
+		local lookup              = expr
+		local typeInfoRepresented = getTypeRepresentedByExpression(lookup.object)
+
+		if typeInfoRepresented and typeInfoRepresented.tag == !(typeTags.TypeInfoEnum) then
+			return true, nil
+		else
+			return false, nil -- Other lookups resolving to constants should have simplified to something else already (I think).
+		end
 
 	elseif expr.nodeType == !(nodeTypes.AstImport) then
 		return true, nil -- Namespaces, just like types, are always constant.
@@ -2304,6 +2426,8 @@ local function createLambdaFromSignature(state, funcSig, parent)
 end
 
 function _G.simplifyTypeExpression(state, expr, typeInfoRepresented)
+	!ASSERT `typeInfoRepresented`
+
 	local typeInfo            = expr.inferredType
 	local typeNode            = astNewNode(AstType, expr.token, expr.parent)
 	local isBuiltin, typeName = isTypeBuiltin(typeInfoRepresented)

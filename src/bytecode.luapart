@@ -297,6 +297,21 @@ function _G.bcAllocateConstantValueForExpressionIfNew(state, expr, dependent)
 
 		return const, isNew
 
+	elseif expr.nodeType == !(nodeTypes.AstEnum) then
+		local enum         = expr
+		local const, isNew = bcAllocateConstantValueIfNew(state, typeInfo, enum)
+
+		if isNew and state.settings.outputDebugInfo then
+			local enumInfo = enum.representedType
+
+			if enumInfo.name ~= "" then
+				const.name         = const.name.."_"..unicodeToLuaIdentifier(enumInfo.name)
+				const.nameTampered = true
+			end
+		end
+
+		return const, isNew
+
 	elseif expr.nodeType == !(nodeTypes.AstIdentifier) then
 		local ident = expr
 		local decl  = ident.declaration
@@ -452,6 +467,10 @@ function _G.bcEmit(state, node)
 	elseif node.nodeType == !(nodeTypes.AstDeclaration) then
 		local decl = node
 		bcEmitForDeclaration(state, decl)
+
+	elseif node.nodeType == !(nodeTypes.AstLookup) then
+		local lookup = node
+		bcEmitForLookup(state, decl)
 
 	else
 		errorUnhandledNodeType(node)

@@ -23,13 +23,15 @@ function _G.writeIdentifierName(state, file, ident)
 	if name == "" then  name = decl.localName  end
 
 	if name == "" then
+		astPrint(ident)
+		printTraceback(io.stderr)
 		nodeError(state, ident, "ProgramWriter", "Internal compiler error: Missing name to write for '%s'.", ident.name)
 	end
 
 	file:write(name)
 end
 
-local function writeStringConcatination(state, file, binary)
+function _G.writeStringConcatination(state, file, binary)
 	if binary.left.nodeType == !(nodeTypes.AstBinary) and binary.left.operation == ".." then
 		writeStringConcatination(state, file, binary.left)
 	else
@@ -40,6 +42,27 @@ local function writeStringConcatination(state, file, binary)
 		writeStringConcatination(state, file, binary.right)
 	else
 		writeExpression(state, file, binary.right)
+	end
+end
+
+function _G.writeLookup(state, file, lookup)
+	if isAny(lookup.object.inferredType.tag, !(typeTags.TypeInfoStruct),!(typeTags.TypeInfoTable)) then
+		writeExpression(state, file, lookup.object)
+
+		if lookup.member.nodeType == !(nodeTypes.AstLiteral) and lookup.member.literalType == !(LITERAL_STRING) and lookup.member.value:find"^[%a_][%w_]*$" then
+			local stringLiteral = lookup.member
+			file:write(".", stringLiteral.value)
+		else
+			file:write("[")
+			writeExpression(state, file, lookup.member)
+			file:write("]")
+		end
+
+	elseif lookup.object.inferredType.tag == !(typeTags.TypeInfoEnum) then
+		errorInternal() -- Enum lookups should have been simplified away.
+
+	else
+		errorUnhandledNodeType(lookup.object)
 	end
 end
 
@@ -91,7 +114,13 @@ function _G.writeExpression(state, file, expr)
 
 	elseif expr.nodeType == !(nodeTypes.AstIdentifier) then
 		local ident = expr
-		writeIdentifierName(state, file, ident)
+
+		if ident.inferredType.tag == !(typeTags.TypeInfoEnum) and not isPartOfAnyDeclaration(ident) then -- @Cleanup: This detection is a bit misplaced, I think.
+			local valueExpr = ident.declaration.assignment.values[1] or errorInternal()
+			writeExpression(state, file, valueExpr)
+		else
+			writeIdentifierName(state, file, ident)
+		end
 
 	elseif expr.nodeType == !(nodeTypes.AstType) then
 		local typeNode = expr
@@ -111,35 +140,14 @@ function _G.writeExpression(state, file, expr)
 
 	elseif expr.nodeType == !(nodeTypes.AstLookup) then
 		local lookup = expr
-
-		if isAny(lookup.object.inferredType.tag, !(typeTags.TypeInfoStruct),!(typeTags.TypeInfoTable)) then
-			writeExpression(state, file, lookup.object)
-
-			if lookup.member.nodeType == !(nodeTypes.AstLiteral) and lookup.member.literalType == !(LITERAL_STRING) and lookup.member.value:find"^[%a_][%w_]*$" then
-				local stringLiteral = lookup.member
-				file:write(".", stringLiteral.value)
-			else
-				file:write("[")
-				writeExpression(state, file, lookup.member)
-				file:write("]")
-			end
-
-		elseif lookup.object.inferredType.tag == !(typeTags.TypeInfoEnum) then
-			-- We shouldn't ever get here as all enum member references should have been replaced
-			-- by constants. (I think... Or maybe we want to keep the lookup node for enums? Actually,
-			-- that's probably the correct thing to do!)
-			errorUnhandledNodeType(lookup.object)
-
-		else
-			errorUnhandledNodeType(lookup.object)
-		end
+		writeLookup(state, file, lookup)
 
 	else
 		errorUnhandledNodeType(expr)
 	end
 end
 
-function _G.writeDefaultValueForType(state, file, typeInfo)
+function _G.writeDefaultValueForType(state, file, typeInfo, nodeForError)
 	local tag = typeInfo.tag
 
 	if tag == !(typeTags.TypeInfoBool) then
@@ -174,11 +182,14 @@ function _G.writeDefaultValueForType(state, file, typeInfo)
 				local valueExpr = assignment.values[1] or errorInternal()
 				writeExpression(state, file, valueExpr)
 			else
-				writeDefaultValueForType(state, file, member.typeInfo)
+				writeDefaultValueForType(state, file, member.typeInfo, nodeForError)
 			end
 		end
 
 		file:write("}")
+
+	elseif tag == !(typeTags.TypeInfoEnum) then
+		nodeError(state, nodeForError, "ProgramWriter", "Enums do not have default values.") -- @Cleanup: This can be detected in the infer pipe.
 
 	else
 		errorInternal("Incomplete: Default initial value for type '%s'.", (TYPE_TAG_NAMES[tag] or "?"))
@@ -221,7 +232,7 @@ function _G.writeImperativeBlock(state, file, block, indent, nextLocalN)
 				else
 					local tag = decl.name.inferredType.tag
 					file:write(indentStr, "local ", decl.localName, " = ")
-					writeDefaultValueForType(state, file, decl.name.inferredType)
+					writeDefaultValueForType(state, file, decl.name.inferredType, decl.name)
 					file:write("\n")
 				end
 
