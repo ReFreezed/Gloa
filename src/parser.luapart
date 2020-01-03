@@ -130,7 +130,8 @@ _G.!structAst"AstIdentifier:_AstExpression"{
 	name          = "",
 	placeDeclared = NIL, -- AstDeclaration|AstStruct|AstFor|AstLambda  (@Cleanup: We don't really use this.)
 	-- Type phase:
-	declaration = NIL, -- AstDeclaration
+	declaration   = NIL, -- AstDeclaration
+	fromUsing     = NIL, -- AstUsing
 }
 _G.!structAst"AstVararg:AstIdentifier"{
 	_overrides              = {name="..."},
@@ -192,6 +193,13 @@ _G.!structAst"AstImport:_AstExpression"{
 	importName = "",
 	-- Type phase:
 	fileScope  = NIL, -- AstFileScope
+}
+
+_G.!structAst"AstUsing:_AstNode"{
+	expression = NIL, -- AstExpression
+	-- Type phase:
+	scope               = NIL, -- AstBlock
+	variableDeclaration = NIL, -- AstDeclaration
 }
 
 _G.!structAst"AstArgument:_AstNode"{
@@ -260,6 +268,7 @@ _G.!structAst"AstBlock:_AstNode"{
 	_scopeType   = "imperative",
 	declarations = {}, -- []AstDeclaration  (Note that inner blocks have their own declarations.)
 	imports      = {}, -- []AstImport       (Excluding loads.)
+	usings       = {}, -- []AstUsing
 	-- [1]=statement1, ...
 	-- Type phase:
 	declarationsInTree = {}, -- Includes all child scopes. Does not include shadows.
@@ -393,6 +402,18 @@ function _G.parseIdentifier(state, parentNode, placeDeclared)
 	ident.placeDeclared = placeDeclared
 
 	return ident
+end
+
+function _G.parseUsing(state, parentNode)
+	local tokType, tokValue, token = consumeNextToken(state)
+	if not isToken(tokType,tokValue, !(TOKEN_KEYWORD),"using") then
+		!ERROR_OR_RETURN `errorParsingLast(state, "Expected 'using'.")`
+	end
+
+	local using                      = astNewNode(AstUsing, token, parentNode)
+	!SET_OR_RETURN `using.expression = parseExpression(state, using)`
+
+	return using
 end
 
 function _G.parseType(state, parentNode)
@@ -1409,6 +1430,12 @@ function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 		!SET_OR_RETURN_FALSE `forLoop.body = parseBlockOrScopedStatement(state, forLoop)`
 		statement.what                     = forLoop
 
+	elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"using") then
+		!SET_OR_RETURN `local using = parseUsing(state, statement)`
+		statement.what              = using
+
+		table.insert(block.usings, using)
+
 	elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"import","load") then
 		!SET_OR_RETURN_FALSE `local import = parseImportOrLoad(state, statement)`
 		statement.what                     = import
@@ -1451,7 +1478,7 @@ function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 		end
 	end
 
-	assert(statement.what)
+	!ASSERT `statement.what`
 
 	tokType, tokValue = peekNextToken(state)
 	if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),";") then
@@ -1561,24 +1588,28 @@ function _G.parseFileScope(state, parentNode, path, isModule, moduleName)
 		if not tokType then
 			break
 
+		elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"local","global","export") then
+			!DO_OR_RETURN `parseDeclarationStatement(state, fileScope, nil)`
+
 		elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"import","load") then
 			-- @Incomplete: Warn about duplicate imports? Maybe not necessay as things will only ever be imported once anyway.
-			!SET_OR_RETURN `local import = parseImportOrLoad(state, fileScope)`
+			local statement              = astNewNode(AstStatement, state.nextToken, fileScope)
+			!SET_OR_RETURN `local import = parseImportOrLoad(state, statement)`
+			statement.what               = import
 
-			local statement = astNewNode(AstStatement, import.token, fileScope)
-			statement.what  = import
-			import.parent   = statement
 			table.insert(fileScope, statement)
 
 			if not import.isLoad then
 				table.insert(fileScope.imports, import)
 			end
 
-		elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"local","global","export") then
-			!DO_OR_RETURN `parseDeclarationStatement(state, fileScope, nil)`
-
 		elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"using") then
-			!ERROR_OR_RETURN `errorParsingNext(state, "@Incomplete: Handle '%s'.", tokValue)`
+			local statement             = astNewNode(AstStatement, state.nextToken, fileScope)
+			!SET_OR_RETURN `local using = parseUsing(state, statement)`
+			statement.what              = using
+
+			table.insert(fileScope,        statement)
+			table.insert(fileScope.usings, using)
 
 		elseif isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),";") then
 			consumeNextToken(state)
@@ -2523,6 +2554,12 @@ do
 				write(" (", (import.isLoad and "load " or "import "), import.importName, ")")
 				write("\n")
 
+			elseif node.nodeType == !(nodeTypes.AstUsing) then
+				local using = node
+				!!(CHILD_PRINT_START)
+				if using.expression then  printNode(using.expression, indent+1, printed, printChildren)  end
+				!!(CHILD_PRINT_END)
+
 			elseif node.nodeType == !(nodeTypes.AstVararg) then
 				local vararg = node
 				if vararg.surroundedByParenthesis then  write(" (adjustTo1)")  end
@@ -2715,6 +2752,7 @@ do
 		elseif node.nodeType == !(nodeTypes.AstContinue)    then  !visitIfNotNil"node"{"loopName"}
 		elseif node.nodeType == !(nodeTypes.AstDefer)       then  !visitIfNotNil"node"{"body"}
 		elseif node.nodeType == !(nodeTypes.AstImport)      then  -- void
+		elseif node.nodeType == !(nodeTypes.AstUsing)       then  !visitIfNotNil"node"{"expression"}
 		elseif node.nodeType == !(nodeTypes.AstIf)          then  !visitIfNotNil"node"{"condition","branchTrue","branchFalse"}
 		elseif node.nodeType == !(nodeTypes.AstWhile)       then  !visitIfNotNil"node"{"condition","body"}
 		elseif node.nodeType == !(nodeTypes.AstFor)         then  !visitList"node"{"names","expressions"} ; visitIfNotNil"node"{"body"}

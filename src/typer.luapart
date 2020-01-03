@@ -361,14 +361,14 @@ function _G.isScopeImperative (scope)  return SCOPE_SET_IMPERATIVE [scope.nodeTy
 
 
 
--- declaration = findDeclaration( state, startNode, name [, declarationToIgnore ] )
+-- declaration, fromUsing = findDeclaration( state, startNode, name [, declarationToIgnore ] )
 function _G.findDeclaration(state, startNode, name, declToIgnore)
 	local scope = isScope(startNode) and startNode or getClosestScope(startNode)
 
 	while scope do
 		for _, decl in ipairs(scope.declarations) do
 			if decl ~= declToIgnore and decl.name.name == name and isDeclarationVisibleToNode(decl, startNode) then
-				return decl
+				return decl, nil
 			end
 		end
 
@@ -378,17 +378,32 @@ function _G.findDeclaration(state, startNode, name, declToIgnore)
 			if import.fileScope then
 				for _, decl in ipairs(import.fileScope.declarations) do
 					if decl ~= declToIgnore and decl.isGlobalOrExported and decl.name.name == name then
-						return decl
+						return decl, nil
 					end
 				end
 			end
 		end
 
-		-- @Incomplete: Look through the scope's usings.
+		for _, using in ipairs(scope.usings) do
+			if using.scope then
+				for _, decl in ipairs(using.scope.declarations) do
+					if
+						decl ~= declToIgnore and decl.name.name == name and (
+							decl.isConstant or (
+								using.variableDeclaration
+								and isDeclarationVisibleToNode(using.variableDeclaration, startNode)
+							)
+						)
+					then
+						return decl, using
+					end
+				end
+			end
+		end
 
 		for _, decl in ipairs(scope.declarationsInTree[name] or EMPTY_TABLE) do
 			if decl ~= declToIgnore and isDeclarationVisibleToNode(decl, startNode) then
-				return decl
+				return decl, nil
 			end
 		end
 
@@ -400,7 +415,7 @@ function _G.findDeclaration(state, startNode, name, declToIgnore)
 		scope = getClosestScope(scope)
 	end
 
-	return nil
+	return nil, nil
 end
 
 function _G.findDeclarationInScope(state, scope, name, onlyLookInExportsIfScopeIsModule)
@@ -439,15 +454,21 @@ function _G.isDeclarationVisibleToNode(decl, node)
 			return true
 
 		elseif nodeScope.nodeType == !(nodeTypes.AstBlock) then
-			local block = nodeScope
-
+			local block                     = nodeScope
 			local declScope, declScopeChild = getClosestScope(decl)
-			!ASSERT `declScope == block`
 
-			local imperativeIndexForDecl = indexOf(block, declScopeChild) or errorInternal()
-			local imperativeIndexForNode = indexOf(block, nodeScopeChild) or errorInternal()
+			if declScope == block then
+				local imperativeIndexForDecl = indexOf(block, declScopeChild) or errorInternal()
+				local imperativeIndexForNode = indexOf(block, nodeScopeChild) or errorInternal()
 
-			return (imperativeIndexForDecl < imperativeIndexForNode)
+				return (imperativeIndexForDecl < imperativeIndexForNode)
+
+			else
+				-- The declaration is probably from a using. The only things you can use right
+				-- now are structs and enums, both being declarative scopes. 2020-01-03
+				assert(isScopeDeclarative(declScope))
+				return true
+			end
 
 		else
 			errorUnhandledNodeType(nodeScope)
@@ -629,11 +650,15 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 	-- Loose identifier.
 	if not isPartOfAnyDeclaration(identOrVararg) then
 		if not decl then
-			decl = findDeclaration(state, identOrVararg, identOrVararg.name)
+			local using
+			decl, using = findDeclaration(state, identOrVararg, identOrVararg.name)
+
 			if not decl then
 				!DEPEND_AND_RETURN(`identOrVararg`, DEPEND_DECLARATION, `identOrVararg.name`)
 			end
+
 			identOrVararg.declaration = decl
+			identOrVararg.fromUsing   = using
 		end
 
 		local identInDecl = decl.name
@@ -642,10 +667,32 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 		end
 		identOrVararg.inferredType = identInDecl.inferredType
 
-		moveToPipe(state, identOrVararg, !(PIPE_DONE))
-		if ident then
-			simplifyExpressionIfConstant(state, ident) -- @Check: Are we in the right pipe after simplification?
+		if identOrVararg.fromUsing then
+			-- @Cleanup: Move this to simplifyExpressionIfConstant()?
+			!ASSERT `ident`
+			local lookup        = astNewNode(AstLookup, ident.token, ident.parent)
+
+			local expr          = astCopy(ident.fromUsing.expression)
+			expr.token          = lookup.token
+			expr.parent         = lookup
+			lookup.object       = expr
+
+			local literal       = astNewNode(AstLiteral, lookup.token, lookup)
+			literal.literalType = !(LITERAL_STRING)
+			literal.value       = ident.name
+			lookup.member       = literal
+
+			addUnqueuedChildrenToQueueRecursively(state, lookup)
+			replaceQueuedNodeAndUnqueueOldTree(state, ident, lookup)
+			-- Stay in the current pipe.
+
+		else
+			moveToPipe(state, identOrVararg, !(PIPE_DONE))
+			if ident then
+				simplifyExpressionIfConstant(state, ident) -- @Check: Are we in the right pipe after simplification?
+			end
 		end
+
 		return
 	end
 
@@ -1015,8 +1062,7 @@ end
 		decl = findDeclaration(state, typeNode, typeNode.typeName)
 		if not decl then
 			!DEPEND_AND_RETURN(`typeNode`, DEPEND_DECLARATION, `typeNode.typeName`)
-		end
-		if not decl.name.inferredType then
+		elseif not decl.name.inferredType then
 			!DEPEND_AND_RETURN(`typeNode`, DEPEND_NODE_INFERRED, `decl.name`)
 		end
 
@@ -1697,7 +1743,7 @@ end
 		if not decl then
 			typeError(state, memberLiteral, "'%s' is not a member of %s.", memberName, getFriendlyTypeInfoName(structInfo))
 		elseif isLeftValue and decl.isConstant then
-			typeError(state, memberLiteral, "Cannot assign value to constant %s.%s .", getFriendlyTypeInfoName(structInfo), memberName)
+			typeError(state, memberLiteral, "Cannot assign value to constant member %s.%s", getFriendlyTypeInfoName(structInfo), memberName)
 		end
 
 		if not decl.isConstant then
@@ -1777,7 +1823,7 @@ end
 		-- Stay in the current pipe so we get simplified. (Needed? Or maybe we can @Speed things up here?)
 
 	else
-		errorUnhandledNodeType(lookup.object)
+		typeError(state, lookup.object, "Cannot look up names in objects of type '%s'.", getFriendlyTypeInfoName(typeInfoObject))
 	end
 end
 
@@ -2004,6 +2050,80 @@ end
 	import.inferredType = getTypeInfoForNamespace(state, import.fileScope)
 
 	moveToPipe(state, import, !(PIPE_DONE))
+end
+
+!NODE_INFERRER `function nodeInferrers.AstUsing(state, using)`
+	local expr     = using.expression
+	local typeInfo = expr.inferredType
+
+	if not typeInfo then
+		!DEPEND_AND_RETURN(`using`, DEPEND_NODE_INFERRED, `expr`)
+	end
+
+	local usingScope
+
+	if expr.nodeType == !(nodeTypes.AstIdentifier) then
+		local ident = expr
+		local decl  = ident.declaration
+
+		if typeInfo.tag == !(typeTags.TypeInfoStruct) then
+			local structInfo = typeInfo
+			usingScope       = structInfo.astNode
+
+			if not decl.isConstant then
+				using.variableDeclaration = decl
+			end
+
+		elseif typeInfo.tag == !(typeTags.TypeInfoEnum) then
+			-- Using an enum value is the same as using the enum type. Is this good?
+			local enumInfo = typeInfo
+			usingScope     = enumInfo.astNode
+
+		else
+			typeError(state, ident, "a Invalid or unsupported type group (%s) in 'using' expression.", TYPE_TAG_NAMES[typeInfo.tag])
+		end
+
+	elseif expr.nodeType == !(nodeTypes.AstType) then
+		local typeNode = expr
+		typeInfo       = typeNode.representedType
+
+		if typeInfo.tag == !(typeTags.TypeInfoStruct) then
+			local structInfo = typeInfo
+			usingScope       = structInfo.astNode
+
+		elseif typeInfo.tag == !(typeTags.TypeInfoEnum) then
+			local enumInfo = typeInfo
+			usingScope     = enumInfo.astNode
+
+		else
+			typeError(state, typeNode, "b Invalid or unsupported type group (%s) in 'using' expression.", TYPE_TAG_NAMES[typeInfo.tag])
+		end
+
+	else
+		!ifDEBUG`astPrint(expr)`
+		typeError(state, astGetExpressionVisuallyFurthestToTheLeft(expr), "Invalid or unsupported 'using' expression.")
+	end
+
+	local scopeOfUsing  = getClosestScope(using)
+	local usingExisting = itemWith(scopeOfUsing.usings, "scope", usingScope)
+
+	if usingExisting then
+		local usingEarly = usingExisting
+		local usingLate  = using
+
+		if usingLate.token < usingEarly.token then
+			usingEarly, usingLate = usingLate, usingEarly
+		end
+
+		printerr()
+		typeMessage(io.stderr, state, usingLate,  "Error", "Duplicate using in the same scope.")
+		typeMessage(io.stderr, state, usingEarly, "Info",  "...first using is here.")
+		exitFailure()
+	end
+
+	using.scope = usingScope
+
+	moveToPipe(state, using, !(PIPE_DONE))
 end
 
 local function inferIfOrWhile(state, ifOrWhile)
