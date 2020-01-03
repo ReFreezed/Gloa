@@ -96,7 +96,7 @@ end
 
 -- Output an assert() in DEBUG mode.
 function pp.metaEnvironment.ASSERT(valueCode)
-	if DEBUG then  pp.outputLua("assert(",valueCode,")")  end
+	if debugMode then  pp.outputLua("assert(",valueCode,")")  end
 end
 
 pp.processFile{

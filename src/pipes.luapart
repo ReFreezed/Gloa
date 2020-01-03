@@ -10,7 +10,7 @@
 --==============================================================
 
 	addDependency
-	addToQueue, addToQueueRecursively, unqueue, unqueueChildrenRecursively, replaceQueuedNode, replaceQueuedNodeAndUnqueueOldTree
+	addToQueue, addToQueueRecursively, pokeAndQueueUnqueuedNodeIntoTree, unqueueChildrenRecursively, replaceQueuedNode, replaceQueuedNodeAndUnqueueOldTree, cutOutPartOfNodeTree
 	errorPipesAreStuck
 	moveToPipe, moveToNextPipe, moveTreeToNextPipe
 
@@ -165,6 +165,24 @@ function _G.addUnqueuedChildrenToQueueRecursively(state, topNode, pipe)
 	end)
 end
 
+-- pokeAndQueueUnqueuedNodeIntoTree( state, nodeAtTargetPosition, newNode, containerInNewNode, keyInContainerInNewNode [, pipe=PIPE_INFER ] )
+-- newNode will become the new parent for nodeAtTargetPosition.
+function _G.pokeAndQueueUnqueuedNodeIntoTree(state, nodeAtTargetPos, newNode, containerInNewNode, keyInNewNode, pipe)
+	!ASSERT `not newNode.queued`
+	pipe = pipe or !(PIPE_INFER)
+
+	addToQueue(state, newNode, nodeAtTargetPos.queued.container, nodeAtTargetPos.queued.key, pipe)
+
+	-- Replace nodeAtTargetPos with newNode in it's parent.
+	nodeAtTargetPos.queued.container[nodeAtTargetPos.queued.key] = newNode
+
+	-- Put nodeAtTargetPos in newNode.
+	containerInNewNode[keyInNewNode] = nodeAtTargetPos
+	nodeAtTargetPos.parent           = newNode
+	nodeAtTargetPos.queued.container = containerInNewNode
+	nodeAtTargetPos.queued.key       = keyInNewNode
+end
+
 function _G.unqueueChildrenRecursively(state, topNode)
 	astVisitAllNodes(topNode, function(node)
 		if node ~= topNode then
@@ -173,7 +191,8 @@ function _G.unqueueChildrenRecursively(state, topNode)
 	end)
 end
 
--- Note: nodeOld doesn't have to be queued right now - it just needs a Queued object reference.
+-- Note: nodeOld doesn't have to be queued right now - it just needs a Queued object.
+-- Note: No node.parent is changed.
 -- (@Cleanup: Sometimes we just want to make use of queued.container/key.)
 function _G.replaceQueuedNode(state, nodeOld, nodeNew)
 	assert(not nodeNew.queued)
@@ -205,6 +224,19 @@ end
 function _G.replaceQueuedNodeAndUnqueueOldTree(state, nodeOld, nodeNew)
 	unqueueChildrenRecursively(state, nodeOld)
 	replaceQueuedNode(state, nodeOld, nodeNew)
+end
+
+-- Note: We update the parent of childTreeNodeToHookIn here.
+function _G.cutOutPartOfNodeTree(state, nodeToRemove, childTreeNodeToHookIn)
+	astVisitAllNodes(nodeToRemove, function(node)
+		if node ~= nodeToRemove          then  node.queued.unqueued = true      end
+		if node == childTreeNodeToHookIn then  return !(VISIT_IGNORE_CHILDREN)  end
+	end)
+
+	childTreeNodeToHookIn.queued = nil -- This will be replaced with nodeToRemove.queued in replaceQueuedNode().
+	childTreeNodeToHookIn.parent = nodeToRemove.parent
+
+	replaceQueuedNode(state, nodeToRemove, childTreeNodeToHookIn)
 end
 
 

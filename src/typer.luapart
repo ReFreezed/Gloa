@@ -17,6 +17,7 @@
 	isTypeSimple, isTypeCompatibleWith
 	newTypeInfo, isTypeBuiltin, getTypeInfo*
 	normalizeVarargItemType
+	simplifyExpressionIfConstant, simplifyTypeExpression
 	typeError, typeMessage
 
 --============================================================]]
@@ -48,9 +49,8 @@ end
 )
 
 !struct"_TypeInfo"{
-	tag         = 0,    -- This is like a "type of type info". The word "type" is used in so many places so we call it "tag" here to make it less confusing...
-	id          = 0,
-	declaration = NIL, -- AstTypeDeclaration
+	tag = 0, -- This is like a "type of type info". The word "type" is used in so many places so we call it "tag" here to make it less confusing...
+	id  = 0,
 }
 
 local !structTypeInfo"TypeInfoAny:_TypeInfo"{}
@@ -128,18 +128,17 @@ _G.TYPE_TAG_NAMES = !(typeTagNames)
 
 
 
--- typeInfo = newTypeInfo( TypeInfoCreator [, declaration=internal ] )
+-- typeInfo = newTypeInfo( TypeInfoCreator )
 do
 	local lastTypeId = 0
 
-	function _G.newTypeInfo(TypeInfoCreator, decl)
-		if not TypeInfoCreator then  errorInternal(2, "No TypeInfoCreator specified.")  end
+	function _G.newTypeInfo(TypeInfoCreator)
+		!ifDEBUG `if not TypeInfoCreator then  errorInternal(2, "No TypeInfoCreator specified.")  end`
 
 		lastTypeId = lastTypeId+1
 
-		local typeInfo       = TypeInfoCreator()
-		typeInfo.id          = lastTypeId
-		typeInfo.declaration = decl -- @Cleanup: Is typeInfo.declaration used/wanted anywhere?
+		local typeInfo = TypeInfoCreator()
+		typeInfo.id    = lastTypeId
 
 		--[[
 		if lastTypeId == 22 then
@@ -314,7 +313,7 @@ function _G.getTypeRepresentedByExpression(expr)
 	elseif expr.nodeType == !(nodeTypes.AstCast) then
 		local cast = expr
 		return
-			cast.targetType.inferredType.tag == !(typeTags.TypeInfoType)
+			cast.inferredType.tag == !(typeTags.TypeInfoType)
 			and getTypeRepresentedByExpression(cast.expression)
 			or  nil
 
@@ -651,7 +650,7 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 	end
 
 	!ASSERT `decl`
-	!ASSERT `isAny(identOrVararg.parent.nodeType, !(nodeTypes.AstDeclaration),!(nodeTypes.AstAssignment)`
+	!ASSERT("isAny(identOrVararg.parent.nodeType, "..nodeTypes.AstDeclaration..","..nodeTypes.AstAssignment..")")
 
 	-- Assignment target in declaration (which is a copy of the identifier in the declaration).
 	if identOrVararg.parent.nodeType == !(nodeTypes.AstAssignment) then
@@ -1603,7 +1602,7 @@ end
 	elseif binary.operation == "//" then
 		local literal        = astNewNode(AstLiteral, binary.token, binary.parent)
 		literal.literalType  = !(LITERAL_INTEGER)
-		literal.value        = math.floor(valueL/valueR) -- Do we need to floor valueL and valueR before the division too?
+		literal.value        = math.floor(valueL/valueR) -- @Robustness: Do we need to floor valueL and valueR before the division too?
 		literal.inferredType = typeInfo
 		replaceQueuedNodeAndUnqueueOldTree(state, binary, literal)
 		moveToPipe(state, literal, !(PIPE_BYTECODE))
@@ -1715,14 +1714,18 @@ end
 		if valueExpr.nodeType == !(nodeTypes.AstLiteral) then
 			replacement       = astCopy(valueExpr)
 			replacement.token = lookup.member.token
-			addUnqueuedChildrenToQueueRecursively(state, replacement, !(PIPE_BYTECODE))
 
 		elseif valueExpr.nodeType == !(nodeTypes.AstType) then
 			replacement       = astCopy(valueExpr)
 			replacement.token = lookup.member.token
 			addUnqueuedChildrenToQueueRecursively(state, replacement, !(PIPE_DONE))
 
+		elseif valueExpr.nodeType == !(nodeTypes.AstIdentifier) and valueExpr.inferredType.tag == !(typeTags.TypeInfoEnum) then
+			replacement       = astCopy(valueExpr)
+			replacement.token = lookup.member.token
+
 		else
+			where(state, valueExpr)
 			errorUnhandledNodeType(valueExpr)
 		end
 
@@ -1840,14 +1843,16 @@ end
 end
 
 !NODE_INFERRER `function nodeInferrers.AstCast(state, cast)`
-	if not cast.targetType.inferredType then
+	-- Note: For convenience, cast.targetType may be nil here for generated casts. cast.inferredType must be set in those cases.
+
+	if cast.targetType and not cast.targetType.inferredType then
 		!DEPEND_AND_RETURN(`cast`, DEPEND_NODE_INFERRED, `cast.targetType`)
 	end
 	if not cast.expression.inferredType then
 		!DEPEND_AND_RETURN(`cast`, DEPEND_NODE_INFERRED, `cast.expression`)
 	end
 
-	local castTypeInfo = getTypeRepresentedByExpression(cast.targetType) or errorInternal()
+	local castTypeInfo = cast.inferredType or getTypeRepresentedByExpression(cast.targetType) or errorInternal()
 	local exprTypeInfo = cast.expression.inferredType
 
 	if exprTypeInfo.tag == !(typeTags.TypeInfoList) then
@@ -1860,7 +1865,8 @@ end
 	end
 
 	if castTypeInfo == exprTypeInfo then
-		-- @Incomplete: Remove unnecessary cast.
+		cutOutPartOfNodeTree(state, cast, cast.expression)
+		return
 
 	elseif isTypeCompatibleWith(exprTypeInfo, castTypeInfo) then
 		-- void  (Valid cast.)
@@ -1871,14 +1877,21 @@ end
 	then
 		-- void  (Valid cast.)
 
-	elseif exprTypeInfo.tag == !(typeTags.TypeInfoEnum) and castTypeInfo == exprTypeInfo.memberTypeInfo then
+	elseif exprTypeInfo.tag == !(typeTags.TypeInfoEnum) and isTypeCompatibleWith(castTypeInfo, exprTypeInfo.memberTypeInfo) then
 		-- void  (Enum members can cast to the real member type.)
 
-	elseif exprTypeInfo.tag == !(typeTags.TypeInfoEnum) and isTypeCompatibleWith(castTypeInfo, exprTypeInfo.memberTypeInfo) then
-		-- @Incomplete: Wrap this cast in another cast.
+	elseif
+		exprTypeInfo.tag == !(typeTags.TypeInfoEnum) and
+		isAny(castTypeInfo.tag,                !(typeTags.TypeInfoFloat),!(typeTags.TypeInfoInt)) and
+		isAny(exprTypeInfo.memberTypeInfo.tag, !(typeTags.TypeInfoFloat),!(typeTags.TypeInfoInt))
+	then
+		-- We need two casts to happen in sequence here so we wrap ourselves in another cast.
+		local wrappingCast        = astNewNode(AstCast, cast.token, cast.parent)
+		wrappingCast.inferredType = exprTypeInfo.memberTypeInfo
+		pokeAndQueueUnqueuedNodeIntoTree(state, cast, wrappingCast, wrappingCast, "expression", !(PIPE_INFER))
 
 	elseif castTypeInfo.tag == !(typeTags.TypeInfoCompound) then
-		typeError(state, cast.targetType, "@Incomplete: Handle casting to compound type.")
+		typeError(state, (cast.targetType or cast), "@Incomplete: Handle casting to compound type.")
 
 	elseif exprTypeInfo.tag == !(typeTags.TypeInfoCompound) then
 		typeError(state, astGetExpressionVisuallyFurthestToTheLeft(cast.expression), "@Incomplete: Handle casting from compound type.")
@@ -1898,7 +1911,7 @@ end
 	cast.inferredType = castTypeInfo
 
 	moveToPipe(state, cast, !(PIPE_DONE))
-	-- simplifyExpressionIfConstant(state, cast) -- @Incomplete: Simplify casted constants.
+	simplifyExpressionIfConstant(state, cast)
 end
 
 !NODE_INFERRER `function nodeInferrers.AstStatement(state, statement)`
@@ -2179,6 +2192,11 @@ end
 
 -- expressionIsConstant, literalValue = getLiteralValueFromExpressionIfConstant( compilationState, expression )
 -- Note: It's assumed that the expression tree has all types figured out.
+--
+-- @Cleanup: All constant expressions that can result in a literal value should have been simplified into an AstLiteral.
+-- That means we don't really need to return a literal here - the caller can just grab it from the literal node.
+-- @Refactor this function to only figure out whether the expression is constant.
+--
 function _G.getLiteralValueFromExpressionIfConstant(state, expr)
 	-- @Incomplete: Return an AstNode?
 
@@ -2208,11 +2226,11 @@ function _G.getLiteralValueFromExpressionIfConstant(state, expr)
 		local isConst, v = getLiteralValueFromExpressionIfConstant(state, cast.expression)
 		if not isConst then  return false, nil  end
 
-		if cast.inferredType == getTypeInfoForBuiltinType(state, "int") then
+		if cast.inferredType.tag == !(typeTags.TypeInfoInt) then
 			return true, math.floor(v)
-		elseif cast.inferredType == getTypeInfoForBuiltinType(state, "float") then
+		elseif cast.inferredType.tag == !(typeTags.TypeInfoFloat) then
 			return true, v
-		elseif cast.inferredType == getTypeInfoForBuiltinType(state, "type") then
+		elseif cast.inferredType.tag == !(typeTags.TypeInfoType) then
 			return true, nil -- Should we return the type ID?
 		else
 			errorInternal("Unhandled cast type: %s", getFriendlyTypeInfoName(cast.inferredType))
@@ -2448,17 +2466,16 @@ function _G.simplifyTypeExpression(state, expr, typeInfoRepresented)
 		typeNode.typeName = enumInfo.name
 
 	elseif typeInfoRepresented.tag == !(typeTags.TypeInfoFunction) then
-		local decl = typeInfo.declaration
-
-		if decl then
-			local lambda = getAssignmentValue(state, decl.name, decl.assignment.values, decl.assignmentIndex)
-			assert(lambda.nodeType == !(nodeTypes.AstLambda))
-			assert(not lambda.body)
-			typeNode.functionSignature = astCopy(lambda) -- Do we need to update the location info of the lambda to where typeNode/expr is?
-		else
+		-- local decl = typeInfo.declaration
+		-- if decl then
+		-- 	local lambda = getAssignmentValue(state, decl.name, decl.assignment.values, decl.assignmentIndex)
+		-- 	assert(lambda.nodeType == !(nodeTypes.AstLambda))
+		-- 	assert(not lambda.body)
+		-- 	typeNode.functionSignature = astCopy(lambda) -- Do we need to update the location info of the lambda to where typeNode/expr is?
+		-- else
 			local funcSig              = typeInfoRepresented
 			typeNode.functionSignature = createLambdaFromSignature(state, funcSig, typeNode)
-		end
+		-- end
 
 		addUnqueuedChildrenToQueueRecursively(state, typeNode, !(PIPE_BYTECODE))
 
@@ -2478,36 +2495,132 @@ function _G.simplifyTypeExpression(state, expr, typeInfoRepresented)
 end
 
 function _G.simplifyExpressionIfConstant(state, expr)
-	local typeInfo = expr.inferredType
+	if not getLiteralValueFromExpressionIfConstant(state, expr) then  return  end
 
-	local decl
 	if expr.nodeType == !(nodeTypes.AstIdentifier) then
 		local ident = expr
-		decl = ident.declaration or errorInternal()
+		local decl  = ident.declaration or errorInternal()
+
+		if not decl.isConstant then  return  end
+
+		local typeInfo = ident.inferredType
+
+		if typeInfo.tag ~= !(typeTags.TypeInfoEnum) then
+			local typeInfoRepresented = decl.valueTypeInfo
+
+			if typeInfoRepresented then
+				simplifyTypeExpression(state, ident, typeInfoRepresented)
+				return
+			end
+		end
+
+		!ASSERT("typeInfo.tag ~= "..typeTags.TypeInfoType)
+		if not isTypeSimple(typeInfo) then  return  end
+
+		-- At this point we should have a literal to copy. Hopefully the expression we copy
+		-- has been simplified into a literal if it wasn't a literal to begin with.
+		local valueExpr = getAssignmentValue(state, decl.name, decl.assignment.values, decl.assignmentIndex)
+		assert(valueExpr.nodeType == !(nodeTypes.AstLiteral))
+
+		local copy = astCopy(valueExpr)
+		copy.token = ident.token
+
+		replaceQueuedNodeAndUnqueueOldTree(state, ident, copy)
+		moveToPipe(state, copy, !(PIPE_BYTECODE))
+
+	elseif expr.nodeType == !(nodeTypes.AstCast) then
+		local cast       = expr
+		local isConst, v = getLiteralValueFromExpressionIfConstant(state, cast.expression)
+
+		!ASSERT `isConst`
+
+		local typeInfoSource = cast.expression.inferredType
+		local typeInfoTarget = cast.inferredType
+
+		if typeInfoSource == typeInfoTarget then
+			errorInternal() -- This should have been simlified away.
+
+		-- int -> float
+		elseif typeInfoSource.tag == !(typeTags.TypeInfoInt) and typeInfoTarget.tag == !(typeTags.TypeInfoFloat) then
+			assert(type(v) == "number")
+			local literal        = astNewNode(AstLiteral, cast.token, cast.parent)
+			literal.literalType  = !(LITERAL_FLOAT)
+			literal.value        = v
+			literal.inferredType = typeInfoTarget
+			replaceQueuedNodeAndUnqueueOldTree(state, cast, literal)
+			moveToPipe(state, literal, !(PIPE_BYTECODE))
+
+		-- float -> int
+		elseif typeInfoSource.tag == !(typeTags.TypeInfoFloat) and typeInfoTarget.tag == !(typeTags.TypeInfoInt) then
+			assert(type(v) == "number")
+			local literal        = astNewNode(AstLiteral, cast.token, cast.parent)
+			literal.literalType  = !(LITERAL_INTEGER)
+			literal.value        = math.floor(v)
+			literal.inferredType = typeInfoTarget
+			replaceQueuedNodeAndUnqueueOldTree(state, cast, literal)
+			moveToPipe(state, literal, !(PIPE_BYTECODE))
+
+		-- enum -> enumMemberType (int, float, string, bool or type)
+		elseif typeInfoSource.tag == !(typeTags.TypeInfoEnum) and isTypeCompatibleWith(typeInfoSource.memberTypeInfo, typeInfoTarget) then
+			local castIsDirect = (typeInfoTarget == typeInfoSource.memberTypeInfo)
+
+			local enumInfo = typeInfoSource
+			local ident    = cast.expression
+			assert(ident.nodeType == !(nodeTypes.AstIdentifier)) -- All constant enum member references should have been simplified to an identifier.
+
+			local memberName = ident.name
+			local decl       = findDeclarationInScope(state, enumInfo.astNode, memberName, false)
+			local valueExpr  = decl.assignment.values[1]
+
+			if BUILTIN_TYPE_TAG_TO_LITERAL_TYPE[typeInfoTarget.tag] then
+				local literal = valueExpr
+				assert(literal.nodeType == !(nodeTypes.AstLiteral))
+
+				local literalCopy = astCopy(literal)
+				literalCopy.token = cast.token
+
+				if castIsDirect then
+					assert(literalCopy.inferredType == typeInfoTarget)
+
+				elseif typeInfoSource.memberTypeInfo.tag == !(typeTags.TypeInfoInt) and typeInfoTarget.tag == !(typeTags.TypeInfoFloat) then
+					literalCopy.literalType  = !(LITERAL_FLOAT)
+					literalCopy.inferredType = typeInfoTarget
+
+				else
+					errorInternal(
+						"Incomplete: Implicitly cast enum from %s to %s.",
+						getFriendlyTypeInfoName(typeInfoSource.memberTypeInfo),
+						getFriendlyTypeInfoName(typeInfoTarget)
+					)
+				end
+
+				replaceQueuedNodeAndUnqueueOldTree(state, cast, literalCopy)
+				moveToPipe(state, literalCopy, !(PIPE_BYTECODE))
+
+			elseif typeInfoTarget.tag == !(typeTags.TypeInfoType) then
+				assert(castIsDirect)
+
+				local typeNode = valueExpr
+				assert(typeNode.nodeType == !(nodeTypes.AstType))
+
+				local typeNodeCopy = astCopy(typeNode)
+				typeNodeCopy.token = cast.token
+
+				addUnqueuedChildrenToQueueRecursively(state, typeNodeCopy, !(PIPE_DONE)) -- Only does something if the type has parameters.
+				replaceQueuedNodeAndUnqueueOldTree(state, cast, typeNodeCopy)
+				moveToPipe(state, typeNodeCopy, !(PIPE_DONE))
+
+			else
+				errorInternal("Incomplete: Handle casting enum to %s.", getFriendlyTypeInfoName(typeInfoTarget))
+			end
+
+		else
+			errorInternal("Incomplete: Handle casting constant from %s to %s.", getFriendlyTypeInfoName(typeInfoSource), getFriendlyTypeInfoName(typeInfoTarget))
+		end
+
 	else
-		decl = typeInfo.declaration -- Nil for built-in types (and function signatures?). (Actually, I don't think typeInfo.declaration is ever set. @Cleanup)
-		if not decl then  return  end
+		-- void
 	end
-	if not decl.isConstant then  return  end
-
-	local typeInfoRepresented = decl.valueTypeInfo
-	if typeInfoRepresented then
-		return simplifyTypeExpression(state, expr, typeInfoRepresented)
-	end
-	!ASSERT `typeInfo ~= getTypeInfoForBuiltinType(state, "type")`
-
-	if not isTypeSimple(typeInfo) then  return  end
-
-	-- At this point we should have a literal to copy. Hopefully the expression we copy
-	-- has been simplified into a literal if it wasn't a literal to begin with.
-	local valueExpr = getAssignmentValue(state, decl.name, decl.assignment.values, decl.assignmentIndex)
-	assert(valueExpr.nodeType == !(nodeTypes.AstLiteral))
-
-	local copy = astCopy(valueExpr)
-	copy.token = expr.token
-
-	replaceQueuedNodeAndUnqueueOldTree(state, expr, copy)
-	moveToPipe(state, copy, !(PIPE_BYTECODE))
 end
 
 

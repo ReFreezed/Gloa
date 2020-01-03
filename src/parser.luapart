@@ -1828,16 +1828,17 @@ function _G.parseExpression(state, parentNode, prevOpPrecedence, expectLeftValue
 
 		-- @Polish: Check if there's a '(' after this and give error early.
 
-	-- Identifier or literal.
-	elseif tokType == !(TOKEN_IDENTIFIER) or isTokenLiteral(tokType, tokValue) then
-		if tokType == !(TOKEN_IDENTIFIER) then
-			local ident = astNewNode(AstIdentifier, exprStartToken, parentNode)
-			ident.name  = tokValue
-			expr        = ident
+	-- Identifier.
+	elseif tokType == !(TOKEN_IDENTIFIER) then
+		local ident = astNewNode(AstIdentifier, exprStartToken, parentNode)
+		ident.name  = tokValue
+		expr        = ident
 
-		elseif tokType == !(TOKEN_KEYWORD) then
-			local literal = astNewNode(AstLiteral, exprStartToken, parentNode)
+	-- Literal.
+	elseif isTokenLiteral(tokType, tokValue) or (isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"+","-") and isAny(tokType2, !(TOKEN_FLOAT),!(TOKEN_INTEGER))) then
+		local literal = astNewNode(AstLiteral, exprStartToken, parentNode)
 
+		if tokType == !(TOKEN_KEYWORD) then
 			if tokValue == "nil" then
 				literal.literalType = !(LITERAL_NIL)
 				literal.value       = nil
@@ -1846,14 +1847,16 @@ function _G.parseExpression(state, parentNode, prevOpPrecedence, expectLeftValue
 				literal.value       = tokValue == "true"
 			end
 
-			expr = literal
-
+		elseif tokType == !(TOKEN_PUNCTUATION) then
+			literal.literalType = TOKEN_TYPE_TO_LITERAL_TYPE[tokType2]
+			literal.value       = tokValue2 * (tokValue == "-" and -1 or 1)
+			consumeNextToken(state)
 		else
-			local literal       = astNewNode(AstLiteral, exprStartToken, parentNode)
 			literal.literalType = TOKEN_TYPE_TO_LITERAL_TYPE[tokType]
 			literal.value       = tokValue
-			expr                = literal
 		end
+
+		expr = literal
 
 	-- Vararg.
 	elseif isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"...") then
@@ -2265,6 +2268,7 @@ end
 
 function _G.errorUnhandledNodeType(node)
 	!if DEBUG then
+		print()
 		astPrintTree(node)
 	!end
 	errorInternal(2, "Incomplete: Unhandled node type '%s'.", (AST_NODE_TYPE_NAMES[node.nodeType] or node.nodeType))
@@ -2467,6 +2471,7 @@ do
 
 			elseif node.nodeType == !(nodeTypes.AstCast) then
 				local cast = node
+				if cast.inferredType then  write(" (", getFriendlyTypeInfoName(cast.inferredType), ")")  end
 				!!(CHILD_PRINT_START)
 				if cast.targetType then  printNode(cast.targetType, indent+1, printed, printChildren)  end
 				if cast.expression then  printNode(cast.expression, indent+1, printed, printChildren)  end

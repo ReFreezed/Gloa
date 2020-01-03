@@ -66,6 +66,28 @@ function _G.writeLookup(state, file, lookup)
 	end
 end
 
+function _G.writeCast(state, file, cast)
+	local typeInfoSource = cast.expression.inferredType
+	local typeInfoTarget = cast.inferredType
+
+	if typeInfoSource == typeInfoTarget then
+		writeExpression(state, file, cast.expression)
+
+	-- int -> float
+	elseif typeInfoSource.tag == !(typeTags.TypeInfoInt) and typeInfoTarget.tag == !(typeTags.TypeInfoFloat) then
+		writeExpression(state, file, cast.expression)
+
+	-- float -> int
+	elseif typeInfoSource.tag == !(typeTags.TypeInfoFloat) and typeInfoTarget.tag == !(typeTags.TypeInfoInt) then
+		file:write("math.floor(")
+		writeExpression(state, file, cast.expression)
+		file:write(")")
+
+	else
+		errorInternal("@Incomplete: Handle casting from %s to %s.", getFriendlyTypeInfoName(typeInfoSource), getFriendlyTypeInfoName(typeInfoTarget))
+	end
+end
+
 function _G.writeExpression(state, file, expr)
 	if expr.nodeType == !(nodeTypes.AstCall) then
 		local call   = expr
@@ -141,6 +163,10 @@ function _G.writeExpression(state, file, expr)
 	elseif expr.nodeType == !(nodeTypes.AstLookup) then
 		local lookup = expr
 		writeLookup(state, file, lookup)
+
+	elseif expr.nodeType == !(nodeTypes.AstCast) then
+		local cast = expr
+		writeCast(state, file, cast)
 
 	else
 		errorUnhandledNodeType(expr)
@@ -372,7 +398,15 @@ function _G.writeConstantValue(state, file, const)
 		file:write(const.value and "true" or "false")
 
 	elseif tag == !(typeTags.TypeInfoInt) then
-		file:write(F("%d", const.value))
+		-- %.0f handles larger values than %d and with no wrapping. (I think the former is 64-bit
+		-- float and the latter 32-bit int.) %d would not work if trying to write the size of a
+		-- large file, for example.
+		local nStr = F("%.0f", const.value)
+
+		if not nStr:find"^%-?%d+$" then
+			errorLine("ProgramWriter", "Cannot write value as integer: %s", tostring(const.value))
+		end
+		file:write(nStr)
 
 	elseif tag == !(typeTags.TypeInfoNil) then
 		file:write("nil")
