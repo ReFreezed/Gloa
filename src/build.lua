@@ -1,6 +1,27 @@
---
--- Glóa build script
---
+--[[============================================================
+--=
+--=  Glóa build script
+--=
+--=-------------------------------------------------------------
+--=
+--=  Glóa - a language that compiles into Lua
+--=  by Marcus 'ReFreezed' Thunström
+--=
+--==============================================================
+
+	To build the compiler, run this from the project root folder:
+
+		lua src/build.lua [ <options> ]
+
+	Options:
+
+		--ouput <path>  ; Where to output the compiler. Default is "gloa.lua" in the project root folder.
+		--silent        ; Disable printing during build.
+		--debug         ; Enable some compiler debugging functionality.
+		--debugger      ; Enable the built-in debugger. (Requires --debug)
+		--gloadir <dir> ; Where the compiler will be able to find the modules folder etc. Default is the same folder the compiler is in. (Requires --debug)
+
+--============================================================]]
 
 local buildStartTime = os.clock()
 
@@ -13,7 +34,7 @@ local DIR_HERE = debug.getinfo(1, "S").source:match"@?(.+)":gsub("[/\\]?[^/\\]+$
 -- Read build arguments.
 local args        = {...}
 local pathGloaOut = DIR_HERE.."/../gloa.lua"
-local pathPp      = DIR_HERE.."/../lib/preprocess.lua" -- @Incomplete: Include LuaPreprocess in this repo.
+local pathPp      = DIR_HERE.."/../lib/preprocess.lua"
 local silent      = false
 local debugMode   = false
 local debugger    = false
