@@ -203,10 +203,11 @@ _G.!structAst"AstUsing:_AstNode"{
 }
 
 _G.!structAst"AstArgument:_AstNode"{
-	declaration = NIL, -- AstDeclaration
-	assignment  = NIL, -- AstAssignment
-	group       = 0,   -- Arguments in the same group have the same type. This is a small optimization for the typer.
-	autobake    = 0,   -- 0=disabled, 1=enabled, 2=required  @Incomplete
+	declaration = NIL,   -- AstDeclaration
+	assignment  = NIL,   -- AstAssignment
+	group       = 0,     -- Arguments in the same group have the same type. This is a small optimization for the typer.
+	autobake    = 0,     -- 0=disabled, 1=enabled, 2=required  @Incomplete
+	isUsing     = false, -- Is it better to store this on declarations?
 
 	-- For an input argument, this indicates optionality.
 	-- For an output argument, if there's a !must then it must not be adjusted away by the caller.
@@ -216,7 +217,7 @@ _G.!structAst"AstArguments:_AstNode"{
 	-- [1]=argument1, ...
 }
 
-_G.!structAst"AstStatement:_AstNode"{ -- Needed? I think so?
+_G.!structAst"AstStatement:_AstNode"{ -- @Cleanup: Needed? I think not.
 	what = NIL,
 }
 
@@ -627,6 +628,20 @@ function _G.parseArguments(state, parentNode, isInput, placeDeclared)
 	for groupN = 1, math.huge do
 		-- Argument name(s).
 		local argsInGroup = {}
+		local isUsing     = false
+
+		local tokType, tokValue, token = peekNextToken(state)
+		local argStartToken            = token
+
+		if isToken(tokType,tokValue, !(TOKEN_KEYWORD),"using") then
+			consumeNextToken(state)
+			isUsing = true
+
+			if not isInput then
+				-- Maybe we should allow 'using' here, but apply it the types instead of the names in the declarations?
+				!ERROR_OR_RETURN `errorParsingLast(state, "Cannot apply 'using' to output arguments.")`
+			end
+		end
 
 		while true do
 			tokType, tokValue, token = consumeNextToken(state)
@@ -634,8 +649,9 @@ function _G.parseArguments(state, parentNode, isInput, placeDeclared)
 				!ERROR_OR_RETURN `errorParsingLast(state, "Argument list: Expected an identifier.")`
 			end
 
-			local arg = astNewNode(AstArgument, token, args)
-			arg.group = groupN
+			local arg   = astNewNode(AstArgument, token, args)
+			arg.group   = groupN
+			arg.isUsing = isUsing
 
 			table.insert(args,        arg)
 			table.insert(argsInGroup, arg)
@@ -657,6 +673,10 @@ function _G.parseArguments(state, parentNode, isInput, placeDeclared)
 
 			else
 				gotVararg = true
+
+				if isUsing then
+					!ERROR_OR_RETURN `errorParsing(state, argStartToken, "Cannot apply 'using' to varargs.")`
+				end
 
 				local vararg         = astNewNode(AstVararg, token, decl)
 				vararg.placeDeclared = placeDeclared
@@ -931,9 +951,17 @@ function _G.parseDeclarationStatement(state, block, placeDeclared, declType)
 	local declNames      = {}
 
 	local isGlobalOrExported = false
+	local isUsing            = false
+
+	local tokType, tokValue = peekNextToken(state)
+
+	if isToken(tokType,tokValue, !(TOKEN_KEYWORD),"using") then
+		consumeNextToken(state)
+		isUsing = true
+	end
 
 	if declType == !(DECLARATION_NORMAL) then
-		local tokType, tokValue = consumeNextToken(state)
+		tokType, tokValue = consumeNextToken(state)
 
 		if tokType ~= !(TOKEN_KEYWORD) then
 			!ERROR_OR_RETURN `errorParsingLast(state, "Expected 'local'.")`
@@ -999,8 +1027,8 @@ function _G.parseDeclarationStatement(state, block, placeDeclared, declType)
 	assert(#declarations == #declStatements)
 	assert(#declarations == #declNames)
 
-	local typesStartToken          = state.nextToken -- Dummy position, kinda.
-	local tokType, tokValue, token = peekNextToken(state)
+	local typesStartToken = state.nextToken -- Dummy position, kinda.
+	tokType, tokValue     = peekNextToken(state)
 
 	-- Type is specified and/or we have a constant.
 	if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),":") then
@@ -1033,7 +1061,7 @@ function _G.parseDeclarationStatement(state, block, placeDeclared, declType)
 		!ERROR_OR_RETURN `errorParsingAfterLast(state, "Expected ':' or '='.")`
 	end
 
-	tokType, tokValue, token = peekNextToken(state)
+	tokType, tokValue = peekNextToken(state)
 
 	local assignmentStatement = nil
 	local assignment          = nil
@@ -1146,6 +1174,22 @@ function _G.parseDeclarationStatement(state, block, placeDeclared, declType)
 	if assignment then
 		table.insert(block, assignmentStatement)
 	end
+	if isUsing then
+		for _, decl in ipairs(declarations) do
+			local statement   = astNewNode(AstStatement, decl.token, block)
+
+			local using       = astNewNode(AstUsing, decl.token, statement)
+			statement.what    = using
+
+			local ident       = astNewNode(AstIdentifier, decl.token, using)
+			ident.name        = decl.name.name
+			ident.declaration = decl
+			using.expression  = ident
+
+			table.insert(block,        statement)
+			table.insert(block.usings, using)
+		end
+	end
 
 	return true
 end
@@ -1207,23 +1251,28 @@ end
 
 -- success = parseOneStatementButSometimesMoreAndAddToBlock( state, block )
 function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
-	local tokType, tokValue = peekNextToken(state)
+	local tokType,  tokValue  = peekNextToken(state, 1)
+	local tokType2, tokValue2 = peekNextToken(state, 2)
+	local tokType3, tokValue3 = peekNextToken(state, 3)
+	local tokType4, tokValue4 = peekNextToken(state, 4)
 
-	if isToken(tokType,tokValue, !(TOKEN_KEYWORD),"local") then
+	if
+		isToken(tokType,tokValue, !(TOKEN_KEYWORD),"local") or (
+			isToken(tokType, tokValue,  !(TOKEN_KEYWORD),"using") and
+			isToken(tokType2,tokValue2, !(TOKEN_KEYWORD),"local")
+		)
+	then
 		!DO_OR_RETURN_FALSE `parseDeclarationStatement(state, block, nil)`
 		return true
 	end
 
 	local statement = astNewNode(AstStatement, state.nextToken, block)
 
-	local tokType2, tokValue2 = peekNextToken(state, 2)
-	local tokType3, tokValue3 = peekNextToken(state, 3)
-	local tokType4, tokValue4 = peekNextToken(state, 4)
-
-	if isToken(tokType,tokValue, !(TOKEN_KEYWORD),"global") then
-		!ERROR_OR_RETURN_FALSE `errorParsingNext(state, "Globals can only be declared in file scope.")`
-	elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"export") then
-		!ERROR_OR_RETURN_FALSE `errorParsingNext(state, "Exports can only be declared in file scope.")`
+	if isToken(tokType,tokValue, !(TOKEN_KEYWORD),"global","export") then
+		!ERROR_OR_RETURN_FALSE `errorParsingNext(state, "%s can only be declared in file scope.", (tokValue  == "global" and "Globals" or "Exports"))`
+	elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"using") and isToken(tokType2,tokValue2, !(TOKEN_KEYWORD),"global","export") then
+		consumeNextToken(state)
+		!ERROR_OR_RETURN_FALSE `errorParsingNext(state, "%s can only be declared in file scope.", (tokValue2 == "global" and "Globals" or "Exports"))`
 
 	elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"return") then
 		consumeNextToken(state)
@@ -1583,12 +1632,18 @@ function _G.parseFileScope(state, parentNode, path, isModule, moduleName)
 	fileScope.moduleName = moduleName
 
 	while true do
-		local tokType, tokValue, token = peekNextToken(state)
+		local tokType,  tokValue, token = peekNextToken(state, 1)
+		local tokType2, tokValue2       = peekNextToken(state, 2)
 
 		if not tokType then
 			break
 
-		elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"local","global","export") then
+		elseif
+			isToken(tokType,tokValue, !(TOKEN_KEYWORD),"local","global","export") or (
+				isToken(tokType, tokValue,  !(TOKEN_KEYWORD),"using") and
+				isToken(tokType2,tokValue2, !(TOKEN_KEYWORD),"local","global","export")
+			)
+		then
 			!DO_OR_RETURN `parseDeclarationStatement(state, fileScope, nil)`
 
 		elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"import","load") then
@@ -1711,17 +1766,37 @@ function _G.parseLambda(state, parentNode, allowBody)
 
 	local lambda = astNewNode(AstLambda, state.nextToken-1, parentNode)
 
-	-- In args.
+	-- Input arguments.
 	local tokType, tokValue = peekNextToken(state)
 
 	if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),")") then
 		consumeNextToken(state)
 
 	else
-		!SET_OR_RETURN `lambda.argumentsIn = parseArguments(state, lambda, true, lambda)`
+		local statement            = astNewNode(AstStatement, state.nextToken, lambda)
+		!SET_OR_RETURN `local args = parseArguments(state, statement, true, lambda)`
+		statement.what             = args
+		lambda.argumentsIn         = args
+		table.insert(lambda, statement)
 
-		for _, arg in ipairs(lambda.argumentsIn) do
+		for _, arg in ipairs(args) do
 			table.insert(lambda.declarations, arg.declaration)
+
+			if arg.isUsing then
+				local decl        = arg.declaration
+				local statement   = astNewNode(AstStatement, arg.token, lambda)
+
+				local using       = astNewNode(AstUsing, arg.token, statement)
+				statement.what    = using
+
+				local ident       = astNewNode(AstIdentifier, arg.token, using)
+				ident.name        = decl.name.name
+				ident.declaration = decl
+				using.expression  = ident
+
+				table.insert(lambda,        statement)
+				table.insert(lambda.usings, using)
+			end
 		end
 
 		tokType, tokValue = consumeNextToken(state)
@@ -1730,12 +1805,15 @@ function _G.parseLambda(state, parentNode, allowBody)
 		end
 	end
 
-	-- Out args.
+	-- Output arguments.
 	tokType, tokValue = peekNextToken(state)
 
 	if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"->") then
 		consumeNextToken(state)
+
 		local argsOutStartToken = state.nextToken
+		local statement         = astNewNode(AstStatement, argsOutStartToken, lambda)
+		local args              = nil
 
 		tokType, tokValue = peekNextToken(state)
 
@@ -1763,7 +1841,7 @@ function _G.parseLambda(state, parentNode, allowBody)
 				consumeNextToken(state)
 
 			else
-				!SET_OR_RETURN `lambda.argumentsOut = parseArguments(state, lambda, false, lambda)`
+				!SET_OR_RETURN `args = parseArguments(state, statement, false, lambda)`
 
 				tokType, tokValue = consumeNextToken(state)
 				if not isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),")") then
@@ -1775,12 +1853,18 @@ function _G.parseLambda(state, parentNode, allowBody)
 			tokType, tokValue = peekNextToken(state)
 			if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"->") then
 				state.nextToken = argsOutStartToken
-				!SET_OR_RETURN `lambda.argumentsOut = parseNamelessArguments(state, lambda, lambda)` -- Replace any argumentsOut we just parsed.
+				!SET_OR_RETURN `args = parseNamelessArguments(state, statement, lambda)` -- Replace any output arguments we just parsed.
 			end
 
 		-- (...) -> type, ...
 		else
-			!SET_OR_RETURN `lambda.argumentsOut = parseNamelessArguments(state, lambda, lambda)`
+			!SET_OR_RETURN `args = parseNamelessArguments(state, statement, lambda)`
+		end
+
+		if args then
+			statement.what      = args
+			lambda.argumentsOut = args
+			table.insert(lambda, statement)
 		end
 	end
 
@@ -1790,14 +1874,23 @@ function _G.parseLambda(state, parentNode, allowBody)
 
 		if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"{") then
 			consumeNextToken(state)
-			!SET_OR_RETURN `lambda.body = parseBlock(state, lambda)`
+			local statement             = astNewNode(AstStatement, state.nextToken, lambda)
+			!SET_OR_RETURN `local block = parseBlock(state, statement)`
+			statement.what              = block
+			lambda.body                 = block
+			table.insert(lambda, statement)
+
 			lambda.bodyEndToken = state.nextToken-1 -- The '}'.
 
 		elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"foreign") then
 			consumeNextToken(state)
-
-			lambda.body          = astNewNode(AstBlock, state.nextToken-1, lambda) -- Dummy block.
 			lambda.bodyIsForeign = true
+
+			local statement = astNewNode(AstStatement, state.nextToken-1, lambda)
+			local block     = astNewNode(AstBlock, statement.token, statement) -- Dummy block.
+			statement.what  = block
+			lambda.body     = block
+			table.insert(lambda, statement)
 
 			tokType, tokValue = consumeNextToken(state)
 			if not isToken(tokType,tokValue, !(TOKEN_IDENTIFIER)) then
@@ -1817,8 +1910,9 @@ function _G.parseLambda(state, parentNode, allowBody)
 			end
 
 			lambda.bodyEndToken = state.nextToken-1
+		else
+			lambda.bodyEndToken = state.nextToken-1 -- Dummy value that shouldn't be used since there's no body.
 		end
-
 	else
 		lambda.bodyEndToken = state.nextToken-1 -- Dummy value that shouldn't be used since there's no body.
 	end
@@ -1912,7 +2006,7 @@ function _G.parseExpression(state, parentNode, prevOpPrecedence, expectLeftValue
 	--     inArgs [-> outArgs] [body]
 	--
 	--     inArgs  = ( [ inArg1, ... ] )
-	--     inArg   = name1 [, ... ] : type [ = defaultValue ]
+	--     inArg   = [ using ] name1 [, ... ] : type [ = defaultValue ]
 	--     outArgs = void
 	--     outArgs = type1 [, ... ]
 	--     outArgs = ( outArg1 [, ... ] )
@@ -1923,6 +2017,7 @@ function _G.parseExpression(state, parentNode, prevOpPrecedence, expectLeftValue
 		isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"(")
 		and (
 			isToken(tokType2,tokValue2, !(TOKEN_PUNCTUATION),")")
+			or isToken(tokType2,tokValue2, !(TOKEN_KEYWORD),"using")
 			or (
 				(
 					isToken(tokType2,tokValue2, !(TOKEN_IDENTIFIER))
@@ -2092,7 +2187,7 @@ function _G.parseExpression(state, parentNode, prevOpPrecedence, expectLeftValue
 			expr.parent                 = binOp
 			expr                        = binOp
 
-		-- Lookup using '.'.
+		-- Lookup using '.'. (t.k is syntactic sugar for t["k"])
 		elseif
 			isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),".")
 			and OPERATOR_PRECEDENCE.lookup > prevOpPrecedence
@@ -2449,9 +2544,9 @@ do
 				local i          = assignment and assignment.forDeclaration and indexOf(assignment.values, lambda)
 				if i then  write(" (", assignment.targets[i].name, ")")  end
 				!!(CHILD_PRINT_START)
-				if lambda.argumentsIn  then  printNode(lambda.argumentsIn,  indent+1, printed, printChildren, "IN")   end
-				if lambda.argumentsOut then  printNode(lambda.argumentsOut, indent+1, printed, printChildren, "OUT")  end
-				if lambda.body then  printNode(lambda.body, indent+1, printed, printChildren)  end
+				if lambda.argumentsIn  then  printNode(lambda.argumentsIn.parent,  indent+1, printed, printChildren, "IN")   end
+				if lambda.argumentsOut then  printNode(lambda.argumentsOut.parent, indent+1, printed, printChildren, "OUT")  end
+				if lambda.body then  printNode(lambda.body.parent, indent+1, printed, printChildren)  end
 				!!(CHILD_PRINT_END)
 
 			elseif node.nodeType == !(nodeTypes.AstArguments) then
@@ -2741,7 +2836,7 @@ do
 		elseif node.nodeType == !(nodeTypes.AstCall)        then  !visitIfNotNil"node"{"callee"} ; visitList"node"{"arguments"}
 		elseif node.nodeType == !(nodeTypes.AstArgument)    then  !visitIfNotNil"node"{"declaration","assignment"}
 		elseif node.nodeType == !(nodeTypes.AstArguments)   then  !visitList"node"{""}
-		elseif node.nodeType == !(nodeTypes.AstLambda)      then  !visitIfNotNil"node"{"argumentsIn","argumentsOut","body"}
+		elseif node.nodeType == !(nodeTypes.AstLambda)      then  !visitList"node"{""}
 		elseif node.nodeType == !(nodeTypes.AstTypeOf)      then  !visitIfNotNil"node"{"expression"}
 		elseif node.nodeType == !(nodeTypes.AstCast)        then  !visitIfNotNil"node"{"targetType","expression"}
 		elseif node.nodeType == !(nodeTypes.AstStatement)   then  !visitIfNotNil"node"{"what"}
