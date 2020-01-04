@@ -46,7 +46,8 @@ function _G.writeStringConcatination(state, file, binary)
 end
 
 function _G.writeLookup(state, file, lookup)
-	if isAny(lookup.object.inferredType.tag, !(typeTags.TypeInfoStruct),!(typeTags.TypeInfoTable)) then
+	if isAny(lookup.object.inferredType.tag, !(typeTags.TypeInfoStruct),!(typeTags.TypeInfoTable),!(typeTags.TypeInfoArray)) then
+		-- @Incomplete: Array bounds checks.
 		writeExpression(state, file, lookup.object)
 
 		if lookup.member.nodeType == !(nodeTypes.AstLiteral) and lookup.member.literalType == !(LITERAL_STRING) and lookup.member.value:find"^[%a_][%w_]*$" then
@@ -188,6 +189,8 @@ function _G.writeDefaultValueForType(state, file, typeInfo, nodeForError)
 		file:write('""')
 	elseif tag == !(typeTags.TypeInfoType) then
 		file:write("0") -- @Robustness: Maybe 'type' variables should have no defult value and this should be an error.
+	elseif tag == !(typeTags.TypeInfoArray) or tag == !(typeTags.TypeInfoTable) then
+		file:write("{}")
 
 	elseif tag == !(typeTags.TypeInfoStruct) then
 		local structInfo = typeInfo
@@ -218,7 +221,7 @@ function _G.writeDefaultValueForType(state, file, typeInfo, nodeForError)
 		nodeError(state, nodeForError, "ProgramWriter", "Enums do not have default values.") -- @Cleanup: This can be detected in the infer pipe.
 
 	else
-		errorInternal("Incomplete: Default initial value for type '%s'.", (TYPE_TAG_NAMES[tag] or "?"))
+		nodeError(state, nodeForError, "ProgramWriter", "There is no default value for %s.", getFriendlyTypeInfoName(typeInfo))
 	end
 end
 

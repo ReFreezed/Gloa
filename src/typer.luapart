@@ -162,7 +162,7 @@ do
 		["string"] = TypeInfoString,
 		["table"]  = TypeInfoTable,
 		["type"]   = TypeInfoType, -- The result of e.g. type_of(int) or type_of(type_of(myVariable)).
-		["void"]   = TypeInfoVoid, -- Barely used, if at all.
+		["void"]   = TypeInfoVoid, -- Barely used, if at all. @Cleanup
 	}
 
 	function _G.getTypeInfoForBuiltinType(state, typeName)
@@ -585,7 +585,7 @@ function _G.getFriendlyTypeInfoName(typeInfo)
 	end
 
 	if name == "" then
-		name = TYPE_TAG_NAMES[typeInfo.tag]
+		name = TYPE_TAG_NAMES[typeInfo.tag] or errorInternal("%d", typeInfo.tag)
 	end
 
 	-- !(if DEBUG then)  name = name.."@"..typeInfo.id  !(end)
@@ -1046,14 +1046,15 @@ end
 		typeInfo            = getTypeInfoForBuiltinType(state, "type")
 
 	elseif typeNode.arrayItemType then
-		local itemTypeInfo = typeNode.arrayItemType
+		local itemTypeNode = typeNode.arrayItemType
 
-		if not itemTypeInfo.inferredType then
-			!DEPEND_AND_RETURN(`typeNode`, DEPEND_NODE_INFERRED, `itemTypeInfo`)
+		if not itemTypeNode.inferredType then
+			!DEPEND_AND_RETURN(`typeNode`, DEPEND_NODE_INFERRED, `itemTypeNode`)
 		end
-		assert(itemTypeInfo.inferredType == getTypeInfoForBuiltinType(state, "type"))
+		assert(itemTypeNode.inferredType.tag == !(typeTags.TypeInfoType))
 
-		typeInfoRepresented = itemTypeInfo
+		local arraySig      = getTypeInfoForArray(state, itemTypeNode.representedType)
+		typeInfoRepresented = arraySig
 		typeInfo            = getTypeInfoForBuiltinType(state, "type")
 
 	else
@@ -1433,11 +1434,9 @@ end
 	local typeInfo = unary.expression.inferredType
 
 	if isAny(unary.operation, "+","-") then
-		if not isAny(typeInfo,
-			getTypeInfoForBuiltinType(state, "int"),
-			getTypeInfoForBuiltinType(state, "float")
-		) then
-			typeError(state, unary.expression,
+		if not isAny(typeInfo.tag, !(typeTags.TypeInfoInt),!(typeTags.TypeInfoFloat)) then
+			typeError(
+				state, unary.expression,
 				"Unary numeric operation (%s): Expected a float or int. (Got %s)",
 				unary.operation,
 				getFriendlyTypeInfoName(typeInfo)
@@ -1445,16 +1444,24 @@ end
 		end
 
 	elseif unary.operation == "not" then
-		if typeInfo ~= getTypeInfoForBuiltinType(state, "bool") then
-			typeError(state, unary.expression,
-				"Unary boolean operation (%s): Expected a bool. (Got %s)",
-				unary.operation,
+		if typeInfo.tag ~= !(typeTags.TypeInfoBool) then
+			typeError(
+				state, unary.expression,
+				"Unary boolean operation (not): Expected a bool. (Got %s)",
 				getFriendlyTypeInfoName(typeInfo)
 			)
 		end
 
 	elseif unary.operation == "#" then
-		errorInternal("@Incomplete: Length operator.")
+		if not isAny(typeInfo.tag, !(typeTags.TypeInfoArray),!(typeTags.TypeInfoTable)) then
+			typeError(
+				state, unary.expression,
+				"Unary length operation (#): Expected an array or a table. (Got %s)",
+				getFriendlyTypeInfoName(typeInfo)
+			)
+		end
+
+		typeInfo = getTypeInfoForBuiltinType(state, "int")
 
 	else
 		errorUnhandledNodeType(unary)
@@ -1678,6 +1685,25 @@ end
 	-- astPrintTree(binary.parent)
 end
 
+function _G.getConstantNameOrTriggerError(state, node)
+	if not (node.nodeType == !(nodeTypes.AstLiteral) and node.literalType == !(LITERAL_STRING)) then
+		typeError(
+			state, astGetExpressionVisuallyFurthestToTheLeft(node),
+			"Expected a name constant after %s.",
+			getFriendlyTypeInfoName(node.inferredType)
+		)
+	end
+
+	local literal = node
+	local name    = literal.value
+
+	if not name:find"^[%a_\128-\255][%w_\128-\255]*$" then
+		typeError(state, literal, "Bad format or invalid characters in name '%s'.", name)
+	end
+
+	return name
+end
+
 !NODE_INFERRER `function nodeInferrers.AstLookup(state, lookup)`
 	local typeInfoObject = lookup.object.inferredType
 	local typeInfoMember = lookup.member.inferredType
@@ -1721,24 +1747,42 @@ end
 	if typeInfoObject.tag == !(typeTags.TypeInfoTable) then
 		errorUnhandledNodeType(lookup.object)
 		return
-	end
 
-	-- Every remaining lookup requires a constant string on the right side.
-	local memberLiteral = lookup.member
-	if not (memberLiteral.nodeType == !(nodeTypes.AstLiteral) and memberLiteral.literalType == !(LITERAL_STRING)) then
-		typeError(state, astGetExpressionVisuallyFurthestToTheLeft(memberLiteral), "Expected a name constant.")
-	end
-	local memberName = memberLiteral.value
-	if not memberName:find"^[%a_\128-\255][%w_\128-\255]*$" then
-		typeError(state, memberLiteral, "Bad format or invalid characters in name '%s'.", memberName)
+	elseif typeInfoObject.tag == !(typeTags.TypeInfoArray) then
+		local arraySig = typeInfoObject
+
+		if typeInfoMember.tag == !(typeTags.TypeInfoInt) then
+			-- @Incomplete: Check for isLeftValue and constantness.
+
+			if lookup.member.nodeType == !(nodeTypes.AstLiteral) and lookup.member.value < 1 then
+				local literal = lookup.member
+				typeError(state, literal, "Array index is %d.", literal.value)
+			end
+
+			lookup.inferredType = arraySig.itemType
+			moveToPipe(state, lookup, !(PIPE_DONE))
+
+		-- elseif not isLeftValue and typeInfoMember.tag == !(typeTags.TypeInfoString) then
+		-- 	local abstractMemberLiteral = lookup.member
+		-- 	local abstractMemberName    = getConstantNameOrTriggerError(state, abstractMemberLiteral)
+		-- 	if abstractMemberName == ? then ... end
+
+		else
+			typeError(state, lookup.member, "Expected an array index.")
+		end
+
+		return
 	end
 
 	-- @Cleanup @Robustness: The way we move things in pipes (after astCopy() and elsewhere)
 	-- is not very good. Should maybe define moveToNextRelevantPipe(state, node).
 
 	if typeInfoObject.tag == !(typeTags.TypeInfoStruct) or (typeInfoRepresented and typeInfoRepresented.tag == !(typeTags.TypeInfoStruct)) then
-		local structInfo = typeInfoRepresented or typeInfoObject
-		local decl       = findDeclarationInScope(state, structInfo.astNode, memberName, false)
+		local memberLiteral = lookup.member
+		local memberName    = getConstantNameOrTriggerError(state, memberLiteral)
+
+		local structInfo    = typeInfoRepresented or typeInfoObject
+		local decl          = findDeclarationInScope(state, structInfo.astNode, memberName, false)
 
 		if not decl then
 			typeError(state, memberLiteral, "'%s' is not a member of %s.", memberName, getFriendlyTypeInfoName(structInfo))
@@ -1759,16 +1803,16 @@ end
 
 		if valueExpr.nodeType == !(nodeTypes.AstLiteral) then
 			replacement       = astCopy(valueExpr)
-			replacement.token = lookup.member.token
+			replacement.token = memberLiteral.token
 
 		elseif valueExpr.nodeType == !(nodeTypes.AstType) then
 			replacement       = astCopy(valueExpr)
-			replacement.token = lookup.member.token
+			replacement.token = memberLiteral.token
 			addUnqueuedChildrenToQueueRecursively(state, replacement, !(PIPE_DONE))
 
 		elseif valueExpr.nodeType == !(nodeTypes.AstIdentifier) and valueExpr.inferredType.tag == !(typeTags.TypeInfoEnum) then
 			replacement       = astCopy(valueExpr)
-			replacement.token = lookup.member.token
+			replacement.token = memberLiteral.token
 
 		else
 			where(state, valueExpr)
@@ -1781,8 +1825,11 @@ end
 		moveToPipe(state, replacement, !(PIPE_DONE))
 
 	elseif typeInfoObject.tag == !(typeTags.TypeInfoEnum) or (typeInfoRepresented and typeInfoRepresented.tag == !(typeTags.TypeInfoEnum)) then
-		local enumInfo = typeInfoRepresented or typeInfoObject
-		local decl     = findDeclarationInScope(state, enumInfo.astNode, memberName, false)
+		local memberLiteral = lookup.member
+		local memberName    = getConstantNameOrTriggerError(state, memberLiteral)
+
+		local enumInfo      = typeInfoRepresented or typeInfoObject
+		local decl          = findDeclarationInScope(state, enumInfo.astNode, memberName, false)
 
 		if not decl then
 			typeError(state, memberLiteral, "'%s' is not a member of %s.", memberName, getFriendlyTypeInfoName(enumInfo))
@@ -1804,8 +1851,11 @@ end
 	elseif typeInfoObject.tag == !(typeTags.TypeInfoNamespace) then
 		assert(isDirectObj)
 
-		local namespace = typeInfoObject
-		local decl      = findDeclarationInScope(state, namespace.scope, memberName, true)
+		local memberLiteral = lookup.member
+		local memberName    = getConstantNameOrTriggerError(state, memberLiteral)
+
+		local namespace     = typeInfoObject
+		local decl          = findDeclarationInScope(state, namespace.scope, memberName, true)
 
 		if not decl then
 			!DEPEND_AND_RETURN(`lookup`, DEPEND_DECLARATION, `memberName`, `namespace.scope`)
@@ -1823,7 +1873,7 @@ end
 		-- Stay in the current pipe so we get simplified. (Needed? Or maybe we can @Speed things up here?)
 
 	else
-		typeError(state, lookup.object, "Cannot look up names in objects of type '%s'.", getFriendlyTypeInfoName(typeInfoObject))
+		typeError(state, lookup, "Values of type '%s' do not have members.", getFriendlyTypeInfoName(typeInfoObject))
 	end
 end
 
