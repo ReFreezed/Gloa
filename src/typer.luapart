@@ -671,11 +671,7 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 			-- @Cleanup: Move this to simplifyExpressionIfConstant()?
 			!ASSERT `ident`
 			local lookup        = astNewNode(AstLookup, ident.token, ident.parent)
-
-			local expr          = astCopy(ident.fromUsing.expression)
-			expr.token          = lookup.token
-			expr.parent         = lookup
-			lookup.object       = expr
+			lookup.object       = astCopy(ident.fromUsing.expression, lookup.token, lookup)
 
 			local literal       = astNewNode(AstLiteral, lookup.token, lookup)
 			literal.literalType = !(LITERAL_STRING)
@@ -1802,17 +1798,14 @@ end
 		local replacement
 
 		if valueExpr.nodeType == !(nodeTypes.AstLiteral) then
-			replacement       = astCopy(valueExpr)
-			replacement.token = memberLiteral.token
+			replacement = astCopy(valueExpr, memberLiteral.token)
 
 		elseif valueExpr.nodeType == !(nodeTypes.AstType) then
-			replacement       = astCopy(valueExpr)
-			replacement.token = memberLiteral.token
+			replacement = astCopy(valueExpr, memberLiteral.token)
 			addUnqueuedChildrenToQueueRecursively(state, replacement, !(PIPE_DONE))
 
 		elseif valueExpr.nodeType == !(nodeTypes.AstIdentifier) and valueExpr.inferredType.tag == !(typeTags.TypeInfoEnum) then
-			replacement       = astCopy(valueExpr)
-			replacement.token = memberLiteral.token
+			replacement = astCopy(valueExpr, memberLiteral.token)
 
 		else
 			where(state, valueExpr)
@@ -1839,9 +1832,7 @@ end
 
 		assert(decl.isConstant)
 
-		local ident         = astCopy(decl.name)
-		ident.token         = lookup.token
-		ident.parent        = lookup.parent
+		local ident         = astCopy(decl.name, lookup.token, lookup.parent)
 		ident.placeDeclared = nil
 
 		-- addUnqueuedChildrenToQueueRecursively(state, ident, !(PIPE_BYTECODE)) -- Not needed for identifiers.
@@ -1863,9 +1854,7 @@ end
 			!DEPEND_AND_RETURN(`lookup`, DEPEND_NODE_INFERRED, `decl.name`)
 		end
 
-		local ident         = astCopy(decl.name)
-		ident.token         = lookup.token
-		ident.parent        = lookup.parent
+		local ident         = astCopy(decl.name, lookup.token, lookup.parent)
 		ident.placeDeclared = nil
 
 		-- addUnqueuedChildrenToQueueRecursively(state, ident, !(PIPE_BYTECODE)) -- Not needed for identifiers.
@@ -2093,7 +2082,8 @@ end
 		else
 			table.insert(globalScope.fileScopes, fileScope) -- @Cleanup: Don't do this in astMoveGlobalDeclarationsToGlobalScope()!
 		end
-		addToQueueRecursively(state, fileScope)
+		local i = indexOf(globalScope.fileScopes, fileScope) or errorInternal()
+		addToQueueRecursively(state, fileScope, globalScope.fileScopes, i)
 	end
 
 	import.fileScope    = itemWith1(globalScope.fileScopes, "path", path) or errorInternal(path)
@@ -2216,11 +2206,87 @@ end
 	inferIfOrWhile(state, whileLoop)
 end
 
--- !NODE_INFERRER `function nodeInferrers.AstFor(state, forLoop)`
--- 	forLoop.names[]
--- 	forLoop.expressions[]
--- 	forLoop.body
--- end
+!NODE_INFERRER `function nodeInferrers.AstFor(state, forLoop)`
+	-- For loops gets inferred in two steps. First we wait for the expressions to get inferred,
+	-- then we generate declarations and stuff that we then wait for.
+
+	if not forLoop.declarations[1] then
+		local names  = forLoop.names
+		local values = forLoop.expressions
+
+		for _, expr in ipairs(forLoop.expressions) do
+			if not expr.inferredType then
+				!DEPEND_AND_RETURN(`forLoop`, DEPEND_NODE_INFERRED, `expr`)
+			end
+		end
+
+		if forLoop.forType == !(FOR_NUMERIC) then
+			!assert `#names <= 1`
+			!assert `values[2] and not values[4]`
+
+			for _, valueExpr in ipairs(values) do
+				if valueExpr.inferredType.tag ~= !(typeTags.TypeInfoInt) then
+					typeError(
+						state, astGetExpressionVisuallyFurthestToTheLeft(valueExpr),
+						"For loop: Expected an int. (Got %s)",
+						getFriendlyTypeInfoName(valueExpr.inferredType)
+					)
+				end
+			end
+
+			local name                = names[1] and names[1].name or "it"
+
+			local statement           = astNewNode(AstStatement,   forLoop.token,   forLoop)
+			local decl                = astNewNode(AstDeclaration, statement.token, statement)
+			statement.what            = decl
+
+			local ident               = astNewNode(AstIdentifier, decl.token, decl)
+			ident.name                = name
+			ident.placeDeclared       = forLoop
+			ident.declaration         = decl
+			decl.name                 = ident
+
+			table.insert(forLoop,              statement)
+			table.insert(forLoop.declarations, decl)
+			addToQueueRecursively(state, statement, forLoop, #forLoop, !(PIPE_INFER))
+
+			local statement           = astNewNode(AstStatement,  forLoop.token,   forLoop)
+			local assignment          = astNewNode(AstAssignment, statement.token, statement)
+			assignment.forDeclaration = true
+			assignment.declarations   = {decl}
+			statement.what            = assignment
+			decl.assignment           = assignment
+
+			local ident               = astNewNode(AstIdentifier, assignment.token, assignment)
+			ident.name                = name
+			ident.declaration         = decl
+			assignment.targets[1]     = ident
+
+			local valueExpr           = astCopy(values[1], assignment.token, assignment)
+			assignment.values[1]      = valueExpr
+
+			table.insert(forLoop, statement)
+			addToQueueRecursively(state, statement, forLoop, #forLoop, !(PIPE_INFER))
+
+			!DEPEND_AND_RETURN(`forLoop`, DEPEND_NODE_INFERRED, `forLoop.body`)
+
+		elseif forLoop.forType == !(FOR_SHORT) then
+			errorUnhandledNodeType(forLoop)
+
+		else--if forLoop.forType == !(FOR_ITERATOR) then
+			errorUnhandledNodeType(forLoop)
+		end
+
+	else
+		for _, statement in ipairs(forLoop) do
+			if statement.queued.pipe <= !(PIPE_INFER) then
+				!DEPEND_AND_RETURN(`forLoop`, DEPEND_NODE_INFERRED, `statement`)
+			end
+		end
+
+		moveToPipe(state, forLoop, !(PIPE_DONE))
+	end
+end
 
 !NODE_INFERRER `function nodeInferrers.AstStruct(state, struct)`
 	for _, statement in ipairs(struct) do
@@ -2696,8 +2762,7 @@ function _G.simplifyExpressionIfConstant(state, expr)
 		local valueExpr = getAssignmentValue(state, decl.name, decl.assignment.values, decl.assignmentIndex)
 		assert(valueExpr.nodeType == !(nodeTypes.AstLiteral))
 
-		local copy = astCopy(valueExpr)
-		copy.token = ident.token
+		local copy = astCopy(valueExpr, ident.token)
 
 		replaceQueuedNodeAndUnqueueOldTree(state, ident, copy)
 		moveToPipe(state, copy, !(PIPE_BYTECODE))
@@ -2750,8 +2815,7 @@ function _G.simplifyExpressionIfConstant(state, expr)
 				local literal = valueExpr
 				assert(literal.nodeType == !(nodeTypes.AstLiteral))
 
-				local literalCopy = astCopy(literal)
-				literalCopy.token = cast.token
+				local literalCopy = astCopy(literal, cast.token)
 
 				if castIsDirect then
 					assert(literalCopy.inferredType == typeInfoTarget)
@@ -2777,8 +2841,7 @@ function _G.simplifyExpressionIfConstant(state, expr)
 				local typeNode = valueExpr
 				assert(typeNode.nodeType == !(nodeTypes.AstType))
 
-				local typeNodeCopy = astCopy(typeNode)
-				typeNodeCopy.token = cast.token
+				local typeNodeCopy = astCopy(typeNode, cast.token)
 
 				addUnqueuedChildrenToQueueRecursively(state, typeNodeCopy, !(PIPE_DONE)) -- Only does something if the type has parameters.
 				replaceQueuedNodeAndUnqueueOldTree(state, cast, typeNodeCopy)
