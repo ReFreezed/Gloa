@@ -226,7 +226,13 @@ function _G.writeDefaultValueForType(state, file, typeInfo, nodeForError)
 end
 
 local function allocateLocalName(name, n, outputDebugInfo)
-	return (outputDebugInfo and unicodeToLuaIdentifier(name).."_L"..n or "L"..n), n+1
+	return
+		(
+			name == "_" and "_" -- @Incomplete: Make "_" a write-only name.
+			or outputDebugInfo and unicodeToLuaIdentifier(name).."_L"..n
+			or "L"..n
+		),
+		n+1
 end
 local function allocateArgumentName(name, n, outputDebugInfo)
 	return outputDebugInfo and unicodeToLuaIdentifier(name).."_A"..n or "A"..n
@@ -268,7 +274,7 @@ function _G.writeImperativeBlock(state, file, block, indent, nextLocalN)
 					local tag = decl.name.inferredType.tag
 					file:write(indentStr, "local ", decl.localName, " = ")
 					writeDefaultValueForType(state, file, decl.name.inferredType, decl.name)
-					file:write("\n")
+					file:write(";\n")
 				end
 
 				-- The initial assignment, if there is one, should be written as the next statement (or after several declarations).
@@ -361,6 +367,7 @@ function _G.writeImperativeBlock(state, file, block, indent, nextLocalN)
 			if forLoop.forType == !(FOR_NUMERIC) then
 				local decl   = forLoop.declarations[1]
 				local values = forLoop.expressions
+
 				file:write(indentStr, "for ")
 				writeIdentifierName(state, file, decl.name)
 				file:write(" = ")
@@ -371,13 +378,42 @@ function _G.writeImperativeBlock(state, file, block, indent, nextLocalN)
 					file:write(", ")
 					writeExpression(state, file, values[3])
 				end
-				file:write(" do\n")
 
+				file:write(" do\n")
 				writeImperativeBlock(state, file, forLoop.body, indent+1, nextLocalN)
 				file:write(indentStr, "end\n")
 
 			elseif forLoop.forType == !(FOR_SHORT) then
-				errorUnhandledNodeType(forLoop)
+				local decl    = forLoop.declarations[1]
+				local values  = forLoop.expressions
+				local objExpr = values[1]
+
+				file:write(indentStr, "for ")
+
+				for i, decl in ipairs(forLoop.declarations) do
+					if i > 1 then  file:write(", ")  end
+					writeIdentifierName(state, file, decl.name)
+				end
+
+				file:write(" in ")
+
+				if objExpr.inferredType.tag == !(typeTags.TypeInfoArray) then
+					file:write("ipairs")
+				elseif objExpr.inferredType.tag == !(typeTags.TypeInfoTable) then
+					file:write("pairs")
+				elseif objExpr.inferredType.tag == !(typeTags.TypeInfoStruct) then
+					errorUnhandledNodeType(objExpr)
+					-- writeConstantValueOrReference(state, file, interatorFuncConst?) -- @Incomplete: Output default iterator for the struct.
+				else
+					errorInternal()
+				end
+
+				file:write("(")
+				writeExpression(state, file, values[1])
+				file:write(") do\n")
+
+				writeImperativeBlock(state, file, forLoop.body, indent+1, nextLocalN)
+				file:write(indentStr, "end\n")
 
 			else--if forLoop.forType == !(FOR_ITERATOR) then
 				errorUnhandledNodeType(forLoop)

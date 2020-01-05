@@ -113,7 +113,7 @@ local !structTypeInfo"TypeInfoEnum:_TypeInfo"{
 }
 
 local !structTypeInfo"TypeInfoNamespace:_TypeInfo"{
-	scope = NIL, -- AstBlock (or substruct.)
+	scope = NIL, -- AstScope
 }
 
 local !structTypeInfo"TypeInfoCompound:_TypeInfo"{
@@ -925,7 +925,8 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 
 	-- Infer type from value.
 	else
-		assert(not vararg)
+		!ASSERT `assignment, "Missing both assignment and types from declaration."`
+		!ASSERT `not vararg`
 
 		local _, valueTypeInfo = getAssignmentValue(state, ident, assignment.values, decl.assignmentIndex)
 		typeInfo               = valueTypeInfo
@@ -2120,7 +2121,7 @@ end
 			usingScope     = enumInfo.astNode
 
 		else
-			typeError(state, ident, "a Invalid or unsupported type group (%s) in 'using' expression.", TYPE_TAG_NAMES[typeInfo.tag])
+			typeError(state, ident, "Invalid or unsupported type group (%s) in 'using' expression.", TYPE_TAG_NAMES[typeInfo.tag])
 		end
 
 	elseif expr.nodeType == !(nodeTypes.AstType) then
@@ -2136,7 +2137,7 @@ end
 			usingScope     = enumInfo.astNode
 
 		else
-			typeError(state, typeNode, "b Invalid or unsupported type group (%s) in 'using' expression.", TYPE_TAG_NAMES[typeInfo.tag])
+			typeError(state, typeNode, "Invalid or unsupported type group (%s) in 'using' expression.", TYPE_TAG_NAMES[typeInfo.tag])
 		end
 
 	else
@@ -2206,23 +2207,42 @@ end
 	inferIfOrWhile(state, whileLoop)
 end
 
-!NODE_INFERRER `function nodeInferrers.AstFor(state, forLoop)`
-	-- For loops gets inferred in two steps. First we wait for the expressions to get inferred,
-	-- then we generate declarations and stuff that we then wait for.
+local function addDeclarationInForLoop(state, forLoop, name, typeInfo)
+	-- @Incomplete: Care about name shadowing.
 
+	local statement     = astNewNode(AstStatement,   forLoop.token,   forLoop)
+	local decl          = astNewNode(AstDeclaration, statement.token, statement)
+	statement.what      = decl
+
+	local ident         = astNewNode(AstIdentifier, decl.token, decl)
+	ident.name          = name
+	ident.placeDeclared = forLoop
+	ident.declaration   = decl
+	ident.inferredType  = typeInfo
+	decl.name           = ident
+
+	table.insert(forLoop,              statement)
+	table.insert(forLoop.declarations, decl)
+
+	addToQueueRecursively(state, statement, forLoop, #forLoop, !(PIPE_DONE))
+	moveToPipe(state, decl, !(PIPE_BYTECODE))
+end
+
+!NODE_INFERRER `function nodeInferrers.AstFor(state, forLoop)`
 	if not forLoop.declarations[1] then
 		local names  = forLoop.names
 		local values = forLoop.expressions
 
-		for _, expr in ipairs(forLoop.expressions) do
+		for _, expr in ipairs(values) do
 			if not expr.inferredType then
 				!DEPEND_AND_RETURN(`forLoop`, DEPEND_NODE_INFERRED, `expr`)
 			end
 		end
 
+		-- for [ i = ] start, end [, step ]
 		if forLoop.forType == !(FOR_NUMERIC) then
-			!assert `#names <= 1`
-			!assert `values[2] and not values[4]`
+			!ASSERT `#names <= 1`
+			!ASSERT `values[2] and not values[4]`
 
 			for _, valueExpr in ipairs(values) do
 				if valueExpr.inferredType.tag ~= !(typeTags.TypeInfoInt) then
@@ -2234,58 +2254,52 @@ end
 				end
 			end
 
-			local name                = names[1] and names[1].name or "it"
+			addDeclarationInForLoop(state, forLoop, (names[1] and names[1].name or "it"), values[1].inferredType)
 
-			local statement           = astNewNode(AstStatement,   forLoop.token,   forLoop)
-			local decl                = astNewNode(AstDeclaration, statement.token, statement)
-			statement.what            = decl
-
-			local ident               = astNewNode(AstIdentifier, decl.token, decl)
-			ident.name                = name
-			ident.placeDeclared       = forLoop
-			ident.declaration         = decl
-			decl.name                 = ident
-
-			table.insert(forLoop,              statement)
-			table.insert(forLoop.declarations, decl)
-			addToQueueRecursively(state, statement, forLoop, #forLoop, !(PIPE_INFER))
-
-			local statement           = astNewNode(AstStatement,  forLoop.token,   forLoop)
-			local assignment          = astNewNode(AstAssignment, statement.token, statement)
-			assignment.forDeclaration = true
-			assignment.declarations   = {decl}
-			statement.what            = assignment
-			decl.assignment           = assignment
-
-			local ident               = astNewNode(AstIdentifier, assignment.token, assignment)
-			ident.name                = name
-			ident.declaration         = decl
-			assignment.targets[1]     = ident
-
-			local valueExpr           = astCopy(values[1], assignment.token, assignment)
-			assignment.values[1]      = valueExpr
-
-			table.insert(forLoop, statement)
-			addToQueueRecursively(state, statement, forLoop, #forLoop, !(PIPE_INFER))
-
-			!DEPEND_AND_RETURN(`forLoop`, DEPEND_NODE_INFERRED, `forLoop.body`)
-
+		-- for [ v1, ... : ] obj
 		elseif forLoop.forType == !(FOR_SHORT) then
-			errorUnhandledNodeType(forLoop)
+			!ASSERT `#values == 1`
 
-		else--if forLoop.forType == !(FOR_ITERATOR) then
-			errorUnhandledNodeType(forLoop)
-		end
+			-- Note: Built-in short-form for loops have the value first and then the index/key.
+			local objExpr = values[1]
 
-	else
-		for _, statement in ipairs(forLoop) do
-			if statement.queued.pipe <= !(PIPE_INFER) then
-				!DEPEND_AND_RETURN(`forLoop`, DEPEND_NODE_INFERRED, `statement`)
+			if objExpr.inferredType.tag == !(typeTags.TypeInfoArray) then
+				local name1 = (names[1] and names[1].name) or "it"
+				local name2 = (names[2] and names[2].name) or "itIndex"
+				addDeclarationInForLoop(state, forLoop, name2, getTypeInfoForBuiltinType(state, "int"))
+				addDeclarationInForLoop(state, forLoop, name1, values[1].inferredType.itemType)
+
+			elseif objExpr.inferredType.tag == !(typeTags.TypeInfoTable) then
+				local name1    = (names[1] and names[1].name) or "it"
+				local name2    = (names[2] and names[2].name) or "itIndex"
+				local typeInfo = getTypeInfoForBuiltinType(state, "any")
+				addDeclarationInForLoop(state, forLoop, name2, typeInfo)
+				addDeclarationInForLoop(state, forLoop, name1, typeInfo)
+
+			elseif objExpr.inferredType.tag == !(typeTags.TypeInfoStruct) then
+				-- We need custom iterators to work AND default iterators for structs before we can do this!
+				typeError(state, objExpr, "@Incomplete: Iterate over struct instances using custom default iterators.")
+
+			else
+				typeError(state, objExpr, "Cannot iterate over values in type group '%s'.", TYPE_TAG_NAMES[objExpr.inferredType.tag])
 			end
-		end
 
-		moveToPipe(state, forLoop, !(PIPE_DONE))
+		-- for v1, ... in iter [, state [, init ] ]
+		else--if forType == FOR_ITERATOR
+			!ASSERT `#names >= 1`
+			!ASSERT `#values[1] and not #values[4]`
+
+			errorUnhandledNodeType(forLoop)
+		end
 	end
+
+	for _, statement in ipairs(forLoop) do
+		if statement.queued.pipe <= !(PIPE_INFER) then
+			!DEPEND_AND_RETURN(`forLoop`, DEPEND_NODE_INFERRED, `statement`)
+		end
+	end
+
+	moveToPipe(state, forLoop, !(PIPE_DONE))
 end
 
 !NODE_INFERRER `function nodeInferrers.AstStruct(state, struct)`
