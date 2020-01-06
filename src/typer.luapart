@@ -905,6 +905,8 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 			else
 				if duplicates[typeInfoRepresented] then
 					!ERROR_DUPLICATE_TYPE("compound type", `typeInfoRepresented`)
+				elseif typeInfoRepresented.tag == !(typeTags.TypeInfoAny) then
+					typeError(state, typeExpr, "Cannot include 'any' in compound types.")
 				end
 
 				table.insert(typeInfos, typeInfoRepresented)
@@ -1049,6 +1051,10 @@ end
 			!DEPEND_AND_RETURN(`typeNode`, DEPEND_NODE_INFERRED, `itemTypeNode`)
 		end
 		assert(itemTypeNode.inferredType.tag == !(typeTags.TypeInfoType))
+
+		if itemTypeNode.representedType.tag == !(typeTags.TypeInfoNil) then
+			typeError(state, itemTypeNode, "Arrays cannot contain nil.")
+		end
 
 		local arraySig      = getTypeInfoForArray(state, itemTypeNode.representedType)
 		typeInfoRepresented = arraySig
@@ -1483,8 +1489,8 @@ end
 		local literal = astNewNode(AstLiteral, unary.token, unary.parent)
 
 		literal.literalType
-			=  typeInfo == getTypeInfoForBuiltinType(state, "int")   and !(LITERAL_INTEGER)
-			or typeInfo == getTypeInfoForBuiltinType(state, "float") and !(LITERAL_FLOAT)
+			=  typeInfo.tag == !(typeTags.TypeInfoInt)   and !(LITERAL_INTEGER)
+			or typeInfo.tag == !(typeTags.TypeInfoFloat) and !(LITERAL_FLOAT)
 			or errorInternal(getFriendlyTypeInfoName(typeInfo))
 
 		literal.value        = !!(opArithmetic ~= "+" and opArithmetic or "") literalValue
@@ -1510,6 +1516,28 @@ end
 	end
 
 	-- astPrintTree(unary.parent)
+end
+
+local function isArrayItemOrTableFieldCheck(state, binary)
+	-- Detect situations like these: myArray[i]==nil or myTable[k]==nil
+
+	if not isAny(binary.operation, "==","~=") then  return false  end
+
+	local maybeLookup  = binary.left
+	local maybeNilExpr = binary.right
+
+	if maybeNilExpr.inferredType.tag == !(typeTags.TypeInfoNil) then
+		-- void
+	elseif maybeLookup.inferredType.tag == !(typeTags.TypeInfoNil) then
+		maybeNilExpr, maybeLookup = maybeLookup, maybeNilExpr
+	else
+		return false
+	end
+
+	if maybeLookup.nodeType ~= !(nodeTypes.AstLookup) then  return false  end
+	if not isAny(maybeLookup.object.inferredType.tag, !(typeTags.TypeInfoArray),!(typeTags.TypeInfoTable)) then  return false  end
+
+	return true
 end
 
 !NODE_INFERRER `function nodeInferrers.AstBinary(state, binary)`
@@ -1548,7 +1576,7 @@ end
 
 	-- @Incomplete: Use isTypeCompatibleWith(). For now, both sides need to be
 	-- the same exact type. (Or maybe we shouldn't for binary operations?)
-	if typeInfoL ~= typeInfoR then
+	if typeInfoL ~= typeInfoR and not isArrayItemOrTableFieldCheck(state, binary) then
 		typeError(
 			state, binary,
 			"Binary operation (%s): Type mismatch for operands. (Left is %s, right is %s)",
@@ -1560,10 +1588,7 @@ end
 
 	-- Numeric operation.
 	if isAny(binary.operation, "+","-","*","^","%","/","//") then
-		if not isAny(typeInfoL,
-			getTypeInfoForBuiltinType(state, "int"),
-			getTypeInfoForBuiltinType(state, "float")
-		) then
+		if not isAny(typeInfoL.tag, !(typeTags.TypeInfoInt),!(typeTags.TypeInfoFloat)) then
 			typeError(
 				state, binary.left,
 				"Binary numeric operation (%s): Expected a float or int. (Got %s)",
@@ -1578,11 +1603,7 @@ end
 
 	-- Comparison.
 	elseif isAny(binary.operation, "<",">","<=",">=") then
-		if not isAny(typeInfoL,
-			getTypeInfoForBuiltinType(state, "int"),
-			getTypeInfoForBuiltinType(state, "float"),
-			getTypeInfoForBuiltinType(state, "string")
-		) then
+		if not isAny(typeInfoL.tag, !(typeTags.TypeInfoInt),!(typeTags.TypeInfoFloat),!(typeTags.TypeInfoString)) then
 			typeError(
 				state, binary.left,
 				"Binary comparison (%s): Expected a float, int or string. (Got %s)",
@@ -1599,14 +1620,14 @@ end
 
 	-- Boolean operation.
 	elseif isAny(binary.operation, "and","or") then
-		if typeInfoL ~= getTypeInfoForBuiltinType(state, "bool") then
+		if typeInfoL.tag ~= !(typeTags.TypeInfoBool) then
 			typeError(state, binary.left, "Binary boolean operation (%s): Expected a bool. (Got %s)", binary.operation, getFriendlyTypeInfoName(typeInfoL))
 		end
 		typeInfo = getTypeInfoForBuiltinType(state, "bool")
 
 	-- String concatination.
 	elseif binary.operation == ".." then
-		if typeInfoL ~= getTypeInfoForBuiltinType(state, "string") then
+		if typeInfoL.tag ~= !(typeTags.TypeInfoString) then
 			typeError(state, binary.left, "String concatination expected a string. (Got %s)", getFriendlyTypeInfoName(typeInfoL))
 		end
 		typeInfo = getTypeInfoForBuiltinType(state, "string")
@@ -1634,8 +1655,8 @@ end
 		local literal = astNewNode(AstLiteral, binary.token, binary.parent)
 
 		literal.literalType
-			=  typeInfo == getTypeInfoForBuiltinType(state, "int")   and !(LITERAL_INTEGER)
-			or typeInfo == getTypeInfoForBuiltinType(state, "float") and !(LITERAL_FLOAT)
+			=  typeInfo.tag == !(typeTags.TypeInfoInt)   and !(LITERAL_INTEGER)
+			or typeInfo.tag == !(typeTags.TypeInfoFloat) and !(LITERAL_FLOAT)
 			or errorInternal(getFriendlyTypeInfoName(typeInfo))
 
 		literal.value        = valueL !!(opArithmeticKeepType) valueR
@@ -2452,13 +2473,7 @@ end
 	else
 		-- Just use the type of the first member as the wanted type for the enum.
 		enumMemberInfo = enum.declarations[1].assignment.values[1].inferredType
-		if not isAny(enumMemberInfo,
-			getTypeInfoForBuiltinType(state, "int"),
-			getTypeInfoForBuiltinType(state, "string"),
-			getTypeInfoForBuiltinType(state, "type"),
-			getTypeInfoForBuiltinType(state, "bool"),
-			getTypeInfoForBuiltinType(state, "float")
-		) then
+		if not isAny(enumMemberInfo.tag, !(typeTags.TypeInfoInt),!(typeTags.TypeInfoString),!(typeTags.TypeInfoType),!(typeTags.TypeInfoBool),!(typeTags.TypeInfoFloat)) then
 			typeError(state, enum, "Supported enum member types are: int, string, type, bool, float")
 		end
 	end
@@ -3024,7 +3039,9 @@ do
 	end
 
 	function _G.normalizeVarargItemType(state, itemType)
-		if itemType.tag == !(typeTags.TypeInfoNil) then  return itemType  end
+		if isAny(itemType.tag, !(typeTags.TypeInfoNil),!(typeTags.TypeInfoAny)) then
+			return itemType
+		end
 
 		if itemType.tag ~= !(typeTags.TypeInfoCompound) then
 			local typeInfos = {itemType, getTypeInfoForBuiltinType(state, "nil")}
