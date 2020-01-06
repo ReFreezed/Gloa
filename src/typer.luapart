@@ -1246,7 +1246,11 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 				valueTypeInfo   = varargSig.itemType
 			end
 
-			if not isTypeCompatibleWith(valueTypeInfo, typeInfoToMatch) then
+			if valueTypeInfo == typeInfoToMatch then
+				-- void
+			elseif isTypeCompatibleWith(valueTypeInfo, typeInfoToMatch) then
+				-- @Incomplete: Add cast.
+			else
 				-- @UX: Tell the name of the call/return argument. (For calls, probably only possible for constants, and maybe not all. Not sure! Returns just depend on the output arguments being named.)
 				-- @UX: Tell the name of the value call's argument. (Probably only possible for constants, and maybe not all. Not sure!)
 				typeError(
@@ -1258,8 +1262,6 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 					getFriendlyTypeInfoName(typeInfoToMatch),
 					getFriendlyTypeInfoName(valueTypeInfo)
 				)
-			elseif valueTypeInfo ~= typeInfoToMatch then
-				-- @Incomplete: Add cast.
 			end
 
 		else
@@ -1270,7 +1272,11 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 			end
 
 			-- Other (1 value).
-			if not isTypeCompatibleWith(valueTypeInfo, typeInfoToMatch) then
+			if valueTypeInfo == typeInfoToMatch then
+				-- void
+			elseif isTypeCompatibleWith(valueTypeInfo, typeInfoToMatch) then
+				-- @Incomplete: Add cast.
+			else
 				typeError(
 					state, astGetExpressionVisuallyFurthestToTheLeft(valueExpr),
 					"Type mismatch for %s #%d. (Wanted %s, got %s)",
@@ -1279,8 +1285,6 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 					getFriendlyTypeInfoName(typeInfoToMatch),
 					getFriendlyTypeInfoName(valueTypeInfo)
 				)
-			elseif valueTypeInfo ~= typeInfoToMatch then
-				-- @Incomplete: Add cast.
 			end
 		end
 	end
@@ -2287,9 +2291,99 @@ end
 		-- for v1, ... in iter [, state [, init ] ]
 		else--if forType == FOR_ITERATOR
 			!ASSERT `#names >= 1`
-			!ASSERT `#values[1] and not #values[4]`
+			!ASSERT `values[1] and not values[4]`
 
-			errorUnhandledNodeType(forLoop)
+			-- @Incomplete: Support 'for' loops/iterators that don't require an iterator value or
+			-- even a state (e.g. if values are read from somewhere else, like an event queue).
+
+			local iterExpr, iterTypeInfo = getAssignmentValue(state, forLoop, values, 1, nil, "loop value")
+
+			if iterTypeInfo.tag ~= !(typeTags.TypeInfoFunction) then
+				typeError(state, iterExpr, "Expected a function. (Got %s)", getFriendlyTypeInfoName(iterTypeInfo))
+
+			elseif #iterTypeInfo.argumentTypesIn ~= 2 then
+				-- @Incomplete: Consider optional arguments.
+				typeError(
+					state, iterExpr,
+					"Iterators must take two arguments - an invariant state object and a control value. (The signature of this function is %s)",
+					getFriendlyTypeInfoName(iterTypeInfo)
+				)
+
+			elseif not iterTypeInfo.argumentTypesOut[1] then
+				typeError(state, iterExpr, "Iterator does not return anything.")
+
+			elseif iterTypeInfo.argumentTypesOut[1].tag == !(typeTags.TypeInfoNil) then
+				typeError(state, iterExpr, "The type of the first returned value from iterators cannot be simply nil. It must be a compound type where nil is included.")
+
+			elseif not (
+				iterTypeInfo.argumentTypesOut[1].tag == !(typeTags.TypeInfoAny)
+				or (
+					iterTypeInfo.argumentTypesOut[1].tag == !(typeTags.TypeInfoCompound)
+					and itemWith1(iterTypeInfo.argumentTypesOut[1], "tag", !(typeTags.TypeInfoNil))
+				)
+			) then
+				typeError(
+					state, iterExpr,
+					"The type of the first returned value from iterators must be a compound type where nil is included. (This function returns %s)",
+					getFriendlyTypeInfoName(iterTypeInfo.argumentTypesOut[1])
+				)
+
+			elseif #iterTypeInfo.argumentTypesOut ~= #names then
+				-- @Incomplete: Consider !must and make everything else optional.
+				typeError(
+					state, names[math.min(#iterTypeInfo.argumentTypesOut+1, #names)],
+					"Incorrect number of names specified for iterator. (Expected %d, got %d)",
+					#iterTypeInfo.argumentTypesOut,
+					#names
+				)
+			end
+
+			local stateExpr, stateTypeInfo = getAssignmentValue(state, forLoop, values, 2, nil, "loop value")
+			local initExpr,  initTypeInfo  = getAssignmentValue(state, forLoop, values, 3, nil, "loop value")
+
+			if stateTypeInfo == iterTypeInfo.argumentTypesIn[1] then
+				-- void
+			elseif isTypeCompatibleWith(stateTypeInfo, iterTypeInfo.argumentTypesIn[1]) then
+				-- @Incomplete: Add cast.
+			else
+				typeError(
+					state, stateExpr,
+					"Type mismatch for iterator state (value #2). (Wanted %s, got %s)",
+					getFriendlyTypeInfoName(iterTypeInfo.argumentTypesIn[1]),
+					getFriendlyTypeInfoName(stateTypeInfo)
+				)
+			end
+
+			if initTypeInfo == iterTypeInfo.argumentTypesIn[2] then
+				-- void
+			elseif isTypeCompatibleWith(initTypeInfo, iterTypeInfo.argumentTypesIn[2]) then
+				-- @Incomplete: Add cast.
+			else
+				typeError(
+					state, initExpr,
+					"Type mismatch for initial control value (value #3). (Wanted %s, got %s)",
+					getFriendlyTypeInfoName(iterTypeInfo.argumentTypesIn[2]),
+					getFriendlyTypeInfoName(initTypeInfo)
+				)
+			end
+
+			for i, ident in ipairs(names) do
+				local typeInfo = iterTypeInfo.argumentTypesOut[i]
+
+				if i > 1 or typeInfo.tag == !(typeTags.TypeInfoAny) then
+					-- void
+
+				-- Strip nil from the compound type for the first value (unless it's any).
+				elseif #typeInfo > 2 then
+					local typeInfos = {unpack(typeInfo)}
+					removeItem(typeInfos, getTypeInfoForBuiltinType(state, "nil"))
+					typeInfo = getTypeInfoForCompoundType(state, typeInfos)
+				else
+					typeInfo = typeInfo[2].tag == !(typeTags.TypeInfoNil) and typeInfo[1] or typeInfo[2] or errorInternal()
+				end
+
+				addDeclarationInForLoop(state, forLoop, ident.name, typeInfo)
+			end
 		end
 	end
 
@@ -2376,15 +2470,17 @@ end
 	for i, decl in ipairs(enum.declarations) do
 		local valueExpr = decl.assignment.values[1]
 
-		if not isTypeCompatibleWith(valueExpr.inferredType, enumMemberInfo) then
+		if valueExpr.inferredType == enumMemberInfo then
+			-- void
+		elseif isTypeCompatibleWith(valueExpr.inferredType, enumMemberInfo) then
+			-- @Incomplete: Add cast.
+		else
 			typeError(state, valueExpr,
 				"Value type mismatch for '%s'. (Wanted %s, got %s)",
 				decl.name.name,
 				getFriendlyTypeInfoName(enumMemberInfo),
 				getFriendlyTypeInfoName(valueExpr.inferredType)
 			)
-		elseif valueExpr.inferredType ~= enumMemberInfo then
-			-- @Incomplete: Add cast.
 		end
 
 		-- Note: valueExpr may not be a constant expression, but the
@@ -2512,8 +2608,8 @@ end
 
 
 
--- expression, typeInfo = getAssignmentValue( state, assignmentTarget, values, valueIndex [, expectedTypeInfo=any ] )
-function _G.getAssignmentValue(state, targetExpr, values, i, typeInfoExpected)
+-- expression, typeInfo = getAssignmentValue( state, assignmentTarget, values, valueIndex [, expectedTypeInfo=any, targetTerm="assignment target" ] )
+function _G.getAssignmentValue(state, targetExpr, values, i, typeInfoExpected, targetTerm)
 	-- This function could use some @Cleanup!
 
 	!local TARGET_NAME = F(
@@ -2528,6 +2624,7 @@ function _G.getAssignmentValue(state, targetExpr, values, i, typeInfoExpected)
 		LITERAL_STRING
 	)
 
+	targetTerm      = targetTerm or "assignment target"
 	local valueExpr = values[i]
 
 	-- Non-call non-vararg value or value not last in list.
@@ -2547,7 +2644,8 @@ function _G.getAssignmentValue(state, targetExpr, values, i, typeInfoExpected)
 			if valueTypeInfo.tag ~= typeInfoExpected.tag then
 				typeError(
 					state, valueExpr,
-					"Value type mismatch for assignment target #%d%s. (Wanted %s, got %s)",
+					"Value type mismatch for %s #%d%s. (Wanted %s, got %s)",
+					targetTerm,
 					i,
 					!!(TARGET_NAME),
 					getFriendlyTypeInfoName(typeInfoExpected),
@@ -2557,7 +2655,8 @@ function _G.getAssignmentValue(state, targetExpr, values, i, typeInfoExpected)
 			elseif typeInfoExpected.tag == !(typeTags.TypeInfoFunction) then
 				typeError(
 					state, valueExpr,
-					"Function signature is different from assignment target #%d%s. (Wanted %s, got %s)",
+					"Function signature is different from %s #%d%s. (Wanted %s, got %s)",
+					targetTerm,
 					i,
 					!!(TARGET_NAME),
 					getFriendlyTypeInfoName(typeInfoExpected),
@@ -2567,7 +2666,8 @@ function _G.getAssignmentValue(state, targetExpr, values, i, typeInfoExpected)
 			elseif typeInfoExpected.tag == !(typeTags.TypeInfoStruct) then
 				typeError(
 					state, valueExpr,
-					"Value type mismatch for assignment target #%d%s. Expected a struct initializer.",
+					"Value type mismatch for %s #%d%s. Expected a struct initializer.",
+					targetTerm,
 					i,
 					!!(TARGET_NAME),
 					getFriendlyTypeInfoName(typeInfoExpected)
@@ -2586,7 +2686,7 @@ function _G.getAssignmentValue(state, targetExpr, values, i, typeInfoExpected)
 		local vararg = valueExpr or values[#values]
 
 		if not (valueExpr or not vararg.surroundedByParenthesis) then
-			typeError(state, targetExpr, "Missing a value for assignment target #%d%s.", i, !!(TARGET_NAME))
+			typeError(state, targetExpr, "Missing a value for %s #%d%s.", targetTerm, i, !!(TARGET_NAME))
 		end
 
 		return vararg, vararg.inferredType.itemType
@@ -2600,10 +2700,12 @@ function _G.getAssignmentValue(state, targetExpr, values, i, typeInfoExpected)
 		-- We're past the end of the list - get the last specified value.
 		call = values[lastIndex]
 
-		if call.nodeType ~= !(nodeTypes.AstCall) then
-			typeError(state, call, "Expected a potential function call as the last expression in the list. Missing a value for assignment target #%d%s.", i, !!(TARGET_NAME))
+		if not call then
+			typeError(state, targetExpr, "No value for any %s. (Internal compiler error?)", targetTerm)
+		elseif call.nodeType ~= !(nodeTypes.AstCall) then
+			typeError(state, call, "Expected a potential function call as the last expression in the list. Missing a value for %s #%d%s.", targetTerm, i, !!(TARGET_NAME))
 		elseif call.surroundedByParenthesis then
-			typeError(state, targetExpr, "Missing a value for assignment target #%d%s.", i, !!(TARGET_NAME))
+			typeError(state, targetExpr, "Missing a value for %s #%d%s.", targetTerm, i, !!(TARGET_NAME))
 		end
 	end
 
@@ -2627,7 +2729,7 @@ function _G.getAssignmentValue(state, targetExpr, values, i, typeInfoExpected)
 	elseif listSig[1] and listSig[#listSig].tag == !(typeTags.TypeInfoVararg) then
 		typeInfoForOutArg = listSig[#listSig]
 	else
-		typeError(state, call, "Function does not return anything for assignment target #%d%s (return value #%d).", i, !!(TARGET_NAME), argIndex)
+		typeError(state, call, "Function does not return anything for %s #%d%s (return value #%d).", targetTerm, i, !!(TARGET_NAME), argIndex)
 	end
 
 	if typeInfoForOutArg.tag == !(typeTags.TypeInfoVararg) then
@@ -2639,7 +2741,8 @@ function _G.getAssignmentValue(state, targetExpr, values, i, typeInfoExpected)
 		local calleeName = (call.callee.nodeType == !(nodeTypes.AstIdentifier) and " of '"..call.callee.name.."'" or "")
 		typeError(
 			state, call,
-			"The type of return value #%d%s (%s) does not match the type of assignment target #%d%s (%s).",
+			"The type of return value #%d%s (%s) does not match the type of %s #%d%s (%s).",
+			targetTerm,
 			argIndex,
 			calleeName,
 			getFriendlyTypeInfoName(typeInfoForOutArg),
@@ -2886,12 +2989,20 @@ function _G.isTypeCompatibleWith(typeToCheck, otherType)
 	if typeToCheck == otherType then  return true  end
 
 	-- Everything is compatible with the 'any' type. The user better know what they're doing!
-	if otherType.tag == !(typeTags.TypeInfoAny) then  return true  end
+	if typeToCheck.tag == !(typeTags.TypeInfoAny) or otherType.tag == !(typeTags.TypeInfoAny) then  return true  end
 
 	-- Ints are always compatible with floats (but the opposite is false).
 	-- This should be safe as all numbers are 64-bit floats in Lua 5.1 (I think).
 	-- @Robustness: Keep this rule?
 	if typeToCheck.tag == !(typeTags.TypeInfoInt) and otherType.tag == !(typeTags.TypeInfoFloat) then  return true  end
+
+	-- Structs and arrays are outputted as tables in Lua, so they are always compatible with tables in Glóa.
+	if
+		otherType.tag == !(typeTags.TypeInfoTable)
+		and isAny(typeToCheck.tag, !(typeTags.TypeInfoStruct),!(typeTags.TypeInfoArray))
+	then
+		return true
+	end
 
 	if otherType.tag == !(typeTags.TypeInfoCompound) then
 		local compound = otherType

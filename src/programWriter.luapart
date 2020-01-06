@@ -47,7 +47,7 @@ end
 
 function _G.writeLookup(state, file, lookup)
 	if isAny(lookup.object.inferredType.tag, !(typeTags.TypeInfoStruct),!(typeTags.TypeInfoTable),!(typeTags.TypeInfoArray)) then
-		-- @Incomplete: Array bounds checks.
+		-- @Incomplete: Compiler setting for runtime checks of array bounds.
 		writeExpression(state, file, lookup.object)
 
 		if lookup.member.nodeType == !(nodeTypes.AstLiteral) and lookup.member.literalType == !(LITERAL_STRING) and lookup.member.value:find"^[%a_][%w_]*$" then
@@ -83,6 +83,13 @@ function _G.writeCast(state, file, cast)
 		file:write("math.floor(")
 		writeExpression(state, file, cast.expression)
 		file:write(")")
+
+	-- (whatever) -> any
+	-- any -> (whatever)
+	elseif typeInfoSource.tag == !(typeTags.TypeInfoAny) or typeInfoTarget.tag == !(typeTags.TypeInfoAny) then
+		-- The user better know what they're doing!
+		-- @Incomplete: Compiler setting for runtime checks of 'any' and 'compound' casts.
+		writeExpression(state, file, cast.expression)
 
 	else
 		errorInternal("@Incomplete: Handle casting from %s to %s.", getFriendlyTypeInfoName(typeInfoSource), getFriendlyTypeInfoName(typeInfoTarget))
@@ -141,6 +148,10 @@ function _G.writeExpression(state, file, expr)
 		if ident.inferredType.tag == !(typeTags.TypeInfoEnum) and not isPartOfAnyDeclaration(ident) then -- @Cleanup: This detection is a bit misplaced, I think.
 			local valueExpr = ident.declaration.assignment.values[1] or errorInternal()
 			writeExpression(state, file, valueExpr)
+
+		elseif ident.declaration.isConstant then
+			writeConstantValueOrReference(state, file, ident.declaration.valueConstant)
+
 		else
 			writeIdentifierName(state, file, ident)
 		end
@@ -305,9 +316,11 @@ function _G.writeImperativeBlock(state, file, block, indent, nextLocalN)
 
 		elseif nodeType == !(nodeTypes.AstReturn) then
 			local returnNode = statement.what
-			!ASSERT("block.parent.nodeType == "..nodeTypes.AstStatement) -- @Cleanup: Remove AstStatement from the compiler?
-
-			if block.parent.parent.nodeType == !(nodeTypes.AstLambda) and not returnNode.values[1] then
+			if
+				block.parent.nodeType == !(nodeTypes.AstStatement) -- @Cleanup: Remove AstStatement from the compiler?
+				and block.parent.parent.nodeType == !(nodeTypes.AstLambda)
+				and not returnNode.values[1]
+			then
 				if outputDebugInfo then
 					file:write(indentStr, "-- return\n")
 				end
@@ -384,9 +397,7 @@ function _G.writeImperativeBlock(state, file, block, indent, nextLocalN)
 				file:write(indentStr, "end\n")
 
 			elseif forLoop.forType == !(FOR_SHORT) then
-				local decl    = forLoop.declarations[1]
-				local values  = forLoop.expressions
-				local objExpr = values[1]
+				local objExpr = forLoop.expressions[1]
 
 				file:write(indentStr, "for ")
 
@@ -409,14 +420,30 @@ function _G.writeImperativeBlock(state, file, block, indent, nextLocalN)
 				end
 
 				file:write("(")
-				writeExpression(state, file, values[1])
+				writeExpression(state, file, objExpr)
 				file:write(") do\n")
 
 				writeImperativeBlock(state, file, forLoop.body, indent+1, nextLocalN)
 				file:write(indentStr, "end\n")
 
 			else--if forLoop.forType == !(FOR_ITERATOR) then
-				errorUnhandledNodeType(forLoop)
+				file:write(indentStr, "for ")
+
+				for i, decl in ipairs(forLoop.declarations) do
+					if i > 1 then  file:write(", ")  end
+					writeIdentifierName(state, file, decl.name)
+				end
+
+				file:write(" in ")
+
+				for i, valueExpr in ipairs(forLoop.expressions) do
+					if i > 1 then  file:write(", ")  end
+					writeExpression(state, file, valueExpr)
+				end
+
+				file:write(" do\n")
+				writeImperativeBlock(state, file, forLoop.body, indent+1, nextLocalN)
+				file:write(indentStr, "end\n")
 			end
 
 		elseif isAny(nodeType, !(nodeTypes.AstImport),!(nodeTypes.AstUsing)) then
@@ -433,9 +460,11 @@ end
 
 function _G.writeFunction(state, file, lambda)
 	if lambda.bodyIsForeign then
+		-- @Incomplete: Compiler setting for runtime checks of anything originating from
+		-- foreign sources. (We can probably wrap foreign functions in something here.)
 		if lambda.foreignSource == "lua" then
 			assert(lambda.foreignSourceName ~= "")
-			file:write("(", lambda.foreignSourceName, ")") -- Too straightforward?
+			file:write("(", lambda.foreignSourceName, ")") -- @Robustness: Is this too straightforward?
 		else
 			errorInternal(lambda.foreignSource)
 		end
