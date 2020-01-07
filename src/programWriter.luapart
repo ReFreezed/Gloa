@@ -50,7 +50,7 @@ function _G.writeLookup(state, file, lookup)
 		-- @Incomplete: Compiler setting for runtime checks of array bounds.
 		writeExpression(state, file, lookup.object)
 
-		if lookup.member.nodeType == !(nodeTypes.AstLiteral) and lookup.member.literalType == !(LITERAL_STRING) and lookup.member.value:find"^[%a_][%w_]*$" then
+		if isExpressionLiteralStringAndValidLuaIdentifier(lookup.member) then
 			local stringLiteral = lookup.member
 			file:write(".", stringLiteral.value)
 		else
@@ -63,7 +63,7 @@ function _G.writeLookup(state, file, lookup)
 		errorInternal() -- Enum lookups should have been simplified away.
 
 	else
-		errorUnhandledNodeType(lookup.object)
+		errorUnhandledNodeType(state, lookup.object)
 	end
 end
 
@@ -110,12 +110,24 @@ function _G.writeExpression(state, file, expr)
 			writeExpression(state, file, callee)
 		end
 
-		file:write("(")
+		local argsNeedParenthesis = not (
+			#call.arguments == 1 and (
+				call.arguments[1].nodeType == !(nodeTypes.AstTable)
+				or (
+					call.arguments[1].nodeType == !(nodeTypes.AstLiteral)
+					and call.arguments[1].literalType == !(LITERAL_STRING)
+				)
+			)
+		)
+
+		if argsNeedParenthesis then  file:write("(")  end
+
 		for i, argExpr in ipairs(call.arguments) do
 			if i > 1 then  file:write(", ")  end
 			writeExpression(state, file, argExpr)
 		end
-		file:write(")")
+
+		if argsNeedParenthesis then  file:write(")")  end
 
 		if call.surroundedByParenthesis then  file:write(")")  end
 
@@ -180,8 +192,54 @@ function _G.writeExpression(state, file, expr)
 		local cast = expr
 		writeCast(state, file, cast)
 
+	elseif expr.nodeType == !(nodeTypes.AstTable) then
+		local tableNode = expr
+		file:write("{")
+
+		if tableNode.inferredType.tag == !(typeTags.TypeInfoTable) then
+			for i, tableField in ipairs(tableNode) do
+				if i > 1 then  file:write(", ")  end
+
+				-- @Polish: Output sequence values without key in 'table' type tables.
+				if isExpressionLiteralStringAndValidLuaIdentifier(tableField.key) then
+					local stringLiteral = tableField.key
+					file:write(stringLiteral.value)
+				else
+					file:write("[")
+					writeExpression(state, file, tableField.key)
+					file:write("]")
+				end
+				file:write("=")
+				writeExpression(state, file, tableField.value)
+			end
+
+		elseif tableNode.inferredType.tag == !(typeTags.TypeInfoArray) then
+			local items = {}
+
+			for _, tableField in ipairs(tableNode) do
+				!ASSERT("tableField.key.nodeType == "..nodeTypes.AstLiteral)
+
+				local literal     = tableField.key
+				local arrayIndex  = literal.value
+				items[arrayIndex] = tableField.value
+			end
+
+			for arrayIndex, expr in ipairs(items) do
+				if arrayIndex > 1 then  file:write(", ")  end
+				writeExpression(state, file, expr)
+			end
+
+		elseif tableNode.inferredType.tag == !(typeTags.TypeInfoStruct) then
+			errorUnhandledNodeType(state, tableNode)
+
+		else
+			errorUnhandledNodeType(state, tableNode)
+		end
+
+		file:write("}")
+
 	else
-		errorUnhandledNodeType(expr)
+		errorUnhandledNodeType(state, expr)
 	end
 end
 
@@ -208,7 +266,7 @@ function _G.writeDefaultValueForType(state, file, typeInfo, nodeForError)
 		file:write("{")
 
 		for i, member in ipairs(structInfo.members) do
-			if i > 1 then  file:write(",")  end
+			if i > 1 then  file:write(", ")  end
 
 			if member.name:find"^[%a_][%w_]*$" then
 				file:write(member.name)
@@ -249,8 +307,8 @@ local function allocateArgumentName(name, n, outputDebugInfo)
 	return outputDebugInfo and unicodeToLuaIdentifier(name).."_A"..n or "A"..n
 end
 
--- writeImperativeBlock( state, file, block, indentation, nextLocalNumber )
-function _G.writeImperativeBlock(state, file, block, indent, nextLocalN)
+-- writeBlock( state, file, block, indentation, nextLocalNumber )
+function _G.writeBlock(state, file, block, indent, nextLocalN)
 	local outputDebugInfo = state.settings.outputDebugInfo
 	local indentStr       = ("\t"):rep(indent)
 
@@ -335,10 +393,17 @@ function _G.writeImperativeBlock(state, file, block, indent, nextLocalN)
 				file:write("\n")
 			end
 
+		elseif nodeType == !(nodeTypes.AstBreak) then
+			local breakNode = statement.what
+			if breakNode.loopName then
+				errorUnhandledNodeType(state, breakNode)
+			end
+			file:write(indentStr, "break\n")
+
 		elseif nodeType == !(nodeTypes.AstBlock) then
 			local block = statement.what
 			file:write(indentStr, "do\n")
-			writeImperativeBlock(state, file, block, indent+1, nextLocalN)
+			writeBlock(state, file, block, indent+1, nextLocalN)
 			file:write(indentStr, "end\n")
 
 		elseif nodeType == !(nodeTypes.AstIf) then
@@ -348,11 +413,11 @@ function _G.writeImperativeBlock(state, file, block, indent, nextLocalN)
 			writeExpression(state, file, ifBranch.condition)
 			file:write(" then\n")
 
-			writeImperativeBlock(state, file, ifBranch.branchTrue, indent+1, nextLocalN)
+			writeBlock(state, file, ifBranch.branchTrue, indent+1, nextLocalN)
 
 			if ifBranch.branchFalse then
 				file:write(indentStr, "else\n")
-				writeImperativeBlock(state, file, ifBranch.branchFalse, indent+1, nextLocalN)
+				writeBlock(state, file, ifBranch.branchFalse, indent+1, nextLocalN)
 			end
 
 			file:write(indentStr, "end\n")
@@ -364,7 +429,7 @@ function _G.writeImperativeBlock(state, file, block, indent, nextLocalN)
 			writeExpression(state, file, whileLoop.condition)
 			file:write(" do\n")
 
-			writeImperativeBlock(state, file, whileLoop.body, indent+1, nextLocalN)
+			writeBlock(state, file, whileLoop.body, indent+1, nextLocalN)
 			file:write(indentStr, "end\n")
 
 		elseif nodeType == !(nodeTypes.AstFor) then
@@ -391,7 +456,7 @@ function _G.writeImperativeBlock(state, file, block, indent, nextLocalN)
 				end
 
 				file:write(" do\n")
-				writeImperativeBlock(state, file, forLoop.body, indent+1, nextLocalN)
+				writeBlock(state, file, forLoop.body, indent+1, nextLocalN)
 				file:write(indentStr, "end\n")
 
 			elseif forLoop.forType == !(FOR_SHORT) then
@@ -411,7 +476,7 @@ function _G.writeImperativeBlock(state, file, block, indent, nextLocalN)
 				elseif objExpr.inferredType.tag == !(typeTags.TypeInfoTable) then
 					file:write("pairs")
 				elseif objExpr.inferredType.tag == !(typeTags.TypeInfoStruct) then
-					errorUnhandledNodeType(objExpr)
+					errorUnhandledNodeType(state, objExpr)
 					-- writeConstantValueOrReference(state, file, interatorFuncConst?) -- @Incomplete: Output default iterator for the struct.
 				else
 					errorInternal()
@@ -421,7 +486,7 @@ function _G.writeImperativeBlock(state, file, block, indent, nextLocalN)
 				writeExpression(state, file, objExpr)
 				file:write(") do\n")
 
-				writeImperativeBlock(state, file, forLoop.body, indent+1, nextLocalN)
+				writeBlock(state, file, forLoop.body, indent+1, nextLocalN)
 				file:write(indentStr, "end\n")
 
 			else--if forLoop.forType == !(FOR_ITERATOR) then
@@ -440,7 +505,7 @@ function _G.writeImperativeBlock(state, file, block, indent, nextLocalN)
 				end
 
 				file:write(" do\n")
-				writeImperativeBlock(state, file, forLoop.body, indent+1, nextLocalN)
+				writeBlock(state, file, forLoop.body, indent+1, nextLocalN)
 				file:write(indentStr, "end\n")
 			end
 
@@ -490,7 +555,7 @@ function _G.writeFunction(state, file, lambda)
 	file:write(")\n")
 
 	if lambda.body[1] then
-		writeImperativeBlock(state, file, lambda.body, 1, 1)
+		writeBlock(state, file, lambda.body, 1, 1)
 	elseif state.settings.outputDebugInfo then
 		file:write("\t-- Empty function.\n")
 	end
@@ -696,6 +761,12 @@ function _G.unicodeToLuaIdentifier(name)
 		return (#c == 1 and c) or UNICODE_TO_ASCII[c] or "_"
 	end)
 	return name
+end
+
+
+
+function _G.isExpressionLiteralStringAndValidLuaIdentifier(expr)
+	return expr.nodeType == !(nodeTypes.AstLiteral) and expr.literalType == !(LITERAL_STRING) and expr.value:find"^[%a_][%w_]*$" ~= nil
 end
 
 

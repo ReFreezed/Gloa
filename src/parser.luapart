@@ -523,7 +523,7 @@ function _G.parseTable(state, parentNode)
 	local listIndex       = 0
 
 	while true do
-		local tokType, tokValue = peekNextToken(state)
+		local tokType, tokValue, token = peekNextToken(state)
 
 		if not tokType then
 			!ERROR_OR_RETURN `errorParsing(state, tableStartToken, "Unfinished table.")`
@@ -532,8 +532,8 @@ function _G.parseTable(state, parentNode)
 			break
 		end
 
-		local tokType2, tokValue2, token = peekNextToken(state, 2)
-		local tableField                 = TableField()
+		local tokType2, tokValue2 = peekNextToken(state, 2)
+		local tableField          = TableField()
 		local tableKey
 
 		-- [k]=v
@@ -2404,12 +2404,14 @@ end
 
 
 
-function _G.errorUnhandledNodeType(node)
+function _G.errorUnhandledNodeType(state, node)
 	!if DEBUG then
 		print()
 		astPrintTree(node)
+		print()
+		printTraceback(io.stderr, 2)
 	!end
-	errorInternal(2, "Incomplete: Unhandled node type '%s'.", (AST_NODE_TYPE_NAMES[node.nodeType] or node.nodeType))
+	nodeError(state, node, "Debug", "Internal compiler error: Incomplete: Unhandled node type '%s'.", (AST_NODE_TYPE_NAMES[node.nodeType] or node.nodeType))
 end
 
 
@@ -2881,7 +2883,7 @@ do
 		elseif node.nodeType == !(nodeTypes.AstStruct)      then  !visitIfNotNil"node"{"arguments"}  ; visitList"node"{""}
 		elseif node.nodeType == !(nodeTypes.AstEnum)        then  !visitIfNotNil"node"{"memberType"} ; visitList"node"{""}
 		else
-			errorUnhandledNodeType(node)
+			errorUnhandledNodeType(state, node)
 		end
 
 		if leavesFirst and cb(node, container, key) == !(VISIT_BREAK) then
@@ -2938,7 +2940,7 @@ function _G.astCopy(node, token, parent)
 		copy.declaration       = typeNode.declaration
 
 	else
-		errorUnhandledNodeType(node)
+		errorUnhandledNodeType(state, node)
 	end
 
 	return copy or errorInternal()

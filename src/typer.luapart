@@ -11,8 +11,8 @@
 
 	getAssignmentValue
 	getClosestScope, isScope, isScopeDeclarative, isScopeImperative
-	getLiteralValueFromExpressionIfConstant
 	inferNode
+	isExpressionConstant, getLiteralValueFromExpressionIfConstant
 	isPartOfAnyDeclaration
 	isTypeSimple, isTypeCompatibleWith
 	newTypeInfo, isTypeBuiltin, getTypeInfo*
@@ -322,7 +322,7 @@ function _G.getTypeRepresentedByExpression(expr)
 		return ident.declaration.valueTypeInfo -- May be nil.
 
 	elseif expr.inferredType.tag == !(typeTags.TypeInfoType) then
-		errorUnhandledNodeType(expr)
+		errorUnhandledNodeType(state, expr)
 	else
 		return nil
 	end
@@ -471,7 +471,7 @@ function _G.isDeclarationVisibleToNode(decl, node)
 			end
 
 		else
-			errorUnhandledNodeType(nodeScope)
+			errorUnhandledNodeType(state, nodeScope)
 		end
 
 		if canSeeImperativeVariables and nodeScope.nodeType == !(nodeTypes.AstLambda) then
@@ -598,11 +598,16 @@ end
 local nodeInferrers = {}
 
 !(
--- DEPEND_AND_RETURN( dependentCode, dependType, dependOnCode [, extraDataCode ] )
-local function DEPEND_AND_RETURN(dependentCode, dependType, dependOnCode, extraDataCode)
+-- DEPEND_AND_RETURN( dependentCode, dependType, dependOnCode [, extraDataCode, valueToReturnCode ] )
+local function DEPEND_AND_RETURN(dependentCode, dependType, dependOnCode, extraDataCode, valueToReturnCode)
 	__LUA("addDependency(state, ",dependentCode,", ",toLua(dependType),", ",dependOnCode)
-	if extraDataCode then  __LUA(", ",extraDataCode)  end
+	if extraDataCode then
+		__LUA(", ",extraDataCode)
+	end
 	__LUA(") ; return")
+	if valueToReturnCode then
+		__LUA(" ", valueToReturnCode)
+	end
 end
 
 local nodeNames = {}
@@ -715,16 +720,6 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 		end
 	end
 
-	local assignment = decl.assignment
-
-	if assignment then
-		for _, valueExpr in ipairs(assignment.values) do
-			if not valueExpr.inferredType then
-				!DEPEND_AND_RETURN(`identOrVararg`, DEPEND_NODE_INFERRED, `valueExpr`)
-			end
-		end
-	end
-
 	local scope = getClosestScope(decl)
 	if not scope then
 		astPrint(identOrVararg)
@@ -742,6 +737,17 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 		if not enumInfo then
 			-- AstEnum is the only scope that gets inferred before it's declarations.
 			!DEPEND_AND_RETURN(`identOrVararg`, DEPEND_NODE_INFERRED, `enum`)
+		end
+	end
+
+	local assignment = decl.assignment
+
+	if not decl.types[1] or decl.isConstant then
+		!ASSERT `assignment`
+		for _, valueExpr in ipairs(assignment.values) do
+			if not valueExpr.inferredType then
+				!DEPEND_AND_RETURN(`identOrVararg`, DEPEND_NODE_INFERRED, `valueExpr`)
+			end
 		end
 	end
 
@@ -937,6 +943,7 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 	assert(typeInfo)
 	local typeInfoForDecl = nil
 
+	-- Check if the value is constant.
 	if decl.isConstant then
 		local valueExpr, valueTypeInfo = getAssignmentValue(state, ident, assignment.values, decl.assignmentIndex)
 		typeInfoForDecl = getTypeRepresentedByExpression(valueExpr)
@@ -983,15 +990,6 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 				enumInfo.name = ident.name
 			end
 		end
-	end
-
-	-- Validate that the assigned value is the same type as the declared name.
-	--
-	-- (Not needed for vararg as those only exist as arguments and don't have default values.
-	-- Also, this doesn't run for enum members as those declarations never have any specified types.)
-	--
-	if assignment and decl.types[1] and ident then
-		getAssignmentValue(state, ident, assignment.values, decl.assignmentIndex, typeInfo)
 	end
 
 	if vararg then
@@ -1390,12 +1388,28 @@ end
 	if decl.assignment then
 		local scope              = getClosestScope(decl) or errorInternal()
 		local scopeIsDeclarative = isScopeDeclarative(scope)
+		local valueExpr
+
+		-- Validate that the assigned value is the same type as the declared name.
+		--
+		-- (Not needed for vararg as those only exist as arguments and don't have default values.
+		-- Also, this doesn't run for enum members as those declarations never have any specified types.)
+		--
+		if decl.types[1] and ident.nodeType ~= !(nodeTypes.AstVararg) then
+			valueExpr = getAssignmentValue(state, ident, decl.assignment.values, decl.assignmentIndex, ident.inferredType)
+		end
 
 		if scopeIsDeclarative or decl.isConstant then
-			local valueExpr = getAssignmentValue(state, ident, decl.assignment.values, decl.assignmentIndex)
-			local isConst   = getLiteralValueFromExpressionIfConstant(state, valueExpr)
+			valueExpr = valueExpr or getAssignmentValue(state, ident, decl.assignment.values, decl.assignmentIndex)
 
-			if not isConst then
+			if isExpressionConstant(state, valueExpr) then
+				-- void
+
+			elseif valueExpr.nodeType == !(nodeTypes.AstTable) then -- @Temp
+				typeError(state, valueExpr, "Constant array/table/struct initializers are not supported yet in the language!") -- :ConstantTableConstructors
+
+			else
+				-- @UX: If the expression is/contains a table with a non-constant field, point out which field key or value!
 				typeError(
 					state, astGetExpressionVisuallyFurthestToTheLeft(valueExpr),
 					"Value for declared %s '%s' is not a constant expression.%s",
@@ -1426,7 +1440,7 @@ _G.!(local )!!BUILTIN_TYPE_TAG_TO_LITERAL_TYPE = {
 }
 
 !NODE_INFERRER `function nodeInferrers.AstLiteral(state, literal)`
-	local typeName = LITERAL_TYPE_TO_BUILTIN_TYPE_NAME[literal.literalType] or errorUnhandledNodeType(literal)
+	local typeName = LITERAL_TYPE_TO_BUILTIN_TYPE_NAME[literal.literalType] or errorUnhandledNodeType(state, literal)
 
 	literal.inferredType = getTypeInfoForBuiltinType(state, typeName)
 
@@ -1471,7 +1485,7 @@ end
 		typeInfo = getTypeInfoForBuiltinType(state, "int")
 
 	else
-		errorUnhandledNodeType(unary)
+		errorUnhandledNodeType(state, unary)
 	end
 
 	unary.inferredType = typeInfo
@@ -1509,10 +1523,10 @@ end
 		moveToPipe(state, literal, !(PIPE_BYTECODE))
 
 	elseif unary.operation == "#" then
-		errorUnhandledNodeType(unary)
+		errorUnhandledNodeType(state, unary)
 
 	else
-		errorUnhandledNodeType(unary)
+		errorUnhandledNodeType(state, unary)
 	end
 
 	-- astPrintTree(unary.parent)
@@ -1633,7 +1647,7 @@ end
 		typeInfo = getTypeInfoForBuiltinType(state, "string")
 
 	else
-		errorUnhandledNodeType(binary)
+		errorUnhandledNodeType(state, binary)
 	end
 
 	assert(typeInfo)
@@ -1701,7 +1715,7 @@ end
 		moveToPipe(state, literal, !(PIPE_BYTECODE))
 
 	else
-		errorUnhandledNodeType(binary)
+		errorUnhandledNodeType(state, binary)
 	end
 
 	-- astPrintTree(binary.parent)
@@ -1767,7 +1781,7 @@ end
 	local typeInfoRepresented = getTypeRepresentedByExpression(lookup.object)
 
 	if typeInfoObject.tag == !(typeTags.TypeInfoTable) then
-		errorUnhandledNodeType(lookup.object)
+		errorUnhandledNodeType(state, lookup.object)
 		return
 
 	elseif typeInfoObject.tag == !(typeTags.TypeInfoArray) then
@@ -1835,7 +1849,7 @@ end
 
 		else
 			where(state, valueExpr)
-			errorUnhandledNodeType(valueExpr)
+			errorUnhandledNodeType(state, valueExpr)
 		end
 
 		assert(replacement) -- Constants must be simplified!
@@ -1892,12 +1906,170 @@ end
 	end
 end
 
--- !NODE_INFERRER `function nodeInferrers.AstTable(state, tableNode)`
--- 	for _, tableField in ipairs(tableNode) do
--- 		tableField.key
--- 		tableField.value
--- 	end
--- end
+-- Returns nil if we're waiting for something.
+-- Errors on failure.
+local function getExpectedTypeInfo(state, node)
+	!local NO_EXPECTATION = `typeError(state, node, "Could not determine what type is expected here.")`
+	local nodeType        = node.parent.nodeType
+
+	if nodeType == !(nodeTypes.AstAssignment) then
+		local assignment = node.parent
+		local i          = indexOf(assignment.values, node) or !!(NO_EXPECTATION)
+
+		if assignment.forDeclaration then
+			local decl = assignment.declarations[i] or errorInternal()
+
+			if not decl.types[1] then
+				!!(NO_EXPECTATION)
+
+			elseif not decl.types[2] then
+				if not decl.types[1].inferredType then
+					!DEPEND_AND_RETURN(`node`, DEPEND_NODE_INFERRED, `decl.types[1]`)
+				end
+				return getTypeRepresentedByExpression(decl.types[1])
+
+			else
+				if not decl.name.inferredType then
+					!DEPEND_AND_RETURN(`node`, DEPEND_NODE_INFERRED, `decl.name`)
+				end
+				return decl.name.inferredType
+			end
+
+		else
+			if not assignment.targets[i].inferredType then
+				!DEPEND_AND_RETURN(`node`, DEPEND_NODE_INFERRED, `assignment.targets[i]`)
+			end
+			return assignment.targets[i].inferredType
+		end
+
+	elseif nodeType == !(nodeTypes.AstCast) then
+		local cast = node.parent
+		if node ~= cast.expression then  !!(NO_EXPECTATION)  end
+
+		if not cast.targetType.inferredType then
+			!DEPEND_AND_RETURN(`node`, DEPEND_NODE_INFERRED, `cast.targetType`)
+		end
+
+		return getTypeRepresentedByExpression(cast.targetType) or errorInternal()
+
+	elseif nodeType == !(nodeTypes.AstBinary) then
+		local binary = node.parent
+		local other  = node == binary.left and binary.right or binary.left
+
+		if not other.inferredType then
+			!DEPEND_AND_RETURN(`node`, DEPEND_NODE_INFERRED, `other`)
+		end
+
+		return other.inferredType
+
+	elseif nodeType == !(nodeTypes.AstCall) then
+		local call           = node.parent
+		local i              = indexOf(call.arguments, node) or !!(NO_EXPECTATION)
+		local calleeTypeInfo = call.callee.inferredType
+
+		if not calleeTypeInfo then
+			!DEPEND_AND_RETURN(`node`, DEPEND_NODE_INFERRED, `call.callee`)
+		end
+
+		local argTypesIn  = calleeTypeInfo.argumentTypesIn
+		local argTypeInfo = argTypesIn[i]
+
+		if
+			(not argTypeInfo and argTypesIn[1] and argTypesIn[#argTypesIn].tag == !(typeTags.TypeInfoVararg))
+			or (argTypeInfo.tag == !(typeTags.TypeInfoVararg))
+		then
+			local varargSig = argTypeInfo or argTypesIn[#argTypesIn]
+			argTypeInfo     = varargSig.itemType
+		end
+
+		-- Note: We don't need to get too fancy with validation here as the call is validated later.
+		if not argTypeInfo then
+			typeError(state, call, "Too many arguments specified for call.")
+		end
+
+		return argTypeInfo
+
+	else
+		!!(NO_EXPECTATION)
+	end
+end
+
+!NODE_INFERRER `function nodeInferrers.AstTable(state, tableNode)`
+	for _, tableField in ipairs(tableNode) do
+		if not tableField.value.inferredType then
+			!DEPEND_AND_RETURN(`tableNode`, DEPEND_NODE_INFERRED, `tableField.value`)
+		elseif not tableField.key.inferredType then
+			!DEPEND_AND_RETURN(`tableNode`, DEPEND_NODE_INFERRED, `tableField.key`)
+		end
+	end
+
+	local typeInfoExpected = getExpectedTypeInfo(state, tableNode)
+	if not typeInfoExpected then  return  end
+
+	if typeInfoExpected.tag == !(typeTags.TypeInfoTable) then
+		tableNode.inferredType = typeInfoExpected
+
+	elseif typeInfoExpected.tag == !(typeTags.TypeInfoArray) then
+		local arraySig            = typeInfoExpected
+		local indexLiterals       = {}
+		local highestLiteralIndex = 0
+
+		for _, tableField in ipairs(tableNode) do
+			if tableField.key.inferredType.tag ~= !(typeTags.TypeInfoInt) then
+				typeError(
+					state, astGetExpressionVisuallyFurthestToTheLeft(tableField.key),
+					"Array indices must be integers. (This is %s)",
+					getFriendlyTypeInfoName(tableField.key.inferredType)
+				)
+			end
+			if not isTypeCompatibleWith(tableField.value.inferredType, arraySig.itemType) then
+				typeError(
+					state, astGetExpressionVisuallyFurthestToTheLeft(tableField.value),
+					"Array item type mismatch. (Wanted %s, got %s)",
+					getFriendlyTypeInfoName(arraySig.itemType),
+					getFriendlyTypeInfoName(tableField.value.inferredType)
+				)
+			end
+
+			if tableField.key.nodeType ~= !(nodeTypes.AstLiteral) then
+				typeError(
+					state, astGetExpressionVisuallyFurthestToTheLeft(tableField.key),
+					"Indices must be constant in array literals."
+				)
+			end
+
+			local literal    = tableField.key
+			local arrayIndex = literal.value
+
+			if indexLiterals[arrayIndex] then
+				printerr()
+				typeMessage(io.stderr, state, literal,                   "Error", "Duplicate index %d.", arrayIndex)
+				typeMessage(io.stderr, state, indexLiterals[arrayIndex], "Info",  "...first occurance is here.")
+				exitFailure()
+			end
+
+			indexLiterals[arrayIndex] = literal
+			highestLiteralIndex       = math.max(highestLiteralIndex, arrayIndex)
+		end
+
+		for arrayIndex = 1, highestLiteralIndex do
+			if not indexLiterals[arrayIndex] then
+				typeError(state, tableNode, "Array is not a sequence. Missing item at index %d.", arrayIndex)
+			end
+		end
+
+		tableNode.inferredType = arraySig
+
+	elseif typeInfoExpected.tag == !(typeTags.TypeInfoStruct) then
+		errorUnhandledNodeType(state, tableNode)
+
+	else
+		errorUnhandledNodeType(state, tableNode)
+		-- errorUnhandledType(state, tableNode, typeInfoExpected) -- @Incomplete: Define errorUnhandledType().
+	end
+
+	moveToPipe(state, tableNode, !(PIPE_DONE))
+end
 
 !NODE_INFERRER `function nodeInferrers.AstArgument(state, arg)`
 	if arg.declaration.queued.pipe <= !(PIPE_INFER) then
@@ -2016,7 +2188,7 @@ end
 		)
 
 	else
-		errorUnhandledNodeType(cast)
+		errorUnhandledNodeType(state, cast)
 	end
 
 	cast.inferredType = castTypeInfo
@@ -2068,9 +2240,12 @@ end
 	moveToPipe(state, assignment, !(PIPE_DONE))
 end
 
--- !NODE_INFERRER `function nodeInferrers.AstBreak(state, breakNode)`
--- 	breakNode.loopName
--- end
+!NODE_INFERRER `function nodeInferrers.AstBreak(state, breakNode)`
+	if breakNode.loopName then
+		typeError(state, breakNode, "@Incomplete: Break from named loops.")
+	end
+	moveToPipe(state, breakNode, !(PIPE_DONE))
+end
 
 -- !NODE_INFERRER `function nodeInferrers.AstContinue(state, continue)`
 -- 	continue.loopName
@@ -2208,7 +2383,7 @@ local function inferIfOrWhile(state, ifOrWhile)
 	end
 
 	if typeInfo.tag == !(typeTags.TypeInfoVararg) then
-		errorUnhandledNodeType(ifOrWhile.condition)
+		errorUnhandledNodeType(state, ifOrWhile.condition)
 	end
 
 	-- @Incomplete: Make if conditions better! Handle compound types and stuff in a nice way!
@@ -2257,6 +2432,8 @@ end
 	if not forLoop.declarations[1] then
 		local names  = forLoop.names
 		local values = forLoop.expressions
+
+		-- @Incomplete: Add all declarations now and infer their types later to fix confusing "undeclared identifier" errors.
 
 		for _, expr in ipairs(values) do
 			if not expr.inferredType then
@@ -2545,7 +2722,7 @@ end
 end
 
 function _G.inferNode(state, node)
-	local nodeInferrer = nodeInferrers[node.nodeType] or errorUnhandledNodeType(node)
+	local nodeInferrer = nodeInferrers[node.nodeType] or errorUnhandledNodeType(state, node)
 	return nodeInferrer(state, node)
 end
 
@@ -2556,7 +2733,7 @@ end
 --
 -- @Cleanup: All constant expressions that can result in a literal value should have been simplified into an AstLiteral.
 -- That means we don't really need to return a literal here - the caller can just grab it from the literal node.
--- @Refactor this function to only figure out whether the expression is constant.
+-- @Refactor this function to only figure out whether the expression is constant and move the code into isExpressionConstant().
 --
 function _G.getLiteralValueFromExpressionIfConstant(state, expr)
 	-- @Incomplete: Return an AstNode?
@@ -2616,9 +2793,24 @@ function _G.getLiteralValueFromExpressionIfConstant(state, expr)
 	elseif expr.nodeType == !(nodeTypes.AstImport) then
 		return true, nil -- Namespaces, just like types, are always constant.
 
+	elseif expr.nodeType == !(nodeTypes.AstTable) then
+		return false
+		--[[ @Incomplete: Constant table constructors. :ConstantTableConstructors
+		local tableNode = expr
+		for _, tableField in ipairs(tableNode) do
+			if not isExpressionConstant(state, tableField.key)   then  return false, nil  end
+			if not isExpressionConstant(state, tableField.value) then  return false, nil  end
+		end
+		return true, nil
+		]]
+
 	else
-		errorUnhandledNodeType(expr)
+		errorUnhandledNodeType(state, expr)
 	end
+end
+
+function _G.isExpressionConstant(state, expr)
+	return (getLiteralValueFromExpressionIfConstant(state, expr))
 end
 
 
@@ -2867,7 +3059,7 @@ function _G.simplifyTypeExpression(state, expr, typeInfoRepresented)
 end
 
 function _G.simplifyExpressionIfConstant(state, expr)
-	if not getLiteralValueFromExpressionIfConstant(state, expr) then  return  end
+	if not isExpressionConstant(state, expr) then  return  end
 
 	if expr.nodeType == !(nodeTypes.AstIdentifier) then
 		local ident = expr
