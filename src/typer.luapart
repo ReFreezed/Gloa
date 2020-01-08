@@ -2007,6 +2007,7 @@ end
 	if not typeInfoExpected then  return  end
 
 	if typeInfoExpected.tag == !(typeTags.TypeInfoTable) then
+		-- @Incomplete: Check for duplicate fields (among constant keys).
 		tableNode.inferredType = typeInfoExpected
 
 	elseif typeInfoExpected.tag == !(typeTags.TypeInfoArray) then
@@ -2021,17 +2022,7 @@ end
 					"Array indices must be integers. (This is %s)",
 					getFriendlyTypeInfoName(tableField.key.inferredType)
 				)
-			end
-			if not isTypeCompatibleWith(tableField.value.inferredType, arraySig.itemType) then
-				typeError(
-					state, astGetExpressionVisuallyFurthestToTheLeft(tableField.value),
-					"Array item type mismatch. (Wanted %s, got %s)",
-					getFriendlyTypeInfoName(arraySig.itemType),
-					getFriendlyTypeInfoName(tableField.value.inferredType)
-				)
-			end
-
-			if tableField.key.nodeType ~= !(nodeTypes.AstLiteral) then
+			elseif tableField.key.nodeType ~= !(nodeTypes.AstLiteral) then
 				typeError(
 					state, astGetExpressionVisuallyFurthestToTheLeft(tableField.key),
 					"Indices must be constant in array literals."
@@ -2050,6 +2041,19 @@ end
 
 			indexLiterals[arrayIndex] = literal
 			highestLiteralIndex       = math.max(highestLiteralIndex, arrayIndex)
+
+			if tableField.value.inferredType == arraySig.itemType then
+				-- void
+			elseif isTypeCompatibleWith(tableField.value.inferredType, arraySig.itemType) then
+				-- @Incomplete: Add cast.
+			else
+				typeError(
+					state, astGetExpressionVisuallyFurthestToTheLeft(tableField.value),
+					"Array item type mismatch. (Wanted %s, got %s)",
+					getFriendlyTypeInfoName(arraySig.itemType),
+					getFriendlyTypeInfoName(tableField.value.inferredType)
+				)
+			end
 		end
 
 		for arrayIndex = 1, highestLiteralIndex do
@@ -2061,7 +2065,61 @@ end
 		tableNode.inferredType = arraySig
 
 	elseif typeInfoExpected.tag == !(typeTags.TypeInfoStruct) then
-		errorUnhandledNodeType(state, tableNode)
+		local structInfo  = typeInfoExpected
+		local keyLiterals = {}
+
+		for _, tableField in ipairs(tableNode) do
+			if tableField.key.inferredType.tag ~= !(typeTags.TypeInfoString) then
+				typeError(
+					state, astGetExpressionVisuallyFurthestToTheLeft(tableField.key),
+					"Struct initializer keys must be strings. (This is %s)",
+					getFriendlyTypeInfoName(tableField.key.inferredType)
+				)
+			elseif tableField.key.nodeType ~= !(nodeTypes.AstLiteral) then
+				typeError(
+					state, astGetExpressionVisuallyFurthestToTheLeft(tableField.key),
+					"Keys must be constant in struct initializers."
+				)
+			end
+
+			local literal    = tableField.key
+			local memberName = literal.value
+
+			if keyLiterals[memberName] then
+				printerr()
+				typeMessage(io.stderr, state, literal,                 "Error", "Duplicate field '%s'.", memberName)
+				typeMessage(io.stderr, state, keyLiterals[memberName], "Info",  "...first occurance is here.")
+				exitFailure()
+			end
+
+			keyLiterals[memberName] = literal
+			local member            = itemWith1(structInfo.members, "name", memberName)
+
+			if not member then
+				typeError(
+					state, astGetExpressionVisuallyFurthestToTheLeft(literal),
+					"'%s' is not a member of %s.",
+					memberName,
+					getFriendlyTypeInfoName(structInfo)
+				)
+			end
+
+			if tableField.value.inferredType == member.typeInfo then
+				-- void
+			elseif isTypeCompatibleWith(tableField.value.inferredType, member.typeInfo) then
+				-- @Incomplete: Add cast.
+			else
+				typeError(
+					state, astGetExpressionVisuallyFurthestToTheLeft(tableField.value),
+					"Type mismatch for struct field '%s'. (Wanted %s, got %s)",
+					tableField.key.value,
+					getFriendlyTypeInfoName(member.typeInfo),
+					getFriendlyTypeInfoName(tableField.value.inferredType)
+				)
+			end
+		end
+
+		tableNode.inferredType = structInfo
 
 	else
 		errorUnhandledNodeType(state, tableNode)

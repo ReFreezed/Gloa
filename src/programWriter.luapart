@@ -96,6 +96,36 @@ function _G.writeCast(state, file, cast)
 	end
 end
 
+function _G.writeTableConstructorKeyName(file, name)
+	if name:find"^[%a_][%w_]*$" then
+		file:write(name)
+	else
+		file:write(F("[%q]", name))
+	end
+end
+
+function _G.writeDefaultValueForStructMember(state, file, structInfo, member, nodeForError)
+	local assignment = findDeclarationInScope(state, structInfo.astNode, member.name, false).assignment
+	if assignment then
+		local valueExpr = assignment.values[1] or errorInternal()
+		writeExpression(state, file, valueExpr)
+	else
+		writeDefaultValueForType(state, file, member.typeInfo, nodeForError)
+	end
+end
+
+local function findTableFieldInStructInitializer(tableNode, memberName)
+	for _, tableField in ipairs(tableNode) do
+		!ASSERT("tableField.key.nodeType == "..nodeTypes.AstLiteral)
+
+		if tableField.key.value == memberName then
+			return tableField
+		end
+	end
+
+	return nil
+end
+
 function _G.writeExpression(state, file, expr)
 	if expr.nodeType == !(nodeTypes.AstCall) then
 		local call   = expr
@@ -200,11 +230,11 @@ function _G.writeExpression(state, file, expr)
 			for i, tableField in ipairs(tableNode) do
 				if i > 1 then  file:write(", ")  end
 
-				-- @Polish: Output sequence values without key in 'table' type tables.
 				if isExpressionLiteralStringAndValidLuaIdentifier(tableField.key) then
 					local stringLiteral = tableField.key
 					file:write(stringLiteral.value)
 				else
+					-- @Polish: Output sequence values without key in 'table' type tables.
 					file:write("[")
 					writeExpression(state, file, tableField.key)
 					file:write("]")
@@ -230,7 +260,22 @@ function _G.writeExpression(state, file, expr)
 			end
 
 		elseif tableNode.inferredType.tag == !(typeTags.TypeInfoStruct) then
-			errorUnhandledNodeType(state, tableNode)
+			local structInfo = tableNode.inferredType
+
+			for i, member in ipairs(structInfo.members) do
+				if i > 1 then  file:write(", ")  end
+
+				local tableField = findTableFieldInStructInitializer(tableNode, member.name)
+
+				writeTableConstructorKeyName(file, member.name)
+				file:write("=")
+
+				if tableField then
+					writeExpression(state, file, tableField.value)
+				else
+					writeDefaultValueForStructMember(state, file, structInfo, member, tableNode) -- @UX: Maybe use a better nodeForError.
+				end
+			end
 
 		else
 			errorUnhandledNodeType(state, tableNode)
@@ -267,21 +312,9 @@ function _G.writeDefaultValueForType(state, file, typeInfo, nodeForError)
 
 		for i, member in ipairs(structInfo.members) do
 			if i > 1 then  file:write(", ")  end
-
-			if member.name:find"^[%a_][%w_]*$" then
-				file:write(member.name)
-			else
-				file:write(F("[%q]", member.name))
-			end
+			writeTableConstructorKeyName(file, member.name)
 			file:write("=")
-
-			local assignment = findDeclarationInScope(state, structInfo.astNode, member.name, false).assignment
-			if assignment then
-				local valueExpr = assignment.values[1] or errorInternal()
-				writeExpression(state, file, valueExpr)
-			else
-				writeDefaultValueForType(state, file, member.typeInfo, nodeForError)
-			end
+			writeDefaultValueForStructMember(state, file, structInfo, member, nodeForError)
 		end
 
 		file:write("}")
