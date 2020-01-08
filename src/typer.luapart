@@ -10,7 +10,7 @@
 --==============================================================
 
 	getAssignmentValue
-	getClosestScope, isScope, isScopeDeclarative, isScopeImperative
+	getClosestScope, getClosestScopeForDeclaration, isScope, isScopeDeclarative, isScopeImperative
 	inferNode
 	isExpressionConstant, getLiteralValueFromExpressionIfConstant
 	isPartOfAnyDeclaration
@@ -350,9 +350,24 @@ end
 
 -- scope, childClosestToScope = getClosestScope( node )
 function _G.getClosestScope(node)
+	-- @Incomplete: Treat global declarations differently and depricate
+	-- getClosestScopeForDeclaration() (or simply change the parent of
+	-- globals to the actual globalScope, though that has problems too).
 	return astFindParent(node,
 		!outputCommaSeparatedValues(unpack(scopeNodeTypes))
 	)
+end
+
+-- Since the physical parent of global declarations actually is a file scope
+-- we have to treat these declarations differently sometimes. This function
+-- returns the correct scope for global declarations.
+function _G.getClosestScopeForDeclaration(state, decl)
+	-- do return getClosestScope(decl) end
+	if decl.isGlobalOrExported then
+		local fileScope = astFindParent(decl, !(nodeTypes.AstFileScope))
+		if fileScope and not fileScope.isModule then  return state.globalScope  end
+	end
+	return (getClosestScope(decl))
 end
 
 function _G.isScope           (node)   return SCOPE_SET            [node .nodeType] or false  end
@@ -720,7 +735,8 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 		end
 	end
 
-	local scope = getClosestScope(decl)
+	local scope = getClosestScopeForDeclaration(state, decl)
+
 	if not scope then
 		astPrint(identOrVararg)
 		printTraceback(io.stderr)
@@ -767,7 +783,7 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 		if not declExisting then
 			-- void
 
-		elseif isMember and not decl.isConstant and scope ~= getClosestScope(declExisting) then
+		elseif isMember and not decl.isConstant and scope ~= getClosestScopeForDeclaration(state, declExisting) then
 			-- void  (Variable members never shadow anything.)
 
 		elseif not decl.canShadow then
@@ -788,7 +804,7 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 					identEarly, identLate = identLate, identEarly
 				end
 
-				if isScopeImperative(getClosestScope(identLate.declaration)) then
+				if isScopeImperative(getClosestScopeForDeclaration(state, identLate.declaration)) then
 					extraMessageEarly = " (Note that constants in imperative scopes are visible to the whole scope, unlike variables.)"
 				end
 
@@ -803,7 +819,7 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 					identEarly, identLate = identLate, identEarly
 				end
 
-				if identEarly.declaration.isConstant and isScopeImperative(getClosestScope(identEarly.declaration)) then
+				if identEarly.declaration.isConstant and isScopeImperative(getClosestScopeForDeclaration(state, identEarly.declaration)) then
 					extraMessageEarly = " (Note that constants in imperative scopes are visible to the whole scope.)"
 				end
 			end
@@ -814,12 +830,12 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 			exitFailure()
 
 		elseif
-			scope == getClosestScope(declExisting)
+			scope == getClosestScopeForDeclaration(state, declExisting)
 			or (
 				-- We do not allow declarations on lambda bodies to shadow the lambda's arguments.
 				scope.nodeType == !(nodeTypes.AstBlock)
 				and getClosestScope(scope).nodeType == !(nodeTypes.AstLambda)
-				and getClosestScope(scope) == getClosestScope(declExisting)
+				and getClosestScope(scope) == getClosestScopeForDeclaration(state, declExisting)
 			)
 		then
 			printerr()
@@ -1005,10 +1021,10 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 			if decl.isConstant then  io.stdout:write(" (CONST)")  end
 			if typeInfoForDecl then  io.stdout:write(" (VALUE ", getFriendlyTypeInfoName(typeInfoForDecl), ")")  end
 			io.stdout:write(" IN ")
-			if decl.name.placeDeclared ~= getClosestScope(decl) then
+			if decl.name.placeDeclared ~= getClosestScopeForDeclaration(state, decl) then
 				io.stdout:write(AST_NODE_TYPE_NAMES[decl.name.placeDeclared.nodeType], " > ")
 			end
-			astPrint(getClosestScope(decl))
+			astPrint(getClosestScopeForDeclaration(state, decl))
 		end
 	!end
 
@@ -1279,7 +1295,7 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 			if valueTypeInfo == typeInfoToMatch then
 				-- void
 			elseif isTypeCompatibleWith(valueTypeInfo, typeInfoToMatch) then
-				-- @Incomplete: Add cast.
+				-- @Incomplete: Add cast. (Can we do that for vararg?)
 			else
 				typeError(
 					state, astGetExpressionVisuallyFurthestToTheLeft(valueExpr),

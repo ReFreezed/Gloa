@@ -12,6 +12,24 @@
 	unicodeToLuaIdentifier
 	writeProgram, write*
 
+----------------------------------------------------------------
+
+	Format for written programs:
+	- Foreign imports.
+	- Constants.
+	- Forward declarations.
+	- Functions.
+	- Global/file-scope variables.
+	- Program entry point.
+
+	Notes:
+	- No Lua globals are read from or written to. (Glóa globals are not Lua globals.)
+	- All functions are top-level in Lua no matter where they were defined in Glóa.
+	- Local variables in Lua are uniquely named and thus never shadow anything (which might help with debugging).
+
+	@Incomplete:
+	- Handle the limited amount of locals Lua allows (200). (Maybe we'll have to use Lua globals to some extent after all.)
+
 --============================================================]]
 
 
@@ -327,21 +345,42 @@ function _G.writeDefaultValueForType(state, file, typeInfo, nodeForError)
 	end
 end
 
-local function allocateLocalName(name, n, outputDebugInfo)
-	return
-		(
-			name == "_" and "_" -- @Incomplete: Make "_" a write-only name.
-			or outputDebugInfo and unicodeToLuaIdentifier(name).."_L"..n
-			or "_L"..n
-		),
-		n+1
-end
-local function allocateArgumentName(name, n, outputDebugInfo)
-	return outputDebugInfo and unicodeToLuaIdentifier(name).."_A"..n or "A"..n
+local function isNameAllocated(state, localsStack, localName)
+	if state.topScopeNames[localName] then  return true  end
+
+	for _, locals in ipairs(localsStack) do
+		if locals[localName] then  return true  end
+	end
+
+	return false
 end
 
--- writeBlock( state, file, block, indentation, nextLocalNumber )
-function _G.writeBlock(state, file, block, indent, nextLocalN)
+local function allocateName(state, localsStack, name, n, shortPrefix, longInfix)
+	if name == "_" then  return name  end -- @Incomplete: Make "_" a write-only name.
+
+	local localName
+
+	if state.settings.outputDebugInfo then
+		localName = unicodeToLuaIdentifier(name)
+		if isNameAllocated(state, localsStack, localName) then
+			localName = localName..longInfix..n
+		end
+	else
+		localName = shortPrefix..n
+	end
+
+	localsStack[1][localName] = true
+
+	return localName, n+1
+end
+local function allocateLocalName(state, localsStack, name, n)
+	return allocateName(state, localsStack, name, n, "L", "_L")
+end
+local function allocateArgumentName(state, localsStack, name, n)
+	return allocateName(state, localsStack, name, n, "A", "_A")
+end
+
+function _G.writeBlock(state, file, block, indent, nextLocalN, localsStack)
 	local outputDebugInfo = state.settings.outputDebugInfo
 	local indentStr       = ("\t"):rep(indent)
 
@@ -352,6 +391,7 @@ function _G.writeBlock(state, file, block, indent, nextLocalN)
 		return
 	end
 
+	localsStack  = {{}, unpack(localsStack)}
 	local inDecl = false
 
 	for _, statement in ipairs(block) do
@@ -364,7 +404,7 @@ function _G.writeBlock(state, file, block, indent, nextLocalN)
 				skipNextAssignment = true
 
 			else
-				decl.localName, nextLocalN = allocateLocalName(decl.name.name, nextLocalN, outputDebugInfo)
+				decl.localName, nextLocalN = allocateLocalName(state, localsStack, decl.name.name, nextLocalN)
 
 				if decl.assignment then
 					inDecl = true
@@ -436,7 +476,7 @@ function _G.writeBlock(state, file, block, indent, nextLocalN)
 		elseif nodeType == !(nodeTypes.AstBlock) then
 			local block = statement.what
 			file:write(indentStr, "do\n")
-			writeBlock(state, file, block, indent+1, nextLocalN)
+			writeBlock(state, file, block, indent+1, nextLocalN, localsStack)
 			file:write(indentStr, "end\n")
 
 		elseif nodeType == !(nodeTypes.AstIf) then
@@ -446,11 +486,11 @@ function _G.writeBlock(state, file, block, indent, nextLocalN)
 			writeExpression(state, file, ifBranch.condition)
 			file:write(" then\n")
 
-			writeBlock(state, file, ifBranch.branchTrue, indent+1, nextLocalN)
+			writeBlock(state, file, ifBranch.branchTrue, indent+1, nextLocalN, localsStack)
 
 			if ifBranch.branchFalse then
 				file:write(indentStr, "else\n")
-				writeBlock(state, file, ifBranch.branchFalse, indent+1, nextLocalN)
+				writeBlock(state, file, ifBranch.branchFalse, indent+1, nextLocalN, localsStack)
 			end
 
 			file:write(indentStr, "end\n")
@@ -462,15 +502,16 @@ function _G.writeBlock(state, file, block, indent, nextLocalN)
 			writeExpression(state, file, whileLoop.condition)
 			file:write(" do\n")
 
-			writeBlock(state, file, whileLoop.body, indent+1, nextLocalN)
+			writeBlock(state, file, whileLoop.body, indent+1, nextLocalN, localsStack)
 			file:write(indentStr, "end\n")
 
 		elseif nodeType == !(nodeTypes.AstFor) then
 			-- @Optimize: Don't output an empty body.
-			local forLoop = statement.what
+			local forLoop     = statement.what
+			local localsStack = {{}, unpack(localsStack)}
 
 			for _, decl in ipairs(forLoop.declarations) do
-				decl.localName, nextLocalN = allocateLocalName(decl.name.name, nextLocalN, outputDebugInfo)
+				decl.localName, nextLocalN = allocateLocalName(state, localsStack, decl.name.name, nextLocalN)
 			end
 
 			if forLoop.forType == !(FOR_NUMERIC) then
@@ -489,7 +530,7 @@ function _G.writeBlock(state, file, block, indent, nextLocalN)
 				end
 
 				file:write(" do\n")
-				writeBlock(state, file, forLoop.body, indent+1, nextLocalN)
+				writeBlock(state, file, forLoop.body, indent+1, nextLocalN, localsStack)
 				file:write(indentStr, "end\n")
 
 			elseif forLoop.forType == !(FOR_SHORT) then
@@ -519,7 +560,7 @@ function _G.writeBlock(state, file, block, indent, nextLocalN)
 				writeExpression(state, file, objExpr)
 				file:write(") do\n")
 
-				writeBlock(state, file, forLoop.body, indent+1, nextLocalN)
+				writeBlock(state, file, forLoop.body, indent+1, nextLocalN, localsStack)
 				file:write(indentStr, "end\n")
 
 			else--if forLoop.forType == !(FOR_ITERATOR) then
@@ -538,7 +579,7 @@ function _G.writeBlock(state, file, block, indent, nextLocalN)
 				end
 
 				file:write(" do\n")
-				writeBlock(state, file, forLoop.body, indent+1, nextLocalN)
+				writeBlock(state, file, forLoop.body, indent+1, nextLocalN, localsStack)
 				file:write(indentStr, "end\n")
 			end
 
@@ -560,6 +601,8 @@ function _G.writeFunction(state, file, lambda)
 		return
 	end
 
+	local localsStack = {{}}
+
 	file:write("function(")
 
 	if lambda.argumentsIn then
@@ -571,7 +614,7 @@ function _G.writeFunction(state, file, lambda)
 			if decl.name.nodeType == !(nodeTypes.AstVararg) then
 				decl.localName = "..."
 			else
-				decl.localName = allocateArgumentName(decl.name.name, i, state.settings.outputDebugInfo)
+				decl.localName = allocateArgumentName(state, localsStack, decl.name.name, i)
 			end
 
 			file:write(decl.localName)
@@ -581,7 +624,7 @@ function _G.writeFunction(state, file, lambda)
 	file:write(")\n")
 
 	if lambda.body[1] then
-		writeBlock(state, file, lambda.body, 1, 1)
+		writeBlock(state, file, lambda.body, 1, 1, localsStack)
 	elseif state.settings.outputDebugInfo then
 		file:write("\t-- Empty function.\n")
 	end
