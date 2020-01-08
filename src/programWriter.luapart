@@ -332,7 +332,7 @@ local function allocateLocalName(name, n, outputDebugInfo)
 		(
 			name == "_" and "_" -- @Incomplete: Make "_" a write-only name.
 			or outputDebugInfo and unicodeToLuaIdentifier(name).."_L"..n
-			or "L"..n
+			or "_L"..n
 		),
 		n+1
 end
@@ -556,14 +556,7 @@ end
 
 function _G.writeFunction(state, file, lambda)
 	if lambda.bodyIsForeign then
-		-- @Incomplete: Compiler setting for runtime checks of anything originating from
-		-- foreign sources. (We can probably wrap foreign functions in something here.)
-		if lambda.foreignSource == "lua" then
-			assert(lambda.foreignSourceName ~= "")
-			file:write("(", lambda.foreignSourceName, ")") -- @Robustness: Is this too straightforward?
-		else
-			errorInternal(lambda.foreignSource)
-		end
+		file:write(state.foreignReferences[lambda.foreignSourceId])
 		return
 	end
 
@@ -668,6 +661,49 @@ function _G.writeProgram(state)
 	local path = state.settings.outputFilePath
 	local file = assert(io.open(path, "w"))
 
+	local outputDebugInfo = state.settings.outputDebugInfo
+
+	--
+	-- Foreign imports.
+	--
+
+	local foreignN             = 0
+	local declaredForeignTable = false
+
+	for _, const in ipairs(state.constants) do
+		if const.valueType.tag == !(typeTags.TypeInfoFunction) and const.value.bodyIsForeign then
+			local lambda = const.value
+			assert(lambda.foreignSourceId ~= "")
+
+			if not state.foreignReferences[lambda.foreignSourceId] then
+				-- @Incomplete: Compiler setting for runtime checks of anything originating from
+				-- foreign sources. (We can probably wrap foreign functions in something here.)
+
+				if lambda.foreignSource == "lua" then
+					foreignN = foreignN+1
+
+					if foreignN == 1 then
+						file:write("local _FOREIGN = {}\n")
+					end
+
+					if outputDebugInfo then
+						state.foreignReferences[lambda.foreignSourceId] = F("_FOREIGN[%d--[[%s]]]", foreignN, (lambda.foreignSourceId:gsub("[%[%]]", "%0 ")))
+						file:write("_FOREIGN[", F("%d", foreignN), "]")
+					else
+						local foreignRef                                = F("_FOREIGN[%d]", foreignN)
+						state.foreignReferences[lambda.foreignSourceId] = foreignRef
+						file:write(foreignRef)
+					end
+
+					file:write(" = (", lambda.foreignSourceName, ")\n") -- @Robustness: Is this too straightforward?
+
+				else
+					errorInternal("Incomplete: Handle lambda.foreignSource=%s", lambda.foreignSource)
+				end
+			end
+		end
+	end
+
 	--
 	-- Forward declarations.
 	--
@@ -712,9 +748,18 @@ function _G.writeProgram(state)
 
 	-- Function definitions.
 	for _, const in ipairs(state.constants) do
-		if const.valueType.tag == !(typeTags.TypeInfoFunction) then
+		if const.valueType.tag == !(typeTags.TypeInfoFunction) and const.value.bodyIsForeign then
+			local lambda = const.value
 			file:write(const.name, " = ")
-			writeConstantValue(state, file, const)
+			writeFunction(state, file, lambda)
+			file:write("\n")
+		end
+	end
+	for _, const in ipairs(state.constants) do
+		if const.valueType.tag == !(typeTags.TypeInfoFunction) and not const.value.bodyIsForeign then
+			local lambda = const.value
+			file:write(const.name, " = ")
+			writeFunction(state, file, lambda)
 			file:write("\n")
 		end
 	end

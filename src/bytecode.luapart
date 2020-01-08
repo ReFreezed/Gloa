@@ -213,13 +213,23 @@ function _G.bcAllocateConstantValueIfNew(state, typeInfo, v)
 			errorInternal("@Incomplete: Handle TypeInfoArray.")
 
 		elseif tag == !(typeTags.TypeInfoFunction) then
-			if const.value == v then  return const, false  end -- All functions are unique for now. We may detect duplicates at some point.
+			-- All functions are unique for now (except foreign functions, which are identified differently).
+			-- We may detect duplicate non-foreign functions at some point.
+			if
+				const.value == v or (
+					v.bodyIsForeign and const.value.bodyIsForeign
+					and v.foreignSourceId == const.value.foreignSourceId
+				)
+			then
+				return const, false
+			end
 
 		elseif tag == !(typeTags.TypeInfoStruct) then
-			if const.value == v then  return const, false  end -- All structs are unique for now. We may detect duplicates at some point.
+			-- All structs are unique for now. We may detect duplicates at some point.
+			if const.value == v then  return const, false  end
 
 		elseif tag == !(typeTags.TypeInfoEnum) then
-			errorInternal("@Incomplete: Handle TypeInfoEnum.")
+			errorInternal("Incomplete: Handle TypeInfoEnum.") -- Not sure we ever get here.
 
 		elseif tag == !(typeTags.TypeInfoTable) then
 			errorInternal("Incomplete: Handle tables.") -- @Incomplete: Compare tables (or maybe every table is a unique?).
@@ -240,11 +250,15 @@ function _G.bcAllocateConstantValueIfNew(state, typeInfo, v)
 		-- Note: Simple constants (like ints) don't need a referencable name as we write those values directly everywhere.
 		if tag == !(typeTags.TypeInfoFunction) then
 			state.functionN = state.functionN+1
-			const.name      = "F"..state.functionN
+			const.name      = "_F"..state.functionN
 		else
 			state.constantN = state.constantN+1
-			const.name      = "C"..state.constantN
+			const.name      = "_C"..state.constantN
 		end
+		while state.topScopeNames[const.name] do
+			const.name = const.name.."_" -- Not pretty, but ensures unique names.
+		end
+		state.topScopeNames[const.name] = true
 	end
 
 	state.constants[i] = const
@@ -288,10 +302,8 @@ function _G.bcAllocateConstantValueForExpressionIfNew(state, expr, dependent)
 
 		if isNew and state.settings.outputDebugInfo then
 			local structInfo = struct.representedType
-
 			if structInfo.name ~= "" then
-				const.name         = unicodeToLuaIdentifier(structInfo.name).."_"..const.name
-				const.nameTampered = true
+				bcMaybeSetConstantName(state, const, structInfo.name)
 			end
 		end
 
@@ -303,10 +315,8 @@ function _G.bcAllocateConstantValueForExpressionIfNew(state, expr, dependent)
 
 		if isNew and state.settings.outputDebugInfo then
 			local enumInfo = enum.representedType
-
 			if enumInfo.name ~= "" then
-				const.name         = unicodeToLuaIdentifier(enumInfo.name).."_"..const.name
-				const.nameTampered = true
+				bcMaybeSetConstantName(state, const, enumInfo.name)
 			end
 		end
 
@@ -336,11 +346,34 @@ end
 
 function _G.bcAllocateTopScopeName(state, name)
 	local i = #state.topScopeNames+1
+	local topScopeName
 
-	local topScopeName = state.settings.outputDebugInfo and unicodeToLuaIdentifier(name).."_G"..i or "G"..i
+	if state.settings.outputDebugInfo then
+		topScopeName = unicodeToLuaIdentifier(name)
+		if state.topScopeNames[topScopeName] then
+			topScopeName = topScopeName.."_G"..i
+		end
+	else
+		topScopeName = "G"..i
+	end
 
-	state.topScopeNames[i] = topScopeName
+	state.topScopeNames[i]            = topScopeName
+	state.topScopeNames[topScopeName] = true
+
 	return topScopeName
+end
+
+function _G.bcMaybeSetConstantName(state, const, name)
+	if const.nameTampered then  return  end
+
+	local constName = unicodeToLuaIdentifier(name)
+	if state.topScopeNames[constName] then
+		constName = constName..const.name
+	end
+
+	const.name                     = constName
+	const.nameTampered             = true
+	state.topScopeNames[constName] = true
 end
 
 
@@ -385,7 +418,7 @@ function _G.bcEmitForLambda(state, lambda)
 		!DEPEND_AND_RETURN(`lambda`, DEPEND_NODE_EMITTED, `body`)
 	end
 
-	if body and lambda.bodyIsForeign then
+	if lambda.bodyIsForeign then
 		-- @Incomplete: Emit for foreign function.
 		moveToPipe(state, lambda, !(PIPE_DONE))
 		return
@@ -442,9 +475,8 @@ function _G.bcEmitForDeclaration(state, decl)
 			decl.valueConstant = const
 
 			if decl.isConstant then
-				if not const.nameTampered and state.settings.outputDebugInfo then
-					const.name         = unicodeToLuaIdentifier(decl.name.name).."_"..const.name
-					const.nameTampered = true
+				if state.settings.outputDebugInfo then
+					bcMaybeSetConstantName(state, const, decl.name.name)
 				end
 			elseif isAny(getClosestScope(decl).nodeType, !(nodeTypes.AstGlobalScope),!(nodeTypes.AstFileScope)) then
 				decl.topScopeName = bcAllocateTopScopeName(state, decl.name.name)
