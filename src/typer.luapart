@@ -14,9 +14,8 @@
 	inferNode
 	isExpressionConstant, getLiteralValueFromExpressionIfConstant
 	isPartOfAnyDeclaration
-	isTypeSimple, isTypeCompatibleWith
+	isTypeSimple, isTypeCompatibleWith, adjustTypeToOne, adjustVarargItemTypeToOneForValueUsage
 	newTypeInfo, isTypeBuiltin, getTypeInfo*
-	normalizeVarargItemType
 	simplifyExpressionIfConstant, simplifyTypeExpression
 	typeError, typeMessage
 
@@ -267,7 +266,6 @@ do
 	end
 
 	function _G.getTypeInfoForVararg(state, itemType)
-		itemType = normalizeVarargItemType(state, itemType)
 		return getTypeInfoForArrayOrVararg(state, itemType, !(typeTags.TypeInfoVararg), TypeInfoVararg)
 	end
 end
@@ -543,6 +541,7 @@ end
 
 -- typeMessage( [ outputFile=io.stdout, ] compilationState, node, label, formatString, ... )
 function _G.typeMessage(file, state, node, label, s, ...)
+	if type(file) ~= "userdata" then  return typeMessage(io.stdout, file, state, node, label, s, ...)  end
 	return nodeMessage(file, state, node, label, "Typer", s, ...)
 end
 
@@ -953,7 +952,7 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 		!ASSERT `not vararg`
 
 		local _, valueTypeInfo = getAssignmentValue(state, ident, assignment.values, decl.assignmentIndex)
-		typeInfo               = valueTypeInfo
+		typeInfo               = adjustTypeToOne(state, valueTypeInfo, true)
 	end
 
 	assert(typeInfo)
@@ -1247,10 +1246,6 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 		local typeInfoIndex   = math.min(slot, typeInfoCount)
 		local typeInfoToMatch = typeInfos[typeInfoIndex]
 
-		if typeInfoToMatch.tag == !(typeTags.TypeInfoVararg) then
-			typeInfoToMatch = typeInfoToMatch.itemType
-		end
-
 		-- Function call (0..inf values).
 		if valueTypeInfo.tag == !(typeTags.TypeInfoList) then
 			local listSig         = valueTypeInfo
@@ -1261,16 +1256,7 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 				typeError(state, valueExpr, "Function call returns nothing. (Expected at least one value.)") -- Note: "Nothing" is not the same as vararg of zero length.
 			end
 
-			if valueTypeInfo.tag == !(typeTags.TypeInfoVararg) then
-				local varargSig = valueTypeInfo
-				valueTypeInfo   = varargSig.itemType
-			end
-
-			if valueTypeInfo == typeInfoToMatch then
-				-- void
-			elseif isTypeCompatibleWith(valueTypeInfo, typeInfoToMatch) then
-				-- @Incomplete: Add cast.
-			else
+			if not isTypeCompatibleWith(adjustTypeToOne(state, valueTypeInfo), adjustTypeToOne(state, typeInfoToMatch)) then
 				-- @UX: Tell the name of the call/return argument. (For calls, probably only possible for constants, and maybe not all. Not sure! Returns just depend on the output arguments being named.)
 				-- @UX: Tell the name of the value call's argument. (Probably only possible for constants, and maybe not all. Not sure!)
 				typeError(
@@ -1279,33 +1265,21 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 					callOrReturnNode.nodeType == !(nodeTypes.AstCall) and "argument" or "return value",
 					slot,
 					callOutArgIndex,
-					getFriendlyTypeInfoName(typeInfoToMatch),
-					getFriendlyTypeInfoName(valueTypeInfo)
+					getFriendlyTypeInfoName(adjustTypeToOne(state, typeInfoToMatch)),
+					getFriendlyTypeInfoName(adjustTypeToOne(state, valueTypeInfo))
 				)
 			end
 
-		else
-			-- Vararg (0..inf values).
-			if valueTypeInfo.tag == !(typeTags.TypeInfoVararg) then
-				local varargSig = valueTypeInfo
-				valueTypeInfo   = varargSig.itemType
-			end
-
-			-- Other (1 value).
-			if valueTypeInfo == typeInfoToMatch then
-				-- void
-			elseif isTypeCompatibleWith(valueTypeInfo, typeInfoToMatch) then
-				-- @Incomplete: Add cast. (Can we do that for vararg?)
-			else
-				typeError(
-					state, astGetExpressionVisuallyFurthestToTheLeft(valueExpr),
-					"Type mismatch for %s #%d. (Wanted %s, got %s)",
-					callOrReturnNode.nodeType == !(nodeTypes.AstCall) and "argument" or "return value",
-					slot,
-					getFriendlyTypeInfoName(typeInfoToMatch),
-					getFriendlyTypeInfoName(valueTypeInfo)
-				)
-			end
+		-- Vararg (0..inf values) or other (1 value).
+		elseif not isTypeCompatibleWith(adjustTypeToOne(state, valueTypeInfo), adjustTypeToOne(state, typeInfoToMatch)) then
+			typeError(
+				state, astGetExpressionVisuallyFurthestToTheLeft(valueExpr),
+				"Type mismatch for %s #%d. (Wanted %s, got %s)",
+				callOrReturnNode.nodeType == !(nodeTypes.AstCall) and "argument" or "return value",
+				slot,
+				getFriendlyTypeInfoName(adjustTypeToOne(state, typeInfoToMatch)),
+				getFriendlyTypeInfoName(adjustTypeToOne(state, valueTypeInfo))
+			)
 		end
 	end
 end
@@ -1468,9 +1442,10 @@ end
 		!DEPEND_AND_RETURN(`unary`, DEPEND_NODE_INFERRED, `unary.expression`)
 	end
 
-	local typeInfo = unary.expression.inferredType
+	local typeInfo = adjustTypeToOne(state, unary.expression.inferredType, true)
 
 	if isAny(unary.operation, "+","-") then
+		-- @Incomplete: Allow int|float compound type here (or disallow declarations of that specific compound type).
 		if not isAny(typeInfo.tag, !(typeTags.TypeInfoInt),!(typeTags.TypeInfoFloat)) then
 			typeError(
 				state, unary.expression,
@@ -1548,18 +1523,16 @@ end
 	-- astPrintTree(unary.parent)
 end
 
-local function isArrayItemOrTableFieldCheck(state, binary)
+local function isArrayItemOrTableFieldCheck(state, binary, typeInfoL, typeInfoR)
 	-- Detect situations like these: myArray[i]==nil or myTable[k]==nil
 
-	if not isAny(binary.operation, "==","~=") then  return false  end
+	local maybeLookup = binary.left
+	local nilExpr     = binary.right
 
-	local maybeLookup  = binary.left
-	local maybeNilExpr = binary.right
-
-	if maybeNilExpr.inferredType.tag == !(typeTags.TypeInfoNil) then
+	if nilExpr.inferredType.tag == !(typeTags.TypeInfoNil) then
 		-- void
 	elseif maybeLookup.inferredType.tag == !(typeTags.TypeInfoNil) then
-		maybeNilExpr, maybeLookup = maybeLookup, maybeNilExpr
+		nilExpr, maybeLookup = maybeLookup, nilExpr
 	else
 		return false
 	end
@@ -1568,6 +1541,44 @@ local function isArrayItemOrTableFieldCheck(state, binary)
 	if not isAny(maybeLookup.object.inferredType.tag, !(typeTags.TypeInfoArray),!(typeTags.TypeInfoTable)) then  return false  end
 
 	return true
+end
+
+local function isCompoundCompare(state, binary, typeInfoL, typeInfoR)
+	-- Detect situations like these: local v:int|string = 0 ; if v == ""
+
+	local compound    = typeInfoL
+	local otherType   = typeInfoR
+
+	local lIsCompound = (compound.tag  == !(typeTags.TypeInfoCompound))
+	local rIsCompound = (otherType.tag == !(typeTags.TypeInfoCompound))
+
+	if lIsCompound and rIsCompound then
+		-- The compound types must be the same for a theoretical test here to pass
+		-- since both compounds must contain all of the other one's types, but we
+		-- should already have checked for that and thus shouldn't be here. So, we
+		-- simply say they are incompatible right away.
+		return false
+	elseif lIsCompound then
+		-- void
+	elseif rIsCompound then
+		compound, otherType = otherType, compound
+	else
+		return false
+	end
+
+	return indexOf(compound, otherType) ~= nil -- We don't use isTypeCompatibleWith() here - the compound must contain exactly otherType!
+end
+
+local function isValidEqualityCheck(state, binary, typeInfoL, typeInfoR)
+	if not isAny(binary.operation, "==","~=") then  return false  end
+
+	if typeInfoL.tag == !(typeTags.TypeInfoAny) then  return true  end
+	if typeInfoR.tag == !(typeTags.TypeInfoAny) then  return true  end
+
+	if isArrayItemOrTableFieldCheck(state, binary, typeInfoL, typeInfoR) then  return true  end
+	if isCompoundCompare           (state, binary, typeInfoL, typeInfoR) then  return true  end
+
+	return false
 end
 
 !NODE_INFERRER `function nodeInferrers.AstBinary(state, binary)`
@@ -1581,32 +1592,17 @@ end
 		!DEPEND_AND_RETURN(`binary`, DEPEND_NODE_INFERRED, `binary.right`)
 	end
 
-	-- @Cleanup: We do this stuff in a lot of places!
-	do
-		if typeInfoL.tag == !(typeTags.TypeInfoList) then
-			local listSig = typeInfoL
-			typeInfoL     = listSig[1]
-			if not typeInfoL then  typeError(state, binary.left, "Function call returns nothing. (Expected at least one value.)")  end
-		end
-		if typeInfoL.tag == !(typeTags.TypeInfoVararg) then
-			local vararg = typeInfoL
-			typeInfoL    = vararg.itemType
-		end
-
-		if typeInfoR.tag == !(typeTags.TypeInfoList) then
-			local listSig = typeInfoR
-			typeInfoR     = listSig[1]
-			if not typeInfoR then  typeError(state, binary.right, "Function call returns nothing. (Expected at least one value.)")  end
-		end
-		if typeInfoR.tag == !(typeTags.TypeInfoVararg) then
-			local vararg = typeInfoR
-			typeInfoR    = vararg.itemType
-		end
+	if typeInfoL.tag == !(typeTags.TypeInfoList) and not typeInfoL[1] then
+		typeError(state, binary.left, "Function call returns nothing. (Expected at least one value.)")
+	end
+	if typeInfoR.tag == !(typeTags.TypeInfoList) and not typeInfoR[1] then
+		typeError(state, binary.right, "Function call returns nothing. (Expected at least one value.)")
 	end
 
-	-- @Incomplete: Use isTypeCompatibleWith(). For now, both sides need to be
-	-- the same exact type. (Or maybe we shouldn't for binary operations?)
-	if typeInfoL ~= typeInfoR and not isArrayItemOrTableFieldCheck(state, binary) then
+	typeInfoL = adjustTypeToOne(state, typeInfoL, true)
+	typeInfoR = adjustTypeToOne(state, typeInfoR, true)
+
+	if not (typeInfoL == typeInfoR or isValidEqualityCheck(state, binary, typeInfoL, typeInfoR)) then
 		typeError(
 			state, binary,
 			"Binary operation (%s): Type mismatch for operands. (Left is %s, right is %s)",
@@ -1707,7 +1703,7 @@ end
 	elseif binary.operation == "//" then
 		local literal        = astNewNode(AstLiteral, binary.token, binary.parent)
 		literal.literalType  = !(LITERAL_INTEGER)
-		literal.value        = math.floor(valueL/valueR) -- @Robustness: Do we need to floor valueL and valueR before the division too?
+		literal.value        = math.modf(valueL/valueR) -- @Robustness: Do we need to floor valueL and valueR before the division too?
 		literal.inferredType = typeInfo
 		replaceQueuedNodeAndUnqueueOldTree(state, binary, literal)
 		moveToPipe(state, literal, !(PIPE_BYTECODE))
@@ -2024,6 +2020,7 @@ end
 
 	if typeInfoExpected.tag == !(typeTags.TypeInfoTable) then
 		-- @Incomplete: Check for duplicate fields (among constant keys).
+		-- @Incomplete: Check for nil keys.
 		tableNode.inferredType = typeInfoExpected
 
 	elseif typeInfoExpected.tag == !(typeTags.TypeInfoArray) then
@@ -2058,16 +2055,12 @@ end
 			indexLiterals[arrayIndex] = literal
 			highestLiteralIndex       = math.max(highestLiteralIndex, arrayIndex)
 
-			if tableField.value.inferredType == arraySig.itemType then
-				-- void
-			elseif isTypeCompatibleWith(tableField.value.inferredType, arraySig.itemType) then
-				-- @Incomplete: Add cast.
-			else
+			if not isTypeCompatibleWith(adjustTypeToOne(state, tableField.value.inferredType, true), arraySig.itemType) then
 				typeError(
 					state, astGetExpressionVisuallyFurthestToTheLeft(tableField.value),
 					"Array item type mismatch. (Wanted %s, got %s)",
 					getFriendlyTypeInfoName(arraySig.itemType),
-					getFriendlyTypeInfoName(tableField.value.inferredType)
+					getFriendlyTypeInfoName(adjustTypeToOne(state, tableField.value.inferredType, true))
 				)
 			end
 		end
@@ -2120,11 +2113,7 @@ end
 				)
 			end
 
-			if tableField.value.inferredType == member.typeInfo then
-				-- void
-			elseif isTypeCompatibleWith(tableField.value.inferredType, member.typeInfo) then
-				-- @Incomplete: Add cast.
-			else
+			if not isTypeCompatibleWith(adjustTypeToOne(state, tableField.value.inferredType, true), member.typeInfo) then
 				typeError(
 					state, astGetExpressionVisuallyFurthestToTheLeft(tableField.value),
 					"Type mismatch for struct field '%s'. (Wanted %s, got %s)",
@@ -2186,14 +2175,20 @@ end
 end
 
 !NODE_INFERRER `function nodeInferrers.AstTypeOf(state, typeOf)`
-	if not typeOf.expression.inferredType then
+	-- @Robustness: Check that the expression doesn't have code that looks like it's going to be executed, because it's not!
+
+	local exprTypeInfo = typeOf.expression.inferredType
+
+	if not exprTypeInfo then
 		!DEPEND_AND_RETURN(`typeOf`, DEPEND_NODE_INFERRED, `typeOf.expression`)
-	elseif typeOf.expression.inferredType.tag == !(typeTags.TypeInfoNamespace) then
+	elseif exprTypeInfo.tag == !(typeTags.TypeInfoNamespace) then
 		typeError(state, typeOf.expression, "Namespaces don't have a type.")
+	elseif exprTypeInfo.tag == !(typeTags.TypeInfoList) then
+		typeError(state, astGetExpressionVisuallyFurthestToTheLeft(typeOf.expression), "Cannot get the type of function calls.")
 	end
 
 	typeOf.inferredType    = getTypeInfoForBuiltinType(state, "type")
-	typeOf.representedType = typeOf.expression.inferredType
+	typeOf.representedType = exprTypeInfo
 
 	if typeOf.representedType.tag == !(typeTags.TypeInfoVararg) then
 		local varargSig        = typeOf.representedType
@@ -2207,6 +2202,15 @@ end
 !NODE_INFERRER `function nodeInferrers.AstCast(state, cast)`
 	-- Note: For convenience, cast.targetType may be nil here for generated casts. cast.inferredType must be set in those cases.
 
+	!local INVALID_CAST = `
+		typeError(
+			state, astGetExpressionVisuallyFurthestToTheLeft(cast.expression),
+			"Cannot cast from %s to %s.",
+			getFriendlyTypeInfoName(exprTypeInfo),
+			getFriendlyTypeInfoName(castTypeInfo)
+		)
+	`
+
 	if cast.targetType and not cast.targetType.inferredType then
 		!DEPEND_AND_RETURN(`cast`, DEPEND_NODE_INFERRED, `cast.targetType`)
 	end
@@ -2215,16 +2219,7 @@ end
 	end
 
 	local castTypeInfo = cast.inferredType or getTypeRepresentedByExpression(cast.targetType) or errorInternal()
-	local exprTypeInfo = cast.expression.inferredType
-
-	if exprTypeInfo.tag == !(typeTags.TypeInfoList) then
-		local listSig = exprTypeInfo
-		exprTypeInfo  = listSig[1]
-	end
-	if exprTypeInfo.tag == !(typeTags.TypeInfoVararg) then
-		local varargSig = exprTypeInfo
-		exprTypeInfo    = varargSig.itemType
-	end
+	local exprTypeInfo = adjustTypeToOne(state, cast.expression.inferredType, true)
 
 	if castTypeInfo == exprTypeInfo then
 		cutOutPartOfNodeTree(state, cast, cast.expression)
@@ -2250,24 +2245,18 @@ end
 		-- We need two casts to happen in sequence here so we wrap ourselves in another cast.
 		local wrappingCast        = astNewNode(AstCast, cast.token, cast.parent)
 		wrappingCast.inferredType = exprTypeInfo.memberTypeInfo
-		pokeAndQueueUnqueuedNodeIntoTree(state, cast, wrappingCast, wrappingCast, "expression", !(PIPE_INFER))
+		pokeAndQueueUnqueuedNodeIntoTree(state, cast, wrappingCast, wrappingCast, "expression", !(PIPE_DONE))
 
-	elseif castTypeInfo.tag == !(typeTags.TypeInfoCompound) then
-		typeError(state, (cast.targetType or cast), "@Incomplete: Handle casting to compound type.")
-
-	elseif exprTypeInfo.tag == !(typeTags.TypeInfoCompound) then
-		typeError(state, astGetExpressionVisuallyFurthestToTheLeft(cast.expression), "@Incomplete: Handle casting from compound type.")
-
-	elseif isTypeBuiltin(castTypeInfo) or isTypeBuiltin(exprTypeInfo) then
-		typeError(
-			state, astGetExpressionVisuallyFurthestToTheLeft(cast.expression),
-			"Cannot cast from %s to %s.",
-			getFriendlyTypeInfoName(exprTypeInfo),
-			getFriendlyTypeInfoName(castTypeInfo)
-		)
+	elseif castTypeInfo.tag ~= !(typeTags.TypeInfoCompound) and exprTypeInfo.tag == !(typeTags.TypeInfoCompound) then
+		-- We get here for situations like these: local xMaybe:int|nil = 0 ; local x = cast(int) xMaybe
+		-- The user better know what they're doing!
+		local compound = exprTypeInfo
+		if not indexOf(compound, castTypeInfo) then
+			!!(INVALID_CAST)
+		end
 
 	else
-		errorUnhandledNodeType(state, cast)
+		!!(INVALID_CAST)
 	end
 
 	cast.inferredType = castTypeInfo
@@ -2618,29 +2607,20 @@ end
 			local stateExpr, stateTypeInfo = getAssignmentValue(state, forLoop, values, 2, nil, "loop value")
 			local initExpr,  initTypeInfo  = getAssignmentValue(state, forLoop, values, 3, nil, "loop value")
 
-			if stateTypeInfo == iterTypeInfo.argumentTypesIn[1] then
-				-- void
-			elseif isTypeCompatibleWith(stateTypeInfo, iterTypeInfo.argumentTypesIn[1]) then
-				-- @Incomplete: Add cast.
-			else
+			if not isTypeCompatibleWith(adjustTypeToOne(state, stateTypeInfo, true), iterTypeInfo.argumentTypesIn[1]) then
 				typeError(
 					state, stateExpr,
 					"Type mismatch for iterator state (value #2). (Wanted %s, got %s)",
 					getFriendlyTypeInfoName(iterTypeInfo.argumentTypesIn[1]),
-					getFriendlyTypeInfoName(stateTypeInfo)
+					getFriendlyTypeInfoName(adjustTypeToOne(state, stateTypeInfo, true))
 				)
 			end
-
-			if initTypeInfo == iterTypeInfo.argumentTypesIn[2] then
-				-- void
-			elseif isTypeCompatibleWith(initTypeInfo, iterTypeInfo.argumentTypesIn[2]) then
-				-- @Incomplete: Add cast.
-			else
+			if not isTypeCompatibleWith(adjustTypeToOne(state, initTypeInfo, true), iterTypeInfo.argumentTypesIn[2]) then
 				typeError(
 					state, initExpr,
 					"Type mismatch for initial control value (value #3). (Wanted %s, got %s)",
 					getFriendlyTypeInfoName(iterTypeInfo.argumentTypesIn[2]),
-					getFriendlyTypeInfoName(initTypeInfo)
+					getFriendlyTypeInfoName(adjustTypeToOne(state, initTypeInfo, true))
 				)
 			end
 
@@ -2650,7 +2630,7 @@ end
 				if i > 1 or typeInfo.tag == !(typeTags.TypeInfoAny) then
 					-- void
 
-				-- Strip nil from the compound type for the first value (unless it's any).
+				-- Strip nil from the compound type for the first value (unless it's 'any').
 				elseif #typeInfo > 2 then
 					local typeInfos = {unpack(typeInfo)}
 					removeItem(typeInfos, getTypeInfoForBuiltinType(state, "nil"))
@@ -2741,11 +2721,7 @@ end
 	for i, decl in ipairs(enum.declarations) do
 		local valueExpr = decl.assignment.values[1]
 
-		if valueExpr.inferredType == enumMemberInfo then
-			-- void
-		elseif isTypeCompatibleWith(valueExpr.inferredType, enumMemberInfo) then
-			-- @Incomplete: Add cast.
-		else
+		if not isTypeCompatibleWith(valueExpr.inferredType, enumMemberInfo) then
 			typeError(state, valueExpr,
 				"Value type mismatch for '%s'. (Wanted %s, got %s)",
 				decl.name.name,
@@ -2844,7 +2820,7 @@ function _G.getLiteralValueFromExpressionIfConstant(state, expr)
 		if not isConst then  return false, nil  end
 
 		if cast.inferredType.tag == !(typeTags.TypeInfoInt) then
-			return true, math.floor(v)
+			return true, (math.modf(v))
 		elseif cast.inferredType.tag == !(typeTags.TypeInfoFloat) then
 			return true, v
 		elseif cast.inferredType.tag == !(typeTags.TypeInfoType) then
@@ -2883,6 +2859,9 @@ function _G.getLiteralValueFromExpressionIfConstant(state, expr)
 		return true, nil
 		]]
 
+	elseif expr.nodeType == !(nodeTypes.AstVararg) then
+		return false
+
 	else
 		errorUnhandledNodeType(state, expr)
 	end
@@ -2899,11 +2878,11 @@ function _G.getAssignmentValue(state, targetExpr, values, i, typeInfoExpected, t
 	-- This function could use some @Cleanup!
 
 	!local TARGET_NAME = F(
-		[[(
+		([[(
 			targetExpr.nodeType == %d and " ('"..targetExpr.name.."')" or
 			targetExpr.nodeType == %d and targetExpr.member.nodeType == %d and targetExpr.member.literalType == %d and " ('"..targetExpr.member.value.."')" or
 			""
-		)]],
+		)]]):gsub("%s%s+", " "),
 		nodeTypes.AstIdentifier,
 		nodeTypes.AstLookup,
 		nodeTypes.AstLiteral,
@@ -2920,7 +2899,8 @@ function _G.getAssignmentValue(state, targetExpr, values, i, typeInfoExpected, t
 			(valueExpr.nodeType == !(nodeTypes.AstVararg) and not valueExpr.surroundedByParenthesis)
 		)
 	then
-		local valueTypeInfo = valueExpr.inferredType
+		local valueTypeInfoToReturn = valueExpr.inferredType
+		local valueTypeInfo         = valueTypeInfoToReturn
 
 		if valueTypeInfo.tag == !(typeTags.TypeInfoVararg) then
 			valueTypeInfo = valueTypeInfo.itemType
@@ -2964,7 +2944,7 @@ function _G.getAssignmentValue(state, targetExpr, values, i, typeInfoExpected, t
 			end
 		end
 
-		return valueExpr, valueTypeInfo
+		return valueExpr, valueTypeInfoToReturn
 	end
 
 	-- Vararg.
@@ -2975,7 +2955,7 @@ function _G.getAssignmentValue(state, targetExpr, values, i, typeInfoExpected, t
 			typeError(state, targetExpr, "Missing a value for %s #%d%s.", targetTerm, i, !!(TARGET_NAME))
 		end
 
-		return vararg, vararg.inferredType.itemType
+		return vararg, vararg.inferredType
 	end
 
 	-- Value list ending in a call (hopefully).
@@ -3018,20 +2998,20 @@ function _G.getAssignmentValue(state, targetExpr, values, i, typeInfoExpected, t
 		typeError(state, call, "Function does not return anything for %s #%d%s (return value #%d).", targetTerm, i, !!(TARGET_NAME), argIndex)
 	end
 
-	if typeInfoForOutArg.tag == !(typeTags.TypeInfoVararg) then
-		local varargSig   = listSig[#listSig]
-		typeInfoForOutArg = varargSig.itemType
-	end
+	-- if typeInfoForOutArg.tag == !(typeTags.TypeInfoVararg) then
+	-- 	local varargSig   = typeInfoForOutArg
+	-- 	typeInfoForOutArg = varargSig.itemType
+	-- end
 
-	if typeInfoExpected and typeInfoForOutArg ~= typeInfoExpected then
+	if typeInfoExpected and not isTypeCompatibleWith(adjustTypeToOne(state, typeInfoForOutArg, true), typeInfoExpected) then
 		local calleeName = (call.callee.nodeType == !(nodeTypes.AstIdentifier) and " of '"..call.callee.name.."'" or "")
 		typeError(
 			state, call,
 			"The type of return value #%d%s (%s) does not match the type of %s #%d%s (%s).",
-			targetTerm,
 			argIndex,
 			calleeName,
-			getFriendlyTypeInfoName(typeInfoForOutArg),
+			getFriendlyTypeInfoName(adjustTypeToOne(state, typeInfoForOutArg, true)),
+			targetTerm,
 			i,
 			!!(TARGET_NAME),
 			getFriendlyTypeInfoName(typeInfoExpected)
@@ -3197,7 +3177,7 @@ function _G.simplifyExpressionIfConstant(state, expr)
 			assert(type(v) == "number")
 			local literal        = astNewNode(AstLiteral, cast.token, cast.parent)
 			literal.literalType  = !(LITERAL_INTEGER)
-			literal.value        = math.floor(v)
+			literal.value        = math.modf(v)
 			literal.inferredType = typeInfoTarget
 			replaceQueuedNodeAndUnqueueOldTree(state, cast, literal)
 			moveToPipe(state, literal, !(PIPE_BYTECODE))
@@ -3290,26 +3270,50 @@ function _G.isTypeCompatibleWith(typeToCheck, otherType)
 		return true
 	end
 
-	if otherType.tag == !(typeTags.TypeInfoCompound) then
-		local compound = otherType
-		for _, compoundItem in ipairs(compound) do
-			if isTypeCompatibleWith(typeToCheck, compoundItem) then  return true  end
+	if typeToCheck.tag == !(typeTags.TypeInfoCompound) then
+		-- All compound items has to match the target. (If only one item matches, an explicit cast is needed.)
+		local compoundToCheck = typeToCheck
+		for _, compoundItemToCheck in ipairs(compoundToCheck) do
+			if not isTypeCompatibleWith(compoundItemToCheck, otherType) then  return false  end
 		end
+		return true
 	end
 
-	-- @Incomplete: Handle typeToCheck being a compound type.
+	if otherType.tag == !(typeTags.TypeInfoCompound) then
+		-- typeToCheck has to match at least one compound item.
+		local otherCompound = otherType
+		for _, otherCompoundItem in ipairs(otherCompound) do
+			if isTypeCompatibleWith(typeToCheck, otherCompoundItem) then  return true  end
+		end
+		return false
+	end
 
 	return false
 end
 
+-- singleTypeInfo = adjustTypeToOne( state, typeInfo [, forValueUsage=false ] )
+function _G.adjustTypeToOne(state, typeInfo, forValueUsage)
+	if typeInfo.tag == !(typeTags.TypeInfoList) then
+		typeInfo = typeInfo[1]
+	end
 
+	if typeInfo.tag == !(typeTags.TypeInfoVararg) then
+		typeInfo = typeInfo.itemType
+
+		if forValueUsage then
+			typeInfo = adjustVarargItemTypeToOneForValueUsage(state, typeInfo)
+		end
+	end
+
+	return typeInfo
+end
 
 do
 	local function compareIdsOfTypes(a, b)
 		return a.id < b.id
 	end
 
-	function _G.normalizeVarargItemType(state, itemType)
+	function _G.adjustVarargItemTypeToOneForValueUsage(state, itemType)
 		if isAny(itemType.tag, !(typeTags.TypeInfoNil),!(typeTags.TypeInfoAny)) then
 			return itemType
 		end

@@ -94,6 +94,8 @@ local testTable :: () {
 local testDeclarations :: () {
 	-- local bad :: 0
 	-- bad = 5 -- Assignment target is constant. @UX: Better error message.
+
+	-- local bad = type_of(testDeclarations()) -- Cannot get the type of function calls.
 }
 --]]
 
@@ -299,8 +301,8 @@ local testEnumLookups :: () {
 	local floatFromEnum2 : float = cast(int)   IntEnum.ONE -- Implicit cast from int to float.
 
 	-- @Incomplete: Handle implicit casts everywhere.
-	-- local FloatEnum :: enum float { ONE::1 }
-	-- local __X__ = cast(int) FloatEnum.ONE
+	-- local FloatEnum :: enum float { ONE::1 } -- 1 should get to float here.
+	-- local one = cast(int) FloatEnum.ONE
 }
 
 --====== Things that should result in an error. ======--
@@ -423,6 +425,10 @@ local operationErrors :: () {
 	-- local Struct :: struct {BAD::"bad"}
 	-- local obj:Struct
 	-- obj[obj.BAD] = "foo" -- Not a member.
+
+	-- local x     :    int|nil = 0 !shadow
+	-- local dummy : string|nil = ""
+	-- local bad = cast(type_of(dummy)) x -- Cannot cast from int|nil to string|nil.
 }
 --]]
 
@@ -603,16 +609,29 @@ local testLists :: () {
 		local c1, c2 = 1, (...)
 		local d1, d2 = ..., 2
 		local e1, e2 = (...), 2
-		local typeOfVararg = type_of(...) -- Should be int|nil.
+		local typeOfVararg = type_of(...) -- Should be int.
+		if ... == nil {}
 		return ...
 	}
 	local x, y = takeAndReturnVararg(1, 2, 3)
-	local typeOfX :: type_of(x) -- Should be int|nil.
-	local typeOfY :: type_of(y) -- Should be int|nil.
+	local typeOfX :: type_of(x) -- Value should be int|nil.
+	local typeOfY :: type_of(y) -- Value should be int|nil.
 	local takeOneIntMaybe :: (x:int|nil) {}
 	takeOneIntMaybe(x)
 	takeOneIntMaybe(y)
-	takeAndReturnVararg(x, y, x, y)
+	if x ~= nil and y ~= nil {
+		local dummy1 :        int|nil = 0
+		local dummy2 : string|int|nil = ""
+		local x1 = cast(type_of(dummy1)) x
+		local y1 = cast(type_of(dummy2)) y
+		local x2 = cast(int) x
+		local y2 = cast(int) y
+		takeAndReturnVararg(x2, y2, x2, y2)
+	}
+
+	-- @Incomplete: Make this work (or disallow this specific compound type).
+	-- local negateNumber : int|float = 0
+	-- negateNumber = -negateNumber
 }
 
 --====== Things that should result in an error. ======--
@@ -648,6 +667,14 @@ local listErrors :: () {
 	-- }
 
 	-- local x : int|any = 0 -- Cannot include 'any' in compound types. That's useless as 'any' is essentially a compound type that includes all other types!
+
+	-- local func :: (...:int) {
+	-- 	local bad = -... -- Vararg value can be nil.
+	-- }
+
+	-- local func :: (...:int) {
+	-- 	local bad = ...+1 -- Vararg value can be nil.
+	-- }
 }
 
 local callVsReturnErrors :: () -> bool, int, string {

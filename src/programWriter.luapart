@@ -89,7 +89,15 @@ function _G.writeCast(state, file, cast)
 	local typeInfoSource = cast.expression.inferredType
 	local typeInfoTarget = cast.inferredType
 
-	if typeInfoSource == typeInfoTarget then
+	file:write("(") -- In case the written expression is a list of some kind.
+
+	if
+		typeInfoSource == typeInfoTarget
+		or typeInfoSource.tag == !(typeTags.TypeInfoCompound)
+		or typeInfoTarget.tag == !(typeTags.TypeInfoCompound)
+		or typeInfoSource.tag == !(typeTags.TypeInfoVararg)
+		or typeInfoTarget.tag == !(typeTags.TypeInfoVararg)
+	then
 		writeExpression(state, file, cast.expression)
 
 	-- int -> float
@@ -98,7 +106,7 @@ function _G.writeCast(state, file, cast)
 
 	-- float -> int
 	elseif typeInfoSource.tag == !(typeTags.TypeInfoFloat) and typeInfoTarget.tag == !(typeTags.TypeInfoInt) then
-		file:write("math.floor(")
+		file:write("math.modf(") -- @Robustness: Store 'math' module in a local. Maybe automatically add a foreign import?
 		writeExpression(state, file, cast.expression)
 		file:write(")")
 
@@ -112,6 +120,8 @@ function _G.writeCast(state, file, cast)
 	else
 		errorInternal("@Incomplete: Handle casting from %s to %s.", getFriendlyTypeInfoName(typeInfoSource), getFriendlyTypeInfoName(typeInfoTarget))
 	end
+
+	file:write(")")
 end
 
 function _G.writeTableConstructorKeyName(file, name)
