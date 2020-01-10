@@ -96,7 +96,7 @@ function pp.metaEnvironment.trimTemplate(lua)
 	return (lua:gsub("%s+", " "):gsub("^ ", ""):gsub(" $", ""))
 end
 function pp.metaEnvironment.templateToLua(template, values)
-	return (template:gsub("$(%w+)", values))
+	return (template:gsub("$(%a%w*)", values))
 end
 
 function pp.metaEnvironment.outputCommaSeparatedValues(...)
