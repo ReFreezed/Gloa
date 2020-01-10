@@ -12,7 +12,7 @@
 	addDependency
 	addToQueue, addToQueueRecursively, pokeAndQueueUnqueuedNodeIntoTree, unqueueChildrenRecursively, replaceQueuedNode, replaceQueuedNodeAndUnqueueOldTree, cutOutPartOfNodeTree
 	errorPipesAreStuck
-	moveToPipe, moveToNextPipe, moveTreeToNextPipe
+	moveToPipe, moveToNextPipe, moveTreeToNextPipe, moveToNextRelevantPipe, moveTreeToNextRelevantPipe
 
 --============================================================]]
 
@@ -266,6 +266,36 @@ end
 function _G.moveTreeToNextPipe(state, topNode, targetPipe)
 	astVisitAllNodes(topNode, function(node)
 		moveToNextPipe(state, node, targetPipe)
+	end)
+end
+
+function _G.moveToNextRelevantPipe(state, node)
+	local pipe = node.queued.pipe
+
+	if pipe == !(PIPE_INFER) then
+		if isAny(node.nodeType, !(nodeTypes.AstLiteral),!(nodeTypes.AstLambda),!(nodeTypes.AstDeclaration),!(nodeTypes.AstLookup),!(nodeTypes.AstForeign)) then
+			moveToNextPipe(state, node, !(PIPE_BYTECODE))
+		else
+			moveToPipe(state, node, !(PIPE_DONE))
+		end
+
+	elseif pipe == !(PIPE_BYTECODE) then
+		moveToNextPipe(state, node, !(PIPE_DONE))
+
+	elseif pipe == !(PIPE_DONE) then
+		printerr("Warning: Trying to move nodes past PIPE_DONE!")
+
+	else
+		errorInternal()
+	end
+end
+
+function _G.moveTreeToNextRelevantPipe(state, topNode)
+	local currentPipe = topNode.queued.pipe
+
+	astVisitAllNodes(topNode, function(node)
+		assert(node.queued.pipe == currentPipe, currentPipe.." "..node.queued.pipe)
+		moveToNextRelevantPipe(state, node)
 	end)
 end
 

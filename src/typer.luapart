@@ -1394,8 +1394,18 @@ end
 			if isExpressionConstant(state, valueExpr) then
 				-- void
 
+			elseif valueExpr.nodeType == !(nodeTypes.AstForeign) then
+				-- void
+				-- We usually treat foreign values as runtime values. The only exception is when
+				-- it's placed directly on a declaration. (Can this be solved in a better way?)
+				-- :SpecialForeignValueRules
+
 			elseif valueExpr.nodeType == !(nodeTypes.AstTable) then -- @Temp
 				typeError(state, valueExpr, "Constant array/table/struct initializers are not supported yet in the language!") -- :ConstantTableConstructors
+
+			elseif astFindInTree(valueExpr, !(nodeTypes.AstForeign)) then
+				local foreign = astFindInTree(valueExpr, !(nodeTypes.AstForeign))
+				typeError(state, foreign, "Cannot evaluate foreign values during compile time.")
 
 			else
 				-- @UX: If the expression is/contains a table with a non-constant field, point out which field key or value!
@@ -1822,7 +1832,7 @@ end
 	end
 
 	-- @Cleanup @Robustness: The way we move things in pipes (after astCopy() and elsewhere)
-	-- is not very good. Should maybe define moveToNextRelevantPipe(state, node).
+	-- is not very good. Use moveToNextRelevantPipe()!
 
 	if typeInfoObject.tag == !(typeTags.TypeInfoStruct) or (typeInfoRepresented and typeInfoRepresented.tag == !(typeTags.TypeInfoStruct)) then
 		local memberLiteral = lookup.member
@@ -2789,7 +2799,9 @@ function _G.getLiteralValueFromExpressionIfConstant(state, expr)
 		return false, nil
 
 	elseif expr.nodeType == !(nodeTypes.AstForeign) then
-		return true, nil
+		-- Technically foreign values are constant at runtime, but since we don't know
+		-- what they are at compile-time we (usually) treat them as runtime values.
+		return false, nil
 
 	else
 		errorUnhandledNodeType(state, expr)
@@ -3026,7 +3038,22 @@ function _G.simplifyTypeExpression(state, expr, typeInfoRepresented)
 end
 
 function _G.simplifyExpressionIfConstant(state, expr)
-	if not isExpressionConstant(state, expr) then  return  end
+	if not isExpressionConstant(state, expr) then
+		if
+			-- :SpecialForeignValueRules
+			expr.nodeType == !(nodeTypes.AstIdentifier)
+			and expr.declaration.isConstant
+			and expr.declaration.assignment.values[expr.declaration.assignmentIndex].nodeType == !(nodeTypes.AstForeign)
+		then
+			local ident       = expr
+			local foreignCopy = astCopy(ident.declaration.assignment.values[ident.declaration.assignmentIndex], ident.token)
+
+			replaceQueuedNodeAndUnqueueOldTree(state, ident, foreignCopy)
+			moveToPipe(state, foreignCopy, !(PIPE_DONE))
+		end
+
+		return
+	end
 
 	if expr.nodeType == !(nodeTypes.AstIdentifier) then
 		local ident = expr
@@ -3048,15 +3075,21 @@ function _G.simplifyExpressionIfConstant(state, expr)
 		!ASSERT("typeInfo.tag ~= "..typeTags.TypeInfoType)
 		if not isTypeSimple(typeInfo) then  return  end
 
-		-- At this point we should have a literal or foreign import to copy. Hopefully the expression we copy
-		-- has been simplified into a literal if it wasn't a literal or foreign import to begin with.
+		-- At this point we should have a literal to copy. Hopefully the expression we copy
+		-- has been simplified into a literal if it wasn't a literal to begin with.
 		local valueExpr = getAssignmentValue(state, decl.name, decl.assignment.values, decl.assignmentIndex)
-		assert(isAny(valueExpr.nodeType, !(nodeTypes.AstLiteral),!(nodeTypes.AstForeign)))
+		assert(valueExpr.nodeType == !(nodeTypes.AstLiteral))
 
 		local copy = astCopy(valueExpr, ident.token)
 
 		replaceQueuedNodeAndUnqueueOldTree(state, ident, copy)
 		moveToPipe(state, copy, !(PIPE_BYTECODE))
+		--[[ Not needed here:
+		addUnqueuedChildrenToQueueRecursively(state, copy, !(PIPE_INFER))
+		replaceQueuedNodeAndUnqueueOldTree(state, ident, copy)
+		moveToPipe(state, copy, !(PIPE_INFER)) -- Revert any previous move before we call moveTreeToNextRelevantPipe().
+		moveTreeToNextRelevantPipe(state, copy)
+		--]]
 
 	elseif expr.nodeType == !(nodeTypes.AstCast) then
 		local cast       = expr

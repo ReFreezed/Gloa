@@ -10,7 +10,7 @@
 --==============================================================
 
 	astCopy
-	astFindParent, astFindCommonParent, astHasParent
+	astFindParent, astFindCommonParent, astHasParent, astFindInTree
 	astGetDepth
 	astGetExpressionVisuallyFurthestToTheLeft, astGetCalleeVisuallyFurthestToTheLeft
 	astIsOrIsInModule
@@ -2852,6 +2852,22 @@ function _G.astHasParent(node, parent)
 	end
 end
 
+-- node = astFindInTree( topNode, nodeType1, ... )
+-- Note: The returned node may be topNode.
+function _G.astFindInTree(topNode, ...)
+	local nodeTypes    = {...}
+	local nodeToReturn = nil
+
+	astVisitAllNodes(topNode, function(node)
+		if indexOf(nodeTypes, node.nodeType) then
+			nodeToReturn = node
+			return VISIT_BREAK
+		end
+	end)
+
+	return nodeToReturn
+end
+
 
 
 function _G.astIsOrIsInModule(node)
@@ -2965,8 +2981,8 @@ end
 
 
 -- copy = astCopy( node [, token=node.token, parent=node.parent ] )
+-- Note: Copies the whole tree. We also don't touch any queued.
 function _G.astCopy(node, token, parent)
-	-- Note: We don't touch any queued.
 	local copy
 
 	-- @Cleanup: Make preprocessor structs more declarative and better so we can generate this function instead of doing all this stuff manually...
@@ -2992,34 +3008,51 @@ function _G.astCopy(node, token, parent)
 		copy                   = astNewNode(AstType, (token or typeNode.token), (parent or typeNode.parent))
 		copy.isUserType        = typeNode.isUserType
 		copy.typeName          = typeNode.typeName
-		copy.functionSignature = typeNode.functionSignature and astCopy(typeNode.functionSignature)
-		copy.arrayItemType     = typeNode.arrayItemType     and astCopy(typeNode.arrayItemType)
-		copy.arguments         = typeNode.arguments         and astCopyArray(typeNode.arguments)
+		copy.functionSignature = typeNode.functionSignature and astCopy(typeNode.functionSignature, token, copy)
+		copy.arrayItemType     = typeNode.arrayItemType     and astCopy(typeNode.arrayItemType,     token, copy)
+		copy.arguments         = typeNode.arguments         and astCopyArray(typeNode.arguments,    token, copy)
 		copy.inferredType      = typeNode.inferredType
 		copy.representedType   = typeNode.representedType
 		copy.declaration       = typeNode.declaration
 
 	elseif node.nodeType == !(nodeTypes.AstForeign) then
-		local foreign     = node
-		copy              = astNewNode(AstForeign, (token or foreign.token), (parent or foreign.parent))
-		copy.source       = foreign.source
-		copy.sourceName   = foreign.sourceName
-		copy.sourceId     = foreign.sourceId
-		copy.inferredType = foreign.inferredType
+		local foreign      = node
+		copy               = astNewNode(AstForeign, (token or foreign.token), (parent or foreign.parent))
+		copy.source        = foreign.source
+		copy.sourceName    = foreign.sourceName
+		copy.sourceId      = foreign.sourceId
+		copy.inferredType  = foreign.inferredType
+		copy.valueConstant = foreign.valueConstant
+
+	elseif node.nodeType == !(nodeTypes.AstUnary) then
+		local unary       = node
+		copy              = astNewNode(AstUnary, (token or unary.token), (parent or unary.parent))
+		copy.operation    = unary.operation
+		copy.expression   = unary.expression and astCopy(unary.expression, token, copy)
+		copy.inferredType = unary.inferredType
+
+	elseif node.nodeType == !(nodeTypes.AstBinary) then
+		local binary      = node
+		copy              = astNewNode(AstBinary, (token or binary.token), (parent or binary.parent))
+		copy.operation    = binary.operation
+		copy.left         = binary.left  and astCopy(binary.left,  token, copy)
+		copy.right        = binary.right and astCopy(binary.right, token, copy)
+		copy.inferredType = binary.inferredType
 
 	else
-		errorUnhandledNodeType(state, node)
+		errorInternal("Incomplete: Copy '%s' nodes.", AST_NODE_TYPE_NAMES[node.nodeType] or "?")
 	end
 
 	return copy or errorInternal()
 end
 
-function astCopyArray(nodes)
-	local copy = {}
+-- copies = astCopyArray( nodes [, token=sameAsSource, parent=sameAsSource ] )
+function astCopyArray(nodes, token, parent)
+	local copies = {}
 	for i, node in ipairs(nodes) do
-		copy[i] = astCopy(node)
+		copies[i] = astCopy(node, token, parent)
 	end
-	return copy
+	return copies
 end
 
 
