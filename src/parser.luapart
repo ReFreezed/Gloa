@@ -142,7 +142,7 @@ _G.!structAst"AstLiteral:_AstExpression"{
 	literalType = 0,
 	value       = NIL, -- The value depends on what literalType is. Could be a number, string or whatever.
 	-- Bytecode phase:
-	valueConstant,
+	valueConstant = NIL,
 }
 _G.!structAst"AstType:_AstExpression"{
 	isUserType        = false,
@@ -194,6 +194,16 @@ _G.!structAst"AstImport:_AstExpression"{
 	importName = "",
 	-- Type phase:
 	fileScope  = NIL, -- AstFileScope
+}
+_G.!structAst"AstForeign:_AstExpression"{
+	source     = "", -- "lua"
+	sourceName = "", -- May be inferred from declaration.
+
+	-- Type phase:
+	sourceId = "", -- Is source and sourceName combined.
+
+	-- Bytecode phase:
+	valueConstant = NIL,
 }
 
 _G.!structAst"AstUsing:_AstNode"{
@@ -315,7 +325,7 @@ _G.!structAst"AstLambda:_AstScopeExpression"{
 	argumentsOut      = NIL, -- AstArguments
 
 	body              = NIL, -- AstBlock  (If this is nil then the lambda is a function signature. If bodyIsForeign is set then this is a dummy block.)
-	bodyIsForeign     = false,
+	bodyIsForeign     = false, -- @Cleanup: Use AstForeign instead of all this stuff.
 	foreignSource     = "",
 	foreignSourceName = "",
 
@@ -421,6 +431,31 @@ function _G.parseUsing(state, parentNode)
 	!SET_OR_RETURN `using.expression = parseExpression(state, using)`
 
 	return using
+end
+
+function _G.parseForeign(state, parentNode)
+	-- Note: We assume the '!foreign' has been eaten already.
+
+	local foreign = astNewNode(AstForeign, state.nextToken-1, parentNode)
+
+	local tokType, tokValue = eatNextToken(state)
+	if not isToken(tokType,tokValue, !(TOKEN_IDENTIFIER)) then
+		!ERROR_OR_RETURN `errorParsingLast(state, "Expected foreign source. (The only valid value right now is: lua)")`
+	elseif tokValue ~= "lua" then
+		!ERROR_OR_RETURN `errorParsingLast(state, "Invalid source '%s'. (The only valid value right now is: lua)", tokValue)`
+	end
+	foreign.source = tokValue
+
+	tokType, tokValue = peekNextToken(state)
+	if isToken(tokType,tokValue, !(TOKEN_STRING)) then
+		eatNextToken(state)
+		foreign.sourceName = tokValue
+	else
+		-- void  (foreign.sourceName will be the name of whatever declared constant the foreign is attached to.)
+		!ERROR_OR_RETURN `errorParsingAfterLast(state, "@Incomplete: Infer foreign.sourceName")` -- TEMP
+	end
+
+	return foreign
 end
 
 function _G.parseType(state, parentNode)
@@ -2150,10 +2185,14 @@ function _G.parseExpression(state, parentNode, prevOpPrecedence, expectLeftValue
 	-- Struct/enum.
 	elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"struct") then
 		-- eatNextToken(state)
-		!SET_OR_RETURN `expr = parseStruct(state, parentNode)` -- @Cleanup: Make this an AstType node instead.
+		!SET_OR_RETURN `expr = parseStruct(state, parentNode)` -- @Cleanup: Make this an AstType node instead?
 	elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"enum") then
 		-- eatNextToken(state)
-		!SET_OR_RETURN `expr = parseEnum(state, parentNode)` -- @Cleanup: Make this an AstType node instead.
+		!SET_OR_RETURN `expr = parseEnum(state, parentNode)` -- @Cleanup: Make this an AstType node instead?
+
+	-- Foreign value.
+	elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"foreign") then
+		!SET_OR_RETURN `expr = parseForeign(state, parentNode)`
 
 	else
 		!ERROR_OR_RETURN `errorParsingLast(state, "Expected an expression.")`
@@ -2690,6 +2729,11 @@ do
 				write(" (", (import.isLoad and "load " or "import "), import.importName, ")")
 				write("\n")
 
+			elseif node.nodeType == !(nodeTypes.AstForeign) then
+				local foreign = node
+				write(" (", foreign.source, " ", foreign.sourceName, ")")
+				write("\n")
+
 			elseif node.nodeType == !(nodeTypes.AstUsing) then
 				local using = node
 				!!(CHILD_PRINT_START)
@@ -2888,6 +2932,7 @@ do
 		elseif node.nodeType == !(nodeTypes.AstContinue)    then  !visitIfNotNil"node"{"loopName"}
 		elseif node.nodeType == !(nodeTypes.AstDefer)       then  !visitIfNotNil"node"{"body"}
 		elseif node.nodeType == !(nodeTypes.AstImport)      then  -- void
+		elseif node.nodeType == !(nodeTypes.AstForeign)     then  -- void
 		elseif node.nodeType == !(nodeTypes.AstUsing)       then  !visitIfNotNil"node"{"expression"}
 		elseif node.nodeType == !(nodeTypes.AstIf)          then  !visitIfNotNil"node"{"condition","branchTrue","branchFalse"}
 		elseif node.nodeType == !(nodeTypes.AstWhile)       then  !visitIfNotNil"node"{"condition","body"}

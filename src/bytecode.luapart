@@ -192,6 +192,7 @@ local !struct"Constant"{
 
 -- constant, isNew = bcAllocateConstantValueIfNew( state, simpleTypeInfo,    literalValue   )
 -- constant, isNew = bcAllocateConstantValueIfNew( state, functionSignature, lambdaWithBody )
+-- constant, isNew = bcAllocateConstantValueIfNew( state, foreignTypeDummy,  foreign        )
 -- constant, isNew = bcAllocateConstantValueIfNew( state, typeInfo,          value          )
 function _G.bcAllocateConstantValueIfNew(state, typeInfo, v)
 	local tag      = typeInfo.tag
@@ -233,6 +234,9 @@ function _G.bcAllocateConstantValueIfNew(state, typeInfo, v)
 
 		elseif tag == !(typeTags.TypeInfoTable) then
 			errorInternal("Incomplete: Handle tables.") -- @Incomplete: Compare tables (or maybe every table is a unique?).
+
+		elseif tag == !(typeTags.TypeInfoForeignDummy) then
+			if v.sourceId == const.value.sourceId then  return const, false  end
 
 		else
 			errorInternal("Incomplete: Unhandled constant value type '%s'.", (TYPE_TAG_NAMES[tag] or "?"))
@@ -283,8 +287,8 @@ function _G.bcAllocateConstantValueForExpressionIfNew(state, expr, dependent)
 
 	elseif expr.nodeType == !(nodeTypes.AstType) then
 		local typeNode = expr
-		local typeInfo = getTypeInfoForBuiltinType(state, "int")
 		local typeId   = typeNode.representedType.id
+		typeInfo       = getTypeInfoForBuiltinType(state, "int")
 		return bcAllocateConstantValueIfNew(state, typeInfo, typeId) -- Glóa types are represented as ints in Lua.
 
 	elseif expr.nodeType == !(nodeTypes.AstLambda) then
@@ -337,6 +341,11 @@ function _G.bcAllocateConstantValueForExpressionIfNew(state, expr, dependent)
 
 	elseif expr.nodeType == !(nodeTypes.AstCast) then
 		errorInternal() -- Casts of constants should have simplified to something else in the typer.
+
+	elseif expr.nodeType == !(nodeTypes.AstForeign) then
+		local foreign = expr
+		typeInfo      = getTypeInfoForBuiltinType(state, "foreign")
+		return bcAllocateConstantValueIfNew(state, typeInfo, foreign)
 
 	else
 		errorUnhandledNodeType(state, expr)
@@ -508,6 +517,12 @@ function _G.bcEmit(state, node)
 	elseif node.nodeType == !(nodeTypes.AstLookup) then
 		local lookup = node
 		bcEmitForLookup(state, decl)
+
+	elseif node.nodeType == !(nodeTypes.AstForeign) then
+		local foreign         = node
+		local typeInfo        = getTypeInfoForBuiltinType(state, "foreign")
+		foreign.valueConstant = bcAllocateConstantValueIfNew(state, typeInfo, foreign)
+		moveToPipe(state, foreign, !(PIPE_DONE))
 
 	else
 		errorUnhandledNodeType(state, node)

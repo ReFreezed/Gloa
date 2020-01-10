@@ -311,6 +311,10 @@ function _G.writeExpression(state, file, expr)
 
 		file:write("}")
 
+	elseif expr.nodeType == !(nodeTypes.AstForeign) then
+		local foreign = expr
+		writeConstantValueOrReference(state, file, foreign.valueConstant)
+
 	else
 		errorUnhandledNodeType(state, expr)
 	end
@@ -642,6 +646,38 @@ function _G.writeFunction(state, file, lambda)
 	file:write("end")
 end
 
+function _G.writeForeignImportIfNew(state, file, typeInfo, foreignSource, foreignSourceName, foreignSourceId)
+	assert(foreignSourceId ~= "")
+
+	if state.foreignReferences[foreignSourceId] then  return  end
+
+	-- @Incomplete: Compiler setting for runtime checks of anything originating from foreign sources.
+	-- (We can probably wrap foreign the code in something here using typeInfo.)
+
+	local foreignN = state.foreignN+1
+	state.foreignN = foreignN
+
+	if foreignN == 1 then
+		file:write("local _FOREIGN = {}\n")
+	end
+
+	if foreignSource == "lua" then
+		if outputDebugInfo then
+			state.foreignReferences[foreignSourceId] = F("_FOREIGN[%d--[[%s]]]", foreignN, (foreignSourceId:gsub("[%[%]]", "%0 ")))
+			file:write("_FOREIGN[", F("%d", foreignN), "]")
+		else
+			local foreignRef                                = F("_FOREIGN[%d]", foreignN)
+			state.foreignReferences[foreignSourceId] = foreignRef
+			file:write(foreignRef)
+		end
+
+		file:write(" = (", foreignSourceName, ")\n") -- @Robustness: Is this too straightforward?
+
+	else
+		errorInternal("Incomplete: Handle foreignSource=%s", foreignSource)
+	end
+end
+
 function _G.writeConstantValue(state, file, const)
 	local tag = const.valueType.tag
 
@@ -693,6 +729,10 @@ function _G.writeConstantValue(state, file, const)
 	elseif tag == !(typeTags.TypeInfoEnum) then
 		errorInternal("@Incomplete: Write enum.")
 
+	elseif tag == !(typeTags.TypeInfoForeignDummy) then
+		local foreign = const.value
+		file:write(state.foreignReferences[foreign.sourceId])
+
 	elseif isAny(tag, !(typeTags.TypeInfoAny),!(typeTags.TypeInfoNamespace),!(typeTags.TypeInfoVoid),!(typeTags.TypeInfoCompound),!(typeTags.TypeInfoList)) then
 		errorInternal("Cannot write invalid value type '%s'.", TYPE_TAG_NAMES[tag])
 	else
@@ -720,40 +760,13 @@ function _G.writeProgram(state)
 	-- Foreign imports.
 	--
 
-	local foreignN             = 0
-	local declaredForeignTable = false
-
 	for _, const in ipairs(state.constants) do
 		if const.valueType.tag == !(typeTags.TypeInfoFunction) and const.value.bodyIsForeign then
 			local lambda = const.value
-			assert(lambda.foreignSourceId ~= "")
-
-			if not state.foreignReferences[lambda.foreignSourceId] then
-				-- @Incomplete: Compiler setting for runtime checks of anything originating from
-				-- foreign sources. (We can probably wrap foreign functions in something here.)
-
-				if lambda.foreignSource == "lua" then
-					foreignN = foreignN+1
-
-					if foreignN == 1 then
-						file:write("local _FOREIGN = {}\n")
-					end
-
-					if outputDebugInfo then
-						state.foreignReferences[lambda.foreignSourceId] = F("_FOREIGN[%d--[[%s]]]", foreignN, (lambda.foreignSourceId:gsub("[%[%]]", "%0 ")))
-						file:write("_FOREIGN[", F("%d", foreignN), "]")
-					else
-						local foreignRef                                = F("_FOREIGN[%d]", foreignN)
-						state.foreignReferences[lambda.foreignSourceId] = foreignRef
-						file:write(foreignRef)
-					end
-
-					file:write(" = (", lambda.foreignSourceName, ")\n") -- @Robustness: Is this too straightforward?
-
-				else
-					errorInternal("Incomplete: Handle lambda.foreignSource=%s", lambda.foreignSource)
-				end
-			end
+			writeForeignImportIfNew(state, file, const.valueType, lambda.foreignSource, lambda.foreignSourceName, lambda.foreignSourceId)
+		elseif const.valueType.tag == !(typeTags.TypeInfoForeignDummy) then
+			local foreign = const.value
+			writeForeignImportIfNew(state, file, foreign.inferredType, foreign.source, foreign.sourceName, foreign.sourceId)
 		end
 	end
 
