@@ -29,7 +29,7 @@ io.stdout:setvbuf("no")
 io.stderr:setvbuf("no")
 collectgarbage("stop") -- Slight speed boost.
 
-local DIR_HERE = debug.getinfo(1, "S").source:match"@?(.+)":gsub("[/\\]?[^/\\]+$", ""):gsub("^$", ".")
+local DIR_HERE = debug.getinfo(1, "S").source:match"@?(.+)":gsub("\\", "/"):gsub("/?[^/]+$", ""):gsub("^$", ".")
 
 -- Read build arguments.
 local args        = {...}
@@ -45,11 +45,11 @@ while args[i] do
 	local arg = args[i]
 
 	if     arg == "--ouput" then
-		pathGloaOut = args[i+1] or error("[GloaBuildArgs] Expected value after "..arg..".")
+		pathGloaOut = (args[i+1] or error("[GloaBuildArgs] Expected value after "..arg..".")):gsub("\\", "/")
 		i           = i+2
 
 	elseif arg == "--pp" then
-		pathPp      = args[i+1] or error("[GloaBuildArgs] Expected value after "..arg..".")
+		pathPp      = (args[i+1] or error("[GloaBuildArgs] Expected value after "..arg..".")):gsub("\\", "/")
 		i           = i+2
 
 	elseif arg == "--silent" then

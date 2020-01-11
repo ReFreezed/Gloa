@@ -1772,28 +1772,15 @@ end
 		!DEPEND_AND_RETURN(`lookup`, DEPEND_NODE_INFERRED, `lookup.member`)
 	end
 
-	-- @Cleanup: We do this stuff in a lot of places!
-	do
-		if typeInfoObject.tag == !(typeTags.TypeInfoList) then
-			local listSig = typeInfoObject
-			typeInfoObject     = listSig[1]
-			if not typeInfoObject then  typeError(state, lookup.object, "Function call returns nothing. (Expected at least one value.)")  end
-		end
-		if typeInfoObject.tag == !(typeTags.TypeInfoVararg) then
-			local vararg = typeInfoObject
-			typeInfoObject    = vararg.itemType
-		end
-
-		if typeInfoMember.tag == !(typeTags.TypeInfoList) then
-			local listSig  = typeInfoMember
-			typeInfoMember = listSig[1]
-			if not typeInfoMember then  typeError(state, lookup.member, "Function call returns nothing. (Expected at least one value.)")  end
-		end
-		if typeInfoMember.tag == !(typeTags.TypeInfoVararg) then
-			local vararg   = typeInfoMember
-			typeInfoMember = vararg.itemType
-		end
+	if typeInfoObject.tag == !(typeTags.TypeInfoList) and not typeInfoObject[1] then
+		typeError(state, lookup.object, "Function call returns nothing. (Expected at least one value.)")
 	end
+	if typeInfoMember.tag == !(typeTags.TypeInfoList) and not typeInfoMember[1] then
+		typeError(state, lookup.member, "Function call returns nothing. (Expected at least one value.)")
+	end
+
+	typeInfoObject = adjustTypeToOne(state, typeInfoObject, true)
+	typeInfoMember = adjustTypeToOne(state, typeInfoMember, true)
 
 	local isDirectObj    = lookup.object.inferredType == typeInfoObject
 	local isDirectMember = lookup.member.inferredType == typeInfoMember
@@ -1802,7 +1789,26 @@ end
 	local typeInfoRepresented = getTypeRepresentedByExpression(lookup.object)
 
 	if typeInfoObject.tag == !(typeTags.TypeInfoTable) then
-		errorUnhandledNodeType(state, lookup.object)
+		local tableNode = typeInfoObject
+
+		if typeInfoMember.tag == !(typeTags.TypeInfoNil) then
+			typeError(state, lookup.member, "Table keys cannot be nil.")
+
+		elseif typeInfoMember.tag == !(typeTags.TypeInfoCompound) and indexOf(typeInfoMember, getTypeInfoForBuiltinType(state, "nil")) then
+			typeError(state, lookup.member, "Table keys cannot be nil. (Type is %s)", getFriendlyTypeInfoName(typeInfoMember))
+
+		--[[ This warning message may be too noisy in some programs.
+		elseif typeInfoMember.tag == !(typeTags.TypeInfoAny) then
+			-- @Incomplete: Add a setting to suppress warnings.
+			typeMessage(
+				io.stderr, state, astGetExpressionVisuallyFurthestToTheLeft(lookup.member),
+				"Warning", "Table key is 'any' and thus possibly nil."
+			)
+		--]]
+		end
+
+		lookup.inferredType = getTypeInfoForBuiltinType(state, "any")
+		moveToPipe(state, lookup, !(PIPE_DONE))
 		return
 
 	elseif typeInfoObject.tag == !(typeTags.TypeInfoArray) then
@@ -2247,7 +2253,7 @@ end
 !NODE_INFERRER `function nodeInferrers.AstImport(state, import)`
 	local path
 	if import.isLoad then
-		path = import.importName
+		path = isPathAbsolute(import.importName) and import.importName or state.projectDirectory.."/"..import.importName
 	else
 		path = DIR_HERE.."/modules/"..import.importName..".gloa"
 	end

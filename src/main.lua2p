@@ -76,7 +76,7 @@ xpcall(function()
 			local arg = args[i]
 
 			if not (parseOptions and arg:find"^%-") then
-				table.insert(pathsToCompile, arg)
+				table.insert(pathsToCompile, (arg:gsub("\\", "/")))
 				i = i+1
 
 			elseif arg == "--" then
@@ -155,26 +155,28 @@ xpcall(function()
 	}
 
 	local !struct"CompilationState"{
-		fileBuffers   = {},
-		tokens        = nil,   -- Tokens (struct)
-		settings      = NIL,   -- CompilationSettings
+		fileBuffers       = {},
+		tokens            = nil,   -- Tokens (struct)
+		settings          = NIL,   -- CompilationSettings
+
+		projectDirectory  = "",    -- (Won't work when we support compiling multiple files at a time.)
 
 		-- Parser:
-		globalScope   = NIL,   -- AstGlobalScope
-		nextToken     = 1,
-		soft          = false, -- Enabling this will make parsing functions return nil on error instead of triggering an actual error.
+		globalScope       = NIL,   -- AstGlobalScope
+		nextToken         = 1,
+		soft              = false, -- Enabling this will make parsing functions return nil on error instead of triggering an actual error.
 
 		-- Typer:
-		allTypeInfos  = {},
-		queue         = {},
-		dependencies  = {},
+		allTypeInfos      = {},
+		queue             = {},
+		dependencies      = {},
 
 		-- Bytecode:
-		constants     = {},
-		constantN     = 0,
-		functionN     = 0,     -- Same as constantN, but for function constants.
-		topScopeNames = {_FOREIGN=true},
-		bytecodes     = {},    -- Code for the interpreter to run.
+		constants         = {},
+		constantN         = 0,
+		functionN         = 0,     -- Same as constantN, but for function constants.
+		topScopeNames     = {_FOREIGN=true},
+		bytecodes         = {},    -- Code for the interpreter to run.
 
 		-- Program writer:
 		foreignN          = 0,
@@ -184,9 +186,9 @@ xpcall(function()
 	local settings           = CompilationSettings()
 	settings.outputDebugInfo = outputDebugInfo
 
-	local state    = CompilationState()
-	state.tokens   = Tokens()
-	state.settings = settings
+	local state       = CompilationState()
+	state.tokens      = Tokens()
+	state.settings    = settings
 
 
 
@@ -251,6 +253,12 @@ xpcall(function()
 
 	local thePath                 = pathsToCompile[1]
 	state.settings.outputFilePath = thePath:gsub("%.gloa", "")..".lua"
+
+	-- Project directory result examples:
+	--   C:/app/main.gloa > C:/app
+	--   ../main.gloa     > ..
+	--   main.gloa        > .
+	state.projectDirectory = thePath:gsub("/?[^/]+$", ""):gsub("^$", ".")
 
 	if not silent then  print("Compiling "..thePath:gsub("^.*/", ""))  end
 
