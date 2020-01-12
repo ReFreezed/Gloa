@@ -83,10 +83,12 @@ local !structTypeInfo"TypeInfoVararg:_TypeInfo"{
 }
 
 local !structTypeInfo"TypeInfoFunction:_TypeInfo"{ -- AKA function signature.
-	argumentTypesIn  = {}, -- []TypeInfo  @Cleanup: Use TypeInfoList here.
-	argumentTypesOut = {}, -- []TypeInfo  @Cleanup: Use TypeInfoList here.
-	polymorphic      = false,
-	inline           = false,
+	argumentTypesIn      = {}, -- []TypeInfo  @Cleanup: Use TypeInfoList here.
+	argumentTypesOut     = {}, -- []TypeInfo  @Cleanup: Use TypeInfoList here.
+	requiredArgumentsIn  = {}, -- []bool
+	requiredArgumentsOut = {}, -- []bool
+	polymorphic          = false,
+	inline               = false,
 }
 
 local !struct"TypeInfoStructMember"{
@@ -193,6 +195,21 @@ do
 	end
 end
 
+local function doesLambdaHaveSignature(lambda, funcSig)
+	if #(lambda.argumentsIn  or EMPTY_TABLE) ~= #funcSig.argumentTypesIn  then  return false  end
+	if #(lambda.argumentsOut or EMPTY_TABLE) ~= #funcSig.argumentTypesOut then  return false  end
+
+	for i, arg in ipairs(lambda.argumentsIn or EMPTY_TABLE) do
+		if arg.declaration.name.inferredType ~= funcSig.argumentTypesIn[i]      then  return false  end
+		if arg.isRequired                    ~= funcSig.requiredArgumentsIn[i]  then  return false  end
+	end
+	for i, arg in ipairs(lambda.argumentsOut or EMPTY_TABLE) do
+		if arg.declaration.name.inferredType ~= funcSig.argumentTypesOut[i] then  return false  end
+	end
+
+	return true
+end
+
 function _G.getTypeInfoForLambda(state, lambda)
 	for _, arg in ipairs(lambda.argumentsIn or EMPTY_TABLE) do
 		if not arg.declaration.name.inferredType then  return nil  end
@@ -210,10 +227,12 @@ function _G.getTypeInfoForLambda(state, lambda)
 	local funcSig = newTypeInfo(TypeInfoFunction)
 
 	for i, arg in ipairs(lambda.argumentsIn or EMPTY_TABLE) do
-		funcSig.argumentTypesIn[i] = arg.declaration.name.inferredType
+		funcSig.argumentTypesIn[i]      = arg.declaration.name.inferredType
+		funcSig.requiredArgumentsIn[i]  = arg.isRequired
 	end
 	for i, arg in ipairs(lambda.argumentsOut or EMPTY_TABLE) do
-		funcSig.argumentTypesOut[i] = arg.declaration.name.inferredType
+		funcSig.argumentTypesOut[i]     = arg.declaration.name.inferredType
+		funcSig.requiredArgumentsOut[i] = arg.isRequired
 	end
 
 	table.insert(state.allTypeInfos, funcSig)
@@ -323,24 +342,6 @@ function _G.getTypeRepresentedByExpression(expr)
 	else
 		return nil
 	end
-end
-
-
-
-function _G.doesLambdaHaveSignature(lambda, funcSig)
-	if #(lambda.argumentsIn  or EMPTY_TABLE) ~= #funcSig.argumentTypesIn  then  return false  end
-	if #(lambda.argumentsOut or EMPTY_TABLE) ~= #funcSig.argumentTypesOut then  return false  end
-
-	for i, arg in ipairs(lambda.argumentsIn or EMPTY_TABLE) do
-		if arg.declaration.name.inferredType ~= funcSig.argumentTypesIn[i]  then  return false  end
-	end
-	for i, arg in ipairs(lambda.argumentsOut or EMPTY_TABLE) do
-		if arg.declaration.name.inferredType ~= funcSig.argumentTypesOut[i] then  return false  end
-	end
-
-	-- @Incomplete: Check arg.isRequired for input args.
-
-	return true
 end
 
 
@@ -563,15 +564,22 @@ function _G.getFriendlyTypeInfoName(typeInfo)
 		local typeTextsOut = {}
 
 		for i, argTypeInfo in ipairs(funcSig.argumentTypesIn) do
-			typeTextsIn[i] = getFriendlyTypeInfoName(argTypeInfo)
+			if i > 1 then
+				table.insert(typeTextsIn, ",")
+			end
+			table.insert(typeTextsIn, getFriendlyTypeInfoName(argTypeInfo))
+			if not funcSig.requiredArgumentsIn[i] then
+				table.insert(typeTextsIn, "?")
+			end
 		end
+
 		for i, argTypeInfo in ipairs(funcSig.argumentTypesOut) do
 			typeTextsOut[i] = getFriendlyTypeInfoName(argTypeInfo)
 		end
 
 		name = typeTextsOut[1]
-			and F("function(%s)->(%s)", table.concat(typeTextsIn, ","), table.concat(typeTextsOut, ","))
-			or  F("function(%s)->void", table.concat(typeTextsIn, ","))
+			and F("function(%s)->(%s)", table.concat(typeTextsIn), table.concat(typeTextsOut, ","))
+			or  F("function(%s)->void", table.concat(typeTextsIn))
 
 	elseif typeInfo.tag == !(typeTags.TypeInfoCompound) then
 		local compound  = typeInfo
@@ -814,6 +822,25 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 			identOrVararg.fromUsing   = using
 		end
 
+		-- Overloaded names refer to multiple things, so that's an error!
+		-- @Incomplete: Add a way to refer to a specific overload.
+		if decl.overloadOf and ident and ident.parent.nodeType ~= !(nodeTypes.AstCall) then
+			local declBase = ident.declaration
+			while declBase.overloadOf and declBase.overloadOf ~= declBase do  declBase = declBase.overloadOf  end
+
+			if not declBase.name.inferredType then
+				-- This is just so we get a better overload list in the error message.
+				!DEPEND_AND_RETURN(`ident`, DEPEND_NODE_INFERRED, `declBase.name`)
+			end
+
+			printerr()
+			typeMessage(io.stderr, state, ident, "Error", "'%s' has multiple overloads and we don't know which one this is referring to.", ident.name)
+			for i, declOverload in ipairs(declBase.overloads) do
+				typeMessage(io.stderr, state, declOverload.name, "Info", "...overload #%d.", i)
+			end
+			exitFailure()
+		end
+
 		local identInDecl = decl.name
 		if not identInDecl.inferredType then
 			!DEPEND_AND_RETURN(`identOrVararg`, DEPEND_NODE_INFERRED, `identInDecl`)
@@ -915,6 +942,52 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 	--
 
 	decl.overloadsLocked = true
+
+	-- Check that call signatures aren't too similar. Optional arguments could make several overloads match calls, i.e.:
+	--   local func :: () {}
+	--   local func :: (n:int=0) {}
+	--   func() -- First or second?
+	if decl.overloadOf == decl then
+		for i = 1, #decl.overloads-1 do
+			local decl1         = decl.overloads[i]
+			local funcSig1      = decl1.assignment.values[decl1.assignmentIndex].inferredType
+			local argTypes1     = funcSig1.argumentTypesIn
+			local argRequireds1 = funcSig1.requiredArgumentsIn
+
+			for i = i+1, #decl.overloads do
+				local decl2         = decl.overloads[i]
+				local funcSig2      = decl2.assignment.values[decl2.assignmentIndex].inferredType
+				local argTypes2     = funcSig2.argumentTypesIn
+				local argRequireds2 = funcSig2.requiredArgumentsIn
+
+				if funcSig1 == funcSig2 then
+					local identEarly, identLate = getEarlyAndLateForRedeclarationError(state, decl1.name, decl2.name)
+					printerr()
+					typeMessage(io.stderr, state, identLate,  "Error", "Call signatures for function overloads (%s) are the same.", ident.name)
+					typeMessage(io.stderr, state, identEarly, "Info",  "...here is the other function.")
+					exitFailure()
+				end
+
+				-- @Incomplete @Robustness: Check that vararg works.
+				for argIndex = 1, math.min(#argTypes1, #argTypes2)+1 do
+					local argTypeInfo1 = argTypes1[argIndex]
+					local argTypeInfo2 = argTypes2[argIndex]
+					local isRequired1  = argTypeInfo1 ~= nil and argRequireds1[argIndex]
+					local isRequired2  = argTypeInfo2 ~= nil and argRequireds2[argIndex]
+
+					if not (isRequired1 or isRequired2) then
+						local identEarly, identLate = getEarlyAndLateForRedeclarationError(state, decl1.name, decl2.name)
+						printerr()
+						typeMessage(io.stderr, state, identLate,  "Error", "Call signatures for function overloads (%s) are too similar.", ident.name)
+						typeMessage(io.stderr, state, identEarly, "Info",  "...here is the other function.")
+						exitFailure()
+					end
+
+					if not (argTypeInfo1 and argTypeInfo1 == argTypeInfo2) then  break  end
+				end
+			end
+		end
+	end
 
 	-- Tell parents that this declaration exists so we can detect more cases of shadowing.
 	if not (isLambdaArgOut or decl.canShadow or vararg) then -- Should vararg do this? I think it's not needed.
@@ -1307,7 +1380,9 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 
 			for i = acceptedMin, 1, -1 do
 				local arg = lambda.argumentsIn[i]
-				if arg.assignment then--not arg.isRequired then -- @Incomplete: Set isRequired in parser.
+				if arg.isRequired then
+					break
+				else
 					acceptedMin = acceptedMin-1
 				end
 			end
@@ -1458,15 +1533,6 @@ end
 
 			!ASSERT("calleeTypeInfo.tag == "..typeTags.TypeInfoFunction)
 
-			--
-			-- @Incomplete: Handle optional arguments making several overloads match, i.e.:
-			--
-			--   local func :: () {}
-			--   local func :: (n:int=0) {}
-			--   func()
-			--
-			-- We can possibly validate overloads after declBase.overloadsLocked is set in inferIdentifierOrVararg().
-			--
 			if checkIfValuesMatchArgumentTypes(state, call, call.arguments, calleeTypeInfo.argumentTypesIn, true, decl) then
 				foundOverload = true
 				break
@@ -2899,6 +2965,7 @@ end
 --
 -- @Cleanup: All constant expressions that can result in a literal value should have been simplified into an AstLiteral.
 -- That means we don't really need to return a literal here - the caller can just grab it from the literal node.
+-- We also return a number for types which is not very good but currently needed for binary simplifications...
 -- @Refactor this function to only figure out whether the expression is constant and move the code into isExpressionConstant().
 --
 function _G.getLiteralValueFromExpressionIfConstant(state, expr)
@@ -2914,16 +2981,19 @@ function _G.getLiteralValueFromExpressionIfConstant(state, expr)
 
 		if not decl.isConstant then  return false, nil  end
 
-		assert(decl.assignment) -- Constant declarations must have a value.
+		!ASSERT `decl.assignment` -- Constant declarations must have a value.
 
 		local valueExpr = getAssignmentValue(state, ident, decl.assignment.values, decl.assignmentIndex)
 		return getLiteralValueFromExpressionIfConstant(state, valueExpr)
 
 	elseif isAny(expr.nodeType, !(nodeTypes.AstType),!(nodeTypes.AstTypeOf)) then
-		return true, nil -- All types are constant, just like literals.
+		return true, expr.representedType.id -- All types are constant, just like literals.
 
-	elseif isAny(expr.nodeType, !(nodeTypes.AstLambda),!(nodeTypes.AstStruct),!(nodeTypes.AstEnum)) then
-		return true, nil -- Lambdas (which are function signatures), structs and enums are types (which are constant, just like literals).
+	elseif isAny(expr.nodeType, !(nodeTypes.AstStruct),!(nodeTypes.AstEnum)) then
+		return true, expr.representedType.id -- Structs and enums are types (which are constant, just like literals).
+	elseif expr.nodeType == !(nodeTypes.AstLambda) then
+		local lambda = expr
+		return true, lambda.inferredType.id -- Lambdas (which are function signatures) are types too.
 
 	elseif expr.nodeType == !(nodeTypes.AstCast) then
 		local cast       = expr
@@ -2935,7 +3005,7 @@ function _G.getLiteralValueFromExpressionIfConstant(state, expr)
 		elseif cast.inferredType.tag == !(typeTags.TypeInfoFloat) then
 			return true, v
 		elseif cast.inferredType.tag == !(typeTags.TypeInfoType) then
-			return true, nil -- Should we return the type ID?
+			return true, getTypeRepresentedByExpression(cast.targetType).id
 		else
 			errorInternal("Unhandled cast type: %s", getFriendlyTypeInfoName(cast.inferredType))
 		end
