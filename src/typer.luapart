@@ -1210,8 +1210,8 @@ end
 	moveToPipe(state, typeNode, !(PIPE_DONE))
 end
 
--- doesMatch = checkIfValuesMatchArgumentTypes( state, callOrReturnNode, values, typeInfos [, softCheck=false ] )
-local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, typeInfos, softCheck)
+-- doesMatch = checkIfValuesMatchArgumentTypes( state, callOrReturnNode, values, typeInfos [, softCheck=false, calleeDeclarationForCurrentOverload ] )
+local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, typeInfos, softCheck, calleeDecl)
 	--[[
 		Situations:
 
@@ -1281,11 +1281,38 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 	end
 
 	-- Get accepted count.
-	-- @Incomplete: Consider optional arguments for calls.
 	local typeInfoCount   = #typeInfos
 	local acceptingVararg = typeInfoCount > 0 and typeInfos[typeInfoCount].tag == !(typeTags.TypeInfoVararg)
 	local acceptedMin     = acceptingVararg and typeInfoCount-1 or typeInfoCount
 	local acceptedMax     = acceptingVararg and math.huge       or typeInfoCount
+
+	-- Consider optional arguments for calls.
+	-- @Robustness @Cleanup: We probably must have argument optionality be part of function types - not just the arguments types.
+	-- @Robustness: Disallow this: local take2 :: (req:int, opt:int=0) {} ; local get1 :: () -> int {} ; take2(get1())  -- :DisallowListAsLastValueToFunctionWithOptionalArguments
+	if callOrReturnNode.nodeType == !(nodeTypes.AstCall) and callOrReturnNode.callee.nodeType == !(nodeTypes.AstIdentifier) then
+		calleeDecl = (calleeDecl or callOrReturnNode.callee.declaration)
+
+		if calleeDecl.isConstant then
+			local assignment = calleeDecl.assignment
+			local lambda     = assignment.values[calleeDecl.assignmentIndex] or errorInternal()
+
+			assert(lambda.nodeType == !(nodeTypes.AstLambda))
+			assert(lambda.inferredType)
+
+			if not areArraysEqual(typeInfos, lambda.inferredType.argumentTypesIn) then
+				-- We should only get here if checking overloads.
+				if softCheck then  return false  end
+				assert(false)
+			end
+
+			for i = acceptedMin, 1, -1 do
+				local arg = lambda.argumentsIn[i]
+				if arg.assignment then--not arg.isRequired then -- @Incomplete: Set isRequired in parser.
+					acceptedMin = acceptedMin-1
+				end
+			end
+		end
+	end
 
 	-- io.stdout:write(F("requested %.0f-%.0f, accepted %.0f-%.0f  ", requestedMin, requestedMax, acceptedMin, acceptedMax)) ; astPrint(callOrReturnNode)
 
@@ -1431,7 +1458,16 @@ end
 
 			!ASSERT("calleeTypeInfo.tag == "..typeTags.TypeInfoFunction)
 
-			if checkIfValuesMatchArgumentTypes(state, call, call.arguments, calleeTypeInfo.argumentTypesIn, true) then
+			--
+			-- @Incomplete: Handle optional arguments making several overloads match, i.e.:
+			--
+			--   local func :: () {}
+			--   local func :: (n:int=0) {}
+			--   func()
+			--
+			-- We can possibly validate overloads after declBase.overloadsLocked is set in inferIdentifierOrVararg().
+			--
+			if checkIfValuesMatchArgumentTypes(state, call, call.arguments, calleeTypeInfo.argumentTypesIn, true, decl) then
 				foundOverload = true
 				break
 			end

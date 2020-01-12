@@ -9,6 +9,7 @@
 --=
 --==============================================================
 
+	isExpressionLiteralStringAndValidLuaIdentifier
 	unicodeToLuaIdentifier
 	writeProgram, write*
 
@@ -168,6 +169,8 @@ function _G.writeExpression(state, file, expr)
 			writeExpression(state, file, callee)
 		end
 
+		local argsNeedParenthesis = true
+		--[[ @Incomplete: Consider optional arguments if omitting parenthesis.
 		local argsNeedParenthesis = not (
 			#call.arguments == 1 and (
 				call.arguments[1].nodeType == !(nodeTypes.AstTable)
@@ -177,12 +180,58 @@ function _G.writeExpression(state, file, expr)
 				)
 			)
 		)
+		]]
 
 		if argsNeedParenthesis then  file:write("(")  end
 
+		local first = true
+
 		for i, argExpr in ipairs(call.arguments) do
-			if i > 1 then  file:write(", ")  end
+			if not first then  file:write(", ")  end
+			first = false
 			writeExpression(state, file, argExpr)
+		end
+
+		if callee.nodeType == !(nodeTypes.AstIdentifier) then
+			local calleeDecl = callee.declaration
+
+			if calleeDecl.isConstant then
+				local assignment = calleeDecl.assignment
+				local lambda     = assignment.values[calleeDecl.assignmentIndex] or errorInternal()
+
+				assert(lambda.nodeType == !(nodeTypes.AstLambda))
+
+				local argLast = lambda.argumentsIn and getLast(lambda.argumentsIn)
+
+				if argLast and argLast.assignment then--not argLast.isRequired then -- @Incomplete: Set isRequired in parser.
+					local argExprLast = getLast(call.arguments)
+					if
+						argExprLast and (
+							(
+								argExprLast.inferredType.tag == !(typeTags.TypeInfoVararg)
+								and not argExprLast.surroundedByParenthesis
+							)
+							or (
+								argExprLast.inferredType.tag == !(typeTags.TypeInfoList)
+								and not argExprLast.surroundedByParenthesis
+								and argExprLast.inferredType[2]
+							)
+						)
+					then
+						-- :DisallowListAsLastValueToFunctionWithOptionalArguments
+						nodeError(state, callee, "ProgramWriter", "@Incomplete: Handle optional arguments if the last value in a call is a list of things.")
+					end
+
+					for i = #call.arguments+1, #lambda.argumentsIn do
+						if not first then  file:write(", ")  end
+						first = false
+
+						local arg = lambda.argumentsIn[i]
+						assert(arg.assignment)
+						writeExpression(state, file, arg.assignment.values[1])
+					end
+				end
+			end
 		end
 
 		if argsNeedParenthesis then  file:write(")")  end
@@ -756,6 +805,10 @@ function _G.writeProgram(state)
 
 	local outputDebugInfo = state.settings.outputDebugInfo
 
+	-- @Incomplete: Setting to specify the prefix for the written file (shebang and maybe a comment with copyright info, library documentation etc.).
+	file:write('#!/bin/sh\n_=[[\nexec lua "$0" "$@"\n]] and nil\n')
+	file:write("xpcall(function()\n") -- Wrap the whole program in a protected call.
+
 	--
 	-- Foreign imports.
 	--
@@ -892,6 +945,22 @@ function _G.writeProgram(state)
 
 	writeConstantValueOrReference(state, file, mainFuncDecl.valueConstant)
 	file:write("()\n")
+
+	-- End of protected call.
+	-- @Incomplete: Convert file paths and line numbers to the Glóa source files.
+	-- @Polish: Nicer traceback format.
+	!(
+	local TEMPLATE_ERROR_HANDLER = `
+		function(err)
+			$outputFile:write(debug.traceback(tostring(err), 2), "\n")
+			os.exit(1)
+		end
+	`
+	local ERROR_HANDLER = templateToLua(TEMPLATE_ERROR_HANDLER, {
+		outputFile = DEBUG and `io.stdout` or `io.stderr`, -- :SublimeText2Desync
+	})
+	)
+	file:write("end,",!(ERROR_HANDLER),")\n")
 
 	file:close()
 end

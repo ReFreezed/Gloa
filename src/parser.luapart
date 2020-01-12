@@ -248,7 +248,7 @@ _G.!structAst"AstDeclaration:_AstNode"{
 	valueTypeInfo        = NIL, -- Type represented by the assigned value if isConstant. If this is set then the declared identifier can be used in places where a type is expected. Can be nil.
 	checkedRedeclaration = false,
 	overloads            = {},
-	overloadOf           = NIL, -- AstDeclaration
+	overloadOf           = NIL, -- AstDeclaration  (If this is self then we're the base declaration for the overloads and the overloads array should be filled.)
 	overloadsLocked      = false,
 
 	-- Bytecode phase:
@@ -662,12 +662,25 @@ function _G.parseExpressionList(state, parentNode, expressions, expectLeftValues
 	return true
 end
 
+local function concatNamesInArgumentGroupForError(argsInGroup)
+	if not argsInGroup[2] then  return argsInGroup[1].declaration.name.name  end
+
+	local names = {}
+
+	for i, arg in ipairs(argsInGroup) do
+		names[i] = arg.declaration.name.name
+	end
+
+	return table.concat(names, "', '", 1, #names-1) .. "' and '" .. names[#names]
+end
+
 -- parseArguments( compilationState, parentNode, isInput, placeDeclared )
 -- placeDeclared = AstLambda|AstStruct
 function _G.parseArguments(state, parentNode, isInput, placeDeclared)
-	local args       = astNewNode(AstArguments, state.nextToken, parentNode)
-	local takenNames = {}
-	local gotVararg  = false
+	local args            = astNewNode(AstArguments, state.nextToken, parentNode)
+	local takenNames      = {}
+	local gotVararg       = false
+	local gotDefaultValue = false
 	local tokType, tokValue, token
 
 	for groupN = 1, math.huge do
@@ -756,18 +769,21 @@ function _G.parseArguments(state, parentNode, isInput, placeDeclared)
 		tokType, tokValue = peekNextToken(state)
 
 		if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"=") then
+			gotDefaultValue = true
 			eatNextToken(state)
+
 			if not isInput then
 				!ERROR_OR_RETURN `errorParsingLast(state, "Output arguments cannot have default values.")`
 			end
 
 			token = state.nextToken
+
 			for i, arg in ipairs(argsInGroup) do
 				state.nextToken = token
 				local decl      = arg.declaration
 
 				if decl.name.nodeType == !(nodeTypes.AstVararg) then
-					!ERROR_OR_RETURN `errorParsing(state, decl.name.token, "Varargs cannot have default values.")`
+					!ERROR_OR_RETURN `errorParsingNext(state, "Varargs cannot have default values.")`
 				else
 					assert(decl.name.nodeType == !(nodeTypes.AstIdentifier))
 				end
@@ -804,6 +820,13 @@ function _G.parseArguments(state, parentNode, isInput, placeDeclared)
 				end
 				--]]
 			end
+
+		elseif gotDefaultValue and not gotVararg then
+			!ERROR_OR_RETURN `errorParsingAfterLast(
+				state,
+				"Missing default value for '%s'. All optional arguments must be at the end of the argument list.",
+				concatNamesInArgumentGroupForError(argsInGroup)
+			)`
 		end
 
 		-- Set if shadowing is allowed.
