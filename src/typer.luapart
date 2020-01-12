@@ -660,12 +660,147 @@ function _G.isPartOfAnyDeclaration(identOrVararg)
 	end
 end
 
+-- identifierEarly, identifierLate, extraShadowMessageEarly, extraShadowMessageLate = getEarlyAndLateForRedeclarationError( state, identifier1, identifier2 )
+local function getEarlyAndLateForRedeclarationError(state, identEarly, identLate)
+	local extraMessageEarly = ""
+	local extraMessageLate  = ""
+
+	-- Globals before locals.
+	if identEarly.declaration.isGlobalOrExported ~= identLate.declaration.isGlobalOrExported then
+		if identLate.declaration.isGlobalOrExported then
+			identEarly, identLate = identLate, identEarly
+		end
+
+	-- Constants before variables.
+	elseif identEarly.declaration.isConstant ~= identLate.declaration.isConstant then
+		if identLate.declaration.isConstant then
+			identEarly, identLate = identLate, identEarly
+		end
+
+		if isScopeImperative(getClosestScopeForDeclaration(state, identLate.declaration)) then
+			extraMessageEarly = " (Note that constants in imperative scopes are visible to the whole scope, unlike variables.)"
+		end
+
+	-- Low depth before high depth.
+	-- Early in file before late in file.
+	else
+		local depthEarly = astGetDepth(identEarly)
+		local depthLate  = astGetDepth(identLate)
+
+		if depthLate < depthEarly or (depthLate == depthEarly and identLate.token < identEarly.token) then
+			-- @Incomplete: Explicitly handle the identifiers being declared in different files. (May be unnecessary.)
+			identEarly, identLate = identLate, identEarly
+		end
+
+		if identEarly.declaration.isConstant and isScopeImperative(getClosestScopeForDeclaration(state, identEarly.declaration)) then
+			extraMessageEarly = " (Note that constants in imperative scopes are visible to the whole scope.)"
+		end
+	end
+
+	return identEarly, identLate, extraMessageEarly, extraMessageLate
+end
+
+local function checkRedeclaration(state, ident, decl, isMember, scope)
+	decl.checkedRedeclaration = true
+
+	local declExisting = findDeclaration(state, ident, ident.name, decl)
+	if not declExisting then  return  end
+	!ASSERT `declExisting ~= decl`
+
+	local scopeExisting = getClosestScopeForDeclaration(state, declExisting)
+
+	-- Member.
+	if isMember and not decl.isConstant and scope ~= scopeExisting then
+		-- void  (Variable members never shadow anything.)
+
+	-- Function overload. (Note: Overloads have to be registered before the identifier DEPEND_AND_RETURN on anything.)
+	elseif
+		decl            .isConstant
+		and declExisting.isConstant
+		and decl        .assignment.values[decl        .assignmentIndex].nodeType == !(nodeTypes.AstLambda)
+		and declExisting.assignment.values[declExisting.assignmentIndex].nodeType == !(nodeTypes.AstLambda)
+	then
+		while declExisting.overloadOf and declExisting.overloadOf ~= declExisting do  declExisting = declExisting.overloadOf  end
+
+		if declExisting == decl then
+			-- This simplifies finding an overload later.
+			declExisting.overloadOf = declExisting
+			table.insert(declExisting.overloads, declExisting)
+
+		elseif scope ~= scopeExisting then
+			local identEarly, identLate = getEarlyAndLateForRedeclarationError(state, declExisting.name, ident)
+			printerr()
+			typeMessage(
+				io.stderr, state, identLate,
+				"Error", "Trying to add a new overload to '%s' which is in another scope. Overloads must currently be declared in the same scope.",
+				ident.name
+			)
+			typeMessage(io.stderr, state, identEarly, "Info", "...here is the previous function.")
+			exitFailure()
+
+		elseif declExisting.overloadsLocked then
+			printerr()
+			typeMessage(
+				io.stderr, state, declExisting.name,
+				"Error", "Trying to add a new overload to '%s' after it's type has been inferred. Overloads currently has to happen in the same 'parsing cycle'.",
+				ident.name
+			)
+			typeMessage(io.stderr, state, ident, "Info", "...this is the new overload.")
+			exitFailure()
+
+		else
+			decl.overloadOf = declExisting
+			table.insert(declExisting.overloads, decl)
+
+			local lambda         = decl        .assignment.values[decl        .assignmentIndex]
+			local lambdaExisting = declExisting.assignment.values[declExisting.assignmentIndex]
+
+			assert(not lambdaExisting.inferredType)
+
+			-- This dependency means lambdaExisting won't get inferred until earliest next cycle
+			-- by which time all overloads should have been added (I think). This should work as
+			-- the first occurence of a name will make the second occurence wait before the
+			-- second has been able to do anything. (This is true even when we remove unordered
+			-- from the queue.)
+			addDependency(state, lambdaExisting, !(DEPEND_NODE_INFERRED), lambda)
+		end
+
+	-- Non-shadow.
+	elseif not decl.canShadow then
+		local identEarly, identLate, extraMessageEarly, extraMessageLate = getEarlyAndLateForRedeclarationError(state, declExisting.name, ident)
+		printerr()
+		typeMessage(io.stderr, state, identLate,  "Error", "'%s' has already been declared.%s", ident.name, extraMessageLate)
+		typeMessage(io.stderr, state, identEarly, "Info",  "...it was declared here.%s", extraMessageEarly)
+		exitFailure()
+
+	-- Shadow in same scope.
+	elseif
+		scope == scopeExisting
+		or (
+			-- We do not allow declarations on lambda bodies to shadow the lambda's arguments.
+			scope.nodeType                      == !(nodeTypes.AstBlock)
+			and getClosestScope(scope).nodeType == !(nodeTypes.AstLambda)
+			and getClosestScope(scope)          == scopeExisting
+		)
+	then
+		printerr()
+		typeMessage(io.stderr, state, ident,             "Error", "'%s' has already been declared in the same scope (which means name shadowing does not work).", ident.name)
+		typeMessage(io.stderr, state, declExisting.name, "Info",  "...it was declared here.")
+		exitFailure()
+
+	-- Shadowing something in an outer (or inner?) scope.
+	-- @Robustness: Don't allow file-scope variables to be shadows (just like constants)?
+	else
+		-- void  (Valid shadow.)
+	end
+end
+
 local function inferIdentifierOrVararg(state, identOrVararg)
 	local vararg = identOrVararg.nodeType == !(nodeTypes.AstVararg) and identOrVararg or nil
 	local ident  = not vararg                                       and identOrVararg or nil
 	local decl   = identOrVararg.declaration
 
-	-- Loose identifier.
+	-- 1. Loose identifier.
 	if not isPartOfAnyDeclaration(identOrVararg) then
 		if not decl then
 			local using
@@ -713,7 +848,7 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 	!ASSERT `decl`
 	!ASSERT("isAny(identOrVararg.parent.nodeType, "..nodeTypes.AstDeclaration..","..nodeTypes.AstAssignment..")")
 
-	-- Assignment target in declaration (which is a copy of the identifier in the declaration).
+	-- 2. Assignment target in declaration (which is a copy of the identifier in the declaration).
 	if identOrVararg.parent.nodeType == !(nodeTypes.AstAssignment) then
 		local identInDecl = decl.name
 		if not identInDecl.inferredType then
@@ -725,13 +860,7 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 		return
 	end
 
-	-- At this point we're defining a declared identifier.
-
-	for _, typeNode in ipairs(decl.types) do
-		if not typeNode.inferredType then
-			!DEPEND_AND_RETURN(`identOrVararg`, DEPEND_NODE_INFERRED, `typeNode`)
-		end
-	end
+	-- 3. At this point we're defining a declared identifier.
 
 	local scope = getClosestScopeForDeclaration(state, decl)
 
@@ -744,11 +873,27 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 	local isEnumMember = scope.nodeType == !(nodeTypes.AstEnum)
 	local isMember     = isEnumMember or scope.nodeType == !(nodeTypes.AstStruct)
 
-	if isEnumMember then
-		local enum     = scope
-		local enumInfo = enum.representedType
+	local isLambdaArgOut = (
+		not isMember
+		and scope.nodeType == !(nodeTypes.AstLambda)
+		and scope.argumentsOut ~= nil
+		and indexOf(scope.argumentsOut, astFindParent(decl, !(nodeTypes.AstArgument))) ~= nil
+	)
 
-		if not enumInfo then
+	-- Check for redeclaration/shadowing (before we DEPEND_AND_RETURN).
+	if not (isLambdaArgOut or vararg or decl.checkedRedeclaration) then
+		checkRedeclaration(state, ident, decl, isMember, scope)
+	end
+
+	for _, typeNode in ipairs(decl.types) do
+		if not typeNode.inferredType then
+			!DEPEND_AND_RETURN(`identOrVararg`, DEPEND_NODE_INFERRED, `typeNode`)
+		end
+	end
+
+	if isEnumMember then
+		local enum = scope
+		if not enum.representedType then
 			-- AstEnum is the only scope that gets inferred before it's declarations.
 			!DEPEND_AND_RETURN(`identOrVararg`, DEPEND_NODE_INFERRED, `enum`)
 		end
@@ -765,87 +910,13 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 		end
 	end
 
-	-- No more dependencies after this point!
+	--
+	-- No more dependencies for this identifier after this point!
+	--
 
-	local isLambdaArgOut = (
-		not isMember
-		and scope.nodeType == !(nodeTypes.AstLambda)
-		and scope.argumentsOut ~= nil
-		and indexOf(scope.argumentsOut, astFindParent(decl, !(nodeTypes.AstArgument))) ~= nil
-	)
+	decl.overloadsLocked = true
 
-	if not (isLambdaArgOut or vararg) then
-		local declExisting = findDeclaration(state, ident, ident.name, decl)
-		!ASSERT `declExisting ~= decl`
-
-		if not declExisting then
-			-- void
-
-		elseif isMember and not decl.isConstant and scope ~= getClosestScopeForDeclaration(state, declExisting) then
-			-- void  (Variable members never shadow anything.)
-
-		elseif not decl.canShadow then
-			local identEarly        = declExisting.name
-			local identLate         = ident
-			local extraMessageEarly = ""
-			local extraMessageLate  = ""
-
-			-- Globals before locals.
-			if identEarly.declaration.isGlobalOrExported ~= identLate.declaration.isGlobalOrExported then
-				if identLate.declaration.isGlobalOrExported then
-					identEarly, identLate = identLate, identEarly
-				end
-
-			-- Constants before variables.
-			elseif identEarly.declaration.isConstant ~= identLate.declaration.isConstant then
-				if identLate.declaration.isConstant then
-					identEarly, identLate = identLate, identEarly
-				end
-
-				if isScopeImperative(getClosestScopeForDeclaration(state, identLate.declaration)) then
-					extraMessageEarly = " (Note that constants in imperative scopes are visible to the whole scope, unlike variables.)"
-				end
-
-			-- Low depth before high depth.
-			-- Early in file before late in file.
-			else
-				local depthEarly = astGetDepth(identEarly)
-				local depthLate  = astGetDepth(identLate)
-
-				if depthLate < depthEarly or (depthLate == depthEarly and identLate.token < identEarly.token) then
-					-- @Incomplete: Explicitly handle the identifiers being declared in different files. (May be unnecessary.)
-					identEarly, identLate = identLate, identEarly
-				end
-
-				if identEarly.declaration.isConstant and isScopeImperative(getClosestScopeForDeclaration(state, identEarly.declaration)) then
-					extraMessageEarly = " (Note that constants in imperative scopes are visible to the whole scope.)"
-				end
-			end
-
-			printerr()
-			typeMessage(io.stderr, state, identLate,  "Error", "'%s' has already been declared.%s", ident.name, extraMessageLate)
-			typeMessage(io.stderr, state, identEarly, "Info",  "...it was declared here.%s", extraMessageEarly)
-			exitFailure()
-
-		elseif
-			scope == getClosestScopeForDeclaration(state, declExisting)
-			or (
-				-- We do not allow declarations on lambda bodies to shadow the lambda's arguments.
-				scope.nodeType == !(nodeTypes.AstBlock)
-				and getClosestScope(scope).nodeType == !(nodeTypes.AstLambda)
-				and getClosestScope(scope) == getClosestScopeForDeclaration(state, declExisting)
-			)
-		then
-			printerr()
-			typeMessage(io.stderr, state, ident,             "Error", "'%s' has already been declared in the same scope (which means name shadowing does not work).", ident.name)
-			typeMessage(io.stderr, state, declExisting.name, "Info",  "...it was declared here.")
-			exitFailure()
-
-		else
-			-- void  (We're validly shadowing something in an outer scope.)
-		end
-	end
-
+	-- Tell parents that this declaration exists so we can detect more cases of shadowing.
 	if not (isLambdaArgOut or decl.canShadow or vararg) then -- Should vararg do this? I think it's not needed.
 		local parentScope = scope
 
@@ -1139,7 +1210,8 @@ end
 	moveToPipe(state, typeNode, !(PIPE_DONE))
 end
 
-local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, typeInfos)
+-- doesMatch = checkIfValuesMatchArgumentTypes( state, callOrReturnNode, values, typeInfos [, softCheck=false ] )
+local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, typeInfos, softCheck)
 	--[[
 		Situations:
 
@@ -1184,6 +1256,7 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 				local argCount    = #argTypesOut
 
 				if argCount == 0 then
+					if softCheck then  return false  end
 					typeError(state, valueCall, "Function call returns nothing. (Expected at least one value.)")
 				end
 
@@ -1219,6 +1292,8 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 	-- Too few values.
 	-- @UX: Better error message if the last value is a call (without parenthesis).
 	if requestedMin < acceptedMin then
+		if softCheck then  return false  end
+
 		local exprForError = values[1] and astGetExpressionVisuallyFurthestToTheLeft(values[1]) or callOrReturnNode
 		local thingsStr    = callOrReturnNode.nodeType == !(nodeTypes.AstCall) and "arguments" or "values to return"
 		local gotStr       = requestedMax ~= math.huge and F("%d", requestedMin) or requestedMin == 0 and "variable amount" or F("%d + variable amount", requestedMin)
@@ -1228,6 +1303,8 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 	-- @UX: Better error message if the last value is a call (without parenthesis).
 	elseif requestedMax > acceptedMax then
 		!ASSERT `not acceptingVararg`
+
+		if softCheck then  return false  end
 
 		local firstExtraValueExpr = values[math.min(acceptedMax+1, valueCount)]
 		local exprForError        = astGetExpressionVisuallyFurthestToTheLeft(firstExtraValueExpr)
@@ -1252,10 +1329,12 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 			valueTypeInfo         = listSig[callOutArgIndex]
 
 			if not valueTypeInfo then
+				if softCheck then  return false  end
 				typeError(state, valueExpr, "Function call returns nothing. (Expected at least one value.)") -- Note: "Nothing" is not the same as vararg of zero length.
 			end
 
 			if not isTypeCompatibleWith(adjustTypeToOne(state, valueTypeInfo), adjustTypeToOne(state, typeInfoToMatch)) then
+				if softCheck then  return false  end
 				-- @UX: Tell the name of the call/return argument. (For calls, probably only possible for constants, and maybe not all. Not sure! Returns just depend on the output arguments being named.)
 				-- @UX: Tell the name of the value call's argument. (Probably only possible for constants, and maybe not all. Not sure!)
 				typeError(
@@ -1271,6 +1350,7 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 
 		-- Vararg (0..inf values) or other (1 value).
 		elseif not isTypeCompatibleWith(adjustTypeToOne(state, valueTypeInfo), adjustTypeToOne(state, typeInfoToMatch)) then
+			if softCheck then  return false  end
 			typeError(
 				state, astGetExpressionVisuallyFurthestToTheLeft(valueExpr),
 				"Type mismatch for %s #%d. (Wanted %s, got %s)",
@@ -1281,19 +1361,35 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 			)
 		end
 	end
+
+	return true
 end
 
 !NODE_INFERRER `function nodeInferrers.AstCall(state, call)`
-	if not call.callee.inferredType then
-		!DEPEND_AND_RETURN(`call`, DEPEND_NODE_INFERRED, `call.callee`)
+	local callee         = call.callee
+	local calleeTypeInfo = callee.inferredType
+
+	if not calleeTypeInfo then
+		!DEPEND_AND_RETURN(`call`, DEPEND_NODE_INFERRED, `callee`)
 	end
+
+	if callee.nodeType == !(nodeTypes.AstIdentifier) and callee.declaration.overloadOf then
+		local ident    = callee
+		local declBase = ident.declaration
+
+		while declBase.overloadOf ~= declBase do  declBase = declBase.overloadOf  end
+
+		calleeTypeInfo = declBase.name.inferredType
+		if not calleeTypeInfo then
+			!DEPEND_AND_RETURN(`call`, DEPEND_NODE_INFERRED, `declBase.name`)
+		end
+	end
+
 	for _, arg in ipairs(call.arguments) do
 		if not arg.inferredType then
 			!DEPEND_AND_RETURN(`call`, DEPEND_NODE_INFERRED, `arg`)
 		end
 	end
-
-	local calleeTypeInfo = call.callee.inferredType
 
 	if calleeTypeInfo.tag == !(typeTags.TypeInfoFunction) then -- @Incomplete: Parameterized structs.
 		-- void
@@ -1311,16 +1407,53 @@ end
 		end
 
 	else
-		if call.callee.nodeType == !(nodeTypes.AstIdentifier) then
-			local ident = call.callee
+		if callee.nodeType == !(nodeTypes.AstIdentifier) then
+			local ident = callee
 			typeError(state, ident, "'%s' is not a function. (It is %s)", ident.name, getFriendlyTypeInfoName(ident.inferredType))
 		else
 			typeError(state, call, "The object being called is not a function. (It is %s)", getFriendlyTypeInfoName(calleeTypeInfo))
 		end
 	end
 
-	assert(calleeTypeInfo.tag == !(typeTags.TypeInfoFunction)) -- @Incomplete: Handle parameterized structs.
-	checkIfValuesMatchArgumentTypes(state, call, call.arguments, calleeTypeInfo.argumentTypesIn)
+	!ASSERT("calleeTypeInfo.tag == "..typeTags.TypeInfoFunction) -- @Incomplete: Handle parameterized structs.
+
+	if callee.nodeType == !(nodeTypes.AstIdentifier) and callee.declaration.overloadOf then
+		local ident         = callee
+		local declBase      = ident.declaration
+		local foundOverload = false
+		local decl
+
+		while declBase.overloadOf ~= declBase do  declBase = declBase.overloadOf  end
+
+		for _, declOverload in ipairs(declBase.overloads) do
+			decl           = declOverload
+			calleeTypeInfo = decl.name.inferredType
+
+			!ASSERT("calleeTypeInfo.tag == "..typeTags.TypeInfoFunction)
+
+			if checkIfValuesMatchArgumentTypes(state, call, call.arguments, calleeTypeInfo.argumentTypesIn, true) then
+				foundOverload = true
+				break
+			end
+		end
+
+		if not foundOverload then
+			printerr()
+			typeMessage(io.stderr, state, ident, "Error", "Did not find any matching overload to call.")
+			for i, declOverload in ipairs(declBase.overloads) do
+				typeMessage(io.stderr, state, declOverload.name, "Info", "...overload #%d.", i)
+			end
+			exitFailure()
+		end
+
+		-- Update the callee to represent the correct overload.
+		-- @Robustness: Is this safe? I don't think anything except the calls itself depends directly on, and uses values from, any callee.
+		ident.declaration  = decl
+		ident.inferredType = calleeTypeInfo
+
+	else
+		checkIfValuesMatchArgumentTypes(state, call, call.arguments, calleeTypeInfo.argumentTypesIn)
+	end
 
 	call.inferredType              = getTypeInfoForList(state, calleeTypeInfo.argumentTypesOut)
 	call.couldBeTypeWithParameters = false

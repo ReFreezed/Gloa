@@ -233,24 +233,28 @@ _G.!structAst"AstStatement:_AstNode"{ -- @Cleanup: Needed? I think not.
 }
 
 _G.!structAst"AstDeclaration:_AstNode"{
-	name               = NIL, -- AstIdentifier|AstVararg
-	types              = {},  -- []AstType  (No value here means the types are inferred.)
-	notes              = {},  -- []AstNote  @Incomplete: Nodes.
+	name                 = NIL, -- AstIdentifier|AstVararg
+	types                = {},  -- []AstType  (No value here means the types are inferred.)
+	notes                = {},  -- []AstNote  @Incomplete: Nodes.
 
-	isGlobalOrExported = false,
-	isConstant         = false,
-	canShadow          = false,
+	isGlobalOrExported   = false,
+	isConstant           = false,
+	canShadow            = false,
 
-	assignment         = NIL, -- AstAssignment  (If this is nil then the name gets it's default value (which depends on the type, of which there must be only one.))
-	assignmentIndex    = 1,
+	assignment           = NIL, -- AstAssignment  (If this is nil then the name gets it's default value (which depends on the type, of which there must be only one.))
+	assignmentIndex      = 1,
 
 	-- Type phase:
-	valueTypeInfo      = NIL, -- Type represented by the assigned value if isConstant. If this is set then the declared identifier can be used in places where a type is expected. Can be nil.
+	valueTypeInfo        = NIL, -- Type represented by the assigned value if isConstant. If this is set then the declared identifier can be used in places where a type is expected. Can be nil.
+	checkedRedeclaration = false,
+	overloads            = {},
+	overloadOf           = NIL, -- AstDeclaration
+	overloadsLocked      = false,
 
 	-- Bytecode phase:
-	valueConstant      = NIL,
-	topScopeName       = "",
-	localName          = "",
+	valueConstant        = NIL,
+	topScopeName         = "",
+	localName            = "",
 }
 
 _G.!structAst"AstAssignment:_AstNode"{
@@ -1106,7 +1110,7 @@ function _G.parseDeclarationStatement(state, block, placeDeclared, declType)
 
 	local assignmentStatement = nil
 	local assignment          = nil
-	local isConstant          = false
+	local isConst             = false
 
 	!local CREATE_ASSIGNMENT = `
 		assignmentStatement       = astNewNode(AstStatement,  declStartToken, block)
@@ -1160,7 +1164,7 @@ function _G.parseDeclarationStatement(state, block, placeDeclared, declType)
 			!ERROR_OR_RETURN `errorParsing(state, declarations[1].types[2].token-1, "Constants can only be of one type.")`
 		end
 
-		isConstant = true
+		isConst = true
 		for _, decl in ipairs(declarations) do
 			decl.isConstant = true
 		end
@@ -1184,7 +1188,7 @@ function _G.parseDeclarationStatement(state, block, placeDeclared, declType)
 	if isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"shadow") then
 		eatNextToken(state)
 
-		if isConstant then
+		if isConst then
 			!ERROR_OR_RETURN `errorParsingLast(state, "Constants cannot be shadows.")`
 		elseif declType == !(DECLARATION_STRUCT) then
 			!ERROR_OR_RETURN `errorParsingLast(state, "Struct members cannot be marked as shadows.")`
@@ -1199,9 +1203,25 @@ function _G.parseDeclarationStatement(state, block, placeDeclared, declType)
 		end
 	end
 
-	-- Quickly check if there are obviously too many values.
-	if assignment and #assignment.values > #declNames then
-		!ERROR_OR_RETURN `errorParsing(state, assignment.values[#declNames+1].token-1, "There are more values than names being declared.")`
+	-- Quickly check if the value count is obviously wrong.
+	if assignment then
+		local valueCount = #assignment.values
+		local nameCount  = #declNames
+
+		if valueCount > nameCount then
+			!ERROR_OR_RETURN `errorParsing(
+				state, assignment.values[nameCount+1].token-1,
+				"There are more values than names being declared. (Expected %d value%s, got %d)",
+				nameCount, (nameCount == 1 and "" or "s"), valueCount
+			)`
+
+		elseif isConst and valueCount < nameCount then
+			!ERROR_OR_RETURN `errorParsingAfterLast(
+				state,
+				"No value for '%s'. Each constant must have it's own value. (Expected %d values, got %d)",
+				declNames[valueCount+1].name, nameCount, valueCount
+			)`
+		end
 	end
 
 	if declType == !(DECLARATION_NORMAL) then  eatTrailingSemicolon(state)  end

@@ -22,29 +22,13 @@ local !struct"Dependency"{ -- @Cleanup: Rename to something with "wait"?
 	dependent  = NIL, -- Queued
 	dependType = 0,   -- DEPEND_DECLARATION|DEPEND_NODE_INFERRED|DEPEND_NODE_EMITTED
 	dependOn   = NIL, -- string|Queued  (The value depends on what dependType is.)
+	next       = NIL, -- Dependency  (This is for chaining multiple dependencies.)
 }
 
 -- addDependency( state, dependent, DEPEND_DECLARATION,   name [, scope ] )
 -- addDependency( state, dependent, DEPEND_NODE_INFERRED, astNode )
 -- addDependency( state, dependent, DEPEND_NODE_EMITTED,  astNode )
 function _G.addDependency(state, dependent, dependType, dependOn, extraData)
-	local dependency = dependent.queued.waitingOn
-
-	if dependency then
-		printTraceback(io.stderr, 2)
-		printerr()
-
-		astPrint(dependent)
-		nodeMessage(io.stderr, state, dependent, "Error", "Pipes", "Internal compiler error: Dependent already waiting for something.")
-
-		if isAny(dependency.dependType, !(DEPEND_NODE_INFERRED),!(DEPEND_NODE_EMITTED)) then
-			astPrint(dependency.dependOn.node)
-			nodeMessage(io.stderr, state, dependency.dependOn.node, "Info", "Pipes", "...it's waiting on this.")
-		end
-
-		exitFailure()
-	end
-
 	!if DEBUG then
 		if dependType == !(DEPEND_DECLARATION) then
 			assert(type(dependOn) == "string")
@@ -61,13 +45,17 @@ function _G.addDependency(state, dependent, dependType, dependOn, extraData)
 		dependOn = dependOn.queued
 	end
 
-	dependency            = Dependency()
+	local dependency      = Dependency()
 	dependency.dependent  = dependent.queued
 	dependency.dependType = dependType
 	dependency.dependOn   = dependOn
 	dependency.extraData  = extraData
 
-	dependent.queued.waitingOn = dependency
+	if dependent.queued.waitingOn then
+		dependent.queued.waitingOn.next = dependency
+	else
+		dependent.queued.waitingOn = dependency
+	end
 
 	if itemWith3(state.dependencies, "dependent",dependency.dependent, "dependType",dependency.dependType, "dependOn",dependency.dependOn) then
 		printTraceback(io.stderr, 2)

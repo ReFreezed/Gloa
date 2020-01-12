@@ -297,6 +297,7 @@ xpcall(function()
 
 		for cycle = 1, math.huge do
 			!if DEBUG then
+				-- print("cycle", cycle)
 				pipeCycles   = pipeCycles+1
 				maxQueueSize = math.max(maxQueueSize, #queue)
 			!end
@@ -316,47 +317,25 @@ xpcall(function()
 				if not queued then  break  end
 
 				if queued.waitingOn then
-					local dependency = queued.waitingOn
-
-					if dependency.dependType == !(DEPEND_DECLARATION) then
-						local name = dependency.dependOn
-						-- @Speed: Only call findDeclaration*() if it's reported that a declaration with the awaited name has been added to the tree.
-						if dependency.extraData then
-							if findDeclarationInScope(state, dependency.extraData, name, true) then  queued.waitingOn = nil  end
-						else
-							if findDeclaration(state, queued.node, name) then  queued.waitingOn = nil  end
-						end
-
-					elseif dependency.dependType == !(DEPEND_NODE_INFERRED) then
-						if dependency.dependOn.pipe > !(PIPE_INFER) then
-						-- if dependency.dependOn.node.inferredType then -- Invalid! dependOn.node is not necessarily an expression.
-							queued.waitingOn = nil
-						end
-
-					elseif dependency.dependType == !(DEPEND_NODE_EMITTED) then
-						if dependency.dependOn.pipe > !(PIPE_BYTECODE) then
-							queued.waitingOn = nil
-						end
-
-					else
-						errorInternal("%d", dependency.dependType)
-					end
-				end
-
-				if queued.waitingOn then
-					waitCount = waitCount+1
+					-- void
 
 				!if DEBUG then
 				elseif queued.pipe > lastPipe then
 					-- void
 				!end
 
-				elseif queued.pipe == !(PIPE_INFER) then
-					didSomething = true
-					inferNode(state, queued.node)
-				elseif queued.pipe == !(PIPE_BYTECODE) then
-					didSomething = true
-					bcEmit(state, queued.node)
+				else
+					if queued.pipe == !(PIPE_INFER) then
+						didSomething = true
+						inferNode(state, queued.node)
+					elseif queued.pipe == !(PIPE_BYTECODE) then
+						didSomething = true
+						bcEmit(state, queued.node)
+					end
+
+					if queued.waitingOn then
+						waitCount = waitCount+1
+					end
 				end
 
 				i = i+1
@@ -379,6 +358,47 @@ xpcall(function()
 
 			elseif not didSomething then
 				errorPipesAreStuck(state)
+			end
+
+			for _, queued in ipairs(queue) do
+				local dependencyCurrent = not queued.unqueued and queued.waitingOn
+
+				while dependencyCurrent do
+					local dependency  = dependencyCurrent
+					dependencyCurrent = nil
+
+					if dependency.dependType == !(DEPEND_DECLARATION) then
+						local name = dependency.dependOn
+						-- @Speed: Only call findDeclaration*() if it's reported that a declaration with the awaited name has been added to the tree.
+						if dependency.extraData then
+							if findDeclarationInScope(state, dependency.extraData, name, true) then
+								dependencyCurrent = dependency.next
+								queued.waitingOn  = dependencyCurrent
+							end
+						else
+							if findDeclaration(state, queued.node, name) then
+								dependencyCurrent = dependency.next
+								queued.waitingOn  = dependencyCurrent
+							end
+						end
+
+					elseif dependency.dependType == !(DEPEND_NODE_INFERRED) then
+						if dependency.dependOn.pipe > !(PIPE_INFER) then
+						-- if dependency.dependOn.node.inferredType then -- Invalid! dependOn.node is not necessarily an expression.
+							dependencyCurrent = dependency.next
+							queued.waitingOn  = dependencyCurrent
+						end
+
+					elseif dependency.dependType == !(DEPEND_NODE_EMITTED) then
+						if dependency.dependOn.pipe > !(PIPE_BYTECODE) then
+							dependencyCurrent = dependency.next
+							queued.waitingOn  = dependencyCurrent
+						end
+
+					else
+						errorInternal("%d", dependency.dependType)
+					end
+				end
 			end
 
 			!if DEBUG then
