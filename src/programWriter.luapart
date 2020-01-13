@@ -12,6 +12,7 @@
 	doesTypeHaveAnyDefaultValue
 	isExpressionLiteralStringAndValidLuaIdentifier
 	unicodeToLuaIdentifier
+	validateForeignSource
 	writeProgram, write*
 
 ----------------------------------------------------------------
@@ -132,9 +133,9 @@ function _G.writeCast(state, file, cast)
 
 	-- float -> int
 	elseif typeInfoSource.tag == !(typeTags.TypeInfoFloat) and typeInfoTarget.tag == !(typeTags.TypeInfoInt) then
-		file:write("math.modf(") -- @Robustness: Store 'math' module in a local. Maybe automatically add a foreign import?
+		file:write("(_MATH_MODF(")
 		writeExpression(state, file, cast.expression)
-		file:write(")")
+		file:write("))")
 
 	-- (whatever) -> any
 	-- any -> (whatever)
@@ -286,16 +287,26 @@ function _G.writeExpression(state, file, expr)
 
 	elseif expr.nodeType == !(nodeTypes.AstBinary) then
 		local binary = expr
-		file:write("(")
+
 		if binary.operation == ".." then
-			-- This makes sure consecutive string concatenations appear as one operation without any parenthesis.
-			writeStringConcatenation(state, file, binary)
+			file:write("(")
+			writeStringConcatenation(state, file, binary) -- This makes sure consecutive string concatenations appear as one operation without any parenthesis.
+			file:write(")")
+
+		elseif binary.operation == "//" then
+			file:write("_MATH_FLOOR(")
+			writeExpression(state, file, binary.left)
+			file:write(" / ")
+			writeExpression(state, file, binary.right)
+			file:write(")")
+
 		else
+			file:write("(")
 			writeExpression(state, file, binary.left)
 			file:write(" ", binary.operation, " ")
 			writeExpression(state, file, binary.right)
+			file:write(")")
 		end
-		file:write(")")
 
 	elseif expr.nodeType == !(nodeTypes.AstLiteral) then
 		local literal = expr
@@ -483,7 +494,8 @@ local function allocateArgumentName(state, localsStack, name, n)
 	return allocateName(state, localsStack, name, n, "A", "_A")
 end
 
-function _G.writeBlock(state, file, block, indent, nextLocalN, localsStack)
+-- writeBlock( state, file, block, indent, nextLocalN, localsStack [, isElseif=false ] )
+function _G.writeBlock(state, file, block, indent, nextLocalN, localsStack, isElseif)
 	local outputDebugInfo = state.settings.outputDebugInfo
 	local indentStr       = ("\t"):rep(indent)
 
@@ -585,18 +597,28 @@ function _G.writeBlock(state, file, block, indent, nextLocalN, localsStack)
 		elseif nodeType == !(nodeTypes.AstIf) then
 			-- @Optimize: Don't output empty branches.
 			local ifBranch = statement.what
-			file:write(indentStr, "if ")
+
+			if not isElseif then  file:write(indentStr)  end
+
+			file:write("if ")
 			writeExpression(state, file, ifBranch.condition)
 			file:write(" then\n")
 
 			writeBlock(state, file, ifBranch.branchTrue, indent+1, nextLocalN, localsStack)
 
-			if ifBranch.branchFalse then
+			if not (ifBranch.branchFalse or EMPTY_TABLE)[1] then
+				-- void
+
+			elseif not ifBranch.branchFalse[2] and ifBranch.branchFalse[1].what.nodeType == !(nodeTypes.AstIf) then
+				file:write(indentStr, "else") -- This will be followed by "if"
+				writeBlock(state, file, ifBranch.branchFalse, indent, nextLocalN, localsStack, true)
+
+			else
 				file:write(indentStr, "else\n")
 				writeBlock(state, file, ifBranch.branchFalse, indent+1, nextLocalN, localsStack)
 			end
 
-			file:write(indentStr, "end\n")
+			if not isElseif then  file:write(indentStr, "end\n")  end
 
 		elseif nodeType == !(nodeTypes.AstWhile) then
 			-- @Optimize: Don't output an empty body.
@@ -891,6 +913,9 @@ function _G.writeProgram(state)
 	)
 	file:write(!(ERROR_HANDLER))
 
+	file:write("local _MATH_MODF  = math.modf\n")  -- Used when casting float to int.
+	file:write("local _MATH_FLOOR = math.floor\n") -- Used for integer division.
+
 	-- Start of protected call around all user code.
 	file:write("local ok = xpcall(function()\n")
 
@@ -1079,13 +1104,16 @@ end
 
 
 function _G.validateForeignSource(state, foreignSource, foreignSourceName, nodeForError)
+	-- @UX: Make error arrow always point at the !foreign token.
+
 	if foreignSource == "lua" then
-		-- void
+		if not loadstring(F("return(%s)", foreignSourceName)) then
+			nodeError(state, nodeForError, "ForeignValidator", "This is not a valid Lua symbol: '%s'", foreignSourceName)
+		end
 
 	elseif foreignSource == "compiler" then
 		if not COMPILER_API[foreignSourceName] then
-			-- @UX: Make error arrow always point at the !foreign token.
-			nodeError(state, nodeForError, nil, "'%s' is not a valid compiler symbol.", foreignSourceName)
+			nodeError(state, nodeForError, "ForeignValidator", "This is not a valid compiler symbol: '%s'", foreignSourceName)
 		end
 
 	else

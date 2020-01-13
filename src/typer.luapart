@@ -1732,7 +1732,7 @@ end
 	unary.inferredType = typeInfo
 
 	--
-	-- Inferring complete! Now fold the expression if it's constant.
+	-- Inferring complete! Now simplify the expression if it's constant.
 	--
 
 	local isConst, literalValue = getLiteralValueFromExpressionIfConstant(state, unary.expression)
@@ -1820,8 +1820,7 @@ local function isCompoundCompare(state, binary, typeInfoL, typeInfoR)
 end
 
 local function isValidEqualityCheck(state, binary, typeInfoL, typeInfoR)
-	if not isAny(binary.operation, "==","~=") then  return false  end
-
+	if typeInfoL     == typeInfoR               then  return true  end
 	if typeInfoL.tag == !(typeTags.TypeInfoAny) then  return true  end
 	if typeInfoR.tag == !(typeTags.TypeInfoAny) then  return true  end
 
@@ -1834,6 +1833,14 @@ end
 !NODE_INFERRER `function nodeInferrers.AstBinary(state, binary)`
 	local typeInfoL = binary.left.inferredType
 	local typeInfoR = binary.right.inferredType
+
+	!local TYPE_MISMATCH = `typeError(
+		state, binary,
+		"Binary operation (%s): Type mismatch for operands. (Left is %s, right is %s)",
+		binary.operation,
+		getFriendlyTypeInfoName(typeInfoL),
+		getFriendlyTypeInfoName(typeInfoR)
+	)`
 
 	if not typeInfoL then
 		!DEPEND_AND_RETURN(`binary`, DEPEND_NODE_INFERRED, `binary.left`)
@@ -1852,34 +1859,33 @@ end
 	typeInfoL = adjustTypeToOne(state, typeInfoL, true)
 	typeInfoR = adjustTypeToOne(state, typeInfoR, true)
 
-	if not (typeInfoL == typeInfoR or isValidEqualityCheck(state, binary, typeInfoL, typeInfoR)) then
-		typeError(
-			state, binary,
-			"Binary operation (%s): Type mismatch for operands. (Left is %s, right is %s)",
-			binary.operation,
-			getFriendlyTypeInfoName(typeInfoL),
-			getFriendlyTypeInfoName(typeInfoR)
-		)
-	end
-
 	-- Numeric operation.
 	if isAny(binary.operation, "+","-","*","^","%","/","//") then
-		if not isAny(typeInfoL.tag, !(typeTags.TypeInfoInt),!(typeTags.TypeInfoFloat)) then
+		if not (isTypeNumeric(typeInfoL) and isTypeNumeric(typeInfoR)) then
 			typeError(
 				state, binary.left,
-				"Binary numeric operation (%s): Expected a float or int. (Got %s)",
+				"Binary numeric operation (%s): Expected operands to be numeric. (Got %s and %s)",
 				binary.operation,
-				getFriendlyTypeInfoName(typeInfoL)
+				getFriendlyTypeInfoName(typeInfoL),
+				getFriendlyTypeInfoName(typeInfoR)
 			)
 		end
 
-		if     binary.operation == "/"  then  typeInfo = getTypeInfoForBuiltinType(state, "float") -- Cast to float.
-		elseif binary.operation == "//" then  typeInfo = getTypeInfoForBuiltinType(state, "int")   -- Cast to int.
-		else                                  typeInfo = typeInfoL  end                            -- Keep type.
+		if binary.operation == "/" then
+			typeInfo = getTypeInfoForBuiltinType(state, "float")
+		elseif binary.operation == "//" then
+			typeInfo = getTypeInfoForBuiltinType(state, "int")
+		elseif isAny(!(typeTags.TypeInfoFloat), typeInfoL.tag,typeInfoR.tag) then
+			typeInfo = getTypeInfoForBuiltinType(state, "float")
+		else
+			typeInfo = getTypeInfoForBuiltinType(state, "int")
+		end
 
 	-- Comparison.
 	elseif isAny(binary.operation, "<",">","<=",">=") then
-		if not isAny(typeInfoL.tag, !(typeTags.TypeInfoInt),!(typeTags.TypeInfoFloat),!(typeTags.TypeInfoString)) then
+		if typeInfoL ~= typeInfoR then
+			!!(TYPE_MISMATCH)
+		elseif not isAny(typeInfoL.tag, !(typeTags.TypeInfoInt),!(typeTags.TypeInfoFloat),!(typeTags.TypeInfoString)) then
 			typeError(
 				state, binary.left,
 				"Binary comparison (%s): Expected a float, int or string. (Got %s)",
@@ -1892,18 +1898,25 @@ end
 
 	-- Equality.
 	elseif isAny(binary.operation, "==","~=") then
+		if not isValidEqualityCheck(state, binary, typeInfoL, typeInfoR) then
+			!!(TYPE_MISMATCH)
+		end
 		typeInfo = getTypeInfoForBuiltinType(state, "bool")
 
 	-- Boolean operation.
 	elseif isAny(binary.operation, "and","or") then
-		if typeInfoL.tag ~= !(typeTags.TypeInfoBool) then
+		if typeInfoL ~= typeInfoR then
+			!!(TYPE_MISMATCH)
+		elseif typeInfoL.tag ~= !(typeTags.TypeInfoBool) then
 			typeError(state, binary.left, "Binary boolean operation (%s): Expected a bool. (Got %s)", binary.operation, getFriendlyTypeInfoName(typeInfoL))
 		end
 		typeInfo = getTypeInfoForBuiltinType(state, "bool")
 
 	-- String concatenation.
 	elseif binary.operation == ".." then
-		if typeInfoL.tag ~= !(typeTags.TypeInfoString) then
+		if typeInfoL ~= typeInfoR then
+			!!(TYPE_MISMATCH)
+		elseif typeInfoL.tag ~= !(typeTags.TypeInfoString) then
 			typeError(state, binary.left, "String concatenation expected a string. (Got %s)", getFriendlyTypeInfoName(typeInfoL))
 		end
 		typeInfo = getTypeInfoForBuiltinType(state, "string")
@@ -1916,13 +1929,15 @@ end
 	binary.inferredType = typeInfo
 
 	--
-	-- Inferring complete! Now fold the expression if it's constant.
-	-- @Incomplete: Fold these kinds of expressions: (1+x)+2 => (1+2)+x => 3+x
-	-- @Incomplete: Fold these kinds of expressions: 1 + -x => 1 - x
+	-- Inferring complete! Now simplify the expression if it's constant.
+	--
+	-- @Incomplete: Simplify these kinds of expressions: (1+x)+2 => (1+2)+x => 3+x
+	-- @Incomplete: Simplify these kinds of expressions: 1 + -x => 1 - x
 	--
 
 	local isConstL, valueL = getLiteralValueFromExpressionIfConstant(state, binary.left)
 	local isConstR, valueR = getLiteralValueFromExpressionIfConstant(state, binary.right)
+
 	if not (isConstL and isConstR) then
 		moveToPipe(state, binary, !(PIPE_DONE))
 
@@ -1935,7 +1950,7 @@ end
 			or typeInfo.tag == !(typeTags.TypeInfoFloat) and !(LITERAL_FLOAT)
 			or errorInternal(getFriendlyTypeInfoName(typeInfo))
 
-		literal.value        = valueL !!(opArithmeticKeepType) valueR
+		literal.value        = valueL !!(opArithmeticKeepType) valueR -- This should produce the correct result for any combination of int and float.
 		literal.inferredType = typeInfo
 
 		replaceQueuedNodeAndUnqueueOldTree(state, binary, literal)
@@ -1953,7 +1968,7 @@ end
 	elseif binary.operation == "//" then
 		local literal        = astNewNode(AstLiteral, binary.token, binary.parent)
 		literal.literalType  = !(LITERAL_INTEGER)
-		literal.value        = math.modf(valueL/valueR) -- @Robustness: Do we need to floor valueL and valueR before the division too?
+		literal.value        = math.floor(valueL/valueR)
 		literal.inferredType = typeInfo
 		replaceQueuedNodeAndUnqueueOldTree(state, binary, literal)
 		moveToPipe(state, literal, !(PIPE_BYTECODE))
@@ -3024,7 +3039,7 @@ function _G.getLiteralValueFromExpressionIfConstant(state, expr)
 		end
 
 	elseif isAny(expr.nodeType, !(nodeTypes.AstUnary),!(nodeTypes.AstBinary)) then
-		return false, nil -- We don't check child nodes as those should have been folded into 'expr' where this function is called.
+		return false, nil -- We don't check child nodes as these operations should have been simplified into 'expr' where this function is called.
 
 	elseif expr.nodeType == !(nodeTypes.AstCall) then
 		return false, nil -- Calls are always a runtime operation.
@@ -3448,6 +3463,10 @@ end
 -- Note: Glóa types are represented as ints in Lua and thus are 'simple'.
 function _G.isTypeSimple(typeInfo)
 	return isAny(typeInfo.tag, !(typeTags.TypeInfoBool),!(typeTags.TypeInfoInt),!(typeTags.TypeInfoNil),!(typeTags.TypeInfoFloat),!(typeTags.TypeInfoString),!(typeTags.TypeInfoType))
+end
+
+function _G.isTypeNumeric(typeInfo)
+	return isAny(typeInfo.tag, !(typeTags.TypeInfoInt),!(typeTags.TypeInfoFloat))
 end
 
 function _G.isTypeCompatibleWith(typeToCheck, otherType)
