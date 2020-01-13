@@ -1,0 +1,291 @@
+--[[============================================================
+--=
+--=  Example program: Lövely Snake
+--=  Requires LÖVE 11.3 to run!
+--=
+--============================================================]]
+
+!load "love.gloa"
+!load "misc.gloa"
+
+
+
+local TILE_SIZE :: 16
+
+local LEVEL_WIDTH  :: 40
+local LEVEL_HEIGHT :: 20
+local LEVEL_WIDTH_IN_PIXELS  :: LEVEL_WIDTH  * TILE_SIZE
+local LEVEL_HEIGHT_IN_PIXELS :: LEVEL_HEIGHT * TILE_SIZE
+
+local TIME_UNTIL_MOVE_MAX :: 0.10
+local TIME_UNTIL_MOVE_MIN :: 0.05
+local SPEEDUP_STEPS       :: 30 -- When the score is this then we've reached max game speed.
+
+local INITIAL_TAIL_LENGTH :: 1
+
+
+
+local Direction :: enum { NONE::-1, RIGHT::0, DOWN::1, LEFT::2, UP::3 }
+local FruitKind :: enum { APPLE::0 }
+
+local Coords :: struct { x=0, y=0 }
+
+local Player :: struct {
+	x = 0,
+	y = 0,
+
+	direction       = Direction.RIGHT,
+	directionNext   = Direction.NONE,
+	directionQueued = Direction.NONE,
+
+	tail: []Coords,
+	growTail = false,
+}
+
+local Fruit :: struct {
+	x         = 0,
+	y         = 0,
+	kind      = FruitKind.APPLE,
+	spawnTime = 0.0,
+}
+
+
+
+local uiTime        = 0.0
+local gameStartTime = 0.0
+local timeUntilMove = 0.0
+
+local player:Player
+local fruit:Fruit
+
+local score     = 0
+local scoreTime = -9999.0
+local lastScore = 0
+local highscore = 0
+
+local dummyCoords:Coords
+
+
+
+local randomizeFruitPosition :: () {
+	while true {
+		local isPlayerAt :: (x,y:int) -> bool {
+			if player.x == x or player.y == y  return true
+
+			for player.tail {
+				if it.x == x and it.y == y  return true
+			}
+			return false
+		}
+
+		fruit.x = random(0, LEVEL_WIDTH-1)
+		fruit.y = random(0, LEVEL_HEIGHT-1)
+
+		if not isPlayerAt(fruit.x, fruit.y)  break
+	}
+	fruit.spawnTime = uiTime
+}
+
+local insertCoords :: (coordsArray:[]Coords, coords:Coords) !foreign lua "table.insert"
+
+local startNewGame :: ()   {
+	if score >= 2 { -- Don't save scores below 2.
+		lastScore = score
+		highscore = max(score, highscore)
+	}
+
+	gameStartTime = uiTime
+	timeUntilMove = TIME_UNTIL_MOVE_MAX
+	score         = 0
+
+	player = {
+		x = LEVEL_WIDTH  // 2,
+		y = LEVEL_HEIGHT // 2,
+	}
+
+	for 1, INITIAL_TAIL_LENGTH
+		insertCoords(player.tail, {x=player.x-it, y=player.y})
+
+	randomizeFruitPosition()
+}
+
+local loveHandler_load :: (args:[]string, argsRaw:[]string) {
+	startNewGame()
+}
+
+
+
+local areDirectionsOpposite :: (dir1:Direction, dir2:Direction) -> bool {
+	return cast(int)dir1 == ((cast(int)dir2 + 2) % 4)
+}
+
+local requestDirection :: (using dir:Direction) {
+	local dirBefore = player.directionNext
+	if dirBefore == NONE  dirBefore = player.direction
+
+	if dir == dirBefore                       return -- Continue forward.
+	if areDirectionsOpposite(dir, dirBefore)  return -- Cannot turn 180 degrees.
+
+	if player.directionNext == NONE
+		player.directionNext = dir
+	else
+		player.directionQueued = dir
+}
+
+local loveHandler_keypressed :: (key:string, scancode:string, isRepeat:bool) {
+	using Direction
+	if     key == "escape"  loveQuit(0)
+	elseif key == "right"   requestDirection(RIGHT)
+	elseif key == "down"    requestDirection(DOWN)
+	elseif key == "left"    requestDirection(LEFT)
+	elseif key == "up"      requestDirection(UP)
+}
+
+
+
+local previousCoord :: (coordsArray:[]Coords, i:int) -> int|nil, Coords {
+	i = i-1
+	if coordsArray[i] == nil  return nil, dummyCoords
+	return i, coordsArray[i]
+}
+local eachCoordsBackwards :: (coordsArray:[]Coords) -> type_of(previousCoord), []Coords, int {
+	return previousCoord, coordsArray, #coordsArray+1
+}
+
+local movePlayer :: () {
+	if player.growTail {
+		insertCoords(player.tail, {}) -- The position of the new tail segment will be set properly below.
+		player.growTail = false
+	}
+
+	-- Move player and tail.
+	using local dir = player.directionNext
+	if dir == NONE  dir = player.direction
+
+	player.direction       = dir
+	player.directionNext   = player.directionQueued
+	player.directionQueued = NONE
+
+	for i, segment in eachCoordsBackwards(player.tail) {
+		if i == 1 {
+			segment.x = player.x
+			segment.y = player.y
+		} else {
+			segment.x = player.tail[i-1].x
+			segment.y = player.tail[i-1].y
+		}
+	}
+
+	if     dir == RIGHT  player.x = player.x+1
+	elseif dir == DOWN   player.y = player.y+1
+	elseif dir == LEFT   player.x = player.x-1
+	elseif dir == UP     player.y = player.y -  1
+
+	timeUntilMove = timeUntilMove + lerp(
+		TIME_UNTIL_MOVE_MAX,
+		TIME_UNTIL_MOVE_MIN,
+		clamp01(score / SPEEDUP_STEPS)
+	)
+
+	-- Check for collisions.
+	if player.x < 0 or player.y < 0 or player.x >= LEVEL_WIDTH or player.y >= LEVEL_HEIGHT
+		startNewGame()
+
+	for player.tail {
+		if player.x == it.x and player.y == it.y
+			startNewGame()
+	}
+
+	if player.x == fruit.x and player.y == fruit.y {
+		score     = score+1
+		scoreTime = uiTime
+
+		player.growTail = true
+		randomizeFruitPosition()
+	}
+}
+
+local loveHandler_update :: (dt:float) {
+	uiTime        = uiTime+dt
+	timeUntilMove = timeUntilMove-dt
+
+	if timeUntilMove <= .0  movePlayer()
+}
+
+
+
+local loveHandler_draw :: () {
+	local ww, wh = loveGetWindowDimensions()
+
+	local FLASH_DURATION :: .50
+	local scoreHighlight = max(1.0-(uiTime-scoreTime)/FLASH_DURATION, 0)^1.5
+
+	loveClear(0, .07, .2, 0)
+
+	local offsetX = round((ww-LEVEL_WIDTH_IN_PIXELS)/2)
+	local offsetY = round((wh-LEVEL_HEIGHT_IN_PIXELS)/2)
+	loveCoordinateSystemTranslate(offsetX, offsetY)
+
+	-- Grid.
+	loveSetColor(.2, 1, .5, .1)
+	for x = 0, LEVEL_WIDTH   loveDrawRectangleFill(x*TILE_SIZE-1, 0, 2, LEVEL_HEIGHT_IN_PIXELS)
+	for y = 0, LEVEL_HEIGHT  loveDrawRectangleFill(0, y*TILE_SIZE-1, LEVEL_WIDTH_IN_PIXELS, 2)
+
+	-- Borders.
+	do {
+		local SPACING :: 5.0
+		local BORDER  :: 8.0
+
+		local spacing = SPACING + 4.0*scoreHighlight
+		local border  = BORDER  + 2.0*scoreHighlight
+
+		loveSetColor(.2, 1, .5, .5-.1*scoreHighlight)
+		loveDrawRectangleFill(cast(float)LEVEL_WIDTH_IN_PIXELS+spacing,  0, +border, LEVEL_HEIGHT_IN_PIXELS)
+		loveDrawRectangleFill(                                -spacing,  0, -border, LEVEL_HEIGHT_IN_PIXELS)
+		loveDrawRectangleFill(0, cast(float)LEVEL_HEIGHT_IN_PIXELS+spacing, LEVEL_WIDTH_IN_PIXELS,  +border)
+		loveDrawRectangleFill(0,                                  -spacing, LEVEL_WIDTH_IN_PIXELS,  -border)
+	}
+
+	-- Fruit.
+	local fruitGrowth = max(1.0-(uiTime-fruit.spawnTime)/FLASH_DURATION, 0)^1.5
+	loveSetColor(.4, .8, .1)
+	loveDrawCircleFill(
+		(cast(float) fruit.x + .5) * cast(float) TILE_SIZE, -- @Compiler @UX: Make these casts unnecessary.
+		(cast(float) fruit.y + .5) * cast(float) TILE_SIZE,
+		(TILE_SIZE-4)/2 + 6.0*fruitGrowth
+	)
+
+	-- Player.
+	loveSetColor(1, .2, .5)
+	loveDrawRectangleFill(player.x*TILE_SIZE, player.y*TILE_SIZE, TILE_SIZE, TILE_SIZE)
+	loveSetColor(1, .2, .5, .7)
+	for player.tail  loveDrawRectangleFill(it.x*TILE_SIZE+2, it.y*TILE_SIZE+2, TILE_SIZE-4, TILE_SIZE-4)
+
+	-- HUD.
+	loveCoordinateSystemReset()
+	loveSetColor(1, 1, 1, .8+.2*scoreHighlight)
+	loveDrawText(
+		format(
+			"Score: %d  ~  Last: %d  ~  Highscore: %d\nTime: %.1f seconds",
+			score, lastScore, highscore, uiTime-gameStartTime
+		),
+		5, 5
+	)
+}
+
+
+
+local main :: () {
+	-- Attach event handlers to LÖVE. Because LÖVE has it's own error handling
+	-- (that we don't want) we have to do some trickery to catch errors in Glóa
+	-- before LÖVE sees them. Fortunately, the compiler makes this specific task easy.
+	local wrap :: (func:any) -> any !foreign compiler "wrapFunctionInGloaErrorHandler"
+	love.load         = wrap(loveHandler_load)
+	love.keypressed   = wrap(loveHandler_keypressed)
+	love.update       = wrap(loveHandler_update)
+	love.draw         = wrap(loveHandler_draw)
+	love.errorhandler = nil
+	love.errhand      = nil
+}
+
+
