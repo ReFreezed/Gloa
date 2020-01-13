@@ -31,15 +31,19 @@ collectgarbage("stop") -- Slight speed boost.
 
 local DIR_HERE = debug.getinfo(1, "S").source:match"@?(.+)":gsub("\\", "/"):gsub("/?[^/]+$", ""):gsub("^$", ".")
 
--- Read build arguments.
-local args        = {...}
-local pathGloaOut = DIR_HERE.."/../gloa.lua"
-local pathPp      = DIR_HERE.."/../lib/preprocess.lua"
-local silent      = false
-local debugMode   = false
-local debugger    = false
-local dirGloa     = "" -- Empty means automatic value at runtime.
-local i           = 1
+-- Read build options.
+local args               = {...}
+
+local pathGloaOut        = DIR_HERE.."/../gloa.lua"
+local silent             = false
+local debugMode          = false
+local debugger           = false
+local dirGloa            = "" -- Empty means automatic value at runtime.
+
+local pathPp             = DIR_HERE.."/../lib/preprocess.lua"
+local runtimeErrorPrefix = ""
+
+local i                  = 1
 
 while args[i] do
 	local arg = args[i]
@@ -47,29 +51,29 @@ while args[i] do
 	if     arg == "--ouput" then
 		pathGloaOut = (args[i+1] or error("[GloaBuildArgs] Expected value after "..arg..".")):gsub("\\", "/")
 		i           = i+2
-
-	elseif arg == "--pp" then
-		pathPp      = (args[i+1] or error("[GloaBuildArgs] Expected value after "..arg..".")):gsub("\\", "/")
-		i           = i+2
-
 	elseif arg == "--silent" then
 		silent      = true
 		i           = i+1
-
 	elseif arg == "--debug" then
 		debugMode   = true
 		i           = i+1
-
 	elseif arg == "--debugger" then
 		debugger    = true
 		i           = i+1
-
 	elseif arg == "--gloadir" then
 		dirGloa     = args[i+1] or error("[GloaBuildArgs] Expected value after "..arg..".")
 		i           = i+2
 
+	-- Secret options:
+	elseif arg == "--pp" then
+		pathPp             = (args[i+1] or error("[GloaBuildArgs] Expected value after "..arg..".")):gsub("\\", "/")
+		i                  = i+2
+	elseif arg == "--runtimeerrorprefix" then
+		runtimeErrorPrefix = args[i+1] or error("[GloaBuildArgs] Expected value after "..arg..".")
+		i                  = i+2
+
 	else
-		error("[GloaBuildArgs] Unknown argument: "..arg)
+		error("[GloaBuildArgs] Unknown option: "..arg)
 	end
 end
 
@@ -84,6 +88,8 @@ local pp = chunk()
 pp.metaEnvironment.DEBUG    = debugMode
 pp.metaEnvironment.DEBUGGER = debugMode and debugger
 pp.metaEnvironment.GLOA_DIR = debugMode and dirGloa or ""
+
+pp.metaEnvironment.RUNTIME_ERROR_PREFIX = debugMode and runtimeErrorPrefix or ""
 
 pp.metaEnvironment.F = string.format
 

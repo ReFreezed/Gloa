@@ -9,6 +9,7 @@
 --=
 --==============================================================
 
+	doesTypeHaveAnyDefaultValue
 	isExpressionLiteralStringAndValidLuaIdentifier
 	unicodeToLuaIdentifier
 	writeProgram, write*
@@ -35,6 +36,30 @@
 
 
 
+local COMPILER_API = {
+	-- Make Glóa handle errors triggered by a function.
+	-- This is useful if an external library or framework tries to handle an error
+	-- triggered by a callback provided by you, but you instead want to trigger a
+	-- normal Glóa error before the library knows what happened.
+	-- wrappedFunction = wrapFunctionInGloaErrorHandler( function )
+	wrapFunctionInGloaErrorHandler = `function(cb)
+		return function(...)
+			local args = {n=select("#", ...), ...}
+
+			if not xpcall(
+				function()
+					cb(unpack(args, 1, args.n))
+				end,
+				gloaErrorHandler
+			) then
+				os.exit(1) -- In case there was an error in gloaErrorHandler() for some reason.
+			end
+		end
+	end`
+}
+
+
+
 function _G.writeIdentifierName(state, file, ident)
 	local decl = ident.declaration
 	local name = decl.topScopeName
@@ -50,15 +75,15 @@ function _G.writeIdentifierName(state, file, ident)
 	file:write(name)
 end
 
-function _G.writeStringConcatination(state, file, binary)
+function _G.writeStringConcatenation(state, file, binary)
 	if binary.left.nodeType == !(nodeTypes.AstBinary) and binary.left.operation == ".." then
-		writeStringConcatination(state, file, binary.left)
+		writeStringConcatenation(state, file, binary.left)
 	else
 		writeExpression(state, file, binary.left)
 	end
 	file:write(" .. ")
 	if binary.right.nodeType == !(nodeTypes.AstBinary) and binary.right.operation == ".." then
-		writeStringConcatination(state, file, binary.right)
+		writeStringConcatenation(state, file, binary.right)
 	else
 		writeExpression(state, file, binary.right)
 	end
@@ -118,8 +143,12 @@ function _G.writeCast(state, file, cast)
 		-- @Incomplete: Compiler setting for runtime checks of 'any' and 'compound' casts.
 		writeExpression(state, file, cast.expression)
 
+	-- enum -> (real enum member type)
+	elseif typeInfoSource.tag == !(typeTags.TypeInfoEnum) and typeInfoTarget == typeInfoSource.memberTypeInfo then
+		writeExpression(state, file, cast.expression)
+
 	else
-		errorInternal("@Incomplete: Handle casting from %s to %s.", getFriendlyTypeInfoName(typeInfoSource), getFriendlyTypeInfoName(typeInfoTarget))
+		errorInternal("Incomplete: Handle casting from %s to %s.", getFriendlyTypeInfoName(typeInfoSource), getFriendlyTypeInfoName(typeInfoTarget))
 	end
 
 	file:write(")")
@@ -186,22 +215,27 @@ function _G.writeExpression(state, file, expr)
 
 		local first = true
 
-		for i, argExpr in ipairs(call.arguments) do
+		-- Write given arguments.
+		for _, argExpr in ipairs(call.arguments) do
 			if not first then  file:write(", ")  end
 			first = false
 			writeExpression(state, file, argExpr)
 		end
 
+		-- Write default values for arguments.
 		if callee.nodeType == !(nodeTypes.AstIdentifier) then
 			local calleeDecl = callee.declaration
 
 			if calleeDecl.isConstant then
 				local assignment = calleeDecl.assignment
 				local lambda     = assignment.values[calleeDecl.assignmentIndex] or errorInternal()
+				!ASSERT("lambda.nodeType == "..nodeTypes.AstLambda)
 
-				assert(lambda.nodeType == !(nodeTypes.AstLambda))
-
+				-- Only write a value if the last non-vararg argument is optional.
 				local argLast = lambda.argumentsIn and getLast(lambda.argumentsIn)
+				if argLast and argLast.declaration.name.nodeType == !(nodeTypes.AstVararg) then
+					argLast = getLast(lambda.argumentsIn, 2)
+				end
 
 				if argLast and not argLast.isRequired then
 					local argExprLast = getLast(call.arguments)
@@ -227,8 +261,10 @@ function _G.writeExpression(state, file, expr)
 						first = false
 
 						local arg = lambda.argumentsIn[i]
-						assert(arg.assignment)
-						writeExpression(state, file, arg.assignment.values[1])
+
+						if arg.assignment then -- Varargs are optional but have no default value (or zero default values, since it's a list).
+							writeExpression(state, file, arg.assignment.values[1])
+						end
 					end
 				end
 			end
@@ -240,16 +276,20 @@ function _G.writeExpression(state, file, expr)
 
 	elseif expr.nodeType == !(nodeTypes.AstUnary) then
 		local unary = expr
-		file:write("(", unary.operation)
-		writeExpression(state, file, unary.expression)
-		file:write(")")
+		if unary.operation == "+" then
+			writeExpression(state, file, unary.expression)
+		else
+			file:write("(", unary.operation, " ")
+			writeExpression(state, file, unary.expression)
+			file:write(")")
+		end
 
 	elseif expr.nodeType == !(nodeTypes.AstBinary) then
 		local binary = expr
 		file:write("(")
 		if binary.operation == ".." then
-			-- This makes sure consecutive string concatinations appear as one operation without any parenthesis.
-			writeStringConcatination(state, file, binary)
+			-- This makes sure consecutive string concatenations appear as one operation without any parenthesis.
+			writeStringConcatenation(state, file, binary)
 		else
 			writeExpression(state, file, binary.left)
 			file:write(" ", binary.operation, " ")
@@ -264,12 +304,13 @@ function _G.writeExpression(state, file, expr)
 	elseif expr.nodeType == !(nodeTypes.AstIdentifier) then
 		local ident = expr
 
-		if ident.inferredType.tag == !(typeTags.TypeInfoEnum) and not isPartOfAnyDeclaration(ident) then -- @Cleanup: This detection is a bit misplaced, I think.
-			local valueExpr = ident.declaration.assignment.values[1] or errorInternal()
-			writeExpression(state, file, valueExpr)
-
-		elseif ident.declaration.isConstant then
-			writeConstantValueOrReference(state, file, ident.declaration.valueConstant)
+		if ident.declaration.isConstant then
+			if ident.inferredType.tag == !(typeTags.TypeInfoEnum) and not isPartOfAnyDeclaration(ident) then -- @Cleanup: This detection seem bit misplaced.
+				local valueExpr = ident.declaration.assignment.values[1] or errorInternal()
+				writeExpression(state, file, valueExpr)
+			else
+				writeConstantValueOrReference(state, file, ident.declaration.valueConstant)
+			end
 
 		else
 			writeIdentifierName(state, file, ident)
@@ -383,7 +424,7 @@ function _G.writeDefaultValueForType(state, file, typeInfo, nodeForError)
 	elseif tag == !(typeTags.TypeInfoString) then
 		file:write('""')
 	elseif tag == !(typeTags.TypeInfoType) then
-		file:write("0") -- @Robustness: Maybe 'type' variables should have no defult value and this should be an error.
+		file:write("0") -- @Robustness: Maybe 'type' variables should have no defult value and this should be an error. :DefaultValueForTypes
 	elseif tag == !(typeTags.TypeInfoArray) or tag == !(typeTags.TypeInfoTable) then
 		file:write("{}")
 
@@ -400,9 +441,8 @@ function _G.writeDefaultValueForType(state, file, typeInfo, nodeForError)
 
 		file:write("}")
 
-	elseif tag == !(typeTags.TypeInfoEnum) then
-		nodeError(state, nodeForError, "ProgramWriter", "Enums do not have default values.") -- @Cleanup: This can be detected in the infer pipe.
-
+	elseif doesTypeHaveAnyDefaultValue(typeInfo) then
+		errorInternal("Incomplete: Write default value for type group '%s'.", TYPE_TAG_NAMES[typeInfo.tag])
 	else
 		nodeError(state, nodeForError, "ProgramWriter", "There is no default value for %s.", getFriendlyTypeInfoName(typeInfo))
 	end
@@ -715,12 +755,24 @@ function _G.writeForeignImportIfNew(state, file, typeInfo, foreignSource, foreig
 			state.foreignReferences[foreignSourceId] = F("_FOREIGN[%d--[[%s]]]", foreignN, (foreignSourceId:gsub("[%[%]]", "%0 ")))
 			file:write("_FOREIGN[", F("%d", foreignN), "]")
 		else
-			local foreignRef                                = F("_FOREIGN[%d]", foreignN)
+			local foreignRef                         = F("_FOREIGN[%d]", foreignN)
 			state.foreignReferences[foreignSourceId] = foreignRef
 			file:write(foreignRef)
 		end
 
 		file:write(" = (", foreignSourceName, ")\n") -- @Robustness: Is this too straightforward?
+
+	elseif foreignSource == "compiler" then
+		if outputDebugInfo then
+			state.foreignReferences[foreignSourceId] = F("_FOREIGN[%d--[[%s]]]", foreignN, (foreignSourceId:gsub("[%[%]]", "%0 ")))
+			file:write("_FOREIGN[", F("%d", foreignN), "]")
+		else
+			local foreignRef                         = F("_FOREIGN[%d]", foreignN)
+			state.foreignReferences[foreignSourceId] = foreignRef
+			file:write(foreignRef)
+		end
+
+		file:write(" = ", COMPILER_API[foreignSourceName], "\n")
 
 	else
 		errorInternal("Incomplete: Handle foreignSource=%s", foreignSource)
@@ -807,7 +859,40 @@ function _G.writeProgram(state)
 
 	-- @Incomplete: Setting to specify the prefix for the written file (shebang and maybe a comment with copyright info, library documentation etc.).
 	file:write('#!/bin/sh\n_=[[\nexec lua "$0" "$@"\n]] and nil\n')
-	file:write("xpcall(function()\n") -- Wrap the whole program in a protected call.
+
+	--
+	-- Compiler symbols.
+	--
+
+	-- @Incomplete: Convert file paths and line numbers to the Glóa source files.
+	-- @Polish: Nicer traceback format.
+	!(
+	local TEMPLATE_ERROR_HANDLER = `
+		local function gloaErrorHandler(err)
+			local errStr    = tostring(err)
+			local traceback = debug.traceback(errStr, 2)
+			$tracebackEdits
+
+			$outputFile:write(traceback, "\n")
+
+			os.exit(1)
+		end
+	`
+	local TEMPLATE_TRACEBACK_EDITS = `
+		traceback = traceback:gsub("%w[-%w_/]*%.lua:%d+", $filePathPrefix.."%0")
+	`
+	local TRACEBACK_EDITS = templateToLua(TEMPLATE_TRACEBACK_EDITS, {
+		filePathPrefix = toLua(RUNTIME_ERROR_PREFIX:gsub("%%", "%%%%")),
+	})
+	local ERROR_HANDLER = templateToLua(TEMPLATE_ERROR_HANDLER, {
+		tracebackEdits = DEBUG and TRACEBACK_EDITS or ``,
+		outputFile     = DEBUG and `io.stdout` or `io.stderr`, -- :SublimeText2Desync
+	})
+	)
+	file:write(!(ERROR_HANDLER))
+
+	-- Start of protected call around all user code.
+	file:write("local ok = xpcall(function()\n")
 
 	--
 	-- Foreign imports.
@@ -886,24 +971,27 @@ function _G.writeProgram(state)
 	!local ENTRY_POINT_NAME = "main" -- @Incomplete: Configurable entry point name.
 	local mainFuncDecl      = nil
 
-	-- Global assignments.
-	for _, decl in ipairs(state.globalScope.declarations) do
+	-- Global & file-scope assignments.
+	local function handleTopScopeDeclaration(decl)
 		if decl.topScopeName ~= "" then
 			file:write(decl.topScopeName, " = ")
-			writeConstantValueOrReference(state, file, decl.valueConstant)
+			if decl.valueConstant then
+				writeConstantValueOrReference(state, file, decl.valueConstant)
+			else
+				-- We should have a declared struct instance or something similar here (I think) that doesn't have a specified initial value.
+				writeDefaultValueForType(state, file, decl.name.inferredType, decl.name)
+			end
 			file:write("\n")
 		end
 		if decl.name.name == !(ENTRY_POINT_NAME) then  mainFuncDecl = decl  end
 	end
-	-- File-scope assignments.
+
+	for _, decl in ipairs(state.globalScope.declarations) do
+		handleTopScopeDeclaration(decl)
+	end
 	for _, fileScope in ipairs(state.globalScope.fileScopes) do
 		for _, decl in ipairs(fileScope.declarations) do
-			if decl.topScopeName ~= "" then
-				file:write(decl.topScopeName, " = ")
-				writeConstantValueOrReference(state, file, decl.valueConstant)
-				file:write("\n")
-			end
-			if decl.name.name == !(ENTRY_POINT_NAME) then  mainFuncDecl = decl  end
+			handleTopScopeDeclaration(decl)
 		end
 	end
 
@@ -947,20 +1035,8 @@ function _G.writeProgram(state)
 	file:write("()\n")
 
 	-- End of protected call.
-	-- @Incomplete: Convert file paths and line numbers to the Glóa source files.
-	-- @Polish: Nicer traceback format.
-	!(
-	local TEMPLATE_ERROR_HANDLER = `
-		function(err)
-			$outputFile:write(debug.traceback(tostring(err), 2), "\n")
-			os.exit(1)
-		end
-	`
-	local ERROR_HANDLER = templateToLua(TEMPLATE_ERROR_HANDLER, {
-		outputFile = DEBUG and `io.stdout` or `io.stderr`, -- :SublimeText2Desync
-	})
-	)
-	file:write("end,",!(ERROR_HANDLER),")\n")
+	file:write("end, gloaErrorHandler)\n")
+	file:write("if not ok then  os.exit(1)  end\n") -- In case there was an error in gloaErrorHandler() for some reason.
 
 	file:close()
 end
@@ -980,6 +1056,41 @@ end
 
 function _G.isExpressionLiteralStringAndValidLuaIdentifier(expr)
 	return expr.nodeType == !(nodeTypes.AstLiteral) and expr.literalType == !(LITERAL_STRING) and expr.value:find"^[%a_][%w_]*$" ~= nil
+end
+
+
+
+function _G.doesTypeHaveAnyDefaultValue(typeInfo)
+	return isAny(
+		typeInfo.tag,
+		!(typeTags.TypeInfoBool),
+		!(typeTags.TypeInfoInt),
+		!(typeTags.TypeInfoNil),
+		!(typeTags.TypeInfoFloat),
+		!(typeTags.TypeInfoString),
+		!(typeTags.TypeInfoType), -- Not sure about this one. Should zero represent no type or must a value always be specified? @Robustness :DefaultValueForTypes
+		!(typeTags.TypeInfoArray),
+		!(typeTags.TypeInfoTable),
+		!(typeTags.TypeInfoStruct),
+		!(typeTags.TypeInfoVararg) -- Varargs never have any default value(s), but because it's a list we can just say that the default value is "nothing".
+	)
+end
+
+
+
+function _G.validateForeignSource(state, foreignSource, foreignSourceName, nodeForError)
+	if foreignSource == "lua" then
+		-- void
+
+	elseif foreignSource == "compiler" then
+		if not COMPILER_API[foreignSourceName] then
+			-- @UX: Make error arrow always point at the !foreign token.
+			nodeError(state, nodeForError, nil, "'%s' is not a valid compiler symbol.", foreignSourceName)
+		end
+
+	else
+		errorInternal("Incomplete: Handle foreignSource=%s", foreignSource)
+	end
 end
 
 

@@ -20,7 +20,7 @@
 	astVisitAllNodes, astVisitAllNodesLeavesFirst
 	eatNextToken, peekNextToken, peekLastToken, putBackLastToken, eatTrailingSemicolon
 	errorParsing*, parserMessage*
-	errorUnhandledNodeType
+	errorUnhandledNodeType, errorUnhandledType
 	nodeError, nodeMessage, where
 	parse*
 
@@ -196,7 +196,7 @@ _G.!structAst"AstImport:_AstExpression"{
 	fileScope  = NIL, -- AstFileScope
 }
 _G.!structAst"AstForeign:_AstExpression"{
-	source     = "", -- "lua"
+	source     = "", -- "lua"|"compiler"
 	sourceName = "", -- May be inferred from declaration.
 
 	-- Type phase:
@@ -444,9 +444,9 @@ function _G.parseForeign(state, parentNode)
 
 	local tokType, tokValue = eatNextToken(state)
 	if not isToken(tokType,tokValue, !(TOKEN_IDENTIFIER)) then
-		!ERROR_OR_RETURN `errorParsingLast(state, "Expected foreign source. (The only valid value right now is: lua)")`
-	elseif tokValue ~= "lua" then
-		!ERROR_OR_RETURN `errorParsingLast(state, "Invalid source '%s'. (The only valid value right now is: lua)", tokValue)`
+		!ERROR_OR_RETURN `errorParsingLast(state, "Expected foreign source. (The only valid values right now are: lua, compiler)")`
+	elseif not isAny(tokValue, "lua","compiler") then
+		!ERROR_OR_RETURN `errorParsingLast(state, "Invalid source '%s'. (The only valid values right now are: lua, compiler)", tokValue)`
 	end
 	foreign.source = tokValue
 
@@ -794,8 +794,7 @@ function _G.parseArguments(state, parentNode, isInput, placeDeclared)
 				arg.assignment             = assignment
 				decl.assignment            = assignment -- Note: decl.assignmentIndex is always 1 for arguments.
 
-				local identCopy            = astCopy(decl.name)
-				identCopy.parent           = assignment
+				local identCopy            = astCopy(decl.name, nil, assignment)
 				assignment.targets[1]      = identCopy
 
 				!SET_OR_RETURN `local expr = parseExpression(state, assignment)` -- @Speed: Parse once then just copy the first one.
@@ -855,7 +854,7 @@ function _G.parseArguments(state, parentNode, isInput, placeDeclared)
 
 	if isInput then
 		for _, arg in ipairs(args) do
-			arg.isRequired = (arg.assignment == nil)
+			arg.isRequired = (arg.assignment == nil and arg.declaration.name.nodeType ~= !(nodeTypes.AstVararg))
 		end
 	else
 		-- @Incomplete: If a !must was specified, set arg.isRequired from first argument to the last !must.
@@ -1144,8 +1143,7 @@ function _G.parseDeclarationStatement(state, block, placeDeclared, declType)
 		assignmentStatement.what  = assignment
 
 		for i, decl in ipairs(declarations) do
-			local identCopy         = astCopy(declNames[i])
-			identCopy.parent        = assignment
+			local identCopy         = astCopy(declNames[i], nil, assignment)
 			identCopy.placeDeclared = nil
 			assignment.targets[i]   = identCopy
 
@@ -1989,9 +1987,9 @@ function _G.parseLambda(state, parentNode, allowBody)
 
 			tokType, tokValue = eatNextToken(state)
 			if not isToken(tokType,tokValue, !(TOKEN_IDENTIFIER)) then
-				!ERROR_OR_RETURN `errorParsingLast(state, "Expected foreign source. (The only valid value right now is: lua)")`
-			elseif tokValue ~= "lua" then
-				!ERROR_OR_RETURN `errorParsingLast(state, "Invalid source '%s'. (The only valid value right now is: lua)", tokValue)`
+				!ERROR_OR_RETURN `errorParsingLast(state, "Expected foreign source. (The only valid values right now are: lua, compiler)")`
+			elseif not isAny(tokValue, "lua","compiler") then
+				!ERROR_OR_RETURN `errorParsingLast(state, "Invalid source '%s'. (The only valid values right now are: lua, compiler)", tokValue)`
 			end
 			lambda.foreignSource = tokValue
 
@@ -2272,7 +2270,7 @@ function _G.parseExpression(state, parentNode, prevOpPrecedence, expectLeftValue
 			expr                        = binOp
 
 		-- Right-associative operations.
-		-- @Incomplete: Combine string concatinations in some way?
+		-- @Incomplete: Combine string concatenations in some way?
 		elseif
 			isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"^","..")
 			and OPERATOR_PRECEDENCE[tokValue] > prevOpPrecedence
@@ -2512,6 +2510,16 @@ function _G.errorUnhandledNodeType(state, node)
 	nodeError(state, node, "Debug", "Internal compiler error: Incomplete: Unhandled node type '%s'.", (AST_NODE_TYPE_NAMES[node.nodeType] or node.nodeType))
 end
 
+function _G.errorUnhandledType(state, node, typeInfo)
+	!if DEBUG then
+		print()
+		astPrintTree(node)
+		print()
+		printTraceback(io.stderr, 2)
+	!end
+	nodeError(state, node, "Debug", "Internal compiler error: Incomplete: Unhandled type '%s'.", getFriendlyTypeInfoName(typeInfo))
+end
+
 
 
 -- nodeError( compilationState, node, agent, formatString, ... )
@@ -2633,12 +2641,10 @@ do
 				elseif decl.isGlobalOrExported then
 					write(" (global/exported)")
 				end
-				write(" (", (decl.name.name or "...vararg"))
-				if decl.name.inferredType then  write(", ", getFriendlyTypeInfoName(decl.name.inferredType))  end
-				if decl.valueTypeInfo     then  write(", ", getFriendlyTypeInfoName(decl.valueTypeInfo))      end
-				write(")")
+				if decl.valueTypeInfo then  write("(value=", getFriendlyTypeInfoName(decl.valueTypeInfo), ")")  end
 
 				!!(CHILD_PRINT_START)
+				if decl.name then  printNode(decl.name, indent+1, printed, printChildren)  end
 				printNodeList(decl.types, indent+1, printed, printChildren)
 				!!(CHILD_PRINT_END)
 

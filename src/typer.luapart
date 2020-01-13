@@ -1596,9 +1596,9 @@ end
 		!DEPEND_AND_RETURN(`decl`, DEPEND_NODE_INFERRED, `decl.assignment`)
 	end
 
-	local ident = decl.name
-	if not ident.inferredType then
-		!DEPEND_AND_RETURN(`decl`, DEPEND_NODE_INFERRED, `ident`)
+	local identOrVararg = decl.name
+	if not identOrVararg.inferredType then
+		!DEPEND_AND_RETURN(`decl`, DEPEND_NODE_INFERRED, `identOrVararg`)
 	end
 
 	for _, typeNode in ipairs(decl.types) do
@@ -1619,12 +1619,13 @@ end
 		-- (Not needed for vararg as those only exist as arguments and don't have default values.
 		-- Also, this doesn't run for enum members as those declarations never have any specified types.)
 		--
-		if decl.types[1] and ident.nodeType ~= !(nodeTypes.AstVararg) then
+		if decl.types[1] and identOrVararg.nodeType ~= !(nodeTypes.AstVararg) then
+			local ident = identOrVararg
 			valueExpr = getAssignmentValue(state, ident, decl.assignment.values, decl.assignmentIndex, ident.inferredType)
 		end
 
 		if scopeIsDeclarative or decl.isConstant then
-			valueExpr = valueExpr or getAssignmentValue(state, ident, decl.assignment.values, decl.assignmentIndex)
+			valueExpr = valueExpr or getAssignmentValue(state, identOrVararg, decl.assignment.values, decl.assignmentIndex)
 
 			if isExpressionConstant(state, valueExpr) then
 				-- void
@@ -1648,11 +1649,16 @@ end
 					state, astGetExpressionVisuallyFurthestToTheLeft(valueExpr),
 					"Value for declared %s '%s' is not a constant expression.%s",
 					(decl.isConstant and "constant" or "variable"),
-					ident.name,
+					identOrVararg.name,
 					(scopeIsDeclarative and not decl.isConstant and " (All values in declarative scopes must be constant.)" or "")
 				)
 			end
 		end
+
+	elseif identOrVararg.parent.parent.nodeType ~= !(nodeTypes.AstArgument) and not doesTypeHaveAnyDefaultValue(identOrVararg.inferredType) then
+		astPrintTree(identOrVararg.parent.parent)
+		!ASSERT `not decl.isConstant` -- This should have been detected in inferIdentifierOrVararg() (I think).
+		typeError(state, identOrVararg, "Variables in type group '%s' must have a specified initial value.", TYPE_TAG_NAMES[identOrVararg.inferredType.tag])
 	end
 
 	moveToPipe(state, decl, !(PIPE_BYTECODE))
@@ -1895,10 +1901,10 @@ end
 		end
 		typeInfo = getTypeInfoForBuiltinType(state, "bool")
 
-	-- String concatination.
+	-- String concatenation.
 	elseif binary.operation == ".." then
 		if typeInfoL.tag ~= !(typeTags.TypeInfoString) then
-			typeError(state, binary.left, "String concatination expected a string. (Got %s)", getFriendlyTypeInfoName(typeInfoL))
+			typeError(state, binary.left, "String concatenation expected a string. (Got %s)", getFriendlyTypeInfoName(typeInfoL))
 		end
 		typeInfo = getTypeInfoForBuiltinType(state, "string")
 
@@ -2180,6 +2186,12 @@ end
 	local typeInfoExpected = getExpectedTypeInfo(state, tableNode)
 	if not typeInfoExpected then  return  end
 
+	-- If a table-like is expected as an argument to a call then we're fine without an
+	-- explicit cast. Otherwise, we don't want to get any expectation through a call.
+	if not isAny(typeInfoExpected.tag, !(typeTags.TypeInfoTable),!(typeTags.TypeInfoStruct),!(typeTags.TypeInfoArray)) then
+		typeInfoExpected = getExpectedTypeInfo(state, tableNode, true) or errorInternal()
+	end
+
 	if typeInfoExpected.tag == !(typeTags.TypeInfoTable) then
 		-- @Incomplete: Check for duplicate fields (among constant keys).
 		-- @Incomplete: Check for nil keys.
@@ -2289,8 +2301,7 @@ end
 		tableNode.inferredType = structInfo
 
 	else
-		errorUnhandledNodeType(state, tableNode)
-		-- errorUnhandledType(state, tableNode, typeInfoExpected) -- @Incomplete: Define errorUnhandledType().
+		errorUnhandledType(state, tableNode, typeInfoExpected)
 	end
 
 	moveToPipe(state, tableNode, !(PIPE_DONE))
@@ -2326,6 +2337,7 @@ end
 
 	if lambda.bodyIsForeign then
 		assert((lambda.foreignSourceName ~= ""), "@Incomplete: Infer lambda.foreignSourceName")
+		validateForeignSource(state, lambda.foreignSource, lambda.foreignSourceName, lambda)
 		lambda.foreignSourceId = lambda.foreignSource.." "..lambda.foreignSourceName
 	end
 
@@ -2599,12 +2611,13 @@ end
 
 !NODE_INFERRER `function nodeInferrers.AstForeign(state, foreign)`
 	-- @Robustness: Limit places the "expected" type can be inferred from.
-	local typeInfoExpected = getExpectedTypeInfo(state, foreign)
+	local typeInfoExpected = getExpectedTypeInfo(state, foreign, true)
 	if not typeInfoExpected then  return  end
 
 	foreign.inferredType = typeInfoExpected
 
 	assert((foreign.sourceName ~= ""), "@Incomplete: Infer foreign.sourceName")
+	validateForeignSource(state, foreign.source, foreign.sourceName, foreign)
 	foreign.sourceId = foreign.source.." "..foreign.sourceName
 
 	moveToPipe(state, foreign, !(PIPE_BYTECODE))
@@ -3432,7 +3445,7 @@ end
 
 
 -- Values of simple types are non-objects (e.g. ints) in the outputted Lua code.
--- Note: Glóa types are represented as ints in Lua.
+-- Note: Glóa types are represented as ints in Lua and thus are 'simple'.
 function _G.isTypeSimple(typeInfo)
 	return isAny(typeInfo.tag, !(typeTags.TypeInfoBool),!(typeTags.TypeInfoInt),!(typeTags.TypeInfoNil),!(typeTags.TypeInfoFloat),!(typeTags.TypeInfoString),!(typeTags.TypeInfoType))
 end
@@ -3521,9 +3534,9 @@ end
 
 
 
--- Returns nil if we're now waiting for something.
--- Errors on failure.
-function _G.getExpectedTypeInfo(state, node)
+-- Returns nil if we're now waiting for something. Errors on failure.
+-- typeInfo = getExpectedTypeInfo( state, node [, strict=false ] )
+function _G.getExpectedTypeInfo(state, node, strict)
 	!local NO_EXPECTATION = `typeError(state, node, "Could not determine what type is expected here.")`
 	local nodeType        = node.parent.nodeType
 
@@ -3576,6 +3589,9 @@ function _G.getExpectedTypeInfo(state, node)
 		end
 
 		return other.inferredType
+
+	elseif strict then
+		!!(NO_EXPECTATION)
 
 	elseif nodeType == !(nodeTypes.AstCall) then
 		local call           = node.parent

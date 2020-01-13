@@ -53,7 +53,7 @@ xpcall(function()
 
 	do
 		local function printHelpAndExit()
-			print("Glóa")
+			print("Gloa") -- No "Glóa" because we don't know the code page. :(
 			print()
 			print("Synopsis:")
 			print("    lua gloa.lua [options] myProgram.gloa [myOtherProgram.gloa ...]")
@@ -121,7 +121,7 @@ xpcall(function()
 	!else
 		if not silent then
 			print()
-			print("-------- Glóa --------")
+			print("-------- Gloa --------")
 			print('Args:  "'..table.concat(args, '" "')..'"')
 			print("Files: "..table.concat(pathsToCompile, ", "))
 			print(os.date"Date:  %Y-%m-%d %H:%M:%S")
@@ -196,8 +196,11 @@ xpcall(function()
 	function _G.readAndTokenizeFile(state, path)
 		assert(not state.fileBuffers[path], path)
 
-		local s = assert(getFileContents(path, true))
-		s       = s:gsub("\r\n?", "\n") -- Normalize line endings.  @Robustness: Handle the uncommon occurrence of \n\r.
+		local s, err = getFileContents(path, true)
+		if not s then
+			errorLine(nil, "Could not read file '%s'. (%s)", path, err)
+		end
+		s = s:gsub("\r\n?", "\n") -- Normalize line endings.  @Robustness: Handle the uncommon occurrence of \n\r.
 
 		state.fileBuffers[path] = s
 
@@ -317,7 +320,7 @@ xpcall(function()
 				if not queued then  break  end
 
 				if queued.waitingOn then
-					-- void
+					waitCount = waitCount+1
 
 				!if DEBUG then
 				elseif queued.pipe > lastPipe then
@@ -437,7 +440,9 @@ xpcall(function()
 
 
 	-- Write program.
-	assert(state.settings.outputFilePath ~= thePath)
+	if state.settings.outputFilePath == thePath then
+		errorLine(nil, "The input path is the same as the output path. (%s)", thePath)
+	end
 
 	local timeStartOutput = os.clock()
 
