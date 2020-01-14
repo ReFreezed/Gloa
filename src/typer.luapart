@@ -963,28 +963,67 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 				if funcSig1 == funcSig2 then
 					local identEarly, identLate = getEarlyAndLateForRedeclarationError(state, decl1.name, decl2.name)
 					printerr()
-					typeMessage(io.stderr, state, identLate,  "Error", "Call signatures for function overloads (%s) are the same.", ident.name)
+					typeMessage(
+						io.stderr, state, identLate,
+						"Error", "Call signatures for function overloads for '%s' are identical. (%s)",
+						ident.name, getFriendlyTypeInfoName(funcSig1)
+					)
 					typeMessage(io.stderr, state, identEarly, "Info",  "...here is the other function.")
 					exitFailure()
 				end
+
+				local requiredCount1 = 0
+				local requiredCount2 = 0
 
 				-- @Incomplete @Robustness: Check that vararg works.
 				for argIndex = 1, math.min(#argTypes1, #argTypes2)+1 do
 					local argTypeInfo1 = argTypes1[argIndex]
 					local argTypeInfo2 = argTypes2[argIndex]
+					argTypeInfo1       = argTypeInfo1 and adjustTypeToOne(state, argTypeInfo1)
+					argTypeInfo2       = argTypeInfo2 and adjustTypeToOne(state, argTypeInfo2)
+
 					local isRequired1  = argTypeInfo1 ~= nil and argRequireds1[argIndex]
 					local isRequired2  = argTypeInfo2 ~= nil and argRequireds2[argIndex]
+
+					if isRequired1 then  requiredCount1 = requiredCount1+1  end
+					if isRequired2 then  requiredCount2 = requiredCount2+1  end
 
 					if not (isRequired1 or isRequired2) then
 						local identEarly, identLate = getEarlyAndLateForRedeclarationError(state, decl1.name, decl2.name)
 						printerr()
-						typeMessage(io.stderr, state, identLate,  "Error", "Call signatures for function overloads (%s) are too similar.", ident.name)
-						typeMessage(io.stderr, state, identEarly, "Info",  "...here is the other function.")
+						typeMessage(io.stderr, state, identEarly, "Error", "Call signatures for function overloads (%s) are too similar.", ident.name)
+						typeMessage(io.stderr, state, identLate,  "Info",  "...here is the other function.")
 						exitFailure()
 					end
 
 					if not (argTypeInfo1 and argTypeInfo1 == argTypeInfo2) then  break  end
 				end
+
+				--[[ This is a bit too restrictive!
+				if requiredCount1 == requiredCount2 then
+					for argIndex = 1, requiredCount1 do
+						local argTypeInfo1 = adjustTypeToOne(state, argTypes1[argIndex])
+						local argTypeInfo2 = adjustTypeToOne(state, argTypes2[argIndex])
+						if
+							isTypeCompatibleWith(argTypeInfo1, argTypeInfo2) or
+							isTypeCompatibleWith(argTypeInfo2, argTypeInfo1)
+						then
+							local identEarly, identLate = getEarlyAndLateForRedeclarationError(state, decl1.name, decl2.name)
+							printerr()
+							typeMessage(
+								io.stderr, state, identEarly,
+								"Error", "Call signatures for function overloads (%s) are too similar. (Argument #%d, %s vs. %s)",
+								ident.name,
+								argIndex,
+								getFriendlyTypeInfoName(argTypeInfo1),
+								getFriendlyTypeInfoName(argTypeInfo2)
+							)
+							typeMessage(io.stderr, state, identLate, "Info", "...here is the other function.")
+							exitFailure()
+						end
+					end
+				end
+				--]]
 			end
 		end
 	end
@@ -1283,7 +1322,7 @@ end
 	moveToPipe(state, typeNode, !(PIPE_DONE))
 end
 
--- doesMatch = checkIfValuesMatchArgumentTypes( state, callOrReturnNode, values, typeInfos [, softCheck=false, calleeDeclarationForCurrentOverload ] )
+-- doesMatch, compatibilityScore = checkIfValuesMatchArgumentTypes( state, callOrReturnNode, values, typeInfos [, softCheck=false, calleeDeclarationForCurrentOverload ] )
 local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, typeInfos, softCheck, calleeDecl)
 	--[[
 		Situations:
@@ -1329,7 +1368,7 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 				local argCount    = #argTypesOut
 
 				if argCount == 0 then
-					if softCheck then  return false  end
+					if softCheck then  return false, 0  end
 					typeError(state, valueCall, "Function call returns nothing. (Expected at least one value.)")
 				end
 
@@ -1374,7 +1413,7 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 
 			if not areArraysEqual(typeInfos, lambda.inferredType.argumentTypesIn) then
 				-- We should only get here if checking overloads.
-				if softCheck then  return false  end
+				if softCheck then  return false, 0  end
 				assert(false)
 			end
 
@@ -1394,7 +1433,7 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 	-- Too few values.
 	-- @UX: Better error message if the last value is a call (without parenthesis).
 	if requestedMin < acceptedMin then
-		if softCheck then  return false  end
+		if softCheck then  return false, 0  end
 
 		local exprForError = values[1] and astGetExpressionVisuallyFurthestToTheLeft(values[1]) or callOrReturnNode
 		local thingsStr    = callOrReturnNode.nodeType == !(nodeTypes.AstCall) and "arguments" or "values to return"
@@ -1406,7 +1445,7 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 	elseif requestedMax > acceptedMax then
 		!ASSERT `not acceptingVararg`
 
-		if softCheck then  return false  end
+		if softCheck then  return false, 0  end
 
 		local firstExtraValueExpr = values[math.min(acceptedMax+1, valueCount)]
 		local exprForError        = astGetExpressionVisuallyFurthestToTheLeft(firstExtraValueExpr)
@@ -1416,6 +1455,8 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 		typeError(state, exprForError, "Too many %s. (Wanted %d, got %s)", thingsStr, acceptedMax, gotStr)
 	end
 
+	local compatibilityScoreSum = 0
+
 	for slot = 1, slotsToCheck do
 		local valueIndex      = math.min(slot, valueCount)
 		local valueExpr       = values[valueIndex]
@@ -1424,6 +1465,8 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 		local typeInfoIndex   = math.min(slot, typeInfoCount)
 		local typeInfoToMatch = typeInfos[typeInfoIndex]
 
+		local isCompatible, compatibilityScore
+
 		-- Function call (0..inf values).
 		if valueTypeInfo.tag == !(typeTags.TypeInfoList) then
 			local listSig         = valueTypeInfo
@@ -1431,12 +1474,14 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 			valueTypeInfo         = listSig[callOutArgIndex]
 
 			if not valueTypeInfo then
-				if softCheck then  return false  end
+				if softCheck then  return false, 0  end
 				typeError(state, valueExpr, "Function call returns nothing. (Expected at least one value.)") -- Note: "Nothing" is not the same as vararg of zero length.
 			end
 
-			if not isTypeCompatibleWith(adjustTypeToOne(state, valueTypeInfo), adjustTypeToOne(state, typeInfoToMatch)) then
-				if softCheck then  return false  end
+			isCompatible, compatibilityScore = isTypeCompatibleWith(adjustTypeToOne(state, valueTypeInfo), adjustTypeToOne(state, typeInfoToMatch))
+
+			if not isCompatible then
+				if softCheck then  return false, 0  end
 				-- @UX: Tell the name of the call/return argument. (For calls, probably only possible for constants, and maybe not all. Not sure! Returns just depend on the output arguments being named.)
 				-- @UX: Tell the name of the value call's argument. (Probably only possible for constants, and maybe not all. Not sure!)
 				typeError(
@@ -1451,20 +1496,28 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 			end
 
 		-- Vararg (0..inf values) or other (1 value).
-		elseif not isTypeCompatibleWith(adjustTypeToOne(state, valueTypeInfo), adjustTypeToOne(state, typeInfoToMatch)) then
-			if softCheck then  return false  end
-			typeError(
-				state, astGetExpressionVisuallyFurthestToTheLeft(valueExpr),
-				"Type mismatch for %s #%d. (Wanted %s, got %s)",
-				callOrReturnNode.nodeType == !(nodeTypes.AstCall) and "argument" or "return value",
-				slot,
-				getFriendlyTypeInfoName(adjustTypeToOne(state, typeInfoToMatch)),
-				getFriendlyTypeInfoName(adjustTypeToOne(state, valueTypeInfo))
-			)
+		else
+			isCompatible, compatibilityScore = isTypeCompatibleWith(adjustTypeToOne(state, valueTypeInfo), adjustTypeToOne(state, typeInfoToMatch))
+
+			if not isCompatible then
+				if softCheck then  return false, 0  end
+				typeError(
+					state, astGetExpressionVisuallyFurthestToTheLeft(valueExpr),
+					"Type mismatch for %s #%d. (Wanted %s, got %s)",
+					callOrReturnNode.nodeType == !(nodeTypes.AstCall) and "argument" or "return value",
+					slot,
+					getFriendlyTypeInfoName(adjustTypeToOne(state, typeInfoToMatch)),
+					getFriendlyTypeInfoName(adjustTypeToOne(state, valueTypeInfo))
+				)
+			end
 		end
+
+		compatibilityScoreSum = compatibilityScoreSum+compatibilityScore
 	end
 
-	return true
+	-- @Incomplete: Decrease compatibilityScoreSum as optional arguments are left out?
+
+	return true, compatibilityScoreSum
 end
 
 !NODE_INFERRER `function nodeInferrers.AstCall(state, call)`
@@ -1476,6 +1529,7 @@ end
 	end
 
 	if callee.nodeType == !(nodeTypes.AstIdentifier) and callee.declaration.overloadOf then
+		-- Wait for all overloads to get inferred.
 		local ident    = callee
 		local declBase = ident.declaration
 
@@ -1519,27 +1573,26 @@ end
 
 	!ASSERT("calleeTypeInfo.tag == "..typeTags.TypeInfoFunction) -- @Incomplete: Handle parameterized structs.
 
+	-- Handle overloads.
 	if callee.nodeType == !(nodeTypes.AstIdentifier) and callee.declaration.overloadOf then
-		local ident         = callee
-		local declBase      = ident.declaration
-		local foundOverload = false
-		local decl
+		local ident             = callee
+		local declBase          = ident.declaration
+		local matchingOverloads = {}
 
 		while declBase.overloadOf ~= declBase do  declBase = declBase.overloadOf  end
 
 		for _, declOverload in ipairs(declBase.overloads) do
-			decl           = declOverload
-			calleeTypeInfo = decl.name.inferredType
+			local calleeTypeInfoOverload = declOverload.name.inferredType
 
-			!ASSERT("calleeTypeInfo.tag == "..typeTags.TypeInfoFunction)
+			!ASSERT("calleeTypeInfoOverload.tag == "..typeTags.TypeInfoFunction)
 
-			if checkIfValuesMatchArgumentTypes(state, call, call.arguments, calleeTypeInfo.argumentTypesIn, true, decl) then
-				foundOverload = true
-				break
+			local doesMatch, compatibilityScore = checkIfValuesMatchArgumentTypes(state, call, call.arguments, calleeTypeInfoOverload.argumentTypesIn, true, declOverload)
+			if doesMatch then
+				table.insert(matchingOverloads, {declaration=declOverload, score=compatibilityScore})
 			end
 		end
 
-		if not foundOverload then
+		if not matchingOverloads[1] then
 			printerr()
 			typeMessage(io.stderr, state, ident, "Error", "Did not find any matching overload to call.")
 			for i, declOverload in ipairs(declBase.overloads) do
@@ -1547,6 +1600,25 @@ end
 			end
 			exitFailure()
 		end
+
+		table.sort(matchingOverloads, function(a, b)
+			return a.score > b.score
+		end)
+
+		local highscore = matchingOverloads[1].score
+
+		if matchingOverloads[2] and matchingOverloads[2].score == highscore then
+			printerr()
+			typeMessage(io.stderr, state, ident, "Error", "There are several matching overloads.")
+			for i, overloadData in ipairs(matchingOverloads) do
+				if overloadData.score < highscore then  break  end
+				typeMessage(io.stderr, state, overloadData.declaration.name, "Info", "...overload #%d.", i)
+			end
+			exitFailure()
+		end
+
+		local decl     = matchingOverloads[1].declaration
+		calleeTypeInfo = decl.name.inferredType
 
 		-- Update the callee to represent the correct overload.
 		-- @Robustness: Is this safe? I don't think anything except the calls itself depends directly on, and uses values from, any callee.
@@ -3469,44 +3541,55 @@ function _G.isTypeNumeric(typeInfo)
 	return isAny(typeInfo.tag, !(typeTags.TypeInfoInt),!(typeTags.TypeInfoFloat))
 end
 
+-- isCompatible, compatibilityScore = isTypeCompatibleWith( typeToCheck, otherType )
 function _G.isTypeCompatibleWith(typeToCheck, otherType)
-	if typeToCheck == otherType then  return true  end
+	!local SCORE = 0x10000
+	if typeToCheck == otherType then  return true, !(SCORE)  end
 
 	-- Everything is compatible with the 'any' type. The user better know what they're doing!
-	if typeToCheck.tag == !(typeTags.TypeInfoAny) or otherType.tag == !(typeTags.TypeInfoAny) then  return true  end
+	!local SCORE = 0x1
+	if typeToCheck.tag == !(typeTags.TypeInfoAny) or otherType.tag == !(typeTags.TypeInfoAny) then  return true, !(SCORE)  end
 
 	-- Ints are always compatible with floats (but the opposite is false).
 	-- This should be safe as all numbers are 64-bit floats in Lua 5.1 (I think).
-	-- @Robustness: Keep this rule?
-	if typeToCheck.tag == !(typeTags.TypeInfoInt) and otherType.tag == !(typeTags.TypeInfoFloat) then  return true  end
+	!local SCORE = 0x1000
+	if typeToCheck.tag == !(typeTags.TypeInfoInt) and otherType.tag == !(typeTags.TypeInfoFloat) then  return true, !(SCORE)  end
 
 	-- Structs and arrays are outputted as tables in Lua, so they are always compatible with tables in Glóa.
+	!local SCORE = 0x10
 	if
 		otherType.tag == !(typeTags.TypeInfoTable)
 		and isAny(typeToCheck.tag, !(typeTags.TypeInfoStruct),!(typeTags.TypeInfoArray))
 	then
-		return true
+		return true, !(SCORE)
 	end
 
+	!local SCORE = 0x100
 	if typeToCheck.tag == !(typeTags.TypeInfoCompound) then
 		-- All compound items has to match the target. (If only one item matches, an explicit cast is needed.)
 		local compoundToCheck = typeToCheck
 		for _, compoundItemToCheck in ipairs(compoundToCheck) do
-			if not isTypeCompatibleWith(compoundItemToCheck, otherType) then  return false  end
+			if not isTypeCompatibleWith(compoundItemToCheck, otherType) then  return false, 0  end
 		end
-		return true
+		return true, !(SCORE)
 	end
 
+	!local SCORE = 0x100
 	if otherType.tag == !(typeTags.TypeInfoCompound) then
 		-- typeToCheck has to match at least one compound item.
 		local otherCompound = otherType
 		for _, otherCompoundItem in ipairs(otherCompound) do
-			if isTypeCompatibleWith(typeToCheck, otherCompoundItem) then  return true  end
+			if isTypeCompatibleWith(typeToCheck, otherCompoundItem) then  return true, !(SCORE)  end
 		end
-		return false
+		return false, 0
 	end
 
-	return false
+	-- Array compatability completely depends on the item type.
+	if typeToCheck.tag == !(typeTags.TypeInfoArray) and otherType.tag == !(typeTags.TypeInfoArray) then
+		return isTypeCompatibleWith(typeToCheck.itemType, otherType.itemType)
+	end
+
+	return false, 0
 end
 
 -- singleTypeInfo = adjustTypeToOne( state, typeInfo [, forValueUsage=false ] )

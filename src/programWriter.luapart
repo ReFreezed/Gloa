@@ -976,21 +976,26 @@ function _G.writeProgram(state)
 	--
 
 	-- Function definitions.
+	local functionConstants = {}
+
 	for _, const in ipairs(state.constants) do
-		if const.valueType.tag == !(typeTags.TypeInfoFunction) and const.value.bodyIsForeign then
-			local lambda = const.value
-			file:write(const.name, " = ")
-			writeFunction(state, file, lambda)
-			file:write("\n")
+		if const.valueType.tag == !(typeTags.TypeInfoFunction) then
+			table.insert(functionConstants, const)
 		end
 	end
-	for _, const in ipairs(state.constants) do
-		if const.valueType.tag == !(typeTags.TypeInfoFunction) and not const.value.bodyIsForeign then
-			local lambda = const.value
-			file:write(const.name, " = ")
-			writeFunction(state, file, lambda)
-			file:write("\n")
-		end
+
+	table.sort(functionConstants, function(a, b)
+		a = a.value
+		b = b.value
+		if a.bodyIsForeign ~= b.bodyIsForeign then  return a.bodyIsForeign  end
+		return a.token < b.token
+	end)
+
+	for _, const in ipairs(functionConstants) do
+		local lambda = const.value
+		file:write(const.name, " = ")
+		writeFunction(state, file, lambda)
+		file:write("\n")
 	end
 
 	!local ENTRY_POINT_NAME = "main" -- @Incomplete: Configurable entry point name.
