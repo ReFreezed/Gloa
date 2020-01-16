@@ -510,10 +510,10 @@ function _G.writeBlock(state, file, block, indent, nextLocalN, localsStack, isEl
 	local inDecl = false
 
 	for _, statement in ipairs(block) do
-		local nodeType = statement.what.nodeType
+		local nodeType = statement.nodeType
 
 		if nodeType == !(nodeTypes.AstDeclaration) then
-			local decl = statement.what
+			local decl = statement
 
 			if decl.isConstant then
 				skipNextAssignment = true
@@ -539,7 +539,7 @@ function _G.writeBlock(state, file, block, indent, nextLocalN, localsStack, isEl
 
 		elseif nodeType == !(nodeTypes.AstAssignment) then
 			if not skipNextAssignment then
-				local assignment = statement.what
+				local assignment = statement
 				assert(assignment.operation == "=", "@Incomplete: Support more than '='.")
 
 				if not inDecl then
@@ -561,12 +561,9 @@ function _G.writeBlock(state, file, block, indent, nextLocalN, localsStack, isEl
 			skipNextAssignment = false
 
 		elseif nodeType == !(nodeTypes.AstReturn) then
-			local returnNode = statement.what
-			if
-				block.parent.nodeType == !(nodeTypes.AstStatement) -- @Cleanup: Remove AstStatement from the compiler?
-				and block.parent.parent.nodeType == !(nodeTypes.AstLambda)
-				and not returnNode.values[1]
-			then
+			local returnNode = statement
+
+			if block.parent.nodeType == !(nodeTypes.AstLambda) and not returnNode.values[1] then
 				if outputDebugInfo then
 					file:write(indentStr, "-- return\n")
 				end
@@ -582,21 +579,21 @@ function _G.writeBlock(state, file, block, indent, nextLocalN, localsStack, isEl
 			end
 
 		elseif nodeType == !(nodeTypes.AstBreak) then
-			local breakNode = statement.what
+			local breakNode = statement
 			if breakNode.loopName then
 				errorUnhandledNodeType(state, breakNode)
 			end
 			file:write(indentStr, "break\n")
 
 		elseif nodeType == !(nodeTypes.AstBlock) then
-			local block = statement.what
+			local block = statement
 			file:write(indentStr, "do\n")
 			writeBlock(state, file, block, indent+1, nextLocalN, localsStack)
 			file:write(indentStr, "end\n")
 
 		elseif nodeType == !(nodeTypes.AstIf) then
 			-- @Optimize: Don't output empty branches.
-			local ifBranch = statement.what
+			local ifBranch = statement
 
 			if not isElseif then  file:write(indentStr)  end
 
@@ -609,7 +606,7 @@ function _G.writeBlock(state, file, block, indent, nextLocalN, localsStack, isEl
 			if not (ifBranch.branchFalse or EMPTY_TABLE)[1] then
 				-- void
 
-			elseif not ifBranch.branchFalse[2] and ifBranch.branchFalse[1].what.nodeType == !(nodeTypes.AstIf) then
+			elseif not ifBranch.branchFalse[2] and ifBranch.branchFalse[1].nodeType == !(nodeTypes.AstIf) then
 				file:write(indentStr, "else") -- This will be followed by "if"
 				writeBlock(state, file, ifBranch.branchFalse, indent, nextLocalN, localsStack, true)
 
@@ -622,7 +619,7 @@ function _G.writeBlock(state, file, block, indent, nextLocalN, localsStack, isEl
 
 		elseif nodeType == !(nodeTypes.AstWhile) then
 			-- @Optimize: Don't output an empty body.
-			local whileLoop = statement.what
+			local whileLoop = statement
 			file:write(indentStr, "while ")
 			writeExpression(state, file, whileLoop.condition)
 			file:write(" do\n")
@@ -632,7 +629,7 @@ function _G.writeBlock(state, file, block, indent, nextLocalN, localsStack, isEl
 
 		elseif nodeType == !(nodeTypes.AstFor) then
 			-- @Optimize: Don't output an empty body.
-			local forLoop     = statement.what
+			local forLoop     = statement
 			local localsStack = {{}, unpack(localsStack)}
 
 			for _, decl in ipairs(forLoop.declarations) do
@@ -714,7 +711,7 @@ function _G.writeBlock(state, file, block, indent, nextLocalN, localsStack, isEl
 		else
 			-- Assume the statement is an expression at this point and let writeExpression() deal with any errors.
 			file:write(indentStr)
-			writeExpression(state, file, statement.what)
+			writeExpression(state, file, statement)
 			file:write(";\n") -- The ';' removes ambiguity is some cases.
 		end
 	end

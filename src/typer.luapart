@@ -2526,13 +2526,6 @@ end
 	simplifyExpressionIfConstant(state, cast)
 end
 
-!NODE_INFERRER `function nodeInferrers.AstStatement(state, statement)`
-	if statement.what.queued.pipe <= !(PIPE_INFER) then
-		!DEPEND_AND_RETURN(`statement`, DEPEND_NODE_INFERRED, `statement.what`)
-	end
-	moveToPipe(state, statement, !(PIPE_DONE))
-end
-
 !NODE_INFERRER `function nodeInferrers.AstAssignment(state, assignment)`
 	for _, targetExpr in ipairs(assignment.targets) do
 		if not targetExpr.inferredType then
@@ -2753,9 +2746,7 @@ end
 local function addDeclarationInForLoop(state, forLoop, name, typeInfo)
 	-- @Incomplete: Care about name shadowing.
 
-	local statement     = astNewNode(AstStatement,   forLoop.token,   forLoop)
-	local decl          = astNewNode(AstDeclaration, statement.token, statement)
-	statement.what      = decl
+	local decl          = astNewNode(AstDeclaration, forLoop.token, forLoop)
 
 	local ident         = astNewNode(AstIdentifier, decl.token, decl)
 	ident.name          = name
@@ -2764,10 +2755,10 @@ local function addDeclarationInForLoop(state, forLoop, name, typeInfo)
 	ident.inferredType  = typeInfo
 	decl.name           = ident
 
-	table.insert(forLoop,              statement)
+	table.insert(forLoop,              decl)
 	table.insert(forLoop.declarations, decl)
 
-	addToQueueRecursively(state, statement, forLoop, #forLoop, !(PIPE_DONE))
+	addToQueueRecursively(state, decl, forLoop, #forLoop, !(PIPE_DONE))
 	moveToPipe(state, decl, !(PIPE_BYTECODE))
 end
 
@@ -2960,12 +2951,12 @@ end
 
 !NODE_INFERRER `function nodeInferrers.AstEnum(state, enum)`
 	for _, statement in ipairs(enum) do
-		if statement.what.nodeType == !(nodeTypes.AstDeclaration) then
+		if statement.nodeType == !(nodeTypes.AstDeclaration) then
 			-- Ignore declarations. We only need the assigned values to be inferred.
 
-		elseif statement.what.nodeType == !(nodeTypes.AstAssignment) and statement.what.forDeclaration then
+		elseif statement.nodeType == !(nodeTypes.AstAssignment) and statement.forDeclaration then
 			-- We only need the assigned values to be inferred.
-			local assignment = statement.what
+			local assignment = statement
 			local valueExpr  = assignment.values[1] -- Note: Struct member declarations only have one name per assignment.
 
 			if not valueExpr.inferredType then
@@ -3318,14 +3309,12 @@ local function createLambdaFromSignature(state, funcSig, parent)
 	local lambda = astNewNode(AstLambda, parent.token, parent)
 
 	if funcSig.argumentTypesIn[1] then
-		local statement    = astNewNode(AstStatement, parent.token, lambda)
-		lambda.argumentsIn = createLambdaArgumentsFromTypes(state, funcSig.argumentTypesIn, statement)
-		table.insert(lambda, statement)
+		lambda.argumentsIn = createLambdaArgumentsFromTypes(state, funcSig.argumentTypesIn, lambda)
+		table.insert(lambda, lambda.argumentsIn)
 	end
 	if funcSig.argumentTypesOut[1] then
-		local statement     = astNewNode(AstStatement, parent.token, lambda)
-		lambda.argumentsOut = createLambdaArgumentsFromTypes(state, funcSig.argumentTypesOut, statement)
-		table.insert(lambda, statement)
+		lambda.argumentsOut = createLambdaArgumentsFromTypes(state, funcSig.argumentTypesOut, lambda)
+		table.insert(lambda, lambda.argumentsOut)
 	end
 
 	return lambda
