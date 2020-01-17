@@ -1,6 +1,6 @@
 --[[============================================================
 --=
---=  Misc functionality
+--=  Lua bindings and misc functionality
 --=
 --=-------------------------------------------------------------
 --=
@@ -10,7 +10,22 @@
 
 global print :: (...:any) !foreign lua "print"
 
--- Math.
+local tonumber :: (s:string, base:int=10) -> float|nil !foreign lua "tonumber"
+
+global stringToFloat :: (s:string, base:int=10) -> (success:bool, number:float) {
+	local n = tonumber(s)
+	if n == nil  return false, 0
+	return true, cast(float) n
+}
+global stringToInt :: (s:string, base:int=10) -> (success:bool, number:int) {
+	local n = tonumber(s)
+	if n == nil  return false, 0
+	return true, cast(int) cast(float) n -- Note: This will simply discard any decimals.
+}
+
+--
+-- Math
+--
 
 global PI  : float : !foreign lua "math.pi"
 global TAU : float : !foreign lua "math.pi*2"
@@ -37,7 +52,9 @@ global lerp :: (v1,v2:float, k:float) -> float { return v1+k*(v2-v1) }
 global clamp   :: (n:float, nMin,nMax:float) -> float { return min(max(n, nMin), nMax) }
 global clamp01 :: (n:float)                  -> float { return min(max(n, 0), 1) }
 
--- Arrays/tables.
+--
+-- Arrays/tables
+--
 
 global TableIterator :: (t:table, k:any) -> (k:any, item:any)
 global pairs :: (t:table) -> (iter:TableIterator, t:table, init:any) !foreign lua "pairs"
@@ -56,6 +73,75 @@ global remove :: (arr:[]any, index:int=1) -> any   !foreign lua "table.remove"
 -- global insert :: (arr:[]$T, index:int, value:T) !foreign lua "table.insert"
 -- global remove :: (arr:[]$T, index:int=1) -> T   !foreign lua "table.remove"
 
--- Strings.
+--
+-- Strings
+--
 
 global format :: (s:string, ...:int|float|string) -> string !foreign lua "string.format"
+
+--
+-- I/O and filesystem
+--
+
+global APP_PATH      : string : !foreign compiler "APP_PATH"
+global APP_DIRECTORY : string : !foreign compiler "APP_DIRECTORY"
+
+local File :: struct {
+	-- These function definitions are dummies.
+	write = (file:File, data:string) {},
+	read  = (file:File, what:string|int) -> string|float|nil { return nil },
+}
+local dummyFile:File
+
+local _openFile :: (path:string, mode:string) -> File|nil, nil|string !foreign lua "io.open"
+
+global closeFile :: (file:File) !foreign lua "io.close"
+
+local openFile :: (path:string, mode:string) -> bool, File, string {
+	local file, err = _openFile(path, mode)
+	if file == nil  return false, dummyFile, cast(string) err
+	return true, cast(File) file, ""
+}
+global openFileForReading :: (path:string) -> (success:bool, file:File, error:string) { return openFile(path, "rb") }
+global openFileForWriting :: (path:string) -> (success:bool, file:File, error:string) { return openFile(path, "wb") }
+
+global readNumber :: (file:File) -> (success:bool, number:float) {
+	local data = file.read!("*n")
+	if data == nil  return false, 0
+	return true, cast(float) data
+}
+global readRemaining :: (file:File) -> (success:bool, data:string) {
+	local data = file.read!("*a") -- (I think this always returns a string?)
+	if data == nil  return false, ""
+	return true, cast(string) data
+}
+global readLine :: (file:File) -> (success:bool, line:string) {
+	local data = file.read!("*l")
+	if data == nil  return false, ""
+	return true, cast(string) data
+}
+global readBytes :: (file:File, maxBytes:int) -> (success:bool, data:string) {
+	local data = file.read!(maxBytes)
+	if data == nil  return false, ""
+	return true, cast(string) data
+}
+
+global readEntireFile :: (path:string) -> (success:bool, data:string, error:string) {
+	local ok, file, err = openFileForReading(path)
+	if not ok  return false, "", err
+
+	local data:string
+	ok, data = readRemaining(file)
+	closeFile(file)
+	if not ok  return false, "", "Could not read from the file."
+
+	return true, data, ""
+}
+
+global writeFile :: (path:string, data:string) -> (success:bool, error:string) {
+	local ok, file, err = openFileForWriting(path)
+	if not ok  return false, err
+
+	file.write!(data)
+	return true, ""
+}

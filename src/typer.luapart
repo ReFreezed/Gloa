@@ -9,6 +9,7 @@
 --=
 --==============================================================
 
+	findDeclaration, findDeclarationInScope, findMemberDeclaration, isDeclarationVisibleToNode, printDeclarationChain
 	getAssignmentValue
 	getClosestScope, getClosestScopeForDeclaration, isScope, isScopeDeclarative, isScopeImperative
 	inferNode
@@ -100,6 +101,7 @@ local !structTypeInfo"TypeInfoStruct:_TypeInfo"{
 	name                  = "",  -- Filled in during definition.
 	arguments             = {},  -- []TypeInfo  @Incomplete: Polymorphism.  @Cleanup: Use TypeInfoList here.
 	members               = {},  -- []TypeInfoStructMember
+	hasMembers            = false,
 	polymorphSourceStruct = NIL, -- TypeInfoStruct  @Incomplete: Polymorphism.
 }
 
@@ -444,6 +446,13 @@ function _G.findDeclarationInScope(state, scope, name, onlyLookInExportsIfScopeI
 		end
 	end
 
+	return nil
+end
+
+function _G.findMemberDeclaration(state, scope, name)
+	for _, decl in ipairs(scope.declarations) do
+		if not decl.isConstant and decl.name.name == name then  return decl  end
+	end
 	return nil
 end
 
@@ -1322,8 +1331,15 @@ end
 	moveToPipe(state, typeNode, !(PIPE_DONE))
 end
 
--- doesMatch, compatibilityScore = checkIfValuesMatchArgumentTypes( state, callOrReturnNode, values, typeInfos [, softCheck=false, calleeDeclarationForCurrentOverload ] )
-local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, typeInfos, softCheck, calleeDecl)
+local function getArgumentNodeForError(callOrReturnNode, valueIndex, valueExpr)
+	return
+		callOrReturnNode.nodeType == !(nodeTypes.AstCall) and callOrReturnNode.isMethod and valueIndex == 1
+		and valueExpr
+		or  astGetExpressionVisuallyFurthestToTheLeft(valueExpr)
+end
+
+-- doesMatch, compatibilityScore = checkIfValuesMatchArgumentTypes( state, callOrReturnNode, values, valueTypes, typeInfos [, softCheck=false, calleeDeclarationForCurrentOverload ] )
+local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, valueTypes, typeInfos, softCheck, calleeDecl)
 	--[[
 		Situations:
 
@@ -1435,7 +1451,7 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 	if requestedMin < acceptedMin then
 		if softCheck then  return false, 0  end
 
-		local exprForError = values[1] and astGetExpressionVisuallyFurthestToTheLeft(values[1]) or callOrReturnNode
+		local exprForError = values[1] and getArgumentNodeForError(callOrReturnNode, 1, values[1]) or callOrReturnNode
 		local thingsStr    = callOrReturnNode.nodeType == !(nodeTypes.AstCall) and "arguments" or "values to return"
 		local gotStr       = requestedMax ~= math.huge and F("%d", requestedMin) or requestedMin == 0 and "variable amount" or F("%d + variable amount", requestedMin)
 		typeError(state, exprForError, "Missing %s. (Wanted %d, got %s)", thingsStr, acceptedMin, gotStr)
@@ -1447,8 +1463,9 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 
 		if softCheck then  return false, 0  end
 
-		local firstExtraValueExpr = values[math.min(acceptedMax+1, valueCount)]
-		local exprForError        = astGetExpressionVisuallyFurthestToTheLeft(firstExtraValueExpr)
+		local valueIndex          = math.min(acceptedMax+1, valueCount)
+		local firstExtraValueExpr = values[valueIndex]
+		local exprForError        = getArgumentNodeForError(callOrReturnNode, valueIndex, firstExtraValueExpr)
 		local thingsStr           = callOrReturnNode.nodeType == !(nodeTypes.AstCall) and "arguments" or "values to return"
 		local gotStr              = requestedMax == math.huge and "variable amount" or F("%d", requestedMax)
 
@@ -1460,7 +1477,7 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 	for slot = 1, slotsToCheck do
 		local valueIndex      = math.min(slot, valueCount)
 		local valueExpr       = values[valueIndex]
-		local valueTypeInfo   = valueExpr.inferredType
+		local valueTypeInfo   = valueTypes[valueIndex]
 
 		local typeInfoIndex   = math.min(slot, typeInfoCount)
 		local typeInfoToMatch = typeInfos[typeInfoIndex]
@@ -1502,7 +1519,7 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 			if not isCompatible then
 				if softCheck then  return false, 0  end
 				typeError(
-					state, astGetExpressionVisuallyFurthestToTheLeft(valueExpr),
+					state, getArgumentNodeForError(callOrReturnNode, valueIndex, valueExpr),
 					"Type mismatch for %s #%d. (Wanted %s, got %s)",
 					callOrReturnNode.nodeType == !(nodeTypes.AstCall) and "argument" or "return value",
 					slot,
@@ -1573,6 +1590,25 @@ end
 
 	!ASSERT("calleeTypeInfo.tag == "..typeTags.TypeInfoFunction) -- @Incomplete: Handle parameterized structs.
 
+	!if DEBUG then
+		if call.isMethod and callee.nodeType ~= !(nodeTypes.AstLookup) then
+			astPrint(callee)
+			where(state, call)
+			errorInternal()
+		end
+	!end
+
+	local realArguments     = (call.isMethod and {call, unpack(call.arguments)} or call.arguments)
+	local realArgumentTypes = {}
+
+	if call.isMethod then
+		local typeInfo = callee.object.inferredType
+		realArgumentTypes[1] = adjustTypeToOne(state, typeInfo) -- Is adjustTypeToOne necessary? @Cleanup
+	end
+	for _, arg in ipairs(call.arguments) do
+		table.insert(realArgumentTypes, arg.inferredType)
+	end
+
 	-- Handle overloads.
 	if callee.nodeType == !(nodeTypes.AstIdentifier) and callee.declaration.overloadOf then
 		local ident             = callee
@@ -1586,7 +1622,9 @@ end
 
 			!ASSERT("calleeTypeInfoOverload.tag == "..typeTags.TypeInfoFunction)
 
-			local doesMatch, compatibilityScore = checkIfValuesMatchArgumentTypes(state, call, call.arguments, calleeTypeInfoOverload.argumentTypesIn, true, declOverload)
+			local doesMatch, compatibilityScore = checkIfValuesMatchArgumentTypes(
+				state, call, realArguments, realArgumentTypes, calleeTypeInfoOverload.argumentTypesIn, true, declOverload
+			)
 			if doesMatch then
 				table.insert(matchingOverloads, {declaration=declOverload, score=compatibilityScore})
 			end
@@ -1626,7 +1664,7 @@ end
 		ident.inferredType = calleeTypeInfo
 
 	else
-		checkIfValuesMatchArgumentTypes(state, call, call.arguments, calleeTypeInfo.argumentTypesIn)
+		checkIfValuesMatchArgumentTypes(state, call, realArguments, realArgumentTypes, calleeTypeInfo.argumentTypesIn)
 	end
 
 	call.inferredType              = getTypeInfoForList(state, calleeTypeInfo.argumentTypesOut)
@@ -1659,7 +1697,12 @@ end
 		!DEPEND_AND_RETURN(`returnNode`, DEPEND_NODE_INFERRED, `lambda`)
 	end
 
-	checkIfValuesMatchArgumentTypes(state, returnNode, returnNode.values, lambda.inferredType.argumentTypesOut)
+	local typeInfos = {}
+	for i, valueExpr in ipairs(returnNode.values) do
+		typeInfos[i] = valueExpr.inferredType
+	end
+
+	checkIfValuesMatchArgumentTypes(state, returnNode, returnNode.values, typeInfos, lambda.inferredType.argumentTypesOut)
 	moveToPipe(state, returnNode, !(PIPE_DONE))
 end
 
@@ -2169,10 +2212,13 @@ end
 	-- is not very good. Use moveToNextRelevantPipe()!
 
 	if typeInfoObject.tag == !(typeTags.TypeInfoStruct) or (typeInfoRepresented and typeInfoRepresented.tag == !(typeTags.TypeInfoStruct)) then
+		local structInfo = typeInfoRepresented or typeInfoObject
+		if not structInfo.hasMembers then
+			!DEPEND_AND_RETURN(`lookup`, DEPEND_STRUCT_MEMBERS_READY, `structInfo`)
+		end
+
 		local memberLiteral = lookup.member
 		local memberName    = getConstantNameOrTriggerError(state, memberLiteral)
-
-		local structInfo    = typeInfoRepresented or typeInfoObject
 		local decl          = findDeclarationInScope(state, structInfo.astNode, memberName, false)
 
 		if not decl then
@@ -2201,6 +2247,60 @@ end
 
 		elseif valueExpr.nodeType == !(nodeTypes.AstIdentifier) and valueExpr.inferredType.tag == !(typeTags.TypeInfoEnum) then
 			replacement = astCopy(valueExpr, memberLiteral.token)
+
+		elseif valueExpr.nodeType == !(nodeTypes.AstLambda) then
+			if lookup.parent.nodeType == !(nodeTypes.AstCall) and lookup == lookup.parent.callee and lookup.parent.isMethod then
+				--
+				-- Change obj.staticMethod!(...) into staticMethod(obj, ...)
+				--
+				-- AstCall (method)
+				--   CALLEE AstLookup
+				--     AstIdentifier (object)
+				--     AstLiteral (string)
+				--   ARG1...
+				--
+				-- AstCall (normal)
+				--   CALLEE AstIdentifier (static function)
+				--   ARG1 AstIdentifier (object)
+				--   ARG2...
+				--
+				local call = lookup.parent
+
+				-- Move object from lookup to call arguments.
+				local obj = lookup.object
+				table.insert(call.arguments, 1, obj)
+				obj.parent = call
+
+				-- Update all argument queueds.
+				for i, arg in ipairs(call.arguments) do
+					arg.queued.container = call.arguments
+					arg.queued.key       = i
+				end
+
+				-- Update callee using lookup. (Note: lookup==callee)
+				local ident        = astNewNode(AstIdentifier, memberLiteral.token, call)
+				ident.name         = decl.name.name
+				ident.declaration  = decl
+				ident.inferredType = decl.name.inferredType
+				replaceQueuedNode(state, lookup, ident)
+				moveToNextRelevantPipe(state, ident)
+
+				-- Update call.
+				call.isMethod = false
+
+				-- Unqueue now unused nodes.
+				unqueue(memberLiteral)
+
+				astPrintTree(call)
+				return
+
+			else
+				local ident        = astNewNode(AstIdentifier, memberLiteral.token, lookup.parent)
+				ident.name         = decl.name.name
+				ident.declaration  = decl
+				ident.inferredType = decl.name.inferredType
+				replacement        = ident
+			end
 
 		else
 			where(state, valueExpr)
@@ -2335,7 +2435,11 @@ end
 		tableNode.inferredType = arraySig
 
 	elseif typeInfoExpected.tag == !(typeTags.TypeInfoStruct) then
-		local structInfo  = typeInfoExpected
+		local structInfo = typeInfoExpected
+		if not structInfo.hasMembers then
+			!DEPEND_AND_RETURN(`tableNode`, DEPEND_STRUCT_MEMBERS_READY, `structInfo`)
+		end
+
 		local keyLiterals = {}
 
 		for _, tableField in ipairs(tableNode) do
@@ -2352,26 +2456,25 @@ end
 				)
 			end
 
-			local literal    = tableField.key
-			local memberName = literal.value
+			local memberLiteral = tableField.key
+			local memberName    = memberLiteral.value
 
 			if keyLiterals[memberName] then
 				printerr()
-				typeMessage(io.stderr, state, literal,                 "Error", "Duplicate field '%s'.", memberName)
+				typeMessage(io.stderr, state, memberLiteral,           "Error", "Duplicate field '%s'.", memberName)
 				typeMessage(io.stderr, state, keyLiterals[memberName], "Info",  "...first occurance is here.")
 				exitFailure()
 			end
 
-			keyLiterals[memberName] = literal
+			keyLiterals[memberName] = memberLiteral
 			local member            = itemWith1(structInfo.members, "name", memberName)
 
-			if not member then
-				typeError(
-					state, astGetExpressionVisuallyFurthestToTheLeft(literal),
-					"'%s' is not a member of %s.",
-					memberName,
-					getFriendlyTypeInfoName(structInfo)
-				)
+			if member then
+				-- void
+			elseif findDeclarationInScope(state, structInfo.astNode, memberName, false) then
+				typeError(state, memberLiteral, "'%s' is a static member in %s.", memberName, getFriendlyTypeInfoName(structInfo))
+			else
+				typeError(state, memberLiteral, "'%s' is not a member of %s.", memberName, getFriendlyTypeInfoName(structInfo))
 			end
 
 			if not isTypeCompatibleWith(adjustTypeToOne(state, tableField.value.inferredType, true), member.typeInfo) then
@@ -2418,7 +2521,15 @@ end
 		!DEPEND_AND_RETURN(`lambda`, DEPEND_NODE_INFERRED, `lambda.argumentsOut`)
 	end
 
-	-- Note: We don't require the body to inferred.
+	-- Note: We don't require the body to inferred - just the "header".
+
+	if lambda.argumentsIn then
+		for _, arg in ipairs(lambda.argumentsIn) do
+			if arg.assignment and not isExpressionConstant(state, arg.assignment.values[1]) then
+				typeError(state, astGetExpressionVisuallyFurthestToTheLeft(arg.assignment.values[1]), "Non-constant default values for arguments are not supported yet.")
+			end
+		end
+	end
 
 	lambda.inferredType = getTypeInfoForLambda(state, lambda) or errorInternal()
 
@@ -2922,31 +3033,39 @@ end
 end
 
 !NODE_INFERRER `function nodeInferrers.AstStruct(state, struct)`
+	local structInfo = struct.representedType
+
+	if not structInfo then
+		structInfo         = newTypeInfo(TypeInfoStruct)
+		structInfo.astNode = struct
+
+		-- Note: We don't populate structInfo.members just yet. (Is this gonna a problem?)
+
+		table.insert(state.allTypeInfos, structInfo)
+
+		struct.representedType = structInfo
+		struct.inferredType    = getTypeInfoForBuiltinType(state, "type")
+	end
+
 	for _, statement in ipairs(struct) do
 		if statement.queued.pipe <= !(PIPE_INFER) then
 			!DEPEND_AND_RETURN(`struct`, DEPEND_NODE_INFERRED, `statement`)
 		end
 	end
 
-	local structInfo   = newTypeInfo(TypeInfoStruct)
-	structInfo.astNode = struct
-
-	for i, decl in ipairs(struct.declarations) do
-		local member          = TypeInfoStructMember()
-		member.name           = decl.name.name
-		member.typeInfo       = decl.name.inferredType or errorInternal()
-		structInfo.members[i] = member
-	end
-
 	-- @Incomplete: struct.arguments
 
-	table.insert(state.allTypeInfos, structInfo)
+	for i, decl in ipairs(struct.declarations) do
+		if not decl.isConstant then
+			local member          = TypeInfoStructMember()
+			member.name           = decl.name.name
+			member.typeInfo       = decl.name.inferredType or errorInternal()
+			table.insert(structInfo.members, member)
+		end
+	end
+	structInfo.hasMembers = true
 
-	struct.representedType = structInfo
-	struct.inferredType    = getTypeInfoForBuiltinType(state, "type")
-
-	moveToPipe(state, struct, !(PIPE_DONE)) -- @Temp until struct bodies are decoupled from the "header".
-	-- moveToNextPipe(state, struct, !(PIPE_BYTECODE))
+	moveToPipe(state, struct, !(PIPE_DONE))
 end
 
 !NODE_INFERRER `function nodeInferrers.AstEnum(state, enum)`
@@ -3011,8 +3130,7 @@ end
 	enum.representedType = enumInfo
 	enum.inferredType    = getTypeInfoForBuiltinType(state, "type")
 
-	moveToPipe(state, enum, !(PIPE_DONE)) -- @Temp until enum bodies are decoupled from the "header" (right?).
-	-- moveToNextPipe(state, enum, !(PIPE_BYTECODE))
+	moveToPipe(state, enum, !(PIPE_DONE))
 end
 
 !NODE_INFERRER `function nodeInferrers.AstFileScope(state, fileScope)`
@@ -3715,5 +3833,23 @@ function _G.getExpectedTypeInfo(state, node, strict)
 		!!(NO_EXPECTATION)
 	end
 end
+
+
+
+--[[
+function _G.getDeclarationThatExpressionIsConstantValueFor(expr)
+	local scope, statement = getClosestScope(expr)
+
+	if not (statement.nodeType == !(nodeTypes.AstAssignment) and statement.forDeclaration) then  return  end
+
+	local assignment = statement
+	local i          = indexOf(assignment.values, expr)
+	local decl       = assignment.declarations[i]
+
+	if not (decl and decl.isConstant) then  return nil  end
+
+	return decl
+end
+]]
 
 

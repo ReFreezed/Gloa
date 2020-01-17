@@ -370,32 +370,38 @@ xpcall(function()
 					local dependency  = dependencyCurrent
 					dependencyCurrent = nil
 
+					!local DEPENDENCY_FULFILLED = `
+						dependencyCurrent = dependency.next
+						queued.waitingOn  = dependencyCurrent
+					`
+
 					if dependency.dependType == !(DEPEND_DECLARATION) then
 						local name = dependency.dependOn
 						-- @Speed: Only call findDeclaration*() if it's reported that a declaration with the awaited name has been added to the tree.
 						if dependency.extraData then
 							if findDeclarationInScope(state, dependency.extraData, name, true) then
-								dependencyCurrent = dependency.next
-								queued.waitingOn  = dependencyCurrent
+								!!(DEPENDENCY_FULFILLED)
 							end
 						else
 							if findDeclaration(state, queued.node, name) then
-								dependencyCurrent = dependency.next
-								queued.waitingOn  = dependencyCurrent
+								!!(DEPENDENCY_FULFILLED)
 							end
 						end
 
 					elseif dependency.dependType == !(DEPEND_NODE_INFERRED) then
-						if dependency.dependOn.pipe > !(PIPE_INFER) then
-						-- if dependency.dependOn.node.inferredType then -- Invalid! dependOn.node is not necessarily an expression.
-							dependencyCurrent = dependency.next
-							queued.waitingOn  = dependencyCurrent
+						-- Note: dependOn.node is not necessarily an expression which is why we also check the pipe.
+						if dependency.dependOn.node.inferredType or dependency.dependOn.pipe > !(PIPE_INFER) then
+							!!(DEPENDENCY_FULFILLED)
+						end
+
+					elseif dependency.dependType == !(DEPEND_STRUCT_MEMBERS_READY) then
+						if dependency.dependOn.hasMembers then
+							!!(DEPENDENCY_FULFILLED)
 						end
 
 					elseif dependency.dependType == !(DEPEND_NODE_EMITTED) then
 						if dependency.dependOn.pipe > !(PIPE_BYTECODE) then
-							dependencyCurrent = dependency.next
-							queued.waitingOn  = dependencyCurrent
+							!!(DEPENDENCY_FULFILLED)
 						end
 
 					else

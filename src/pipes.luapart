@@ -10,7 +10,7 @@
 --==============================================================
 
 	addDependency
-	addToQueue, addToQueueRecursively, pokeAndQueueUnqueuedNodeIntoTree, unqueueChildrenRecursively, replaceQueuedNode, replaceQueuedNodeAndUnqueueOldTree, cutOutPartOfNodeTree
+	addToQueue, addToQueueRecursively, pokeAndQueueUnqueuedNodeIntoTree, unqueue, unqueueChildrenRecursively, replaceQueuedNode, replaceQueuedNodeAndUnqueueOldTree, cutOutPartOfNodeTree
 	errorPipesAreStuck
 	moveToPipe, moveToNextPipe, moveTreeToNextPipe, moveToNextRelevantPipe, moveTreeToNextRelevantPipe
 
@@ -20,20 +20,21 @@
 
 local !struct"Dependency"{ -- @Cleanup: Rename to something with "wait"?
 	dependent  = NIL, -- Queued
-	dependType = 0,   -- DEPEND_DECLARATION|DEPEND_NODE_INFERRED|DEPEND_NODE_EMITTED
+	dependType = 0,   -- DEPEND_DECLARATION|DEPEND_NODE_INFERRED|DEPEND_NODE_EMITTED|DEPEND_STRUCT_MEMBERS_READY
 	dependOn   = NIL, -- string|Queued  (The value depends on what dependType is.)
 	next       = NIL, -- Dependency  (This is for chaining multiple dependencies.)
 }
 
--- addDependency( state, dependent, DEPEND_DECLARATION,   name [, scope ] )
--- addDependency( state, dependent, DEPEND_NODE_INFERRED, astNode )
--- addDependency( state, dependent, DEPEND_NODE_EMITTED,  astNode )
+-- addDependency( state, dependent, DEPEND_DECLARATION,          name [, scope ] )
+-- addDependency( state, dependent, DEPEND_NODE_INFERRED,        astNode )
+-- addDependency( state, dependent, DEPEND_NODE_EMITTED,         astNode )
+-- addDependency( state, dependent, DEPEND_STRUCT_MEMBERS_READY, structInfo )
 function _G.addDependency(state, dependent, dependType, dependOn, extraData)
 	!if DEBUG then
 		if dependType == !(DEPEND_DECLARATION) then
 			assert(type(dependOn) == "string")
 			assert(extraData == nil or type(extraData) == "table")
-		elseif isAny(dependType, !(DEPEND_NODE_INFERRED),!(DEPEND_NODE_EMITTED)) then
+		elseif isAny(dependType, !(DEPEND_NODE_INFERRED),!(DEPEND_NODE_EMITTED),!(DEPEND_STRUCT_MEMBERS_READY)) then
 			assert(type(dependOn) == "table")
 		else
 			errorInternal("%d", dependType)
@@ -85,6 +86,8 @@ function _G.addDependency(state, dependent, dependType, dependOn, extraData)
 				astPrint(dependOn.node)
 			elseif dependType == !(DEPEND_NODE_EMITTED) then
 				astPrint(dependOn.node)
+			elseif dependType == !(DEPEND_STRUCT_MEMBERS_READY) then
+				print(getFriendlyTypeInfoName(dependOn))
 			else
 				print("? ("..tostring(dependOn)..")")
 			end
@@ -169,6 +172,10 @@ function _G.pokeAndQueueUnqueuedNodeIntoTree(state, nodeAtTargetPos, newNode, co
 	nodeAtTargetPos.parent           = newNode
 	nodeAtTargetPos.queued.container = containerInNewNode
 	nodeAtTargetPos.queued.key       = keyInNewNode
+end
+
+function _G.unqueue(node)
+	node.queued.unqueued = true
 end
 
 function _G.unqueueChildrenRecursively(state, topNode)

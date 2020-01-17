@@ -37,12 +37,24 @@
 
 
 
-local COMPILER_API = {
+local FOREIGN_API_COMPILER_SYMBOLS = {
+	-- APP_PATH
+	-- Get the path to the application file. The path may be relative to the current working directory.
+	APP_PATH      = `(debug.getinfo(1, "S").source:match"@?(.+)" or error("Could not get application path.")) :gsub("\\", "/")`,
+
+	-- APP_DIRECTORY
+	-- Get the path to the directory the application is located in. The path may be relative to the current working directory.
+	APP_DIRECTORY = `(debug.getinfo(1, "S").source:match"@?(.+)" or error("Could not get application path.")) :gsub("\\", "/"):gsub("/?[^/]+$", ""):gsub("^$", ".")`,
+
+	-- wrapFunctionInGloaErrorHandler()
 	-- Make Glóa handle errors triggered by a function.
+	--
 	-- This is useful if an external library or framework tries to handle an error
 	-- triggered by a callback provided by you, but you instead want to trigger a
 	-- normal Glóa error before the library knows what happened.
+	--
 	-- wrappedFunction = wrapFunctionInGloaErrorHandler( function )
+	--
 	wrapFunctionInGloaErrorHandler = `function(cb)
 		return function(...)
 			local args = {n=select("#", ...), ...}
@@ -56,7 +68,7 @@ local COMPILER_API = {
 				os.exit(1) -- In case there was an error in gloaErrorHandler() for some reason.
 			end
 		end
-	end`
+	end`,
 }
 
 
@@ -95,9 +107,20 @@ function _G.writeLookup(state, file, lookup)
 		-- @Incomplete: Compiler setting for runtime checks of array bounds.
 		writeExpression(state, file, lookup.object)
 
-		if isExpressionLiteralStringAndValidLuaIdentifier(lookup.member) then
+		if lookup.parent.nodeType == !(nodeTypes.AstCall) and lookup.parent.isMethod then
+			local stringLiteral = lookup.member
+			assert(stringLiteral.nodeType == !(nodeTypes.AstLiteral) and stringLiteral.literalType == !(LITERAL_STRING))
+
+			if not stringLiteral.value:find"^[%a_][%w_]*$" then
+				errorInternal("@Incomplete: Support method names using non-ASCII characters.")
+			end
+
+			file:write(":", stringLiteral.value)
+
+		elseif isExpressionLiteralStringAndValidLuaIdentifier(lookup.member) then
 			local stringLiteral = lookup.member
 			file:write(".", stringLiteral.value)
+
 		else
 			file:write("[")
 			writeExpression(state, file, lookup.member)
@@ -164,9 +187,9 @@ function _G.writeTableConstructorKeyName(file, name)
 end
 
 function _G.writeDefaultValueForStructMember(state, file, structInfo, member, nodeForError)
-	local assignment = findDeclarationInScope(state, structInfo.astNode, member.name, false).assignment
-	if assignment then
-		local valueExpr = assignment.values[1] or errorInternal()
+	local decl = findMemberDeclaration(state, structInfo.astNode, member.name) or errorInternal("Did not find member '%s'", member.name)
+	if decl.assignment then
+		local valueExpr = decl.assignment.values[1] or errorInternal()
 		writeExpression(state, file, valueExpr)
 	else
 		writeDefaultValueForType(state, file, member.typeInfo, nodeForError)
@@ -791,7 +814,7 @@ function _G.writeForeignImportIfNew(state, file, typeInfo, foreignSource, foreig
 			file:write(foreignRef)
 		end
 
-		file:write(" = ", COMPILER_API[foreignSourceName], "\n")
+		file:write(" = ", FOREIGN_API_COMPILER_SYMBOLS[foreignSourceName], "\n")
 
 	else
 		errorInternal("Incomplete: Handle foreignSource=%s", foreignSource)
@@ -1114,7 +1137,7 @@ function _G.validateForeignSource(state, foreignSource, foreignSourceName, nodeF
 		end
 
 	elseif foreignSource == "compiler" then
-		if not COMPILER_API[foreignSourceName] then
+		if not FOREIGN_API_COMPILER_SYMBOLS[foreignSourceName] then
 			nodeError(state, nodeForError, "ForeignValidator", "This is not a valid compiler symbol: '%s'", foreignSourceName)
 		end
 
