@@ -1,0 +1,82 @@
+--[[============================================================
+--=
+--=  Glóa I/O and filesystem module
+--=
+--==============================================================
+
+	APP_PATH, APP_DIRECTORY
+	stdin, stderr, stdout
+
+	openFileForReading, openFileForWriting, closeFile
+	readEntireFile
+	readNumber, readRemaining, readLine, readBytes
+	writeFile
+
+--============================================================]]
+
+export APP_PATH      : string : !foreign compiler "APP_PATH"
+export APP_DIRECTORY : string : !foreign compiler "APP_DIRECTORY"
+
+export stdin  : File : !foreign lua "io.stdin"
+export stderr : File : !foreign lua "io.stderr"
+export stdout : File : !foreign lua "io.stdout"
+
+local File :: struct {
+	-- These function definitions are dummies.
+	write = (file:File, data:string) {},
+	read  = (file:File, what:string|int) -> string|float|nil { return nil },
+}
+local invalidFileHandle:File : !foreign lua "nil" -- Kind of a @Hack. @Compiler: Maybe we should have a NULL macro of sorts?
+
+local _openFile :: (path:string, mode:string) -> File|nil, nil|string !foreign lua "io.open"
+
+export closeFile :: (file:File) !foreign lua "io.close"
+
+local openFile :: (path:string, mode:string) -> bool, File, string {
+	local file, err = _openFile(path, mode)
+	if file == nil  return false, invalidFileHandle, cast(string) err
+	return true, cast(File) file, ""
+}
+export openFileForReading :: (path:string) -> (success:bool, file:File, error:string) { return openFile(path, "rb") }
+export openFileForWriting :: (path:string) -> (success:bool, file:File, error:string) { return openFile(path, "wb") }
+
+export readNumber :: (file:File) -> (success:bool, number:float) {
+	local data = file.read!("*n")
+	if data == nil  return false, 0
+	return true, cast(float) data
+}
+export readRemaining :: (file:File) -> (success:bool, data:string) {
+	local data = file.read!("*a") -- (I think this always returns a string?)
+	if data == nil  return false, ""
+	return true, cast(string) data
+}
+export readLine :: (file:File) -> (success:bool, line:string) {
+	local data = file.read!("*l")
+	if data == nil  return false, ""
+	return true, cast(string) data
+}
+export readBytes :: (file:File, maxBytes:int) -> (success:bool, data:string) {
+	local data = file.read!(maxBytes)
+	if data == nil  return false, ""
+	return true, cast(string) data
+}
+
+export readEntireFile :: (path:string) -> (success:bool, data:string, error:string) {
+	local ok, file, err = openFileForReading(path)
+	if not ok  return false, "", err
+
+	local data:string
+	ok, data = readRemaining(file)
+	closeFile(file)
+	if not ok  return false, "", "Could not read from the file."
+
+	return true, data, ""
+}
+
+export writeFile :: (path:string, data:string) -> (success:bool, error:string) {
+	local ok, file, err = openFileForWriting(path)
+	if not ok  return false, err
+
+	file.write!(data)
+	return true, ""
+}

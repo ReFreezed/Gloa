@@ -1,0 +1,190 @@
+--[[============================================================
+--=
+--=  LÖVE bindings (love2d.org)
+--=
+--==============================================================
+
+	LoveEvent
+
+	loveClear
+	loveCoordinateSystemReset
+	loveCoordinateSystemRotate, loveCoordinateSystemScale, loveCoordinateSystemShear, loveCoordinateSystemTranslate
+	loveDrawCircleFill, loveDrawCircleLine
+	loveDrawLine
+	loveDrawRectangleFill, loveDrawRectangleLine
+	loveDrawText
+	loveGetColor, loveSetColor
+	loveGetLineWidth, loveSetLineWidth
+	loveGetTime
+	loveGetWindowDimensions
+	loveGraphicsPushAll, loveGraphicsPushTransform, loveGraphicsPop
+	loveGraphicsReset
+	loveQuit, loveRestart
+	loveReadFile, loveWriteFile
+	loveSetAppDataFolderName
+	loveSetEventHandler
+
+--============================================================]]
+
+----------------------------------------------------------------
+-- love.event.*
+----------------------------------------------------------------
+
+using export LoveEvent :: enum {
+	-- General.
+	DRAW              :: "draw",
+	ERROR_HANDLER     :: "errorhandler",
+	LOAD              :: "load",
+	LOW_MEMORY        :: "lowmemory",
+	QUIT              :: "quit",
+	RUN               :: "run",
+	THREAD_ERROR      :: "threaderror",
+	UPDATE            :: "update",
+	-- Window.
+	DIRECTORY_DROPPED :: "directorydropped",
+	FILE_DROPPED      :: "filedropped",
+	FOCUS             :: "focus",
+	MOUSE_FOCUS       :: "mousefocus",
+	RESIZE            :: "resize",
+	VISIBLE           :: "visible",
+	-- Keyboard.
+	KEY_PRESSED       :: "keypressed",
+	KEY_RELEASED      :: "keyreleased",
+	TEXT_EDITED       :: "textedited",
+	TEXT_INPUT        :: "textinput",
+	-- Mouse.
+	MOUSE_MOVED       :: "mousemoved",
+	MOUSE_PRESSED     :: "mousepressed",
+	MOUSE_RELEASED    :: "mousereleased",
+	WHEEL_MOVED       :: "wheelmoved",
+	-- Joystick.
+	GAMEPAD_AXIS      :: "gamepadaxis",
+	GAMEPAD_PRESSED   :: "gamepadpressed",
+	GAMEPAD_RELEASED  :: "gamepadreleased",
+	JOYSTICK_ADDED    :: "joystickadded",
+	JOYSTICK_AXIS     :: "joystickaxis",
+	JOYSTICK_HAT      :: "joystickhat",
+	JOYSTICK_PRESSED  :: "joystickpressed",
+	JOYSTICK_RELEASED :: "joystickreleased",
+	JOYSTICK_REMOVED  :: "joystickremoved",
+	-- Touch.
+	TOUCH_MOVED       :: "touchmoved",
+	TOUCH_PRESSED     :: "touchpressed",
+	TOUCH_RELEASED    :: "touchreleased",
+}
+
+local love:table : !foreign lua "love"
+
+export loveSetEventHandler :: (event:LoveEvent, handler:any, catchErrorsInGloa:bool=true) { -- @Compiler @Cleanup :RestrictAnyToTypeTag
+	!import "basic"
+
+	assert(getLuaType(handler) == LuaType.FUNCTION, "Handler is not a function.") -- @Cleanup: Remove this when :RestrictAnyToTypeTag is solved.
+
+	if catchErrorsInGloa {
+		-- Because LÖVE has it's own error handling that the user may not want we have
+		-- to do some trickery to catch errors in Glóa before LÖVE sees them.
+		local wrap :: (func:any) -> any !foreign compiler "wrapFunctionInGloaErrorHandler"
+		handler = wrap(handler)
+	}
+
+	love[event] = handler
+	if event == ERROR_HANDLER  love.errhand = handler
+}
+
+export loveRemoveEventHandler :: (event:LoveEvent) {
+	love[event] = nil
+	if event == ERROR_HANDLER  love.errhand = nil
+}
+
+export loveQuit :: (exitStatus:int=0) !foreign lua "love.event.quit"
+
+local _loveRestart :: (restart:string) !foreign lua "love.event.quit"
+export loveRestart :: () { _loveRestart("restart") }
+
+----------------------------------------------------------------
+-- love.filesystem.*
+----------------------------------------------------------------
+
+export loveSetAppDataFolderName :: (name:string) !foreign lua "love.filesystem.setIdentity"
+
+local _loveReadFile :: (path:string) -> string|nil, int|string !foreign lua "love.filesystem.read"
+export loveReadFile :: (path:string) -> (success:bool, data:string, error:string) {
+	local data, sizeOrErr = _loveReadFile(path)
+	if data == nil  return false, "", cast(string) sizeOrErr
+	return true, cast(string) data, ""
+}
+
+local _loveWriteFile :: (path:string, data:string) -> bool, nil|string !foreign lua "love.filesystem.write"
+export loveWriteFile :: (path:string, data:string) -> (success:bool, error:string) {
+	local ok, err = _loveWriteFile(path, data)
+	if not ok  return false, cast(string) err
+	return true, ""
+}
+
+----------------------------------------------------------------
+-- love.graphics.*
+----------------------------------------------------------------
+
+-- Drawing.
+
+export loveDrawText :: (text:string, x,y:float=0, r:float=0                                         ) !foreign lua "love.graphics.print"
+export loveDrawText :: (text:string, x,y:float,   r:float, sx:float                                 ) { loveDrawText(text, x,y, r, sx,sx) }
+export loveDrawText :: (text:string, x,y:float,   r:float, sx,sy:float, ox,oy:float=0, kx,ky:float=0) !foreign lua "love.graphics.print"
+-- @Compiler @Incomplete: Make sy:float=sx work somehow here below and remove the overloads here above.
+-- export loveDrawText :: (text:string, x,y:float=0, r:float=0, sx:float=1,sy:float=sx, ox,oy:float=0, kx,ky:float=0) !foreign lua "love.graphics.print"
+
+local _loveDrawRectangle :: (mode:string, x,y:float, w,h:float)                                      !foreign lua "love.graphics.rectangle"
+local _loveDrawRectangle :: (mode:string, x,y:float, w,h:float, radiusX,radiusY:float)               !foreign lua "love.graphics.rectangle"
+local _loveDrawRectangle :: (mode:string, x,y:float, w,h:float, radiusX,radiusY:float, segments:int) !foreign lua "love.graphics.rectangle"
+export loveDrawRectangleFill :: (x,y:float, w,h:float)                                      { _loveDrawRectangle("fill", x,y, w,h) }
+export loveDrawRectangleLine :: (x,y:float, w,h:float)                                      { _loveDrawRectangle("line", x,y, w,h) }
+export loveDrawRectangleFill :: (x,y:float, w,h:float, radiusX,radiusY:float)               { _loveDrawRectangle("fill", x,y, w,h, radiusX,radiusY) }
+export loveDrawRectangleLine :: (x,y:float, w,h:float, radiusX,radiusY:float)               { _loveDrawRectangle("line", x,y, w,h, radiusX,radiusY) }
+export loveDrawRectangleFill :: (x,y:float, w,h:float, radiusX,radiusY:float, segments:int) { _loveDrawRectangle("fill", x,y, w,h, radiusX,radiusY, segments) }
+export loveDrawRectangleLine :: (x,y:float, w,h:float, radiusX,radiusY:float, segments:int) { _loveDrawRectangle("line", x,y, w,h, radiusX,radiusY, segments) }
+
+local _loveDrawCircle :: (mode:string, x,y:float, radius:float)               !foreign lua "love.graphics.circle"
+local _loveDrawCircle :: (mode:string, x,y:float, radius:float, segments:int) !foreign lua "love.graphics.circle"
+export loveDrawCircleFill :: (x,y:float, radius:float)               { _loveDrawCircle("fill", x,y, radius) }
+export loveDrawCircleLine :: (x,y:float, radius:float)               { _loveDrawCircle("line", x,y, radius) }
+export loveDrawCircleFill :: (x,y:float, radius:float, segments:int) { _loveDrawCircle("fill", x,y, radius, segments) }
+export loveDrawCircleLine :: (x,y:float, radius:float, segments:int) { _loveDrawCircle("line", x,y, radius, segments) }
+
+export loveDrawLine :: (x1,y1,x2,y2,...:float) !foreign lua "love.graphics.line"
+
+-- Graphics state.
+
+export loveGetColor :: () -> (r,g,b,a:float)    !foreign lua "love.graphics.getColor"
+export loveSetColor :: (r,g,b:float, a:float=1) !foreign lua "love.graphics.setColor"
+
+export loveClear :: ()                       !foreign lua "love.graphics.clear" -- Same as loveClear(0,0,0,0)
+export loveClear :: (r,g,b:float, a:float=1) !foreign lua "love.graphics.clear"
+
+export loveGetLineWidth :: () -> float !foreign lua "love.graphics.getLineWidth"
+export loveSetLineWidth :: (w:float)   !foreign lua "love.graphics.setLineWidth"
+
+-- Coordinate system.
+
+export loveCoordinateSystemRotate    :: (anlge:float) !foreign lua "love.graphics.rotate"
+export loveCoordinateSystemScale     :: (sx,sy:float) !foreign lua "love.graphics.scale"
+export loveCoordinateSystemShear     :: (kx,ky:float) !foreign lua "love.graphics.shear"
+export loveCoordinateSystemTranslate :: (dx,dy:float) !foreign lua "love.graphics.translate"
+
+export loveCoordinateSystemReset :: () !foreign lua "love.graphics.origin"
+
+local _loveGraphicsPush :: ()             !foreign lua "love.graphics.push"
+local _loveGraphicsPush :: (stack:string) !foreign lua "love.graphics.push"
+export loveGraphicsPushAll       :: () { _loveGraphicsPush("all") }
+export loveGraphicsPushTransform :: () { _loveGraphicsPush()      }
+export loveGraphicsPop           :: () !foreign lua "love.graphics.pop"
+export loveGraphicsReset         :: () !foreign lua "love.graphics.reset"
+
+-- Window.
+
+export loveGetWindowDimensions :: () -> int, int !foreign lua "love.graphics.getDimensions"
+
+----------------------------------------------------------------
+-- love.timer.*
+----------------------------------------------------------------
+
+export loveGetTime :: () -> float !foreign lua "love.timer.getTime"

@@ -10,8 +10,7 @@
 --==============================================================
 
 	doesTypeHaveAnyDefaultValue
-	isExpressionLiteralStringAndValidLuaIdentifier
-	unicodeToLuaIdentifier
+	unicodeToLuaIdentifier, isExpressionLiteralStringAndValidLuaIdentifier
 	validateForeignSource
 	writeProgram, write*
 
@@ -71,6 +70,8 @@ local FOREIGN_API_COMPILER_SYMBOLS = {
 	end`,
 }
 
+local LUA_KEYWORDS = !(Set{"and","break","do","else","elseif","end","false","for","function","goto","if","in","local","nil","not","or","repeat","return","then","true","until","while"})
+
 
 
 function _G.writeIdentifierName(state, file, ident)
@@ -112,7 +113,9 @@ function _G.writeLookup(state, file, lookup)
 			assert(stringLiteral.nodeType == !(nodeTypes.AstLiteral) and stringLiteral.literalType == !(LITERAL_STRING))
 
 			if not stringLiteral.value:find"^[%a_][%w_]*$" then
-				errorInternal("@Incomplete: Support method names using non-ASCII characters.")
+				errorInternal("@Incomplete: Support method calls using names containing non-ASCII characters.")
+			elseif LUA_KEYWORDS[stringLiteral.value] then
+				errorInternal("@Incomplete: Support method calls using names that are keywords in Lua.")
 			end
 
 			file:write(":", stringLiteral.value)
@@ -179,7 +182,7 @@ function _G.writeCast(state, file, cast)
 end
 
 function _G.writeTableConstructorKeyName(file, name)
-	if name:find"^[%a_][%w_]*$" then
+	if name:find"^[%a_][%w_]*$" and not LUA_KEYWORDS[name] then
 		file:write(name)
 	else
 		file:write(F("[%q]", name))
@@ -1096,16 +1099,22 @@ end
 local UNICODE_TO_ASCII = @insert "unicodeConversions.luapart"
 
 function _G.unicodeToLuaIdentifier(name)
-	name = name:gsub(!(UTF8_CHARACTER_PATTERN), function(c)
-		return (#c == 1 and c) or UNICODE_TO_ASCII[c] or "_"
-	end)
+	if name:find"[\128-\255]" then
+		name = name:gsub(!(UTF8_CHARACTER_PATTERN), function(c)
+			return (#c == 1 and c) or UNICODE_TO_ASCII[c] or "_"
+		end)
+	elseif LUA_KEYWORDS[name] then
+		name = name.."_"
+	end
 	return name
 end
 
-
-
 function _G.isExpressionLiteralStringAndValidLuaIdentifier(expr)
-	return expr.nodeType == !(nodeTypes.AstLiteral) and expr.literalType == !(LITERAL_STRING) and expr.value:find"^[%a_][%w_]*$" ~= nil
+	return
+		expr.nodeType == !(nodeTypes.AstLiteral)
+		and expr.literalType == !(LITERAL_STRING)
+		and expr.value:find"^[%a_][%w_]*$" ~= nil
+		and not LUA_KEYWORDS[expr.value]
 end
 
 

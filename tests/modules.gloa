@@ -1,0 +1,156 @@
+--
+-- Tests for modules.
+--
+
+local main :: () {
+	!import "basic"
+	print("Running testBasicModule()") ; testBasicModule()
+	print("Running testStringModule()") ; testStringModule()
+	print("All done!")
+}
+
+local assert :: (b:bool)             !foreign lua "assert"
+local assert :: (b:bool, err:string) !foreign lua "assert"
+
+
+
+local testBasicModule :: () {
+	!import "basic"
+
+	print("Print test")
+
+	assert(format("a%d%%b%s", 5, "c") == "a5%bc")
+
+	local arr : []string = {"a","b","c"}
+	assert(getLuaType(arr) == LuaType.TABLE)
+	insert(arr, "d")
+	assert(#arr == 4)
+	assert(arr[4] == "d")
+	remove(arr, 3)
+	assert(arr[3] == "d")
+
+	do {
+		local ok, n = stringToFloat("8.0")
+		assert(ok)
+		assert(n == 8.0)
+		ok, n = stringToFloat("abc")
+		assert(not ok)
+	}
+	do {
+		local ok, n = stringToInt("8")
+		assert(ok)
+		assert(n == 8)
+		ok, n = stringToInt("f0", 16)
+		assert(ok)
+		assert(n == 240)
+		ok, n = stringToInt("abc")
+		assert(not ok)
+		ok, n = stringToInt("8", 8)
+		assert(not ok)
+	}
+}
+
+
+
+local testStringModule :: () {
+	!import "string"
+
+	assert(getByte("ab")    == !char "a")
+	assert(getByte("ab", 2) == !char "b")
+
+	assert(bytesToString() == "")
+	assert(bytesToString(!char "a", !char "b") == "ab")
+
+	do {
+		local found, i1, i2 = findString("What is a foo?", "foo.")
+		assert(not found)
+		found, i1, i2 = findString("What is a foo?", "a")
+		assert(found)
+		assert(i1 == 3)
+		assert(i2 == 3)
+		found, i1, i2 = findString("What is a foo?", "a", 4)
+		assert(found)
+		assert(i1 == 9)
+		assert(i2 == 9)
+	}
+
+	do {
+		local found, i1, i2, oo = findPattern("What is a foo?", "f(oo).")
+		assert(found)
+		assert(i1 == 11)
+		assert(i2 == 14)
+		assert(oo == "oo")
+		found, i1, i2, oo = findPattern("What is a foo?", "f(oo).", 99)
+		assert(not found)
+	}
+
+	do {
+		local pattern = "(ba[gt])"
+		local found, word = matchPattern("Half-full bag.", pattern)
+		assert(found)
+		assert(word == "bag")
+		found, word = matchPattern("Look out for the bat!", pattern)
+		assert(found)
+		assert(word == "bat")
+	}
+
+	local i = 0
+	for word in eachPatternMatch("That rat is quite fat.", "[fr]at") {
+		i = i+1
+		if i == 1 assert(word == "rat")
+		if i == 2 assert(word == "fat")
+		if i == 3 assert(false)
+	}
+	assert(i == 2)
+
+	assert(escapePattern("foo(bar)?") == "foo%(bar%)%?")
+	assert(reverse("123") == "321")
+	assert(toLower("AbCd!") == "abcd!")
+	assert(toUpper("AbCd!") == "ABCD!")
+
+	assert(repeatString("ab", 3) == "ababab")
+	-- assert(repeatString("ab", 3, "|") == "ab|ab|ab") -- @Incomplete
+
+	local chunkString = getBinaryRepresentationOfLuaFunction(main)
+
+	assert(getSubstring("abc 123", 3, 5)  == "c 1")
+	assert(getSubstring("abc 123", 5, -2) == "12")
+	assert(getSubstring("abc 123", -3)    == "123")
+	assert(getSubstring("abc 123", 99)    == "")
+
+	do {
+		local s = "The dog spotted the other dog."
+		local result:string
+		local reps:int
+
+		result, reps = replaceStringWithString(s, "dog", "cat")
+		assert(result == "The cat spotted the other cat.")
+		assert(reps == 2)
+		result, reps = replaceStringWithString(s, "dog", "cat", 1)
+		assert(result == "The cat spotted the other dog.")
+		assert(reps == 1)
+
+		result, reps = replacePatternWithString(s, "[Tt]he ", "One ")
+		assert(result == "One dog spotted One other dog.")
+		assert(reps == 2)
+		result, reps = replacePatternWithString(s, "[Tt]he ", "One ", 1)
+		assert(result == "One dog spotted the other dog.")
+		assert(reps == 1)
+
+		result, reps = replaceStringWithPattern(s, "dog", "%0-cat")
+		assert(result == "The dog-cat spotted the other dog-cat.")
+		assert(reps == 2)
+		result, reps = replaceStringWithPattern(s, "dog", "%0-cat", 1)
+		assert(result == "The dog-cat spotted the other dog.")
+		assert(reps == 1)
+
+		result, reps = replacePatternWithPattern(s, "[Tt]he ", "%0silly ")
+		assert(result == "The silly dog spotted the silly other dog.")
+		assert(reps == 2)
+		result, reps = replacePatternWithPattern(s, "[Tt]he ", "%0silly ", 1)
+		assert(result == "The silly dog spotted the other dog.")
+		assert(reps == 1)
+	}
+}
+
+

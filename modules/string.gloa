@@ -1,0 +1,107 @@
+--[[============================================================
+--=
+--=  Glóa string module
+--=
+--==============================================================
+
+	eachPatternMatch
+	escapePattern
+	findString, findPattern, matchPattern
+	getBinaryRepresentationOfLuaFunction
+	getByte, bytesToString
+	repeatString
+	replaceStringWithString, replacePatternWithString, replaceStringWithPattern, replacePatternWithPattern
+	reverse
+	toLower, toUpper
+
+--============================================================]]
+
+export getByte :: (s:string, pos:int=1) -> int !foreign lua "string.byte"
+export bytesToString :: (...:int) -> string !foreign lua "string.char"
+
+local find :: (s:string, needle:string, startPos:int, plain:bool) -> (start:int|nil, end:int|nil, ...:string) !foreign lua "string.find"
+
+export findString :: (s:string, needle:string,  startPos:int=1) -> (found:bool, start:int, end:int) {
+	local i1, i2 = find(s, needle, startPos, true)
+	if i1 == nil  return false, 0, 0
+	return true, cast(int) i1, cast(int) i2
+}
+
+export findPattern :: (s:string, pattern:string, startPos:int=1) -> (found:bool, start:int, end:int, ...:string) {
+	local helper :: (start:int|nil, end:int|nil, ...:string) -> (found:bool, start:int, end:int, ...:string) {
+		if start == nil  return false, 0, 0
+		return true, cast(int) start, cast(int) end, ...
+	}
+	return helper(find(s, pattern, startPos, false))
+}
+
+export matchPattern :: (s:string, pattern:string, startPos:int=1) -> (found:bool, ...:string) {
+	local helper :: (...:string) -> (found:bool, ...:string) {
+		if ... == nil  return false
+		return true, ...
+	}
+	local match :: (s:string, pattern:string, startPos:int) -> (...:string) !foreign lua "string.match"
+
+	return helper(match(s, pattern, startPos))
+}
+
+local StringMatchIterator :: (dummy1,dummy2:any) -> (match:string|nil) -- @Temp until we can handle variable amounts of values from iterators in 'for' loops (if that's a thing we actually want in the language).
+-- local StringMatchIterator :: (dummy1,dummy2:any) -> (match:string|nil, ...:string) -- How many matches there are actually depend on the pattern. Can this be solved in some nice way using metaprogramming? Do we require the pattern to be constant so we can count parentheses? Also, how do we hande "()" in patterns in general? Lots of tasks for metaprogramming!
+export eachPatternMatch :: (s:string, pattern:string, startPos:int=1) -> StringMatchIterator, nil, nil !foreign lua "string.gmatch"
+
+local gsub :: (s:string, pattern:string, replacementPattern:string, maxReplacements:int|nil) -> (s:string, replacements:int) !foreign lua "string.gsub"
+
+export escapePattern :: (pattern:string) -> (s:string) {
+	return (gsub(pattern, "[-+*^?$.%%()[%]]", "%%%0", nil))
+}
+
+export replaceStringWithString :: (s:string, needle:string, replacementString:string) -> (s:string, replacements:int) {
+	needle            = escapePattern(needle)
+	replacementString = gsub(replacementString, "%%", "%%%%", nil)
+	return gsub(s, needle, replacementString, nil)
+}
+export replaceStringWithString :: (s:string, needle:string, replacementString:string, maxReplacements:int) -> (s:string, replacements:int) {
+	needle            = escapePattern(needle)
+	replacementString = gsub(replacementString, "%%", "%%%%", nil)
+	return gsub(s, needle, replacementString, maxReplacements)
+}
+
+export replacePatternWithString :: (s:string, pattern:string, replacementString:string) -> (s:string, replacements:int) {
+	replacementString = gsub(replacementString, "%%", "%%%%", nil)
+	return gsub(s, pattern, replacementString, nil)
+}
+export replacePatternWithString :: (s:string, pattern:string, replacementString:string, maxReplacements:int) -> (s:string, replacements:int) {
+	replacementString = gsub(replacementString, "%%", "%%%%", nil)
+	return gsub(s, pattern, replacementString, maxReplacements)
+}
+
+export replaceStringWithPattern :: (s:string, needle:string, replacementPattern:string) -> (s:string, replacements:int) {
+	needle = escapePattern(needle)
+	return gsub(s, needle, replacementPattern, nil)
+}
+export replaceStringWithPattern :: (s:string, needle:string, replacementPattern:string, maxReplacements:int) -> (s:string, replacements:int) {
+	needle = escapePattern(needle)
+	return gsub(s, needle, replacementPattern, maxReplacements)
+}
+
+export replacePatternWithPattern :: (s:string, pattern:string, replacementPattern:string)                      -> (s:string, replacements:int) !foreign lua "string.gsub"
+export replacePatternWithPattern :: (s:string, pattern:string, replacementPattern:string, maxReplacements:int) -> (s:string, replacements:int) !foreign lua "string.gsub"
+
+export repeatString :: (s:string, times:int) -> string !foreign lua "string.rep"
+-- export repeatString :: (s:string, times:int, separator:string) -> string { @Incomplete }
+
+export reverse :: (s:string) -> string !foreign lua "string.reverse"
+
+-- Positive indices are counted from the start of the string - negative are counted from the end.
+export getSubstring :: (s:string, fromIndex:int, toIndex:int=-1) -> string !foreign lua "string.sub"
+
+-- These depend on the current locale. Often these only work on ASCII characters.
+export toLower :: (s:string) -> string !foreign lua "string.lower"
+export toUpper :: (s:string) -> string !foreign lua "string.upper"
+
+-- @Cleanup: This is silly! Can we somehow restrict the "any" type to only functions (or structs or whatever)? Do we need metaprogramming for that? :RestrictAnyToTypeTag
+export getBinaryRepresentationOfLuaFunction :: (func:(       )->void     ) -> string !foreign lua "string.dump"
+export getBinaryRepresentationOfLuaFunction :: (func:(...:any)->void     ) -> string !foreign lua "string.dump"
+export getBinaryRepresentationOfLuaFunction :: (func:(       )->(...:any)) -> string !foreign lua "string.dump"
+export getBinaryRepresentationOfLuaFunction :: (func:(...:any)->(...:any)) -> string !foreign lua "string.dump"
+-- export getBinaryRepresentationOfLuaFunction :: (func:anyFunction) -> string !foreign lua "string.dump"
