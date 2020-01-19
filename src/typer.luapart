@@ -2462,6 +2462,10 @@ end
 
 	elseif typeInfoExpected.tag == !(typeTags.TypeInfoStruct) then
 		local structInfo = typeInfoExpected
+
+		-- @Incomplete: This dependency is problematic in these cases:
+		-- local Struct :: struct{ bad:Struct = {} }
+		-- local Struct :: struct{ bad = cast(Struct) {} }
 		if not structInfo.hasMembers then
 			!DEPEND_AND_RETURN(`tableNode`, DEPEND_STRUCT_MEMBERS_READY, `structInfo`)
 		end
@@ -2517,7 +2521,12 @@ end
 		tableNode.inferredType = structInfo
 
 	else
-		errorUnhandledType(state, tableNode, typeInfoExpected)
+		typeError(
+			state, tableNode,
+			"Table literal is expecting to inferred as %s (type group '%s'), which is illegal. (The inferred type must be array, struct or table.)",
+			getFriendlyTypeInfoName(typeInfoExpected),
+			TYPE_TAG_NAMES[typeInfoExpected.tag]
+		)
 	end
 
 	moveToPipe(state, tableNode, !(PIPE_DONE))
@@ -3058,6 +3067,38 @@ end
 	moveToPipe(state, forLoop, !(PIPE_DONE))
 end
 
+local function checkForRecursiveStruct(state, declThatWeAreChecking, memberPath, member, structInfo, parentStructInfo)
+	local typeInfo = member.typeInfo
+
+	if typeInfo == structInfo then
+		for i, member in ipairs(memberPath) do
+			memberPath[i] = member.name
+		end
+
+		-- @Incomplete: In the case of compound types, trigger this error if the default value has the type of the struct.
+		typeError(
+			state, declThatWeAreChecking.name,
+			"%s.%s is of type %s. This creates an infinite recursive loop. (Note: Compound types containing the struct are ok (unless the default value is the struct type), e.g. %s|nil)",
+			getFriendlyTypeInfoName(structInfo),
+			table.concat(memberPath, "."),
+			getFriendlyTypeInfoName(structInfo),
+			getFriendlyTypeInfoName(structInfo)
+		)
+	end
+
+	if typeInfo.tag ~= !(typeTags.TypeInfoStruct) then  return  end
+	local structInfoInner = typeInfo
+
+	local memberPathIndex = #memberPath+1
+
+	for _, member in ipairs(structInfoInner.members) do
+		memberPath[memberPathIndex] = member
+		checkForRecursiveStruct(state, declThatWeAreChecking, memberPath, member, structInfo, structInfoInner)
+	end
+
+	memberPath[memberPathIndex] = nil
+end
+
 !NODE_INFERRER `function nodeInferrers.AstStruct(state, struct)`
 	local structInfo = struct.representedType
 
@@ -3087,6 +3128,8 @@ end
 			member.name           = decl.name.name
 			member.typeInfo       = decl.name.inferredType or errorInternal()
 			table.insert(structInfo.members, member)
+
+			checkForRecursiveStruct(state, decl, {member}, member, structInfo, structInfo)
 		end
 	end
 	structInfo.hasMembers = true
