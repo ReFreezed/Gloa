@@ -982,8 +982,8 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 					exitFailure()
 				end
 
-				local requiredCount1 = 0
-				local requiredCount2 = 0
+				-- local requiredCount1 = 0
+				-- local requiredCount2 = 0
 
 				-- @Incomplete @Robustness: Check that vararg works.
 				for argIndex = 1, math.min(#argTypes1, #argTypes2)+1 do
@@ -995,8 +995,8 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 					local isRequired1  = argTypeInfo1 ~= nil and argRequireds1[argIndex]
 					local isRequired2  = argTypeInfo2 ~= nil and argRequireds2[argIndex]
 
-					if isRequired1 then  requiredCount1 = requiredCount1+1  end
-					if isRequired2 then  requiredCount2 = requiredCount2+1  end
+					-- if isRequired1 then  requiredCount1 = requiredCount1+1  end
+					-- if isRequired2 then  requiredCount2 = requiredCount2+1  end
 
 					if not (isRequired1 or isRequired2) then
 						local identEarly, identLate = getEarlyAndLateForRedeclarationError(state, decl1.name, decl2.name)
@@ -2133,6 +2133,27 @@ function _G.getConstantNameOrTriggerError(state, node)
 	return name
 end
 
+local function checkForStaticAccessThatUsesWhatLooksLikeRuntimeCode(state, topNodeToCheck, staticObjectNode)
+	astVisitAllNodes(topNodeToCheck, function(node)
+		if not (
+			node.nodeType == !(nodeTypes.AstLookup)
+			or (
+				node.nodeType == !(nodeTypes.AstIdentifier)
+				and node == node.parent.object -- We know this is a lookup because astVisitAllNodes() visit parents first.
+			)
+			or (
+				node.nodeType == !(nodeTypes.AstLiteral)
+				and node == node.parent.member -- We know this is a lookup because astVisitAllNodes() visit parents first.
+			)
+		) then
+			printerr()
+			typeMessage(io.stderr, state, staticObjectNode, "Error", "Trying to access a static object using code that looks like it's supposed to do something at runtime. Ambigous intension.")
+			typeMessage(io.stderr, state, node,             "Info",  "...this looks like a runtime expression.")
+			exitFailure()
+		end
+	end)
+end
+
 !NODE_INFERRER `function nodeInferrers.AstLookup(state, lookup)`
 	local typeInfoObject = lookup.object.inferredType
 	local typeInfoMember = lookup.member.inferredType
@@ -2234,6 +2255,10 @@ end
 
 			moveToPipe(state, lookup, !(PIPE_DONE))
 			return
+		end
+
+		if not isExpressionConstant(state, lookup.object) then
+			checkForStaticAccessThatUsesWhatLooksLikeRuntimeCode(state, lookup.object, lookup.member)
 		end
 
 		local valueExpr = getAssignmentValue(state, decl.name, decl.assignment.values, decl.assignmentIndex)
