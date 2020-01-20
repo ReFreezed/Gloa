@@ -145,11 +145,13 @@ _G.!structAst"AstLiteral:_AstExpression"{
 	valueConstant = NIL,
 }
 _G.!structAst"AstType:_AstExpression"{
+	kind              = TYPE_KIND_UNSET, -- TYPE_KIND_SIMPLE_BUILTIN|TYPE_KIND_SIMPLE_USER|TYPE_KIND_FUNCTION|TYPE_KIND_ARRAY|TYPE_KIND_PARAMETERIZED_STRUCT|TYPE_KIND_COMPOUND
 	isUserType        = false,
 	typeName          = "",
-	functionSignature = NIL, -- AstLambda without a body. This is used to create the actual function type.  @Cleanup: Rename to 'lambdaHeader' or something.
+	functionHeader    = NIL, -- AstLambda without a body. This is used to create the actual function type.
 	arrayItemType     = NIL, -- AstType
 	arguments         = NIL, -- []AstExpression  (Is set for parameterized structs.)
+	components        = {},  -- []AstExpression  (Used if kind is TYPE_KIND_COMPOUND.)
 	-- Type phase:
 	representedType   = NIL, -- TypeInfo
 	declaration       = NIL, -- AstDeclaration
@@ -484,6 +486,7 @@ function _G.parseType(state, parentNode)
 		end
 
 		local typeNode      = astNewNode(AstType, token, parentNode)
+		typeNode.kind       = !(TYPE_KIND_ARRAY)
 		typeNode.isUserType = true
 
 		!SET_OR_RETURN `typeNode.arrayItemType = parseType(state, typeNode)`
@@ -492,9 +495,10 @@ function _G.parseType(state, parentNode)
 
 	elseif isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"(") then
 		local typeNode      = astNewNode(AstType, token, parentNode)
+		typeNode.kind       = !(TYPE_KIND_FUNCTION)
 		typeNode.isUserType = true
 
-		!SET_OR_RETURN `typeNode.functionSignature = parseLambda(state, typeNode, false)`
+		!SET_OR_RETURN `typeNode.functionHeader = parseLambda(state, typeNode, false)`
 
 		return typeNode
 	end
@@ -504,6 +508,7 @@ function _G.parseType(state, parentNode)
 
 	if isBuiltinType or tokType == !(TOKEN_IDENTIFIER) then
 		typeNode            = astNewNode(AstType, token, parentNode)
+		typeNode.kind       = isBuiltinType and !(TYPE_KIND_SIMPLE_BUILTIN) or !(TYPE_KIND_SIMPLE_USER)
 		typeNode.isUserType = not isBuiltinType
 		typeNode.typeName   = tokValue
 	else
@@ -810,6 +815,7 @@ function _G.parseArguments(state, parentNode, isInput, placeDeclared)
 					and not itemWith1(decl.types, "typeName", "nil")
 				then
 					local typeNode    = astNewNode(AstType, expr.token, decl)
+					typeNode.kind     = !(TYPE_KIND_SIMPLE_BUILTIN)
 					typeNode.typeName = "nil"
 					table.insert(decl.types, typeNode)
 				end
@@ -1991,6 +1997,7 @@ function _G.parseExpression(state, parentNode, prevOpPrecedence, expectLeftValue
 	-- Built-in type.
 	elseif isTokenBuiltinType(tokType, tokValue) then
 		local typeNode    = astNewNode(AstType, exprStartToken, parentNode)
+		typeNode.kind     = !(TYPE_KIND_SIMPLE_BUILTIN)
 		typeNode.typeName = tokValue
 		expr              = typeNode
 
@@ -2075,11 +2082,12 @@ function _G.parseExpression(state, parentNode, prevOpPrecedence, expectLeftValue
 		if lambda.body then
 			expr = lambda
 		else
-			local typeNode             = astNewNode(AstType, lambda.token, parentNode)
-			typeNode.isUserType        = true
-			typeNode.functionSignature = lambda
-			lambda.parent              = typeNode
-			expr                       = typeNode
+			local typeNode          = astNewNode(AstType, lambda.token, parentNode)
+			typeNode.kind           = !(TYPE_KIND_FUNCTION)
+			typeNode.isUserType     = true
+			typeNode.functionHeader = lambda
+			lambda.parent           = typeNode
+			expr                    = typeNode
 		end
 
 	-- Parenthesis (must be detected after lambda).
@@ -2538,7 +2546,8 @@ do
 			if node.nodeType == !(nodeTypes.AstIdentifier) then
 				local ident = node
 				write(" (", ident.name)
-				if ident.inferredType then  write(", ", getFriendlyTypeInfoName(ident.inferredType))  end
+				if ident.inferredType then  write(", type=", getFriendlyTypeInfoName(ident.inferredType))  end
+				if ident.inferredType and getTypeRepresentedByExpression(ident) then  write(", reprtype=", getFriendlyTypeInfoName(getTypeRepresentedByExpression(ident)))  end
 				write(")\n")
 
 			elseif node.nodeType == !(nodeTypes.AstUnary) then
@@ -2644,12 +2653,18 @@ do
 
 			elseif node.nodeType == !(nodeTypes.AstType) then
 				local typeNode = node
-				if typeNode.typeName ~= "" then  write(" (", typeNode.typeName, ")")  end
+				write(" (", TYPE_KIND_TITLES[typeNode.kind])
+				if typeNode.typeName ~= "" then  write(", name=", typeNode.typeName)  end
+				write(")")
 				!!(CHILD_PRINT_START)
-				if typeNode.functionSignature then
-					printNode(typeNode.functionSignature, indent+1, printed, printChildren)
-				elseif typeNode.arguments then
-					printNodeList(typeNode.arguments, indent+1, printed, printChildren, "ARG")
+				if typeNode.kind == !(TYPE_KIND_FUNCTION) then
+					if typeNode.functionHeader then  printNode(typeNode.functionHeader, indent+1, printed, printChildren)  end
+				elseif typeNode.kind == !(TYPE_KIND_ARRAY) then
+					if typeNode.arrayItemType then  printNode(typeNode.arrayItemType, indent+1, printed, printChildren)  end
+				elseif typeNode.kind == !(TYPE_KIND_PARAMETERIZED_STRUCT) then
+					if typeNode.arguments then  printNodeList(typeNode.arguments, indent+1, printed, printChildren)  end
+				elseif typeNode.kind == !(TYPE_KIND_COMPOUND) then
+					if typeNode.components then  printNodeList(typeNode.components, indent+1, printed, printChildren)  end
 				end
 				!!(CHILD_PRINT_END)
 
@@ -2882,7 +2897,7 @@ do
 		!(
 		local INDENT = ("\t"):rep(3)
 
-		local function visitIfNotNil(var) return function(fieldNames)
+		local function VISIT_IF_NOT_NIL(var) return function(fieldNames)
 			__LUA("\n",INDENT,"local subNode")
 			for _, fieldName in ipairs(fieldNames) do
 				__LUA("\n",INDENT,"subNode = ",var,".",fieldName)
@@ -2890,7 +2905,7 @@ do
 			end
 		end end
 
-		local function visitList(var) return function(fieldNames)
+		local function VISIT_LIST(var) return function(fieldNames)
 			__LUA("\n",INDENT,"local arr")
 			for _, fieldName in ipairs(fieldNames) do
 				__LUA("\n",INDENT,"arr = ",var) ; if fieldName ~= "" then  __LUA(".",fieldName)  end
@@ -2917,40 +2932,41 @@ do
 		elseif node.nodeType == !(nodeTypes.AstVararg)      then  -- void
 		elseif node.nodeType == !(nodeTypes.AstLiteral)     then  -- void
 		elseif node.nodeType == !(nodeTypes.AstType)        then
-			!visitIfNotNil"node"{"functionSignature","arrayItemType"}
+			!VISIT_IF_NOT_NIL "node" {"functionHeader","arrayItemType"}
+			!VISIT_LIST "node" {"components"}
 			if node.arguments then
-				!visitList"node"{"arguments"}
+				!VISIT_LIST "node" {"arguments"}
 			end
-		elseif node.nodeType == !(nodeTypes.AstUnary)       then  !visitIfNotNil"node"{"expression"}
-		elseif node.nodeType == !(nodeTypes.AstBinary)      then  !visitIfNotNil"node"{"left","right"}
-		elseif node.nodeType == !(nodeTypes.AstLookup)      then  !visitIfNotNil"node"{"object","member"}
+		elseif node.nodeType == !(nodeTypes.AstUnary)       then  !VISIT_IF_NOT_NIL "node" {"expression"}
+		elseif node.nodeType == !(nodeTypes.AstBinary)      then  !VISIT_IF_NOT_NIL "node" {"left","right"}
+		elseif node.nodeType == !(nodeTypes.AstLookup)      then  !VISIT_IF_NOT_NIL "node" {"object","member"}
 		elseif node.nodeType == !(nodeTypes.AstTable)       then
 			for _, tableField in ipairs(node) do
-				!visitIfNotNil"tableField"{"key","value"}
+				!VISIT_IF_NOT_NIL "tableField" {"key","value"}
 			end
-		elseif node.nodeType == !(nodeTypes.AstCall)        then  !visitIfNotNil"node"{"callee"} ; visitList"node"{"arguments"}
-		elseif node.nodeType == !(nodeTypes.AstArgument)    then  !visitIfNotNil"node"{"declaration","assignment"}
-		elseif node.nodeType == !(nodeTypes.AstArguments)   then  !visitList"node"{""}
-		elseif node.nodeType == !(nodeTypes.AstLambda)      then  !visitList"node"{""}
-		elseif node.nodeType == !(nodeTypes.AstTypeOf)      then  !visitIfNotNil"node"{"expression"}
-		elseif node.nodeType == !(nodeTypes.AstCast)        then  !visitIfNotNil"node"{"targetType","expression"}
-		elseif node.nodeType == !(nodeTypes.AstDeclaration) then  !visitIfNotNil"node"{"name"} ; visitList"node"{"types","notes"}
-		elseif node.nodeType == !(nodeTypes.AstAssignment)  then  !visitList"node"{"targets","values"}
-		elseif node.nodeType == !(nodeTypes.AstReturn)      then  !visitList"node"{"values"}
-		elseif node.nodeType == !(nodeTypes.AstBreak)       then  !visitIfNotNil"node"{"loopName"}
-		elseif node.nodeType == !(nodeTypes.AstContinue)    then  !visitIfNotNil"node"{"loopName"}
-		elseif node.nodeType == !(nodeTypes.AstDefer)       then  !visitIfNotNil"node"{"body"}
+		elseif node.nodeType == !(nodeTypes.AstCall)        then  !VISIT_IF_NOT_NIL "node" {"callee"} ; VISIT_LIST "node" {"arguments"}
+		elseif node.nodeType == !(nodeTypes.AstArgument)    then  !VISIT_IF_NOT_NIL "node" {"declaration","assignment"}
+		elseif node.nodeType == !(nodeTypes.AstArguments)   then  !VISIT_LIST "node" {""}
+		elseif node.nodeType == !(nodeTypes.AstLambda)      then  !VISIT_LIST "node" {""}
+		elseif node.nodeType == !(nodeTypes.AstTypeOf)      then  !VISIT_IF_NOT_NIL "node" {"expression"}
+		elseif node.nodeType == !(nodeTypes.AstCast)        then  !VISIT_IF_NOT_NIL "node" {"targetType","expression"}
+		elseif node.nodeType == !(nodeTypes.AstDeclaration) then  !VISIT_IF_NOT_NIL "node" {"name"} ; VISIT_LIST "node" {"types","notes"}
+		elseif node.nodeType == !(nodeTypes.AstAssignment)  then  !VISIT_LIST "node" {"targets","values"}
+		elseif node.nodeType == !(nodeTypes.AstReturn)      then  !VISIT_LIST "node" {"values"}
+		elseif node.nodeType == !(nodeTypes.AstBreak)       then  !VISIT_IF_NOT_NIL "node" {"loopName"}
+		elseif node.nodeType == !(nodeTypes.AstContinue)    then  !VISIT_IF_NOT_NIL "node" {"loopName"}
+		elseif node.nodeType == !(nodeTypes.AstDefer)       then  !VISIT_IF_NOT_NIL "node" {"body"}
 		elseif node.nodeType == !(nodeTypes.AstImport)      then  -- void
 		elseif node.nodeType == !(nodeTypes.AstForeign)     then  -- void
-		elseif node.nodeType == !(nodeTypes.AstUsing)       then  !visitIfNotNil"node"{"expression"}
-		elseif node.nodeType == !(nodeTypes.AstIf)          then  !visitIfNotNil"node"{"condition","branchTrue","branchFalse"}
-		elseif node.nodeType == !(nodeTypes.AstWhile)       then  !visitIfNotNil"node"{"condition","body"}
-		elseif node.nodeType == !(nodeTypes.AstFor)         then  !visitList"node"{"expressions",""}
-		elseif node.nodeType == !(nodeTypes.AstBlock)       then  !visitList"node"{""}
-		elseif node.nodeType == !(nodeTypes.AstFileScope)   then  !visitList"node"{""}
-		elseif node.nodeType == !(nodeTypes.AstGlobalScope) then  !visitList"node"{""}
-		elseif node.nodeType == !(nodeTypes.AstStruct)      then  !visitIfNotNil"node"{"arguments"}  ; visitList"node"{""}
-		elseif node.nodeType == !(nodeTypes.AstEnum)        then  !visitIfNotNil"node"{"memberType"} ; visitList"node"{""}
+		elseif node.nodeType == !(nodeTypes.AstUsing)       then  !VISIT_IF_NOT_NIL "node" {"expression"}
+		elseif node.nodeType == !(nodeTypes.AstIf)          then  !VISIT_IF_NOT_NIL "node" {"condition","branchTrue","branchFalse"}
+		elseif node.nodeType == !(nodeTypes.AstWhile)       then  !VISIT_IF_NOT_NIL "node" {"condition","body"}
+		elseif node.nodeType == !(nodeTypes.AstFor)         then  !VISIT_LIST "node" {"expressions",""}
+		elseif node.nodeType == !(nodeTypes.AstBlock)       then  !VISIT_LIST "node" {""}
+		elseif node.nodeType == !(nodeTypes.AstFileScope)   then  !VISIT_LIST "node" {""}
+		elseif node.nodeType == !(nodeTypes.AstGlobalScope) then  !VISIT_LIST "node" {""}
+		elseif node.nodeType == !(nodeTypes.AstStruct)      then  !VISIT_IF_NOT_NIL "node" {"arguments"}  ; VISIT_LIST "node" {""}
+		elseif node.nodeType == !(nodeTypes.AstEnum)        then  !VISIT_IF_NOT_NIL "node" {"memberType"} ; VISIT_LIST "node" {""}
 		else
 			errorUnhandledNodeType(state, node)
 		end
@@ -2997,16 +3013,18 @@ function _G.astCopy(node, token, parent)
 		copy.valueConstant = literal.valueConstant
 
 	elseif node.nodeType == !(nodeTypes.AstType) then
-		local typeNode         = node
-		copy                   = astNewNode(AstType, (token or typeNode.token), (parent or typeNode.parent))
-		copy.isUserType        = typeNode.isUserType
-		copy.typeName          = typeNode.typeName
-		copy.functionSignature = typeNode.functionSignature and astCopy(typeNode.functionSignature, token, copy)
-		copy.arrayItemType     = typeNode.arrayItemType     and astCopy(typeNode.arrayItemType,     token, copy)
-		copy.arguments         = typeNode.arguments         and astCopyArray(typeNode.arguments,    token, copy)
-		copy.inferredType      = typeNode.inferredType
-		copy.representedType   = typeNode.representedType
-		copy.declaration       = typeNode.declaration
+		local typeNode       = node
+		copy                 = astNewNode(AstType, (token or typeNode.token), (parent or typeNode.parent))
+		copy.kind            = typeNode.kind
+		copy.isUserType      = typeNode.isUserType
+		copy.typeName        = typeNode.typeName
+		copy.functionHeader  = typeNode.functionHeader and astCopy(typeNode.functionHeader, token, copy)
+		copy.arrayItemType   = typeNode.arrayItemType     and astCopy(typeNode.arrayItemType,     token, copy)
+		copy.arguments       = typeNode.arguments         and astCopyArray(typeNode.arguments,    token, copy)
+		copy.components      = astCopyArray(typeNode.components, token, copy)
+		copy.inferredType    = typeNode.inferredType
+		copy.representedType = typeNode.representedType
+		copy.declaration     = typeNode.declaration
 
 	elseif node.nodeType == !(nodeTypes.AstForeign) then
 		local foreign      = node

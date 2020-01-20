@@ -1233,12 +1233,20 @@ end
 	local decl = nil
 	local typeInfo, typeInfoRepresented
 
-	if not typeNode.isUserType then
+	!if DEBUG then
+		if typeNode.kind == !(TYPE_KIND_UNSET) then
+			astPrintTree(typeNode)
+			where(state, typeNode)
+			errorInternal()
+		end
+	!end
+
+	if typeNode.kind == !(TYPE_KIND_SIMPLE_BUILTIN) then
 		typeInfoRepresented = getTypeInfoForBuiltinType(state, typeNode.typeName)
 		typeInfo            = getTypeInfoForBuiltinType(state, "type")
 
-	elseif typeNode.functionSignature then
-		local lambda = typeNode.functionSignature
+	elseif typeNode.kind == !(TYPE_KIND_FUNCTION) then
+		local lambda = typeNode.functionHeader or errorInternal()
 
 		if not lambda.inferredType then
 			!DEPEND_AND_RETURN(`typeNode`, DEPEND_NODE_INFERRED, `lambda`)
@@ -1249,8 +1257,8 @@ end
 		typeInfoRepresented = funcSig
 		typeInfo            = getTypeInfoForBuiltinType(state, "type")
 
-	elseif typeNode.arrayItemType then
-		local itemTypeNode = typeNode.arrayItemType
+	elseif typeNode.kind == !(TYPE_KIND_ARRAY) then
+		local itemTypeNode = typeNode.arrayItemType or errorInternal()
 
 		if not itemTypeNode.inferredType then
 			!DEPEND_AND_RETURN(`typeNode`, DEPEND_NODE_INFERRED, `itemTypeNode`)
@@ -1264,6 +1272,9 @@ end
 		local arraySig      = getTypeInfoForArray(state, itemTypeNode.representedType)
 		typeInfoRepresented = arraySig
 		typeInfo            = getTypeInfoForBuiltinType(state, "type")
+
+	elseif typeNode.kind == !(TYPE_KIND_COMPOUND) then
+		errorInternal("@Incomplete")
 
 	else
 		assert(typeNode.typeName ~= "")
@@ -1318,7 +1329,7 @@ end
 			assert(not typeNode.arguments)
 
 		elseif typeInfo.tag == !(typeTags.TypeInfoFunction) then
-			assert(not typeNode.arguments) -- This should not be possible I think. The node should have been parsed as an AstCall - not an AstType without functionSignature... right? I may be wrong.
+			assert(not typeNode.arguments) -- This should not be possible I think. The node should have been parsed as an AstCall - not an AstType without functionHeader... right? I may be wrong.
 
 		else
 			errorInternal("Incomplete: Handle type tag '%s'.", TYPE_TAG_NAMES[typeInfo.tag])
@@ -3519,14 +3530,17 @@ function _G.simplifyTypeExpression(state, expr, typeInfoRepresented)
 	typeNode.representedType = typeInfoRepresented
 
 	if isBuiltin then
+		typeNode.kind     = !(TYPE_KIND_SIMPLE_BUILTIN)
 		typeNode.typeName = typeName
 
 	elseif typeInfoRepresented.tag == !(typeTags.TypeInfoStruct) then
 		local structInfo  = typeInfoRepresented
+		typeNode.kind     = !(TYPE_KIND_SIMPLE_USER)
 		typeNode.typeName = structInfo.name
 
 	elseif typeInfoRepresented.tag == !(typeTags.TypeInfoEnum) then
 		local enumInfo    = typeInfoRepresented
+		typeNode.kind     = !(TYPE_KIND_SIMPLE_USER)
 		typeNode.typeName = enumInfo.name
 
 	elseif typeInfoRepresented.tag == !(typeTags.TypeInfoFunction) then
@@ -3535,22 +3549,27 @@ function _G.simplifyTypeExpression(state, expr, typeInfoRepresented)
 		-- 	local lambda = getAssignmentValue(state, decl.name, decl.assignment.values, decl.assignmentIndex)
 		-- 	assert(lambda.nodeType == !(nodeTypes.AstLambda))
 		-- 	assert(not lambda.body)
-		-- 	typeNode.functionSignature = astCopy(lambda) -- Do we need to update the location info of the lambda to where typeNode/expr is?
+		-- 	typeNode.functionHeader = astCopy(lambda) -- Do we need to update the location info of the lambda to where typeNode/expr is?
 		-- else
-			local funcSig              = typeInfoRepresented
-			typeNode.functionSignature = createLambdaFromSignature(state, funcSig, typeNode)
+			local funcSig           = typeInfoRepresented
+			typeNode.kind           = !(TYPE_KIND_FUNCTION)
+			typeNode.functionHeader = createLambdaFromSignature(state, funcSig, typeNode)
 		-- end
 
 		addUnqueuedChildrenToQueueRecursively(state, typeNode, !(PIPE_BYTECODE))
 
-		astVisitAllNodes(typeNode.functionSignature, function(node)
+		astVisitAllNodes(typeNode.functionHeader, function(node)
 			if node ~= typeNode and node.nodeType ~= !(nodeTypes.AstDeclaration) then
 				moveToPipe(state, node, !(PIPE_DONE))
 			end
 		end)
 
-	elseif isAny(typeInfoRepresented.tag, !(typeTags.TypeInfoVararg),!(typeTags.TypeInfoCompound)) then
-		-- void
+	elseif typeInfoRepresented.tag == !(typeTags.TypeInfoCompound) then
+		typeNode.kind = !(TYPE_KIND_COMPOUND)
+
+	elseif typeInfoRepresented.tag == !(typeTags.TypeInfoVararg) then
+		errorInternal() -- When do we get here?
+
 	else
 		errorInternal("Incomplete: Handle type tag '%s'.", TYPE_TAG_NAMES[typeInfoRepresented.tag])
 	end
