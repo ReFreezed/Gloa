@@ -232,7 +232,7 @@ _G.!structAst"AstArguments:_AstNode"{
 
 _G.!structAst"AstDeclaration:_AstNode"{
 	name                 = NIL, -- AstIdentifier|AstVararg
-	types                = {},  -- []AstType  (No value here means the types are inferred.)  @Cleanup @Refactor: Make this into a single node.
+	type                 = nil, -- AstType  (If this is nil then the type is inferred from the value.)
 	notes                = {},  -- []AstNote  @Incomplete: Notes.
 
 	isGlobalOrExported   = false,
@@ -460,79 +460,6 @@ function _G.parseForeign(state, parentNode)
 	return foreign
 end
 
---[[
-function _G.parseType(state, parentNode)
-	local tokType, tokValue, token = eatNextToken(state)
-
-	if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"(") then
-		local typeNode      = astNewNode(AstType, token, parentNode)
-		typeNode.kind       = !(TYPE_KIND_FUNCTION)
-		typeNode.isUserType = true
-
-		!SET_OR_RETURN `typeNode.functionHeader = parseLambda(state, typeNode, false)`
-
-		return typeNode
-	end
-
-	local isBuiltinType = isTokenBuiltinType(tokType, tokValue)
-	local typeNode
-
-	if isBuiltinType or tokType == !(TOKEN_IDENTIFIER) then
-		typeNode            = astNewNode(AstType, token, parentNode)
-		typeNode.kind       = isBuiltinType and !(TYPE_KIND_SIMPLE_BUILTIN) or !(TYPE_KIND_SIMPLE_USER)
-		typeNode.isUserType = not isBuiltinType
-		typeNode.typeName   = tokValue
-	else
-		!ERROR_OR_RETURN `errorParsingLast(state, "Expected a type.")`
-	end
-
-	-- User type parameters.
-	tokType, tokValue = peekNextToken(state)
-
-	if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"(") then
-		eatNextToken(state)
-
-		if isBuiltinType then
-			!ERROR_OR_RETURN `errorParsingLast(state, "Built-in types have no parameters.")`
-		end
-
-		typeNode.arguments = {}
-		!DO_OR_RETURN `parseExpressionList(state, typeNode, typeNode.arguments)`
-		assert(typeNode.arguments[1])
-
-		tokType, tokValue = eatNextToken(state)
-		if not isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),")") then
-			!ERROR_OR_RETURN `errorParsingAfterPrevious(state, "Expected ')'.")`
-		end
-	end
-
-	return typeNode
-end
-]]
-
--- success = parsePipeSeparatedTypes( compilationState, parentNode, identifierTypes )
-function _G.parsePipeSeparatedTypes(state, parentNode, typeNodes)
-	!SET_OR_RETURN_FALSE `local typeExpr = parseExpression(state, parentNode)`
-	table.insert(typeNodes, typeExpr)
-	--[[
-	while true do
-		!SET_OR_RETURN_FALSE `local typeNode = parseExpression(state, parentNode, OPERATOR_PRECEDENCE.compound)`
-		table.insert(typeNodes, typeNode)
-
-		local tokType, tokValue, token = peekNextToken(state)
-
-		if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"|") then
-			eatNextToken(state)
-			tokType, tokValue, token = peekNextToken(state)
-		else
-			break
-		end
-	end
-	]]
-
-	return true
-end
-
 function _G.parseTable(state, parentNode)
 	-- Note: We assume the '{' has been eaten already.
 
@@ -736,9 +663,9 @@ function _G.parseArguments(state, parentNode, isInput, placeDeclared)
 		-- Type(s).
 		token = state.nextToken
 		for _, arg in ipairs(argsInGroup) do
-			state.nextToken = token
-			local decl      = arg.declaration
-			!DO_OR_RETURN `parsePipeSeparatedTypes(state, decl, decl.types)` -- @Speed: Parse once then just copy the first one.
+			state.nextToken           = token
+			local decl                = arg.declaration
+			!SET_OR_RETURN `decl.type = parseExpression(state, decl)` -- @Speed: Parse once then just copy the first one.
 		end
 
 		-- Default value.
@@ -848,9 +775,9 @@ function _G.parseNamelessArguments(state, parentNode, placeDeclared)
 		arg.group = groupN
 		table.insert(args, arg)
 
-		local decl      = astNewNode(AstDeclaration, arg.token, arg)
-		arg.declaration = decl
-		!DO_OR_RETURN `parsePipeSeparatedTypes(state, decl, decl.types)`
+		local decl                = astNewNode(AstDeclaration, arg.token, arg)
+		arg.declaration           = decl
+		!SET_OR_RETURN `decl.type = parseExpression(state, decl)`
 
 		local ident         = astNewNode(AstIdentifier, decl.token, decl)
 		ident.name          = "_UNNAMED"..groupN
@@ -1076,18 +1003,13 @@ function _G.parseDeclarationStatement(state, block, placeDeclared, declType)
 		if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),":") then
 			-- void
 
-			-- @Robustness: Mark the declarations to have their types inferred instead of just
-			-- leaving decl.types empty? Or should we have an AstTypeInferred node?
-
 		-- Specified type.
+		elseif declType == !(DECLARATION_ENUM) then
+			!ERROR_OR_RETURN `errorParsingNext(state, "The type of the members must be specified after the 'enum' keyword.")`
 		else
-			if declType == !(DECLARATION_ENUM) then
-				!ERROR_OR_RETURN `errorParsingNext(state, "The type of the members must be specified after the 'enum' keyword.")`
-			else
-				for _, decl in ipairs(declarations) do
-					state.nextToken = typesStartToken
-					!DO_OR_RETURN `parsePipeSeparatedTypes(state, decl, decl.types)` -- @Speed: Parse once then just copy the first one.
-				end
+			for _, decl in ipairs(declarations) do
+				state.nextToken           = typesStartToken
+				!SET_OR_RETURN `decl.type = parseExpression(state, decl)` -- @Speed: Parse once then just copy the first one.
 			end
 		end
 
@@ -2609,7 +2531,7 @@ do
 
 				!!(CHILD_PRINT_START)
 				if decl.name then  printNode(decl.name, indent+1, printed, printChildren)  end
-				printNodeList(decl.types, indent+1, printed, printChildren)
+				if decl.type then  printNode(decl.type, indent+1, printed, printChildren)  end
 				!!(CHILD_PRINT_END)
 
 			elseif node.nodeType == !(nodeTypes.AstTable) then
@@ -2955,7 +2877,7 @@ do
 		elseif node.nodeType == !(nodeTypes.AstLambda)      then  !VISIT_LIST "node" {""}
 		elseif node.nodeType == !(nodeTypes.AstTypeOf)      then  !VISIT_IF_NOT_NIL "node" {"expression"}
 		elseif node.nodeType == !(nodeTypes.AstCast)        then  !VISIT_IF_NOT_NIL "node" {"targetType","expression"}
-		elseif node.nodeType == !(nodeTypes.AstDeclaration) then  !VISIT_IF_NOT_NIL "node" {"name"} ; VISIT_LIST "node" {"types","notes"}
+		elseif node.nodeType == !(nodeTypes.AstDeclaration) then  !VISIT_IF_NOT_NIL "node" {"name","type"} ; VISIT_LIST "node" {"notes"}
 		elseif node.nodeType == !(nodeTypes.AstAssignment)  then  !VISIT_LIST "node" {"targets","values"}
 		elseif node.nodeType == !(nodeTypes.AstReturn)      then  !VISIT_LIST "node" {"values"}
 		elseif node.nodeType == !(nodeTypes.AstBreak)       then  !VISIT_IF_NOT_NIL "node" {"loopName"}

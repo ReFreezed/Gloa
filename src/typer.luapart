@@ -922,10 +922,9 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 		checkRedeclaration(state, ident, decl, isMember, scope)
 	end
 
-	for _, typeNode in ipairs(decl.types) do
-		if not typeNode.inferredType then
-			!DEPEND_AND_RETURN(`identOrVararg`, DEPEND_NODE_INFERRED, `typeNode`)
-		end
+	local typeExpr = decl.type
+	if typeExpr and not typeExpr.inferredType then
+		!DEPEND_AND_RETURN(`identOrVararg`, DEPEND_NODE_INFERRED, `typeExpr`)
 	end
 
 	if isEnumMember then
@@ -938,7 +937,7 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 
 	local assignment = decl.assignment
 
-	if not decl.types[1] or decl.isConstant then
+	if not typeExpr or decl.isConstant then
 		!ASSERT `assignment`
 		for _, valueExpr in ipairs(assignment.values) do
 			if not valueExpr.inferredType then
@@ -1061,10 +1060,8 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 	local typeInfo
 
 	-- Specified type.
-	if decl.types[1] then
-		local typeExpr = decl.types[1]
-		typeInfo       = getTypeRepresentedByExpression(typeExpr)
-
+	if typeExpr then
+		typeInfo = getTypeRepresentedByExpression(typeExpr)
 		if not typeInfo then
 			typeError(state, typeExpr, "This is not a type. (It is %s)", getFriendlyTypeInfoName(typeExpr.inferredType))
 		end
@@ -1748,7 +1745,7 @@ end
 		!DEPEND_AND_RETURN(`decl`, DEPEND_NODE_INFERRED, `identOrVararg`)
 	end
 
-	local typeExpr = decl.types[1]
+	local typeExpr = decl.type
 
 	if typeExpr then
 		if not typeExpr.inferredType then
@@ -3897,21 +3894,12 @@ function _G.getExpectedTypeInfo(state, node, strict)
 		if assignment.forDeclaration then
 			local decl = assignment.declarations[i] or errorInternal()
 
-			if not decl.types[1] then
+			if not decl.type then
 				!!(NO_EXPECTATION)
-
-			elseif not decl.types[2] then
-				if not decl.types[1].inferredType then
-					!DEPEND_AND_RETURN(`node`, DEPEND_NODE_INFERRED, `decl.types[1]`)
-				end
-				return getTypeRepresentedByExpression(decl.types[1])
-
-			else
-				if not decl.name.inferredType then
-					!DEPEND_AND_RETURN(`node`, DEPEND_NODE_INFERRED, `decl.name`)
-				end
-				return decl.name.inferredType
+			elseif not decl.type.inferredType then
+				!DEPEND_AND_RETURN(`node`, DEPEND_NODE_INFERRED, `decl.type`)
 			end
+			return getTypeRepresentedByExpression(decl.type) or errorInternal()
 
 		else
 			if not assignment.targets[i].inferredType then
