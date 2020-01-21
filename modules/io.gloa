@@ -22,19 +22,19 @@ export stderr : File : !foreign lua "io.stderr"
 export stdout : File : !foreign lua "io.stdout"
 
 local File :: struct {
-	-- These function definitions are dummies.
-	write = (file:File, data:string) {},
-	read  = (file:File, what:string|int) -> string|float|nil { return nil },
+	-- These functions are abstract dummies because the File struct itself is actually foreign.
+	write = (file:File, data:string) !foreign lua "nil",
+	read  = (file:File, what:string|int) -> string|float|none !foreign lua "nil",
 }
-local invalidFileHandle:File : !foreign lua "nil" -- Kind of a @Hack. @Compiler: Maybe we should have a NULL macro of sorts?
 
-local _openFile :: (path:string, mode:string) -> File|nil, nil|string !foreign lua "io.open"
+local _openFile :: (path:string, mode:string) -> File|none, none|string !foreign lua "io.open"
 
 export closeFile :: (file:File) !foreign lua "io.close"
 
 local openFile :: (path:string, mode:string) -> bool, File, string {
+	local nullFile:File : !foreign lua "nil" -- Kind of a @Hack. @Compiler: Maybe we should have a NULL macro of sorts?
 	local file, err = _openFile(path, mode)
-	if file == nil  return false, invalidFileHandle, cast(string) err
+	if file == nil  return false, nullFile, cast(string) err
 	return true, cast(File) file, ""
 }
 export openFileForReading :: (path:string) -> (success:bool, file:File, error:string) { return openFile(path, "rb") }

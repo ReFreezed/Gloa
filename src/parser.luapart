@@ -232,8 +232,8 @@ _G.!structAst"AstArguments:_AstNode"{
 
 _G.!structAst"AstDeclaration:_AstNode"{
 	name                 = NIL, -- AstIdentifier|AstVararg
-	types                = {},  -- []AstType  (No value here means the types are inferred.)
-	notes                = {},  -- []AstNote  @Incomplete: Nodes.
+	types                = {},  -- []AstType  (No value here means the types are inferred.)  @Cleanup @Refactor: Make this into a single node.
+	notes                = {},  -- []AstNote  @Incomplete: Notes.
 
 	isGlobalOrExported   = false,
 	isConstant           = false,
@@ -460,40 +460,11 @@ function _G.parseForeign(state, parentNode)
 	return foreign
 end
 
+--[[
 function _G.parseType(state, parentNode)
 	local tokType, tokValue, token = eatNextToken(state)
 
-	if isToken(tokType,tokValue, !(TOKEN_KEYWORD),"type_of") then
-		tokType, tokValue = eatNextToken(state)
-		if not isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"(") then
-			!ERROR_OR_RETURN `errorParsingAfterPrevious(state, "Expected '('.")`
-		end
-
-		local typeOf                      = astNewNode(AstTypeOf, token, parentNode)
-		!SET_OR_RETURN `typeOf.expression = parseExpression(state, typeOf)`
-
-		tokType, tokValue = eatNextToken(state)
-		if not isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),")") then
-			!ERROR_OR_RETURN `errorParsingAfterPrevious(state, "Expected ')'.")`
-		end
-
-		return typeOf
-
-	elseif isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"[") then
-		tokType, tokValue = eatNextToken(state)
-		if not isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"]") then
-			!ERROR_OR_RETURN `errorParsingAfterPrevious(state, "Expected ']'.")`
-		end
-
-		local typeNode      = astNewNode(AstType, token, parentNode)
-		typeNode.kind       = !(TYPE_KIND_ARRAY)
-		typeNode.isUserType = true
-
-		!SET_OR_RETURN `typeNode.arrayItemType = parseType(state, typeNode)`
-
-		return typeNode
-
-	elseif isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"(") then
+	if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"(") then
 		local typeNode      = astNewNode(AstType, token, parentNode)
 		typeNode.kind       = !(TYPE_KIND_FUNCTION)
 		typeNode.isUserType = true
@@ -503,7 +474,7 @@ function _G.parseType(state, parentNode)
 		return typeNode
 	end
 
-	local isBuiltinType = isTokenBuiltinType(tokType, tokValue) or isToken(tokType,tokValue, !(TOKEN_KEYWORD),"nil")
+	local isBuiltinType = isTokenBuiltinType(tokType, tokValue)
 	local typeNode
 
 	if isBuiltinType or tokType == !(TOKEN_IDENTIFIER) then
@@ -537,12 +508,15 @@ function _G.parseType(state, parentNode)
 
 	return typeNode
 end
+]]
 
 -- success = parsePipeSeparatedTypes( compilationState, parentNode, identifierTypes )
 function _G.parsePipeSeparatedTypes(state, parentNode, typeNodes)
-	-- @Incomplete: Detect repeated types. (This may be more difficult than it seems. It's possibly a task for the typer.)
+	!SET_OR_RETURN_FALSE `local typeExpr = parseExpression(state, parentNode)`
+	table.insert(typeNodes, typeExpr)
+	--[[
 	while true do
-		!SET_OR_RETURN_FALSE `local typeNode = parseType(state, parentNode)`
+		!SET_OR_RETURN_FALSE `local typeNode = parseExpression(state, parentNode, OPERATOR_PRECEDENCE.compound)`
 		table.insert(typeNodes, typeNode)
 
 		local tokType, tokValue, token = peekNextToken(state)
@@ -554,6 +528,7 @@ function _G.parsePipeSeparatedTypes(state, parentNode, typeNodes)
 			break
 		end
 	end
+	]]
 
 	return true
 end
@@ -816,7 +791,7 @@ function _G.parseArguments(state, parentNode, isInput, placeDeclared)
 				then
 					local typeNode    = astNewNode(AstType, expr.token, decl)
 					typeNode.kind     = !(TYPE_KIND_SIMPLE_BUILTIN)
-					typeNode.typeName = "nil"
+					typeNode.typeName = "none"
 					table.insert(decl.types, typeNode)
 				end
 				--]]
@@ -952,7 +927,7 @@ function _G.parseEnum(state, parentNode)
 	local tokType, tokValue = peekNextToken(state)
 
 	if isToken(tokType,tokValue, !(TOKEN_KEYWORD),"float","int","string","bool","type") then -- We don't allow 'table', 'any' or anything user-defined.
-		!SET_OR_RETURN `enum.memberType = parseType(state, enum)`
+		!SET_OR_RETURN `enum.memberType = parseExpression(state, enum, math.huge)`
 	end
 
 	tokType, tokValue = eatNextToken(state)
@@ -1171,10 +1146,6 @@ function _G.parseDeclarationStatement(state, block, placeDeclared, declType)
 	elseif isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),":") then
 		eatNextToken(state)
 
-		if declarations[1].types[2] then
-			!ERROR_OR_RETURN `errorParsing(state, declarations[1].types[2].token-1, "Constants can only be of one type.")`
-		end
-
 		isConst = true
 		for _, decl in ipairs(declarations) do
 			decl.isConstant = true
@@ -1188,9 +1159,6 @@ function _G.parseDeclarationStatement(state, block, placeDeclared, declType)
 			!SET_OR_RETURN `local expr = parseExpression(state, assignment)`
 			table.insert(assignment.values, expr)
 		end
-
-	elseif declarations[1].types[2] then
-		!ERROR_OR_RETURN `errorParsingAfterLast(state, "Initial values are required if multiple types are specified.")`
 	end
 
 	-- Set if shadowing is allowed.
@@ -2116,13 +2084,13 @@ function _G.parseExpression(state, parentNode, prevOpPrecedence, expectLeftValue
 
 	-- Cast.
 	elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"cast") then
-		tokType, tokValue, token = eatNextToken(state)
+		tokType, tokValue = eatNextToken(state)
 		if not isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"(") then
 			!ERROR_OR_RETURN `errorParsingAfterPrevious(state, "Expected '('.")`
 		end
 
-		local cast                      = astNewNode(AstCast, token-1, parentNode)
-		!SET_OR_RETURN `cast.targetType = parseType(state, cast)`
+		local cast                      = astNewNode(AstCast, exprStartToken, parentNode)
+		!SET_OR_RETURN `cast.targetType = parseExpression(state, cast)`
 
 		tokType, tokValue = eatNextToken(state)
 		if not isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),")") then
@@ -2132,25 +2100,33 @@ function _G.parseExpression(state, parentNode, prevOpPrecedence, expectLeftValue
 		!SET_OR_RETURN `cast.expression = parseExpression(state, cast, OPERATOR_PRECEDENCE.cast)`
 		expr                            = cast
 
-	-- Type.
-	elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"type") then
-		-- Note: parseType() does not recognize !type which is why you can't put
-		-- the directive anywhere a type is expected. Should we change this?
-		!SET_OR_RETURN `expr = parseType(state, parentNode)`
+	-- Type of.
+	elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"type_of") then
+		tokType, tokValue = eatNextToken(state)
+		if not isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"(") then
+			!ERROR_OR_RETURN `errorParsingAfterPrevious(state, "Expected '('.")`
+		end
 
-	elseif
-		isToken(tokType,tokValue, !(TOKEN_KEYWORD),"type_of") or
-		isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"[")
-	then
-		putBackLastToken(state)
-		!SET_OR_RETURN `expr = parseType(state, parentNode)`
+		local typeOf                      = astNewNode(AstTypeOf, exprStartToken, parentNode)
+		!SET_OR_RETURN `typeOf.expression = parseExpression(state, typeOf)`
 
-	elseif
-		isToken(tokType,tokValue, !(TOKEN_KEYWORD),"type_of") or
-		isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"[")
-	then
-		putBackLastToken(state)
-		!SET_OR_RETURN `expr = parseType(state, parentNode)`
+		tokType, tokValue = eatNextToken(state)
+		if not isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),")") then
+			!ERROR_OR_RETURN `errorParsingAfterPrevious(state, "Expected ')'.")`
+		end
+
+		expr = typeOf
+
+	-- Array type.
+	elseif isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"[") and isToken(tokType2,tokValue2, !(TOKEN_PUNCTUATION),"]") then
+		eatNextToken(state) -- ']'
+
+		local typeNode      = astNewNode(AstType, exprStartToken, parentNode)
+		typeNode.kind       = !(TYPE_KIND_ARRAY)
+		typeNode.isUserType = true
+
+		!SET_OR_RETURN `typeNode.arrayItemType = parseExpression(state, typeNode)`
+		expr                                   = typeNode
 
 	-- Unicode codepoint.
 	elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"char") then
@@ -2196,6 +2172,35 @@ function _G.parseExpression(state, parentNode, prevOpPrecedence, expectLeftValue
 
 	else
 		!ERROR_OR_RETURN `errorParsingLast(state, "Expected an expression.")`
+	end
+
+	-- Compound type.
+	tokType, tokValue = peekNextToken(state)
+
+	if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"|") and !(OPERATOR_PRECEDENCE.compound) > prevOpPrecedence then
+		eatNextToken(state)
+
+		local typeNodeCompound = astNewNode(AstType, exprStartToken, parentNode)
+		typeNodeCompound.kind  = !(TYPE_KIND_COMPOUND)
+
+		table.insert(typeNodeCompound.components, expr)
+		expr.parent = typeNodeCompound
+
+		while true do
+			!SET_OR_RETURN `local typeExpr = parseExpression(state, parentNode, OPERATOR_PRECEDENCE.compound)`
+			table.insert(typeNodeCompound.components, typeExpr)
+
+			tokType, tokValue = peekNextToken(state)
+
+			if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"|") then
+				eatNextToken(state)
+				tokType, tokValue = peekNextToken(state)
+			else
+				break
+			end
+		end
+
+		expr = typeNodeCompound
 	end
 
 	-- Binary operations.
@@ -2245,7 +2250,7 @@ function _G.parseExpression(state, parentNode, prevOpPrecedence, expectLeftValue
 		-- Lookup using '.'. (t.k is syntactic sugar for t["k"])
 		elseif
 			isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),".")
-			and OPERATOR_PRECEDENCE.lookup > prevOpPrecedence
+			and !(OPERATOR_PRECEDENCE.lookup) > prevOpPrecedence
 		then
 			eatNextToken(state)
 
@@ -2271,7 +2276,7 @@ function _G.parseExpression(state, parentNode, prevOpPrecedence, expectLeftValue
 		-- Lookup using '['.
 		elseif
 			isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"[")
-			and OPERATOR_PRECEDENCE.lookup > prevOpPrecedence
+			and !(OPERATOR_PRECEDENCE.lookup) > prevOpPrecedence
 		then
 			eatNextToken(state)
 
@@ -2290,7 +2295,7 @@ function _G.parseExpression(state, parentNode, prevOpPrecedence, expectLeftValue
 		-- Function call.
 		elseif
 			isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"(")
-			and OPERATOR_PRECEDENCE.call > prevOpPrecedence
+			and !(OPERATOR_PRECEDENCE.call) > prevOpPrecedence
 		then
 			!SET_OR_RETURN `expr = parseCall(state, parentNode, false, expr, false)`
 
@@ -2300,7 +2305,7 @@ function _G.parseExpression(state, parentNode, prevOpPrecedence, expectLeftValue
 				isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"!")
 				and isToken(tokType2,tokValue2, !(TOKEN_PUNCTUATION),"(")
 			)
-			and OPERATOR_PRECEDENCE.call > prevOpPrecedence
+			and !(OPERATOR_PRECEDENCE.call) > prevOpPrecedence
 		then
 			tokType, tokValue = peekLastToken(state)
 

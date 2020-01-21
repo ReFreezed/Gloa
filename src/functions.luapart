@@ -178,21 +178,29 @@ end
 
 
 
--- errorInternal( [ level=1, ] [ formatString, ... ] )
-local function _errorInternal(level, s, ...)
-	if s then
-		printerrf("\nError: Internal compiler error: "..s, ...)
+-- errorInternal( [ level=1, ] [[ state, node, ] formatString, ... ] )
+local function _errorInternal(level, state, node, s, ...)
+	if type(state) == "string" then  _errorInternal(1+level, nil, nil, state, node, s, ...)  end
+
+	printerr()
+
+	s = s and F("Internal compiler error: "..s, ...) or "Internal compiler error."
+	if node then
+		!ifDEBUG`astPrint(io.stderr, node)`
+		nodeMessage(io.stderr, state, node, "Error", nil, "%s", s)
 	else
-		printerrf("\nError: Internal compiler error.")
+		printerr("Error: "..s)
 	end
+
 	printTraceback(io.stderr, 1+level)
+
 	exitFailure()
 end
-function _G.errorInternal(levelOrS, ...)
-	if type(levelOrS) == "number" then
-		_errorInternal(1+levelOrS, ...)
+function _G.errorInternal(level, state, node, ...)
+	if type(level) == "number" then
+		_errorInternal(1+level, state, node, ...)
 	else
-		_errorInternal(2, levelOrS, ...)
+		_errorInternal(2, level, state, node, ...)
 	end
 end
 

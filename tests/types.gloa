@@ -44,12 +44,11 @@ local double21, double22                     = 1, 2
 local double31, double32 : int               = 1, 2
 local double41, double42 : type_of(double22) = 1, 2
 
-local NilType :: !type nil -- Note: The nil type is only really useful in compound types, where !type is not needed.
+local NilType :: none -- Note: The nil type (none) is only really useful in compound types.
 local iCanOnlyBeNil : NilType = nil
 
--- @Incomplete:
--- local StringOrNil :: !type string|nil
--- local maybeString:StringOrNil = nil
+local StringOrNil :: string|none
+local maybeString:StringOrNil = nil
 
 local testTable :: () {
 	local k       = "a%/"
@@ -87,8 +86,9 @@ local testTable :: () {
 -- local bad2 :: nope -- (Test that the error message is good.)
 -- local bad1 :: bad2
 
--- @Incomplete:
--- local Compound :: !type string|nil
+-- local arr : 5 -- 5 is not a type.
+
+-- local Compound :: string|none
 -- local bad:Compound : "" -- Constants cannot be compound types.
 
 local testDeclarations :: () {
@@ -119,7 +119,7 @@ local testFunctions :: () {
 	local myFunc : (arg1:string,arg2,arg3:int)->bool,string : (arg1:string, arg2,arg3:int) -> bool, string { return true, "" }
 
 	local testFuncReturningFunc :: () {
-		local funcReturningFunc :: () -> (n:int)->string {
+		local funcReturningFunc :: () -> (func:(n:int)->string) {
 			return (n:int) -> string {
 				return "foo"
 			}
@@ -330,9 +330,6 @@ local myClass:ClassName = ClassName.MAGIC
 local Vector3 :: struct { x:int; y:int, z:int }
 local myVec3:Vector3
 
--- @Incomplete: Using 'self' type for a member.
--- local Foo :: struct { a:Foo }
-
 local noCollision :: 5
 local StructFreeOfCollisions :: struct { noCollision="" }
 
@@ -340,7 +337,7 @@ local StructWithOne :: struct { ONE::1 }
 local one :: cast(int) StructWithOne.ONE
 
 local AcceptableRecursiveStruct :: struct {
-	recursive: AcceptableRecursiveStruct|nil = nil,
+	recursive: AcceptableRecursiveStruct|none = nil,
 }
 
 local testStructs :: () {
@@ -465,7 +462,7 @@ local testEnumLookups :: () {
 -- @Incomplete: The actual error message we want here.
 -- local Struct::struct{bad:Struct={}} -- Recursive struct.
 -- local Struct::struct{bad=cast(Struct){}} -- Recursive struct.
--- local Struct::struct{bad:Struct|nil=cast(Struct){}} -- Recursive struct.
+-- local Struct::struct{bad:Struct|none=cast(Struct){}} -- Recursive struct.
 --]]
 
 
@@ -491,15 +488,9 @@ local EIGHT : int : cast(int) (2.0 ^ 2.0) * 2
 local TAU   :     : 3.14 * cast(type_of(5.0)) (EIGHT // 4)
 
 local testOperations :: () {
-	-- @Incomplete: Casting compound types.
-	-- local dummy:int|nil = 0
-	-- local Dummy :: type_of(dummy)
-	-- -- local Dummy :: !type int|nil -- @Incomplete: Handle pipes here.
-	-- local getCompound :: () -> Dummy { return 5 }
-	-- -- local getCompound :: () -> int|nil { return 5 } -- @Incomplete: Handle pipes here.
-	-- local x      = cast(int) getCompound()
-	-- local xMaybe = cast(Dummy) x
-	-- -- local xMaybe = cast(int|nil) x -- @Incomplete: Handle pipes here.
+	local getCompound :: () -> int|none { return 5 }
+	local x      = cast(int) getCompound()
+	local xMaybe = cast(int|none) x
 
 	local Foo :: struct {
 		status = -1;
@@ -546,9 +537,8 @@ local operationErrors :: () {
 	-- local obj:Struct
 	-- obj[obj.BAD] = "foo" -- Not a member.
 
-	-- local x     :    int|nil = 0 !shadow
-	-- local dummy : string|nil = ""
-	-- local bad = cast(type_of(dummy)) x -- Cannot cast from int|nil to string|nil.
+	-- local x : int|none = 0 !shadow
+	-- local bad = cast(string|none) x -- Cannot cast from int|none to string|none.
 }
 --]]
 
@@ -695,7 +685,7 @@ local testLists :: () {
 	printAny("Hello, Lua!")
 	printAny(123)
 
-	local maybeInt1        : int|nil                   = 0
+	local maybeInt1        : int|none                  = 0
 	local maybeInt2        : type_of(maybeInt1)        = 0
 	local maybeIntOrString : type_of(maybeInt1)|string = ""
 
@@ -714,7 +704,7 @@ local testLists :: () {
 	print(true, getValues())
 
 	local getVararg :: () -> (...:int) { return 1, 2, 3 }
-	local takeThreeMaybe :: (x,y,z:int|nil) {}
+	local takeThreeMaybe :: (x,y,z:int|none) {}
 	takeThreeMaybe(10, getVararg(), 30)
 	takeThreeMaybe(10, 20, (getVararg()))
 
@@ -734,20 +724,22 @@ local testLists :: () {
 		return ...
 	}
 	local x, y = takeAndReturnVararg(1, 2, 3)
-	local typeOfX :: type_of(x) -- Value should be int|nil.
-	local typeOfY :: type_of(y) -- Value should be int|nil.
-	local takeOneIntMaybe :: (x:int|nil) {}
+	local typeOfX :: type_of(x) -- Value should be int|none.
+	local typeOfY :: type_of(y) -- Value should be int|none.
+	local takeOneIntMaybe :: (x:int|none) {}
 	takeOneIntMaybe(x)
 	takeOneIntMaybe(y)
 	if x ~= nil and y ~= nil {
-		local dummy1 :        int|nil = 0
-		local dummy2 : string|int|nil = ""
-		local x1 = cast(type_of(dummy1)) x
-		local y1 = cast(type_of(dummy2)) y
+		local x1 = cast(       int|none) x
+		local y1 = cast(string|int|none) y
 		local x2 = cast(int) x
 		local y2 = cast(int) y
 		takeAndReturnVararg(x2, y2, x2, y2)
 	}
+
+	local getIntVararg :: () -> (...:int) {}
+	local useIntVararg :: (...:int) {}
+	useIntVararg(getIntVararg())
 
 	-- @Incomplete: Make this work (or disallow this specific compound type).
 	-- local negateNumber : int|float = 0
@@ -761,7 +753,7 @@ local testLists :: () {
 -- local INT :: int
 -- local bad:int|INT = 0 -- Duplicate type.
 
--- local bad:int|nil -- Missing required value.
+-- local bad:int|none -- Missing required value.
 
 local listErrors :: () {
 	-- local a   : bool|int       = true
@@ -811,7 +803,7 @@ local callVsReturnErrors :: () -> bool, int, string {
 
 	-- local bad  :: () -> (...:int) { return 1, 2 }
 	-- local func :: (x:int, y:int) {}
-	-- func(10, (bad())) -- Returned vararg gets adjusted to int|nil which func() does not accept.
+	-- func(10, (bad())) -- Returned vararg gets adjusted to int|none which func() does not accept.
 }
 --]]
 
@@ -940,7 +932,7 @@ local testArraysAndLoops :: () {
 	}
 
 	do {
-		local inext :: (ints:[]int, i:int) -> int|nil, int {
+		local inext :: (ints:[]int, i:int) -> int|none, int {
 			-- Array lookups can be compared to nil.
 			if ints[i+1] == nil  return nil, 0
 			return i+1, ints[i+1]
@@ -959,7 +951,7 @@ local testArraysAndLoops :: () {
 	}
 
 	do {
-		local IntArrayIterator :: (arr:[]int, i:int) -> (i:int|nil, item:int)
+		local IntArrayIterator :: (arr:[]int, i:int) -> (i:int|none, item:int)
 		local ipairs :: (arr:[]int) -> (iter:IntArrayIterator, arr:[]int, init:int) !foreign lua "ipairs"
 		local ints : []int
 		insert(ints, 10)
@@ -1004,29 +996,31 @@ local arrayAndLoopErrors :: () {
 	-- for i, n in bad, arr, 0 {}
 
 	-- local arr : []int
-	-- local bad :: (arr:float, i:bool) -> nil {} -- Interators must return compound type as first value.
+	-- local bad :: (arr:float, i:bool) -> none {} -- Interators must return compound type as first value.
 	-- for i, n in bad, arr, 0 {}
 
 	-- local arr : []int
-	-- local func :: (arr:float, i:bool) -> int|nil {}
+	-- local func :: (arr:float, i:bool) -> int|none {}
 	-- for i, n in func, arr, 0 {} -- Too many names for iterator.
 
 	-- local arr : []int
-	-- local func :: (arr:float, i:bool) -> int|nil, int {}
+	-- local func :: (arr:float, i:bool) -> int|none, int {}
 	-- for i in func, arr, 0 {} -- Too few names for iterator.
 
 	-- local bad : []int
-	-- local func :: (arr:float, i:bool) -> int|nil, int {}
+	-- local func :: (arr:float, i:bool) -> int|none, int {}
 	-- for i, n in func, bad, 0 {} -- Type mismatch for state.
 
 	-- local arr : []int
-	-- local func :: (arr:[]int, i:bool) -> int|nil, int {}
+	-- local func :: (arr:[]int, i:bool) -> int|none, int {}
 	-- for i, n in func, arr, 0 {} -- Type mismatch for control value.
 
-	-- local bad : []nil -- Arrays cannot contain nil.
+	-- local bad : []none -- Arrays cannot contain nil.
 
 	-- local i            = 1
 	-- local arr:[]string = {[i]="foo"} -- Index is not constant.
+
+	-- local arr : [] 5 -- 5 is not a type.
 }
 --]]
 
@@ -1064,7 +1058,7 @@ local testShadow :: (shadowed1:int=1 !shadow, x:int=2) {
 	local shadowed2:int = 5 !shadow
 }
 
--- @Incomplete: Make this work.
+-- @Incomplete: Make this work. (Actually, it should be an error in this case.)
 -- local  LOCAL_STRING :: ""
 -- global fileScopeShadowingGlobal = LOCAL_STRING
 -- local  fileScopeShadowingGlobal = 1 !shadow
