@@ -29,7 +29,7 @@ io.stdout:setvbuf("no")
 io.stderr:setvbuf("no")
 collectgarbage("stop") -- Slight speed boost.
 
-local DIR_HERE = debug.getinfo(1, "S").source:match"@?(.+)":gsub("\\", "/"):gsub("/?[^/]+$", ""):gsub("^$", ".")
+local DIR_HERE = debug.getinfo(1, "S").source:match"^@(.+)":gsub("\\", "/"):gsub("/?[^/]+$", ""):gsub("^$", ".")
 
 -- Read build options.
 local args               = {...}

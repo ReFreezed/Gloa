@@ -39,11 +39,19 @@
 local FOREIGN_API_COMPILER_SYMBOLS = {
 	-- APP_PATH
 	-- Get the path to the application file. The path may be relative to the current working directory.
-	APP_PATH      = `(debug.getinfo(1, "S").source:match"@?(.+)" or error("Could not get application path.")) :gsub("\\", "/")`,
+	APP_PATH = `(debug.getinfo(1, "S").source:match"^@(.+)" or error("Could not get application path.")) :gsub("\\", "/")`,
 
 	-- APP_DIRECTORY
 	-- Get the path to the directory the application is located in. The path may be relative to the current working directory.
-	APP_DIRECTORY = `(debug.getinfo(1, "S").source:match"@?(.+)" or error("Could not get application path.")) :gsub("\\", "/"):gsub("/?[^/]+$", ""):gsub("^$", ".")`,
+	APP_DIRECTORY = `(debug.getinfo(1, "S").source:match"^@(.+)" or error("Could not get application path.")) :gsub("\\", "/"):gsub("/?[^/]+$", ""):gsub("^$", ".")`,
+
+	-- COMPILER_PATH
+	-- Get the path to the compiler. This will be a hardcoded value in the compiled program.
+	COMPILER_PATH = F("%q", COMPILER_PATH),
+
+	-- COMPILER_DIRECTORY
+	-- Get the path to the directory the compiler is located in. This will be a hardcoded value in the compiled program.
+	COMPILER_DIRECTORY = F("%q", COMPILER_DIRECTORY),
 
 	-- wrapFunctionInGloaErrorHandler()
 	-- Make Glóa handle errors triggered by a function.
@@ -139,7 +147,7 @@ function _G.writeLookup(state, file, lookup)
 end
 
 function _G.writeCast(state, file, cast)
-	local typeInfoSource = cast.expression.inferredType
+	local typeInfoSource = adjustTypeToOne(state, cast.expression.inferredType, true)
 	local typeInfoTarget = cast.inferredType
 
 	file:write("(") -- In case the written expression is a list of some kind.
@@ -148,8 +156,6 @@ function _G.writeCast(state, file, cast)
 		typeInfoSource == typeInfoTarget
 		or typeInfoSource.tag == !(typeTags.TypeInfoCompound)
 		or typeInfoTarget.tag == !(typeTags.TypeInfoCompound)
-		or typeInfoSource.tag == !(typeTags.TypeInfoVararg)
-		or typeInfoTarget.tag == !(typeTags.TypeInfoVararg)
 	then
 		writeExpression(state, file, cast.expression)
 

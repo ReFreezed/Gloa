@@ -599,16 +599,11 @@ function _G.getFriendlyTypeInfoName(typeInfo)
 			typeTexts[i] = getFriendlyTypeInfoName(compoundItem)
 		end
 
-		!if false then
-		-- !if DEBUG then
-			name = "["..table.concat(typeTexts, "|").."]"
-		!else
-			name = table.concat(typeTexts, "|")
-		!end
+		name = table.concat(typeTexts, "|")
 
 	elseif typeInfo.tag == !(typeTags.TypeInfoArray) then
 		local arraySig = typeInfo
-		name           = "[]"..getFriendlyTypeInfoName(arraySig.itemType)
+		name           = "array("..getFriendlyTypeInfoName(arraySig.itemType)..")"
 
 	elseif typeInfo.tag == !(typeTags.TypeInfoVararg) then
 		local varargSig = typeInfo
@@ -1830,7 +1825,11 @@ end
 		typeError(state, identOrVararg, "Variables in type group '%s' must have a specified initial value.", TYPE_TAG_NAMES[identOrVararg.inferredType.tag])
 	end
 
-	moveToPipe(state, decl, !(PIPE_BYTECODE))
+	if decl.name.inferredType.tag == !(typeTags.TypeInfoNamespace) then
+		moveToPipe(state, decl, !(PIPE_DONE))
+	else
+		moveToPipe(state, decl, !(PIPE_BYTECODE))
+	end
 end
 
 !!local LITERAL_TYPE_TO_BUILTIN_TYPE_NAME = {
@@ -2576,7 +2575,7 @@ end
 	else
 		typeError(
 			state, tableNode,
-			"Table literal is expecting to inferred as %s (type group '%s'), which is illegal. (The inferred type must be array, struct or table.)",
+			"Table literal is expecting to get inferred as %s (type group '%s'), which is illegal. (The inferred type must be array, struct or table.)",
 			getFriendlyTypeInfoName(typeInfoExpected),
 			TYPE_TAG_NAMES[typeInfoExpected.tag]
 		)
@@ -2786,7 +2785,7 @@ end
 	if import.isLoad then
 		path = isPathAbsolute(import.importName) and import.importName or state.projectDirectory.."/"..import.importName
 	else
-		path = DIR_HERE.."/modules/"..import.importName..".gloa"
+		path = COMPILER_DIRECTORY.."/modules/"..import.importName..".gloa"
 	end
 
 	local globalScope = state.globalScope
@@ -3021,7 +3020,12 @@ end
 				typeError(state, objExpr, "@Incomplete: Iterate over struct instances using custom default iterators.")
 
 			else
-				typeError(state, objExpr, "Cannot iterate over values in type group '%s'.", TYPE_TAG_NAMES[objExpr.inferredType.tag])
+				typeError(
+					state, objExpr,
+					"Cannot iterate over values in type group '%s'. (Type is %s)",
+					TYPE_TAG_NAMES[objExpr.inferredType.tag],
+					getFriendlyTypeInfoName(objExpr.inferredType)
+				)
 			end
 
 		-- for v1, ... in iter [, state [, init ] ]
@@ -3897,13 +3901,13 @@ function _G.getExpectedTypeInfo(state, node, strict)
 			if not decl.type then
 				!!(NO_EXPECTATION)
 			elseif not decl.type.inferredType then
-				!DEPEND_AND_RETURN(`node`, DEPEND_NODE_INFERRED, `decl.type`)
+				!DEPEND_AND_RETURN(`node`, DEPEND_NODE_INFERRED, `decl.type`, nil, `nil`)
 			end
 			return getTypeRepresentedByExpression(decl.type) or errorInternal()
 
 		else
 			if not assignment.targets[i].inferredType then
-				!DEPEND_AND_RETURN(`node`, DEPEND_NODE_INFERRED, `assignment.targets[i]`)
+				!DEPEND_AND_RETURN(`node`, DEPEND_NODE_INFERRED, `assignment.targets[i]`, nil, `nil`)
 			end
 			return assignment.targets[i].inferredType
 		end
@@ -3913,7 +3917,7 @@ function _G.getExpectedTypeInfo(state, node, strict)
 		if node ~= cast.expression then  !!(NO_EXPECTATION)  end
 
 		if not cast.targetType.inferredType then
-			!DEPEND_AND_RETURN(`node`, DEPEND_NODE_INFERRED, `cast.targetType`)
+			!DEPEND_AND_RETURN(`node`, DEPEND_NODE_INFERRED, `cast.targetType`, nil, `nil`)
 		end
 
 		return getTypeRepresentedByExpression(cast.targetType) or errorInternal()
@@ -3923,10 +3927,38 @@ function _G.getExpectedTypeInfo(state, node, strict)
 		local other  = node == binary.left and binary.right or binary.left
 
 		if not other.inferredType then
-			!DEPEND_AND_RETURN(`node`, DEPEND_NODE_INFERRED, `other`)
+			!DEPEND_AND_RETURN(`node`, DEPEND_NODE_INFERRED, `other`, nil, `nil`)
 		end
 
 		return other.inferredType
+
+	elseif nodeType == !(nodeTypes.AstReturn) then
+		local returnNode = node.parent
+		local i          = indexOf(returnNode.values, node) or !!(NO_EXPECTATION)
+		local lambda     = astFindParent(returnNode, !(nodeTypes.AstLambda))
+		local funcSig    = lambda.inferredType
+
+		if not funcSig then
+			!DEPEND_AND_RETURN(`node`, DEPEND_NODE_INFERRED, `lambda`, nil, `nil`)
+		end
+
+		local argTypesOut = funcSig.argumentTypesOut
+		local argTypeInfo = argTypesOut[i]
+
+		if
+			(not argTypeInfo and argTypesOut[1] and argTypesOut[#argTypesOut].tag == !(typeTags.TypeInfoVararg))
+			or (argTypeInfo.tag == !(typeTags.TypeInfoVararg))
+		then
+			local varargSig = argTypeInfo or argTypesOut[#argTypesOut]
+			argTypeInfo     = varargSig.itemType
+		end
+
+		-- Note: We don't need to get too fancy with validation here as the return is validated later.
+		if not argTypeInfo then
+			typeError(state, returnNode, "Too many values specified for return.")
+		end
+
+		return argTypeInfo
 
 	elseif strict then
 		!!(NO_EXPECTATION)
@@ -3937,7 +3969,7 @@ function _G.getExpectedTypeInfo(state, node, strict)
 		local calleeTypeInfo = call.callee.inferredType
 
 		if not calleeTypeInfo then
-			!DEPEND_AND_RETURN(`node`, DEPEND_NODE_INFERRED, `call.callee`)
+			!DEPEND_AND_RETURN(`node`, DEPEND_NODE_INFERRED, `call.callee`, nil, `nil`)
 		end
 
 		local argTypesIn  = calleeTypeInfo.argumentTypesIn
@@ -3961,6 +3993,7 @@ function _G.getExpectedTypeInfo(state, node, strict)
 	else
 		!!(NO_EXPECTATION)
 	end
+	errorInternal()
 end
 
 
