@@ -865,21 +865,34 @@ function _G.writeConstantValue(state, file, const)
 			file:write("--[[", getFriendlyTypeInfoName(typeInfo):gsub("%]", "%0 "), "]]")
 		end
 
-	elseif tag == !(typeTags.TypeInfoTable) then
-		errorInternal("@Incomplete: Write table.")
-
-	elseif tag == !(typeTags.TypeInfoArray) then
-		errorInternal("@Incomplete: Write array.")
-
 	elseif tag == !(typeTags.TypeInfoFunction) then
 		local lambda = const.value
 		writeFunction(state, file, lambda)
 
 	elseif tag == !(typeTags.TypeInfoStruct) then
-		errorInternal("@Incomplete: Write struct.")
+		errorInternal("@Incomplete: Write struct instance constant.")
+
+	elseif tag == !(typeTags.TypeInfoArray) then
+		local arraySig      = const.valueType
+		local tableNode     = const.value
+		local indexedValues = {}
+
+		for _, tableField in ipairs(tableNode) do
+			indexedValues[tableField.key.value] = tableField.value
+		end
+
+		file:write("{")
+		for i, valueExpr in ipairs(indexedValues) do
+			if i > 1 then  file:write(", ")  end
+			writeExpression(state, file, valueExpr)
+		end
+		file:write("}")
+
+	elseif tag == !(typeTags.TypeInfoTable) then
+		errorInternal("@Incomplete: Write table constant.")
 
 	elseif tag == !(typeTags.TypeInfoEnum) then
-		errorInternal("@Incomplete: Write enum.")
+		errorInternal("@Incomplete: Write enum constant.") -- Do we ever get here? I think not.
 
 	elseif tag == !(typeTags.TypeInfoForeignDummy) then
 		local foreign = const.value

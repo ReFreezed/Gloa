@@ -193,6 +193,7 @@ local !struct"Constant"{
 -- constant, isNew = bcAllocateConstantValueIfNew( state, simpleTypeInfo,    literalValue   )
 -- constant, isNew = bcAllocateConstantValueIfNew( state, functionSignature, lambdaWithBody )
 -- constant, isNew = bcAllocateConstantValueIfNew( state, foreignTypeDummy,  foreign        )
+-- constant, isNew = bcAllocateConstantValueIfNew( state, tableLikeTypeInfo, tableNode      )
 -- constant, isNew = bcAllocateConstantValueIfNew( state, typeInfo,          value          )
 function _G.bcAllocateConstantValueIfNew(state, typeInfo, v)
 	local tag      = typeInfo.tag
@@ -210,9 +211,6 @@ function _G.bcAllocateConstantValueIfNew(state, typeInfo, v)
 		elseif isSimple then
 			if const.value == v then  return const, false  end
 
-		elseif tag == !(typeTags.TypeInfoArray) then
-			errorInternal("@Incomplete: Handle TypeInfoArray.")
-
 		elseif tag == !(typeTags.TypeInfoFunction) then
 			-- All functions are unique for now (except foreign functions, which are identified differently).
 			-- We may detect duplicate non-foreign functions at some point.
@@ -225,15 +223,12 @@ function _G.bcAllocateConstantValueIfNew(state, typeInfo, v)
 				return const, false
 			end
 
-		elseif tag == !(typeTags.TypeInfoStruct) then
-			-- All structs are unique for now. We may detect duplicates at some point.
+		-- All table-likes are always unique.
+		elseif isAny(tag, !(typeTags.TypeInfoStruct),!(typeTags.TypeInfoArray),!(typeTags.TypeInfoTable)) then
 			if const.value == v then  return const, false  end
 
 		elseif tag == !(typeTags.TypeInfoEnum) then
 			errorInternal("Incomplete: Handle TypeInfoEnum.") -- Not sure we ever get here.
-
-		elseif tag == !(typeTags.TypeInfoTable) then
-			errorInternal("Incomplete: Handle tables.") -- @Incomplete: Compare tables (or maybe every table is a unique?).
 
 		elseif tag == !(typeTags.TypeInfoForeignDummy) then
 			if v.sourceId == const.value.sourceId then  return const, false  end
@@ -346,6 +341,24 @@ function _G.bcAllocateConstantValueForExpressionIfNew(state, expr, dependent)
 		local foreign = expr
 		typeInfo      = getTypeInfoForBuiltinType(state, "foreign")
 		return bcAllocateConstantValueIfNew(state, typeInfo, foreign)
+
+	elseif expr.nodeType == !(nodeTypes.AstTable) then
+		local tableNode    = expr
+		local const, isNew = bcAllocateConstantValueIfNew(state, typeInfo, tableNode)
+
+		if
+			isNew
+			and state.settings.outputDebugInfo
+			and tableNode.parent.nodeType == !(nodeTypes.AstAssignment)
+			and tableNode.parent.forDeclaration
+		then
+			local assignment = tableNode.parent
+			local i          = indexOf(assignment.values, tableNode) or errorInternal()
+			local decl       = assignment.declarations[i]
+			bcMaybeSetConstantName(state, const, decl.name.name)
+		end
+
+		return const, isNew
 
 	else
 		errorUnhandledNodeType(state, expr)
