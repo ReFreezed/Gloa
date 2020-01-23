@@ -1,0 +1,782 @@
+global TESTS_THAT_SHOULD_FAIL : []string : {
+
+	--==============================================================
+	--= Complement to test/parsing.gloa
+	--==============================================================
+
+	-- Syntax errors
+	--------------------------------
+	[=[ local main :: () {  f!()  } ]=],
+	[=[ local main :: () {  t.(m)!()  } ]=],
+	[=[ local main :: () {  t.m!()!()  } ]=],
+	[=[ local main :: () {  f()!()  } ]=],
+	[=[ local main :: () {  local v = f!()  } ]=],
+	[=[ local main :: () {  local v = t.m!()!()  } ]=],
+	[=[ local main :: () {  local v = t.(m)!()  } ]=],
+	[=[ local main :: () {  local v = f()!()  } ]=],
+	[=[ local main :: () {  local v = (f)!()  } ]=],
+
+	[=[ local main :: () {  t.(k)  } ]=],
+	[=[ local main :: () {  local v = t.(k)  } ]=],
+
+	[=[ local main :: () {  obj.k1.m1 (m1Arg)(fArg).k2.m2 (m2Arg).k3  } -- Not a full statement. ]=],
+	[=[ local main :: () {  obj.k1.m1!(m1Arg)(fArg).k2.m2!(m2Arg).k3  } -- Not a full statement. ]=],
+
+	[=[ local main :: () {  x, f()(aaa) = a, b  } -- Cannot "set" a call. ]=],
+
+	-- Illegal statements
+	--------------------------------
+	[=[ local func :: (...:int, b:bool) {} -- Vararg must be last. ]=],
+	[=[ local func :: (..., x: int)     {} -- Vararg must be last. ]=],
+
+	[=[ local func :: (x:int=0, b,a,d:int) {} -- Missing default values. ]=],
+	[=[ local func :: () -> (i:int=5) {} -- Out args cannot have default values (yet?). ]=],
+
+	[=[ local main :: () {  a          = x, y     } -- Too many values. ]=],
+	[=[ local main :: () {  f().k, a   = x, y, z  } -- Too many values. ]=],
+	[=[ local main :: () {  local a, b = 1, 2, 3  } -- Too many values. ]=],
+
+	[=[ local main :: () {  for 1, 10, 1, 5   func(it)  } -- Too many parameters. ]=],
+	[=[ local main :: () {  for v: obj, obj2  func(it)  } -- Too many values. ]=],
+
+	[=[ local main :: () {  local x, y, x = 1, 2, 3             } -- Duplicate name. ]=],
+	[=[ local main :: () {  local func :: (x,y:int, x:float=5)  } -- Duplicate name. ]=],
+	[=[ local main :: () {  for k, v, k: obj  func(v)           } -- Duplicate name. ]=],
+	[=[ local main :: () {  for k, k in pairs(t)  func(k)       } -- Duplicate name. ]=],
+
+	[=[ local main :: () {  func() ; (var) = 6  } -- Could work, but looks weird! ]=],
+
+	[=[ local Enum :: enum { A:int:1 } -- Wrong place for type. ]=],
+	[=[ local Enum :: enum { A:int   } -- Wrong place for type. ]=],
+	[=[ local Enum :: enum { A=5     } -- Must be constant. ]=],
+	[=[ local Enum :: enum {         } -- No members. ]=],
+	[=[ local Enum :: enum table  { A::{} } -- Illegal type. ]=],
+	[=[ local Enum :: enum MyType { A::{} } -- Illegal type. (Maybe this should be ok if MyType==int or similar.) ]=],
+
+	[=[ local func :: (...:int=5) {} -- Varargs cannot have default values. ]=],
+
+	[=[ !import 5 ]=],
+
+	[=[ export bad = 0 -- Only modules can export. ]=],
+	[=[ local bad = !import "test" -- Imports must be constant. ]=],
+	[=[ local bad = !load "types.load.gloa" -- !load must be a full statement, unlike !import. ]=],
+
+	[=[ local Struct :: struct {} ; local func :: () -> (using bad:Struct) { return bad } -- Cannot 'using' output arguments. ]=],
+	[=[ local func :: (using ...:int) -> () {} -- Cannot 'using' varargs. ]=],
+
+	[=[ local bad:int ; local func :: () {  local bad:int : 5 !shadow  } -- Constants cannot be shadows. ]=],
+
+	-- @Incomplete: Move these to type tests
+	-- local foo : int : !import "bar" -- Imports don't have any user-specifyable type. (Beware of 'type_of(!import"bar")'!)
+	-- local foo = !import "bar" -- Imports must be constant.
+
+	-- @Incomplete
+	-- local x = ()() -- Should be an error. The compiler thinks this is a call on an expression (that results in a function signature). May solve itself once we resolve types. (Yeah, move to type tests.)
+	-- func() ; (func)() -- Works, but looks weird! Should be an error.
+	-- func() ; (func())() -- Works, but looks weird! Should be an error.
+
+
+
+	--==============================================================
+	--= Complement to test/types.gloa
+	--==============================================================
+
+	-- Simple declarations
+	--------------------------------
+	[=[
+		local bad:int = "foo" -- Type/value type mismatch.
+	]=],
+	[=[
+		local bad:type = 50 -- Type/value type mismatch.
+	]=],
+	[=[
+		local n = -100
+		local bad : type_of(n) = "nope" -- Type/value type mismatch.
+	]=],
+	[=[
+		local bad : stillFive = 99 -- The int 5 is not a type.
+		local stillFive :: alsoFive
+		local alsoFive  :: five
+		local five      :: 5
+	]=],
+	[=[
+		local bad :: string
+		local bad :: string -- Redeclaration.
+	]=],
+	[=[
+		local v: nonexistent -- Undeclared type/identifier.
+	]=],
+	[=[
+		local v: nonexistent(5, int) -- Undeclared type/identifier.
+	]=],
+	[=[
+		local v = nonexistent -- Undeclared identifier.
+	]=],
+	[=[
+		local main :: () {
+			local v = nonexistent() -- Undeclared identifier.
+		}
+	]=],
+	[=[
+		local v : type_of(nonexistent) -- Undeclared identifier.
+	]=],
+	[=[
+		local circularA :: circularB -- Circular dependency. @UX: Better error message.
+		local circularB :: circularA
+	]=],
+	[=[
+		local var =  5
+		local bad :: var -- Value is not constant.
+	]=],
+	[=[
+		local bad1 :: bad2 -- (Test that the error message is good.)
+		local bad2 :: nope
+	]=],
+	[=[
+		local bad2 :: nope -- (Test that the error message is good.)
+		local bad1 :: bad2
+	]=],
+	[=[
+		local arr : 5 -- 5 is not a type.
+	]=],
+	[=[
+		local Compound :: string|none
+		local bad:Compound : "" -- Constants cannot be compound types.
+	]=],
+	[=[
+		local main :: () {
+			local bad :: 0
+			bad = 5 -- Assignment target is constant. @UX: Better error message.
+		}
+	]=],
+	[=[
+		local main :: () {}
+		local bad = type_of(main()) -- Cannot get the type of function calls.
+	]=],
+
+	-- Functions
+	--------------------------------
+	[=[
+		local func :: () -> int { return 5 }
+		local bad  =  func() -- Not a constant expression in declarative scope.
+	]=],
+	-- [=[
+	-- 	-- @Incomplete:
+	-- 	global bad :: (x:int=x) {}
+	-- ]=],
+	-- [=[
+	-- 	-- @Incomplete:
+	-- 	global bad :: (x:int, y:int=x) {} -- Should this be an error or a feature?
+	-- ]=],
+	-- [=[
+	-- 	-- @Incomplete:
+	-- 	global bad :: (x:int=y, y:int=0) {}
+	-- ]=],
+	[=[
+		local bad :: (n:int) {}
+		local func :: () { local bad::(){} } -- Overloads must be in the same scope.
+	]=],
+	[=[
+		local main :: () {
+			local oneInNoneOut :: (a:int) {return}
+			local x, y, z : int = 5, oneInNoneOut(99) -- Nothing for y (nor z).
+		}
+	]=],
+	[=[
+		local main :: () {
+			local oneInOneOut :: (a:int) -> int { return a }
+			local x, y, z : int = 5, oneInOneOut(99) -- Nothing for z.
+		}
+	]=],
+	[=[
+		local main :: () {
+			local func :: (a:int) -> int, string { return a, "foo" }
+			local x, y, z : int = 5, func(99) -- Type mismatch for 'z'.
+		}
+	]=],
+	[=[
+		local sig :: (arg1:string, arg2:int) -> bool, string
+		local func:sig : (arg1:string, arg2,arg3:int) -> bool, string { return true, "" } -- Incorrect function signature.
+	]=],
+	[=[
+		local sig :: (arg1:string, arg2,arg3:string) -> bool, string
+		local func : sig : (arg1:string, arg2,arg3:int) -> bool, string { return true, "" } -- Incorrect function signature.
+	]=],
+	[=[
+		local mySig :: (a:int, b:nonexistent) -- Undeclared identifier.
+	]=],
+	[=[
+		local mySig :: (a:int) -> nonexistent -- Undeclared identifier.
+	]=],
+	[=[
+		local main :: () {
+			local func :: () -> () {}
+			local bad  =  func() -- No return arguments.
+		}
+	]=],
+	[=[
+		local main :: () {
+			local func :: () -> (n:int)->string {}
+			local bad  =  func()(5)() -- Trying to call a string.
+		}
+	]=],
+	[=[
+		local func :: () -> ()->string {
+			return ()->string { return nonexistent } -- Undeclared identifier.
+		}
+	]=],
+	[=[
+		local func :: () {}
+		local bad  :: () -> int { return func() } -- Too few values.
+	]=],
+	[=[
+		local func :: () -> int { return 1 }
+		local bad  :: () -> int, int { return func() } -- Too few values.
+	]=],
+	[=[
+		local func :: () {}
+		local bad  :: () -> int { return (func()) } -- No resulting value in parenthesis.
+	]=],
+	[=[
+		local func :: () -> int, int { return 1, 2 }
+		local bad  :: () -> int, int { return 1, func() } -- Too many values.
+	]=],
+	[=[
+		local func :: () -> string, int { return "", 2 }
+		local bad  :: () -> int, int, int { return 1, func() } -- Returning wrong type.
+	]=],
+	[=[
+		local func :: () -> int, string { return 1, "" }
+		local bad  :: () -> int, int, int { return 1, func() } -- Returning wrong type.
+	]=],
+	[=[
+		local main :: () {
+			local func :: (a:int) -> int { return a }
+			local bad  =  func() -- Missing args.
+		}
+	]=],
+	[=[
+		local main :: () {
+			local func :: (a:int) -> int { return a }
+			local bad  =  func(1, 2) -- Too many args.
+		}
+	]=],
+	[=[
+		local main :: () {
+			local func :: (a:int) -> int { return a }
+			local bad  =  func("nope") -- Wrong type.
+		}
+	]=],
+	[=[
+		local Bad  :: struct {}
+		local func :: (a:Bad) -> int { return a } -- Wrong type.
+	]=],
+	[=[
+		local main :: () {
+			local func : () -> int
+			func = () -> int { return func() } -- func is not constant, thus invisible in the body. @UX: Improve error message.
+		}
+	]=],
+	[=[
+		local main :: () {
+			local func :: () {}
+			func(func()) -- Function returns nothing. (Could work here, but it would be very confusing!)
+		}
+	]=],
+	[=[
+		local main :: () {
+			local func :: (n:int) {}
+			local func :: (s:string) {}
+			func(true) -- No matching overload.
+		}
+	]=],
+	[=[
+		local same :: () {}
+		local same :: () {} -- Function signatures are the same.
+	]=],
+	[=[
+		local similar :: () {}
+		local similar :: (n:int=0) {} -- Function signatures too similar.
+	]=],
+	[=[
+		local similar :: (n:int=0) {}
+		local similar :: (s:string="") {} -- Function signatures too similar.
+	]=],
+	[=[
+		local func :: (n:int) {}
+		local bad  :: func -- Don't know which overload.
+		local func :: (s:string) {}
+	]=],
+	[=[
+		local main :: () {
+			local func :: (f:float|int) {}
+			local func :: (i:string|int) {}
+			func(5) -- Several matching overloads.
+		}
+	]=],
+	-- [=[
+	-- 	local main :: () {
+	-- 		-- @Incomplete: Disallow this error-prone situation.
+	-- 		local take3 :: (req:int, opt1:int=0, opt2:int=0) {}
+	-- 		local get2  :: () -> int, int {}
+	-- 		take3(get2())
+	-- 	}
+	-- ]=],
+
+	-- Structs and enums
+	--------------------------------
+	[=[
+		local bad :: struct {a:nonexistent} -- Undeclared type/identifier.
+	]=],
+	[=[
+		local Struct :: struct {}
+		local bad:Struct = Struct -- Type/value type mismatch.
+	]=],
+	[=[
+		local bad :: 5
+		local Struct :: struct {
+			bad :: "", -- Redeclaration (because the member is constant).
+		}
+	]=],
+	[=[
+		local bad = 5
+		local Struct :: struct {
+			bad :: "", -- Redeclaration (because the member is constant). @UX: Improve error message. The message is reversed!
+		}
+	]=],
+	[=[
+		local value :: int
+		local Struct :: struct {
+			value = "",
+			bad :: value, -- Name confusion. @UX: Improve error message.
+		}
+	]=],
+	[=[
+		local Struct :: struct {
+			circularA :: circularB, -- Circular dependency. @UX: Better error message. This is awful!
+			circularB :: circularA,
+		}
+	]=],
+	[=[
+		local Enum :: enum { INT::int }
+		local bad:type : Enum.INT -- Type mismatch. (This would work with an explicit cast.)
+	]=],
+	[=[
+		local main :: () {
+			local Struct :: struct { m="" }
+			local var:type = Struct
+			local bad      = var.m -- Cannot lookup type variables.
+		}
+	]=],
+	[=[
+		local main :: () {
+			local Struct :: struct { m="" }
+			local k        = "m"
+			local o:Struct = {[k]="foo"} -- Key is not constant.
+		}
+	]=],
+	[=[
+		local main :: () {
+			local getOuter :: () -> Outer {
+				local outer:Outer
+				return outer
+			}
+			local Inner :: struct { innerStatic::(){} }
+			local Outer :: struct { inner:Inner }
+			getOuter().inner.innerStatic() -- Ambigous intension. No code here would run, except innerStatic().
+		}
+	]=],
+	[=[
+		local Struct::struct{bad:Struct} -- Recursive struct.
+	]=],
+	[=[
+		local Struct1::struct{s2:Struct2}
+		local Struct2::struct{s1bad:Struct1} -- Recursive struct.
+	]=],
+	-- [=[
+	-- 	-- @Incomplete: The actual error message we want here.
+	-- 	local Struct::struct{bad:Struct={}} -- Recursive struct.
+	-- 	local Struct::struct{bad=cast(Struct){}} -- Recursive struct.
+	-- 	local Struct::struct{bad:Struct|none=cast(Struct){}} -- Recursive struct.
+	-- ]=],
+
+	-- Operations
+	--------------------------------
+	[=[
+		local bad = "nope" + "nooope"
+	]=],
+	[=[
+		local bad  :: ""
+		local nope :: -bad
+	]=],
+	[=[
+		local bad = cast(int) "nope"
+	]=],
+	[=[
+		local main :: () {
+			local Struct :: struct {}
+			local obj:Struct
+			obj.bad = 5 -- Not a member.
+		}
+	]=],
+	[=[
+		local main :: () {
+			local Struct :: struct {}
+			local obj:Struct
+			obj["a b c"] = 5 -- Invalid characters in member name (and not a member).
+		}
+	]=],
+	[=[
+		local main :: () {
+			local Struct :: struct {m=""}
+			local obj:Struct
+			obj.m = 5 -- Type mismatch.
+		}
+	]=],
+	[=[
+		local main :: () {
+			local Struct :: struct {BAD::"bad"}
+			local obj:Struct
+			obj.BAD = "" -- Assigning value to constant.
+		}
+	]=],
+	[=[
+		local main :: () {
+			local Struct :: struct {BAD::"bad"}
+			local obj:Struct
+			obj[obj.BAD] = "foo" -- Not a member.
+		}
+	]=],
+	[=[
+		local main :: () {
+			local x : int|none = 0
+			local bad = cast(string|none) x -- Cannot cast from int|none to string|none.
+		}
+	]=],
+
+	-- Blocks
+	--------------------------------
+	[=[
+		local main :: () {
+			local bad:int = bad -- Undeclared identifier. @UX: Better error message.
+		}
+	]=],
+	[=[
+		local main :: () {
+			bad = 5 -- Undeclared identifier.
+			local bad:int
+		}
+	]=],
+	[=[
+		local main :: () {
+			main()() -- Trying to call void.
+		}
+	]=],
+	[=[
+		local main :: () {
+			local bad = main() -- No return value.
+		}
+	]=],
+	[=[
+		local main :: () {
+			local func :: (a:int) -> int { return a }
+			func("nope") -- Wrong type.
+		}
+	]=],
+	[=[
+		local main :: () {
+			local func :: () -> int { return 5 }
+			local var  =  func()
+			local bad  :: 2*var -- Not a constant expression.
+		}
+	]=],
+	[=[
+		local main :: () {
+			local func :: () -> int { return 5 }
+			local bad  :: func() -- Calls are not constant.
+		}
+	]=],
+	[=[
+		local main :: () {
+			if main() {} -- Function returns nothing.
+		}
+	]=],
+
+	-- Multiple files
+	--------------------------------
+	[=[
+		!load "types.errorGlobal.gloa"
+		local other :: 0 -- Global defined in other file.
+	]=],
+	[=[
+		!load "types.errorLocal.gloa"
+		global other :: 0 -- Shadowed in other file.
+	]=],
+	[=[
+		local bad:type_of( !import "test" ) -- Namespaces don't have a type.
+	]=],
+	[=[
+		local lib :: !import "test"
+		local bad:type_of(lib) -- Namespaces don't have a type.
+	]=],
+	[=[
+		local main :: () {
+			local lib :: !import "test"
+			lib.invisible() -- Identifier not visible outside namespace.
+		}
+	]=],
+	[=[
+		local main :: () {
+			lib.bad() -- (Test that the error message is good.)
+			local lib :: !import "test"
+			local bad :: () {}
+		}
+	]=],
+	[=[
+		local main :: () {
+			local lib :: !import "test"
+			lib.bad() -- (Test that the error message is good.)
+		}
+		global bad :: () {}
+	]=],
+
+	-- Lists of things
+	--------------------------------
+	[=[
+		local bad:int|string|int = 0 -- Duplicate type.
+	]=],
+	[=[
+		local INT :: int
+		local bad:int|INT = 0 -- Duplicate type.
+	]=],
+	[=[
+		local bad:int|none -- Missing required value.
+	]=],
+	[=[
+		local main :: () {
+			local a   : bool|int       = true
+			local bad : type_of(a)|int = 0 -- Duplicate type 'int'.
+		}
+	]=],
+	[=[
+		local main :: () {
+			local a   : bool|int       = true
+			local bad : int|type_of(a) = 0 -- Duplicate type 'int'.
+		}
+	]=],
+	[=[
+		local main :: () {
+			local a   :   bool|int            = true
+			local b   : string|int            = 0
+			local bad : type_of(a)|type_of(b) = "" -- Duplicate type 'int'.
+		}
+	]=],
+	[=[
+		local main :: () {
+			local print :: (...:string) !foreign lua "print"
+			local func  :: () {}
+			print("a", func()) -- Nothing returned.
+		}
+	]=],
+	[=[
+		local main :: () {
+			local print :: (...:string) !foreign lua "print"
+			local func  :: () -> string, int { return "GET", 100 }
+			print("a", func()) -- Type mismatch of 2nd returned value.
+		}
+	]=],
+	[=[
+		local func :: (...:int) {
+			local bad1, bad2 = (...) -- No value for 'bad2'.
+		}
+	]=],
+	[=[
+		local main :: () {
+			local x : int|any = 0 -- Cannot include 'any' in compound types. That's useless as 'any' is essentially a compound type that includes all other types!
+		}
+	]=],
+	[=[
+		local func :: (...:int) {
+			local bad = -... -- Vararg value can be nil.
+		}
+	]=],
+	[=[
+		local func :: (...:int) {
+			local bad = ...+1 -- Vararg value can be nil.
+		}
+	]=],
+	[=[
+		local callVsReturnErrors :: () -> bool, int, string {
+			local func :: () -> int, int { return 1, 1 }
+			do return true, func() -- Type mismatch for value 3 (call value 2).
+			return true, 0, ""
+		}
+	]=],
+	[=[
+		local callVsReturnErrors :: () -> bool, int, string {
+			local func :: (b:bool, ...:int) {}
+			local bad  :: () -> int, string { return 1, "" }
+			func(true, bad()) -- Type mismatch for argument 3 (call value 2).
+			return true, 0, ""
+		}
+	]=],
+	[=[
+		local callVsReturnErrors :: () -> bool, int, string {
+			local func :: (x:int, y:int, z:int) {}
+			local bad  :: () -> (...:int) { return 1, 2, 3 }
+			func(0, bad()) -- Non-vararg function cannot take varargs.
+			return true, 0, ""
+		}
+	]=],
+	[=[
+		local callVsReturnErrors :: () -> bool, int, string {
+			local bad  :: () -> (...:int) { return 1, 2 }
+			local func :: (x:int, y:int) {}
+			func(10, (bad())) -- Returned vararg gets adjusted to int|none which func() does not accept.
+			return true, 0, ""
+		}
+	]=],
+
+	-- Using
+	--------------------------------
+	[=[
+		local main :: () {
+			local Struct :: struct { foo=1 }
+			using Struct
+			local bad = foo -- Undeclared identifier.
+		}
+	]=],
+	[=[
+		local main :: () {
+			using Struct
+			local Struct :: struct {}
+			using Struct -- Duplicate using in the scope.
+		}
+	]=],
+	[=[
+		local main :: () {
+			local Struct :: struct { bad::true }
+			using Struct
+			bad = 76 -- Cannot assign to constant struct member.
+		}
+	]=],
+	[=[
+		local main :: () {
+			local Enum :: enum { bad::true }
+			using Enum
+			bad = 76 -- Cannot assign to enum member.
+		}
+	]=],
+
+	-- Arrays and loops
+	--------------------------------
+	[=[
+		local main :: () {
+			local arr : [][]int
+			arr[1] = "" -- Type mismatch.
+		}
+	]=],
+	[=[
+		local main :: () {
+			local arr : []int
+			local bad = arr[1][2] -- Trying to index an int.
+		}
+	]=],
+	[=[
+		local main :: () {
+			for bad = 1, bad {} -- Undeclared identifier.
+		}
+	]=],
+	[=[
+		local main :: () {
+			local arr : []int
+			local bad :: () {} -- Iterator is missing arguments.
+			for i, n in bad, arr, 0 {}
+		}
+	]=],
+	[=[
+		local main :: () {
+			local arr : []int
+			local bad :: (arr:float, i:bool) {} -- Iterator returns nothing.
+			for i, n in bad, arr, 0 {}
+		}
+	]=],
+	[=[
+		local main :: () {
+			local arr : []int
+			local bad :: (arr:float, i:bool) -> int { return 0 } -- First returned value must include nil.
+			for i, n in bad, arr, 0 {}
+		}
+	]=],
+	[=[
+		local main :: () {
+			local arr : []int
+			local bad :: (arr:float, i:bool) -> none { return nil } -- Interators must return compound type as first value.
+			for i, n in bad, arr, 0 {}
+		}
+	]=],
+	[=[
+		local main :: () {
+			local arr : []int
+			local func :: (arr:float, i:bool) -> int|none { return nil }
+			for i, n in func, arr, 0 {} -- Too many names for iterator.
+		}
+	]=],
+	[=[
+		local main :: () {
+			local arr : []int
+			local func :: (arr:float, i:bool) -> int|none, int { return nil, 0 }
+			for i in func, arr, 0 {} -- Too few names for iterator.
+		}
+	]=],
+	[=[
+		local main :: () {
+			local bad : []int
+			local func :: (arr:float, i:bool) -> int|none, int { return nil, 0 }
+			for i, n in func, bad, 0 {} -- Type mismatch for state.
+		}
+	]=],
+	[=[
+		local main :: () {
+			local arr : []int
+			local func :: (arr:[]int, i:bool) -> int|none, int { return nil, 0 }
+			for i, n in func, arr, 0 {} -- Type mismatch for control value.
+		}
+	]=],
+	[=[
+		local main :: () {
+			local bad : []none -- Arrays cannot contain nil.
+		}
+	]=],
+	[=[
+		local main :: () {
+			local i            = 1
+			local arr:[]string = {[i]="foo"} -- Index is not constant.
+		}
+	]=],
+	[=[
+		local main :: () {
+			local arr : [] 5 -- 5 is not a type.
+		}
+	]=],
+
+	-- Misc
+	--------------------------------
+	[=[
+		local func :: () {
+			local bad:int
+			local bad:int !shadow -- Shadows don't work in the scope they're in.
+		}
+	]=],
+	[=[
+		local func :: (bad:int) {
+			local bad:int !shadow -- Shadows don't work in the scope they're in. (Function bodies sometimes count as the same scope as the arguments.)
+		}
+	]=],
+	[=[
+		local bad = !foreign lua "_G" -- Types of foreigns cannot be inferred from the value itself.
+	]=],
+	[=[
+		local BAD:string : ""..!foreign lua "_VERSION" -- No compile-time operations on foreign values.
+	]=],
+}

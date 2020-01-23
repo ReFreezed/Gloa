@@ -2,34 +2,74 @@
 -- Glóa test suite
 --
 
-local TEST_FILES:[]string : {
+!import "basic"
+!import "io"
+!import "string"
+
+!load "suite.fails.gloa"
+
+local TEST_FILES : []string : {
 	"tests/types.gloa",
 	"tests/basic.gloa",
 	"tests/modules.gloa",
 	"examples/lovelySnake/main.gloa",
 }
 
-local COMPILER_OPTIONS = "--debug --nogc"
+local COMPILER_OPTIONS   :: "--debug --nogc --silent"
+local OUTPUT_REDIRECTION :: ">NUL" -- ">NUL 2>&1"
 
-!import "basic"
-!import "string"
+local COMPILER_PATH:string : !foreign compiler "COMPILER_PATH"
+
+local execute :: (cmd:string) -> int !foreign lua "os.execute"
 
 local main :: () {
-	local COMPILER_PATH:string : !foreign compiler "COMPILER_PATH"
-
-	local run :: (cmd:string) -> int !foreign lua "os.execute"
+	disableBuffering(stdout)
+	disableBuffering(stderr)
 
 	local failCount = 0
-	local lines:[]string
+	local lines: []string
 
-	for TEST_FILES {
-		local cmd  = format([["lua "%s" %s "%s""]], COMPILER_PATH, COMPILER_OPTIONS, it)
-		local code = run(cmd)
+	for path: TEST_FILES {
+		local cmd = format([["lua "%s" %s "%s" %s"]], COMPILER_PATH, COMPILER_OPTIONS, path, OUTPUT_REDIRECTION)
 
-		if code == 0 {
-			insert(lines, format("ok      %s", it))
+		print(cmd)
+		if execute(cmd) == 0 {
+			insert(lines, format("ok      %s", path))
 		} else {
-			insert(lines, format("FAILED  %s", it))
+			insert(lines, format("NOT_OK  %s", path))
+			failCount = failCount+1
+		}
+	}
+
+	local FILES_TO_COPY_TO_TEMP_FOLDER : []string : {
+		"tests/types.errorGlobal.gloa",
+		"tests/types.errorLocal.gloa",
+		"tests/types.load.gloa",
+	}
+
+	for path: FILES_TO_COPY_TO_TEMP_FOLDER {
+		local ok, filename = matchPattern(path, "[^/]+$")
+		assert(ok, path)
+
+		local tempPath = "local/temp/" .. cast(string) filename
+		copyFile(path, tempPath)
+	}
+
+	for gloa, i: TESTS_THAT_SHOULD_FAIL {
+		if not find(gloa, "main ::")
+			gloa = gloa.."\nlocal main :: () {}\n"
+
+		local tempPath = format("local/temp/shouldFail%d.gloa", i)
+		local ok, err  = writeFile(tempPath, gloa)
+		assert(ok, err)
+
+		local cmd = format([["lua "%s" %s "%s" %s"]], COMPILER_PATH, COMPILER_OPTIONS, tempPath, OUTPUT_REDIRECTION)
+		print(cmd)
+
+		if execute(cmd) ~= 0 {
+			insert(lines, format("ok      %s", tempPath))
+		} else {
+			insert(lines, format("NOT_OK  %s", tempPath))
 			failCount = failCount+1
 		}
 	}
@@ -38,9 +78,12 @@ local main :: () {
 	print(repeat("-", 64))
 	for lines  print(it)
 	print(repeat("-", 64))
+
+	local TEST_COUNT :: #TESTS_THAT_SHOULD_FAIL + #TEST_FILES
 	if failCount == 0
-		printf("Completed all %d tests successfully. Yay!", #TEST_FILES)
+		printf("Completed all %d tests successfully. Yay!", TEST_COUNT)
 	else
-		printf("Failed %d of %d", failCount, #TEST_FILES)
+		printf("Failed %d of %d", failCount, TEST_COUNT)
+
 	print()
 }

@@ -478,8 +478,12 @@ function _G.isDeclarationVisibleToNode(decl, node)
 			return true
 
 		elseif nodeScope.nodeType == !(nodeTypes.AstBlock) then
-			local block                     = nodeScope
-			local declScope, declScopeChild = getClosestScope(decl)
+			local block = nodeScope
+
+			-- Note: If the node is inside the initial assignment then we need to treat the declaration
+			-- and the assignment as if they were the same statement. Otherwise the assignment will be
+			-- able to see it's own declarations, which is illegal!
+			local declScope, declScopeChild = getClosestScope(decl.assignment or decl)
 
 			if declScope == block then
 				local imperativeIndexForDecl = indexOf(block, declScopeChild) or errorInternal()
@@ -1469,9 +1473,9 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 		if softCheck then  return false, 0  end
 
 		local exprForError = values[1] and getArgumentNodeForError(callOrReturnNode, 1, values[1]) or callOrReturnNode
-		local prefix       = acceptedMax == math.huge and "Missing" or "Incorrect number of"
+		local prefix       = requestedMax+acceptedMax == math.huge and "Incorrect number of" or "Missing"
 		local thingsStr    = callOrReturnNode.nodeType == !(nodeTypes.AstCall) and "arguments" or "values to return"
-		local gotStr       = requestedMax ~= math.huge and F("%d", requestedMin) or requestedMin == 0 and "variable amount" or F("%d + variable amount", requestedMin)
+		local gotStr       = (requestedMax ~= math.huge and F("%d", requestedMin)) or (requestedMin == 0 and "variable amount") or F("%d + variable amount", requestedMin)
 		typeError(state, exprForError, "%s %s. (Wanted %d, got %s)", prefix, thingsStr, acceptedMin, gotStr)
 
 	-- Too many values.
@@ -1484,11 +1488,11 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 		local valueIndex          = math.min(acceptedMax+1, valueCount)
 		local firstExtraValueExpr = values[valueIndex]
 		local exprForError        = getArgumentNodeForError(callOrReturnNode, valueIndex, firstExtraValueExpr)
-		local prefix              = acceptedMax == math.huge and "Too many" or "Incorrect number of"
+		local prefix              = requestedMax+acceptedMax == math.huge and "Incorrect number of" or "Too many"
 		local thingsStr           = callOrReturnNode.nodeType == !(nodeTypes.AstCall) and "arguments" or "values to return"
 		local gotStr              = requestedMax == math.huge and "variable amount" or F("%d", requestedMax)
 
-		typeError(state, exprForError, "%s %s. (Wanted %d, got %s)", prefix, thingsStr, acceptedMax, gotStr)
+		typeError(state, exprForError, "%s %s. (Wanted %d, got %s)", prefix, thingsStr, acceptedMax, gotStr) -- Note: acceptedMax is never infinite here.
 	end
 
 	local compatibilityScoreSum = 0
