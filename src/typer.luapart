@@ -326,9 +326,9 @@ function _G.getTypeRepresentedByExpression(expr)
 	elseif expr.nodeType == !(nodeTypes.AstTypeOf) then
 		local typeOf = expr
 		return typeOf.representedType
-	elseif expr.nodeType == !(nodeTypes.AstLookup) then -- Not sure if this is needed. @Cleanup
-		local lookup = expr
-		return lookup.representedType -- May be nil.
+	elseif expr.nodeType == !(nodeTypes.AstAccess) then -- Not sure if this is needed. @Cleanup
+		local access = expr
+		return access.representedType -- May be nil.
 
 	elseif expr.nodeType == !(nodeTypes.AstCast) then
 		local cast = expr
@@ -860,16 +860,16 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 		if identOrVararg.fromUsing then
 			-- @Cleanup: Move this to simplifyExpressionIfConstant()?
 			!ASSERT `ident`
-			local lookup        = astNewNode(AstLookup, ident.token, ident.parent)
-			lookup.object       = astCopy(ident.fromUsing.expression, lookup.token, lookup)
+			local access        = astNewNode(AstAccess, ident.token, ident.parent)
+			access.object       = astCopy(ident.fromUsing.expression, access.token, access)
 
-			local literal       = astNewNode(AstLiteral, lookup.token, lookup)
+			local literal       = astNewNode(AstLiteral, access.token, access)
 			literal.literalType = !(LITERAL_STRING)
 			literal.value       = ident.name
-			lookup.member       = literal
+			access.member       = literal
 
-			addUnqueuedChildrenToQueueRecursively(state, lookup)
-			replaceQueuedNodeAndUnqueueOldTree(state, ident, lookup)
+			addUnqueuedChildrenToQueueRecursively(state, access)
+			replaceQueuedNodeAndUnqueueOldTree(state, ident, access)
 			-- Stay in the current pipe.
 
 		else
@@ -1620,7 +1620,7 @@ end
 	!ASSERT("calleeTypeInfo.tag == "..typeTags.TypeInfoFunction) -- @Incomplete: Handle parameterized structs.
 
 	!if DEBUG then
-		if call.isMethod and callee.nodeType ~= !(nodeTypes.AstLookup) then
+		if call.isMethod and callee.nodeType ~= !(nodeTypes.AstAccess) then
 			astPrint(callee)
 			where(state, call)
 			errorInternal()
@@ -1968,19 +1968,19 @@ end
 local function isArrayItemOrTableFieldCheck(state, binary, typeInfoL, typeInfoR)
 	-- Detect situations like these: myArray[i]==nil or myTable[k]==nil
 
-	local maybeLookup = binary.left
+	local maybeAccess = binary.left
 	local nilExpr     = binary.right
 
 	if nilExpr.inferredType.tag == !(typeTags.TypeInfoNone) then
 		-- void
-	elseif maybeLookup.inferredType.tag == !(typeTags.TypeInfoNone) then
-		nilExpr, maybeLookup = maybeLookup, nilExpr
+	elseif maybeAccess.inferredType.tag == !(typeTags.TypeInfoNone) then
+		nilExpr, maybeAccess = maybeAccess, nilExpr
 	else
 		return false
 	end
 
-	if maybeLookup.nodeType ~= !(nodeTypes.AstLookup) then  return false  end
-	if not isAny(maybeLookup.object.inferredType.tag, !(typeTags.TypeInfoArray),!(typeTags.TypeInfoTable)) then  return false  end
+	if maybeAccess.nodeType ~= !(nodeTypes.AstAccess) then  return false  end
+	if not isAny(maybeAccess.object.inferredType.tag, !(typeTags.TypeInfoArray),!(typeTags.TypeInfoTable)) then  return false  end
 
 	return true
 end
@@ -2212,14 +2212,14 @@ end
 local function checkForStaticAccessThatUsesWhatLooksLikeRuntimeCode(state, topNodeToCheck, staticObjectNode)
 	astVisitAllNodes(topNodeToCheck, function(node)
 		if not (
-			node.nodeType == !(nodeTypes.AstLookup)
+			node.nodeType == !(nodeTypes.AstAccess)
 			or (
 				node.nodeType == !(nodeTypes.AstIdentifier)
-				and node == node.parent.object -- We know this is a lookup because astVisitAllNodes() visit parents first.
+				and node == node.parent.object -- We know this is an access because astVisitAllNodes() visit parents first.
 			)
 			or (
 				node.nodeType == !(nodeTypes.AstLiteral)
-				and node == node.parent.member -- We know this is a lookup because astVisitAllNodes() visit parents first.
+				and node == node.parent.member -- We know this is an access because astVisitAllNodes() visit parents first.
 			)
 		) then
 			printerr()
@@ -2230,54 +2230,54 @@ local function checkForStaticAccessThatUsesWhatLooksLikeRuntimeCode(state, topNo
 	end)
 end
 
-!NODE_INFERRER `function nodeInferrers.AstLookup(state, lookup)`
-	local typeInfoObject = lookup.object.inferredType
-	local typeInfoMember = lookup.member.inferredType
+!NODE_INFERRER `function nodeInferrers.AstAccess(state, access)`
+	local typeInfoObject = access.object.inferredType
+	local typeInfoMember = access.member.inferredType
 
 	if not typeInfoObject then
-		!DEPEND_AND_RETURN(`lookup`, DEPEND_NODE_INFERRED, `lookup.object`)
+		!DEPEND_AND_RETURN(`access`, DEPEND_NODE_INFERRED, `access.object`)
 	end
 	if not typeInfoMember then
-		!DEPEND_AND_RETURN(`lookup`, DEPEND_NODE_INFERRED, `lookup.member`)
+		!DEPEND_AND_RETURN(`access`, DEPEND_NODE_INFERRED, `access.member`)
 	end
 
 	if typeInfoObject.tag == !(typeTags.TypeInfoList) and not typeInfoObject[1] then
-		typeError(state, lookup.object, "Function call returns nothing. (Expected at least one value.)")
+		typeError(state, access.object, "Function call returns nothing. (Expected at least one value.)")
 	end
 	if typeInfoMember.tag == !(typeTags.TypeInfoList) and not typeInfoMember[1] then
-		typeError(state, lookup.member, "Function call returns nothing. (Expected at least one value.)")
+		typeError(state, access.member, "Function call returns nothing. (Expected at least one value.)")
 	end
 
 	typeInfoObject = adjustTypeToOne(state, typeInfoObject, true)
 	typeInfoMember = adjustTypeToOne(state, typeInfoMember, true)
 
-	local isDirectObj    = lookup.object.inferredType == typeInfoObject
-	local isDirectMember = lookup.member.inferredType == typeInfoMember
+	local isDirectObj    = access.object.inferredType == typeInfoObject
+	local isDirectMember = access.member.inferredType == typeInfoMember
 
-	local isLeftValue         = lookup.parent.nodeType == !(nodeTypes.AstAssignment) and indexOf(lookup.parent.targets, lookup) ~= nil
-	local typeInfoRepresented = getTypeRepresentedByExpression(lookup.object)
+	local isLeftValue         = access.parent.nodeType == !(nodeTypes.AstAssignment) and indexOf(access.parent.targets, access) ~= nil
+	local typeInfoRepresented = getTypeRepresentedByExpression(access.object)
 
 	if typeInfoObject.tag == !(typeTags.TypeInfoTable) then
 		local tableNode = typeInfoObject
 
 		if typeInfoMember.tag == !(typeTags.TypeInfoNone) then
-			typeError(state, lookup.member, "Table keys cannot be nil.")
+			typeError(state, access.member, "Table keys cannot be nil.")
 
 		elseif typeInfoMember.tag == !(typeTags.TypeInfoCompound) and indexOf(typeInfoMember, getTypeInfoForBuiltinType(state, "none")) then
-			typeError(state, lookup.member, "Table keys cannot be nil. (Type is %s)", getFriendlyTypeInfoName(typeInfoMember))
+			typeError(state, access.member, "Table keys cannot be nil. (Type is %s)", getFriendlyTypeInfoName(typeInfoMember))
 
 		--[[ This warning message may be too noisy in some programs.
 		elseif typeInfoMember.tag == !(typeTags.TypeInfoAny) then
 			-- @Incomplete: Add a setting to suppress warnings.
 			typeMessage(
-				io.stderr, state, astGetExpressionVisuallyFurthestToTheLeft(lookup.member),
+				io.stderr, state, astGetExpressionVisuallyFurthestToTheLeft(access.member),
 				"Warning", "Table key is 'any' and thus possibly nil."
 			)
 		--]]
 		end
 
-		lookup.inferredType = getTypeInfoForBuiltinType(state, "any")
-		moveToPipe(state, lookup, !(PIPE_DONE))
+		access.inferredType = getTypeInfoForBuiltinType(state, "any")
+		moveToPipe(state, access, !(PIPE_DONE))
 		return
 
 	elseif typeInfoObject.tag == !(typeTags.TypeInfoArray) then
@@ -2286,21 +2286,21 @@ end
 		if typeInfoMember.tag == !(typeTags.TypeInfoInt) then
 			-- @Incomplete: Check for isLeftValue and constantness.
 
-			if lookup.member.nodeType == !(nodeTypes.AstLiteral) and lookup.member.value < 1 then
-				local literal = lookup.member
+			if access.member.nodeType == !(nodeTypes.AstLiteral) and access.member.value < 1 then
+				local literal = access.member
 				typeError(state, literal, "Array index is %d.", literal.value)
 			end
 
-			lookup.inferredType = arraySig.itemType
-			moveToPipe(state, lookup, !(PIPE_DONE))
+			access.inferredType = arraySig.itemType
+			moveToPipe(state, access, !(PIPE_DONE))
 
 		-- elseif not isLeftValue and typeInfoMember.tag == !(typeTags.TypeInfoString) then
-		-- 	local abstractMemberLiteral = lookup.member
+		-- 	local abstractMemberLiteral = access.member
 		-- 	local abstractMemberName    = getConstantNameOrTriggerError(state, abstractMemberLiteral)
 		-- 	if abstractMemberName == ? then ... end
 
 		else
-			typeError(state, lookup.member, "Expected an array index.")
+			typeError(state, access.member, "Expected an array index.")
 		end
 
 		return
@@ -2312,10 +2312,10 @@ end
 	if typeInfoObject.tag == !(typeTags.TypeInfoStruct) or (typeInfoRepresented and typeInfoRepresented.tag == !(typeTags.TypeInfoStruct)) then
 		local structInfo = typeInfoRepresented or typeInfoObject
 		if not structInfo.hasMembers then
-			!DEPEND_AND_RETURN(`lookup`, DEPEND_STRUCT_MEMBERS_READY, `structInfo`)
+			!DEPEND_AND_RETURN(`access`, DEPEND_STRUCT_MEMBERS_READY, `structInfo`)
 		end
 
-		local memberLiteral = lookup.member
+		local memberLiteral = access.member
 		local memberName    = getConstantNameOrTriggerError(state, memberLiteral)
 		local decl          = findDeclarationInScope(state, structInfo.astNode, memberName, false)
 
@@ -2326,15 +2326,15 @@ end
 		end
 
 		if not decl.isConstant then
-			lookup.inferredType    = decl.name.inferredType or errorInternal()
-			lookup.representedType = decl.valueTypeInfo -- May be nil.
+			access.inferredType    = decl.name.inferredType or errorInternal()
+			access.representedType = decl.valueTypeInfo -- May be nil.
 
-			moveToPipe(state, lookup, !(PIPE_DONE))
+			moveToPipe(state, access, !(PIPE_DONE))
 			return
 		end
 
-		if not isExpressionConstant(state, lookup.object) then
-			checkForStaticAccessThatUsesWhatLooksLikeRuntimeCode(state, lookup.object, lookup.member)
+		if not isExpressionConstant(state, access.object) then
+			checkForStaticAccessThatUsesWhatLooksLikeRuntimeCode(state, access.object, access.member)
 		end
 
 		local valueExpr = getAssignmentValue(state, decl.name, decl.assignment.values, decl.assignmentIndex)
@@ -2351,12 +2351,12 @@ end
 			replacement = astCopy(valueExpr, memberLiteral.token)
 
 		elseif valueExpr.nodeType == !(nodeTypes.AstLambda) then
-			if lookup.parent.nodeType == !(nodeTypes.AstCall) and lookup == lookup.parent.callee and lookup.parent.isMethod then
+			if access.parent.nodeType == !(nodeTypes.AstCall) and access == access.parent.callee and access.parent.isMethod then
 				--
 				-- Change obj.staticMethod!(...) into staticMethod(obj, ...)
 				--
 				-- AstCall (method)
-				--   CALLEE AstLookup
+				--   CALLEE AstAccess
 				--     AstIdentifier (object)
 				--     AstLiteral (string)
 				--   ARG1...
@@ -2366,10 +2366,10 @@ end
 				--   ARG1 AstIdentifier (object)
 				--   ARG2...
 				--
-				local call = lookup.parent
+				local call = access.parent
 
-				-- Move object from lookup to call arguments.
-				local obj = lookup.object
+				-- Move object from access to call arguments.
+				local obj = access.object
 				table.insert(call.arguments, 1, obj)
 				obj.parent = call
 
@@ -2379,12 +2379,12 @@ end
 					arg.queued.key       = i
 				end
 
-				-- Update callee using lookup. (Note: lookup==callee)
+				-- Update callee using access. (Note: access==callee)
 				local ident        = astNewNode(AstIdentifier, memberLiteral.token, call)
 				ident.name         = decl.name.name
 				ident.declaration  = decl
 				ident.inferredType = decl.name.inferredType
-				replaceQueuedNode(state, lookup, ident)
+				replaceQueuedNode(state, access, ident)
 				moveToNextRelevantPipe(state, ident)
 
 				-- Update call.
@@ -2397,7 +2397,7 @@ end
 				return
 
 			else
-				local ident        = astNewNode(AstIdentifier, memberLiteral.token, lookup.parent)
+				local ident        = astNewNode(AstIdentifier, memberLiteral.token, access.parent)
 				ident.name         = decl.name.name
 				ident.declaration  = decl
 				ident.inferredType = decl.name.inferredType
@@ -2411,11 +2411,11 @@ end
 
 		assert(replacement) -- Constants must be simplified!
 
-		replaceQueuedNodeAndUnqueueOldTree(state, lookup, replacement)
+		replaceQueuedNodeAndUnqueueOldTree(state, access, replacement)
 		moveToPipe(state, replacement, !(PIPE_DONE))
 
 	elseif typeInfoObject.tag == !(typeTags.TypeInfoEnum) or (typeInfoRepresented and typeInfoRepresented.tag == !(typeTags.TypeInfoEnum)) then
-		local memberLiteral = lookup.member
+		local memberLiteral = access.member
 		local memberName    = getConstantNameOrTriggerError(state, memberLiteral)
 
 		local enumInfo      = typeInfoRepresented or typeInfoObject
@@ -2429,37 +2429,37 @@ end
 
 		assert(decl.isConstant)
 
-		local ident         = astCopy(decl.name, lookup.token, lookup.parent)
+		local ident         = astCopy(decl.name, access.token, access.parent)
 		ident.placeDeclared = nil
 
 		-- addUnqueuedChildrenToQueueRecursively(state, ident, !(PIPE_BYTECODE)) -- Not needed for identifiers.
-		replaceQueuedNodeAndUnqueueOldTree(state, lookup, ident)
+		replaceQueuedNodeAndUnqueueOldTree(state, access, ident)
 		-- Stay in the current pipe so we get simplified. (Needed? Or maybe we can @Speed things up here?)
 
 	elseif typeInfoObject.tag == !(typeTags.TypeInfoNamespace) then
 		assert(isDirectObj)
 
-		local memberLiteral = lookup.member
+		local memberLiteral = access.member
 		local memberName    = getConstantNameOrTriggerError(state, memberLiteral)
 
 		local namespace     = typeInfoObject
 		local decl          = findDeclarationInScope(state, namespace.scope, memberName, true)
 
 		if not decl then
-			!DEPEND_AND_RETURN(`lookup`, DEPEND_DECLARATION, `memberName`, `namespace.scope`)
+			!DEPEND_AND_RETURN(`access`, DEPEND_DECLARATION, `memberName`, `namespace.scope`)
 		elseif not decl.name.inferredType then
-			!DEPEND_AND_RETURN(`lookup`, DEPEND_NODE_INFERRED, `decl.name`)
+			!DEPEND_AND_RETURN(`access`, DEPEND_NODE_INFERRED, `decl.name`)
 		end
 
-		local ident         = astCopy(decl.name, lookup.token, lookup.parent)
+		local ident         = astCopy(decl.name, access.token, access.parent)
 		ident.placeDeclared = nil
 
 		-- addUnqueuedChildrenToQueueRecursively(state, ident, !(PIPE_BYTECODE)) -- Not needed for identifiers.
-		replaceQueuedNodeAndUnqueueOldTree(state, lookup, ident)
+		replaceQueuedNodeAndUnqueueOldTree(state, access, ident)
 		-- Stay in the current pipe so we get simplified. (Needed? Or maybe we can @Speed things up here?)
 
 	else
-		typeError(state, lookup, "Values of type '%s' do not have members.", getFriendlyTypeInfoName(typeInfoObject))
+		typeError(state, access, "Values of type '%s' do not have members.", getFriendlyTypeInfoName(typeInfoObject))
 	end
 end
 
@@ -2767,7 +2767,7 @@ end
 
 	-- Validate targets.
 	for _, targetExpr in ipairs(assignment.targets) do
-		if not isAny(targetExpr.nodeType, !(nodeTypes.AstIdentifier),!(nodeTypes.AstLookup)) then
+		if not isAny(targetExpr.nodeType, !(nodeTypes.AstIdentifier),!(nodeTypes.AstAccess)) then
 			!ifDEBUG`astPrint(targetExpr)`
 			typeError(state, astGetExpressionVisuallyFurthestToTheLeft(targetExpr), "Invalid assignment target. Expected a variable name or field.")
 		end
@@ -3380,14 +3380,14 @@ function _G.getLiteralValueFromExpressionIfConstant(state, expr)
 	elseif expr.nodeType == !(nodeTypes.AstCall) then
 		return false, nil -- Calls are always a runtime operation.
 
-	elseif expr.nodeType == !(nodeTypes.AstLookup) then
-		local lookup              = expr
-		local typeInfoRepresented = getTypeRepresentedByExpression(lookup.object)
+	elseif expr.nodeType == !(nodeTypes.AstAccess) then
+		local access              = expr
+		local typeInfoRepresented = getTypeRepresentedByExpression(access.object)
 
 		if typeInfoRepresented and typeInfoRepresented.tag == !(typeTags.TypeInfoEnum) then
 			return true, nil
 		else
-			return false, nil -- Other lookups resolving to constants should have simplified to something else already (I think).
+			return false, nil -- Other accesses resolving to constants should have simplified to something else already (I think).
 		end
 
 	elseif expr.nodeType == !(nodeTypes.AstImport) then
@@ -3426,12 +3426,12 @@ function _G.getAssignmentValue(state, targetExpr, values, i, typeInfoExpected, t
 	!(
 		local TEMPLATE_TARGET_NAME = trimTemplate`(
 			targetExpr.nodeType == $nodeTypeIdent  and " ('"..targetExpr.name.."')" or
-			targetExpr.nodeType == $nodeTypeLookup and targetExpr.member.nodeType == $nodeTypeLiteral and targetExpr.member.literalType == $literalTypeString and " ('"..targetExpr.member.value.."')" or
+			targetExpr.nodeType == $nodeTypeAccess and targetExpr.member.nodeType == $nodeTypeLiteral and targetExpr.member.literalType == $literalTypeString and " ('"..targetExpr.member.value.."')" or
 			""
 		)`
 		local TARGET_NAME = templateToLua(TEMPLATE_TARGET_NAME, {
 			nodeTypeIdent     = nodeTypes.AstIdentifier,
-			nodeTypeLookup    = nodeTypes.AstLookup,
+			nodeTypeAccess    = nodeTypes.AstAccess,
 			nodeTypeLiteral   = nodeTypes.AstLiteral,
 			literalTypeString = LITERAL_STRING,
 		})

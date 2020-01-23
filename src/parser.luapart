@@ -165,7 +165,7 @@ _G.!structAst"AstBinary:_AstExpression"{
 	left      = NIL, -- AstExpression
 	right     = NIL, -- AstExpression
 }
-_G.!structAst"AstLookup:_AstExpression"{ -- @Cleanup: Rename to AstAccess.
+_G.!structAst"AstAccess:_AstExpression"{
 	object = NIL, -- AstExpression
 	member = NIL, -- AstExpression
 	-- Type phase:
@@ -1162,8 +1162,8 @@ function _G.parseAssignment(state, parentNode)
 	!DO_OR_RETURN `parseExpressionList(state, assignment, assignment.targets, true)`
 
 	for i, expr in ipairs(assignment.targets) do
-		if not isAny(expr.nodeType, !(nodeTypes.AstIdentifier),!(nodeTypes.AstLookup)) then
-			!ERROR_OR_RETURN `errorParsing(state, expr.token, "Expected assignment target expression to resolve into a variable or lookup.")`
+		if not isAny(expr.nodeType, !(nodeTypes.AstIdentifier),!(nodeTypes.AstAccess)) then
+			!ERROR_OR_RETURN `errorParsing(state, expr.token, "Expected assignment target expression to resolve into a variable or namespace access.")`
 		end
 	end
 
@@ -2172,47 +2172,47 @@ function _G.parseExpression(state, parentNode, prevOpPrecedence, expectLeftValue
 		-- Lookup using '.'. (t.k is syntactic sugar for t["k"])
 		elseif
 			isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),".")
-			and !(OPERATOR_PRECEDENCE.lookup) > prevOpPrecedence
+			and !(OPERATOR_PRECEDENCE.access) > prevOpPrecedence
 		then
 			eatNextToken(state)
 
-			local lookup = astNewNode(AstLookup, token, parentNode)
+			local access = astNewNode(AstAccess, token, parentNode)
 
 			tokType, tokValue, token = eatNextToken(state)
 			if tokType ~= !(TOKEN_IDENTIFIER) then
 				!ERROR_OR_RETURN `errorParsingLast(state, "Expected an identifier.")`
 			end
 
-			local literal       = astNewNode(AstLiteral, token, lookup)
+			local literal       = astNewNode(AstLiteral, token, access)
 			literal.literalType = !(LITERAL_STRING)
 			literal.value       = tokValue
 
-			lookup.object       = expr
-			lookup.member       = literal
+			access.object       = expr
+			access.member       = literal
 
-			expr.parent         = lookup
-			expr                = lookup
+			expr.parent         = access
+			expr                = access
 
 			nextCanBeMethodCall = true
 
 		-- Lookup using '['.
 		elseif
 			isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"[")
-			and !(OPERATOR_PRECEDENCE.lookup) > prevOpPrecedence
+			and !(OPERATOR_PRECEDENCE.access) > prevOpPrecedence
 		then
 			eatNextToken(state)
 
-			local lookup                  = astNewNode(AstLookup, token, parentNode)
-			lookup.object                 = expr
-			!SET_OR_RETURN `lookup.member = parseExpression(state, lookup, OPERATOR_PRECEDENCE[tokValue])`
+			local access                  = astNewNode(AstAccess, token, parentNode)
+			access.object                 = expr
+			!SET_OR_RETURN `access.member = parseExpression(state, access, OPERATOR_PRECEDENCE[tokValue])`
 
 			tokType, tokValue = eatNextToken(state)
 			if not isToken(tokType,tokValue, !(TOKEN_PUNCTUATION), "]") then
 				!ERROR_OR_RETURN `errorParsingLast(state, "Expected ']'.")`
 			end
 
-			expr.parent = lookup
-			expr        = lookup
+			expr.parent = access
+			expr        = access
 
 		-- Function call.
 		elseif
@@ -2251,7 +2251,7 @@ function _G.parseExpression(state, parentNode, prevOpPrecedence, expectLeftValue
 			if encounteredParenthesis then
 				!ERROR_OR_RETURN `errorParsing(state, exprStartToken, "Unexpected parenthesis around identifier.")` -- :ParenthesisAmbiguityError
 			end
-		elseif expr.nodeType == !(nodeTypes.AstLookup) then
+		elseif expr.nodeType == !(nodeTypes.AstAccess) then
 			-- void
 		else
 			tokType, tokValue = peekNextToken(state)
@@ -2493,28 +2493,28 @@ do
 				if binOp.right then  printNode(binOp.right, indent+1, printed, printChildren)  end
 				!!(CHILD_PRINT_END)
 
-			elseif node.nodeType == !(nodeTypes.AstLookup) then
-				local lookup = node
+			elseif node.nodeType == !(nodeTypes.AstAccess) then
+				local access = node
 				write(" (")
 				write(
-					lookup.object and lookup.inferredType and getFriendlyTypeInfoName(
-						getTypeRepresentedByExpression(lookup.object)
-						or lookup.object.inferredType
+					access.object and access.inferredType and getFriendlyTypeInfoName(
+						getTypeRepresentedByExpression(access.object)
+						or access.object.inferredType
 					)
 					or "?"
 				)
 				write(".")
 				write(
-					lookup.member and (
-						(lookup.member.nodeType == !(nodeTypes.AstLiteral) and tostring(lookup.member.value))
-						or (lookup.inferredType and getFriendlyTypeInfoName(lookup.member.inferredType))
+					access.member and (
+						(access.member.nodeType == !(nodeTypes.AstLiteral) and tostring(access.member.value))
+						or (access.inferredType and getFriendlyTypeInfoName(access.member.inferredType))
 					)
 					or "?"
 				)
 				write(")")
 				!!(CHILD_PRINT_START)
-				if lookup.object then  printNode(lookup.object, indent+1, printed, printChildren)  end
-				if lookup.member then  printNode(lookup.member, indent+1, printed, printChildren)  end
+				if access.object then  printNode(access.object, indent+1, printed, printChildren)  end
+				if access.member then  printNode(access.member, indent+1, printed, printChildren)  end
 				!!(CHILD_PRINT_END)
 
 			elseif node.nodeType == !(nodeTypes.AstDeclaration) then
@@ -2866,7 +2866,7 @@ do
 			end
 		elseif node.nodeType == !(nodeTypes.AstUnary)       then  !VISIT_IF_NOT_NIL "node" {"expression"}
 		elseif node.nodeType == !(nodeTypes.AstBinary)      then  !VISIT_IF_NOT_NIL "node" {"left","right"}
-		elseif node.nodeType == !(nodeTypes.AstLookup)      then  !VISIT_IF_NOT_NIL "node" {"object","member"}
+		elseif node.nodeType == !(nodeTypes.AstAccess)      then  !VISIT_IF_NOT_NIL "node" {"object","member"}
 		elseif node.nodeType == !(nodeTypes.AstTable)       then
 			for _, tableField in ipairs(node) do
 				!VISIT_IF_NOT_NIL "tableField" {"key","value"}
@@ -3008,9 +3008,9 @@ function _G.astGetExpressionVisuallyFurthestToTheLeft(expr, onlyFollowCalls)
 		local binary = expr
 		return astGetExpressionVisuallyFurthestToTheLeft(binary.left, false)
 
-	elseif expr.nodeType == !(nodeTypes.AstLookup) then
-		local lookup = expr
-		return astGetExpressionVisuallyFurthestToTheLeft(lookup.object, false)
+	elseif expr.nodeType == !(nodeTypes.AstAccess) then
+		local access = expr
+		return astGetExpressionVisuallyFurthestToTheLeft(access.object, false)
 
 	else
 		return expr
