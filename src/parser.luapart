@@ -9,7 +9,7 @@
 --=
 --==============================================================
 
-	astCopy
+	astCopy, astCopyArray
 	astFindParent, astFindCommonParent, astHasParent, astFindInTree
 	astGetDepth
 	astGetExpressionVisuallyFurthestToTheLeft, astGetCalleeVisuallyFurthestToTheLeft
@@ -87,11 +87,11 @@ local function structAst(nameAndParent)
 		fields._scopeType = nil
 
 		if not name:find"^_" then
-			nodeTypeN                = nodeTypeN+1
-
 			local overrides          = fields._overrides or {}
-			overrides.nodeType       = nodeTypeN
 			fields._overrides        = overrides
+
+			nodeTypeN                = nodeTypeN+1
+			table.insert(overrides, {`nodeType`, nodeTypeN})
 
 			nodeTypes[name]          = nodeTypeN
 			nodeTypeNames[nodeTypeN] = name
@@ -113,241 +113,239 @@ end
 )
 
 !struct"_AstNode"{
-	nodeType   = 0,
-	s          = 0,   -- Serial number.
-	parent     = NIL, -- AstNode
-	token      = 1,
-	replacedBy = NIL, -- AstNode
-	replacing  = NIL, -- AstNode
+	{`nodeType`,   0},
+	{`s`,          0},   -- Serial number.
+	{`parent`,     nil}, -- AstNode
+	{`token`,      1},
+	{`replacedBy`, nil}, -- AstNode
+	{`replacing`,  nil}, -- AstNode
 	-- Pipe phases:
-	queued = NIL, -- Queued
+	{`queued`,     nil}, -- Queued
 }
 
 !structAst"_AstExpression:_AstNode"{
 	-- Type phase:
-	inferredType = NIL, -- TypeInfo
+	{`inferredType`, nil}, -- TypeInfo
 }
 _G.!structAst"AstIdentifier:_AstExpression"{
-	name          = "",
-	placeDeclared = NIL, -- AstDeclaration|AstStruct|AstFor|AstLambda  (@Cleanup: We don't really use this.)
+	{`name`,          ""},
+	{`placeDeclared`, nil}, -- AstDeclaration|AstStruct|AstFor|AstLambda  (@Cleanup: We don't really use this.)
 	-- Type phase:
-	declaration   = NIL, -- AstDeclaration
-	fromUsing     = NIL, -- AstUsing
+	{`declaration`,   nil}, -- AstDeclaration
+	{`fromUsing`,     nil}, -- AstUsing
 }
 _G.!structAst"AstVararg:AstIdentifier"{
-	_overrides              = {name="..."},
-	surroundedByParenthesis = false,
+	_overrides = {{`name`,"..."}},
+	{`surroundedByParenthesis`, false},
 }
 _G.!structAst"AstLiteral:_AstExpression"{
-	literalType = 0,
-	value       = NIL, -- The value depends on what literalType is. Could be a number, string or whatever.
+	{`literalType`,   0},
+	{`value`,         nil}, -- The value depends on what literalType is. Could be a number, string or whatever.
 	-- Bytecode phase:
-	valueConstant = NIL,
+	{`valueConstant`, nil},
 }
 _G.!structAst"AstType:_AstExpression"{
-	kind              = TYPE_KIND_UNSET, -- TYPE_KIND_SIMPLE_BUILTIN|TYPE_KIND_SIMPLE_USER|TYPE_KIND_FUNCTION|TYPE_KIND_ARRAY|TYPE_KIND_PARAMETERIZED_STRUCT|TYPE_KIND_COMPOUND
-	isUserType        = false,
-	typeName          = "",
-	functionHeader    = NIL, -- AstLambda without a body. This is used to create the actual function type.
-	arrayItemType     = NIL, -- AstType
-	arguments         = NIL, -- []AstExpression  (Is set for parameterized structs.)
-	components        = {},  -- []AstExpression  (Used if kind is TYPE_KIND_COMPOUND.)
+	{`kind`,            TYPE_KIND_UNSET}, -- TYPE_KIND_SIMPLE_BUILTIN|TYPE_KIND_SIMPLE_USER|TYPE_KIND_FUNCTION|TYPE_KIND_ARRAY|TYPE_KIND_PARAMETERIZED_STRUCT|TYPE_KIND_COMPOUND
+	{`isUserType`,      false},
+	{`typeName`,        ""},
+	{`functionHeader`,  nil, ast="node"},  -- AstLambda without a body. This is used to create the actual function type.
+	{`arrayItemType`,   nil, ast="node"},  -- AstType
+	{`arguments`,       nil, ast="array"}, -- []AstExpression  (Is set for parameterized structs.)
+	{`components`,      {},  ast="array"}, -- []AstExpression  (Used if kind is TYPE_KIND_COMPOUND.)
 	-- Type phase:
-	representedType   = NIL, -- TypeInfo
-	declaration       = NIL, -- AstDeclaration
+	{`representedType`, nil}, -- TypeInfo
+	{`declaration`,     nil}, -- AstDeclaration
 }
 _G.!structAst"AstUnary:_AstExpression"{
-	operation  = "",  -- "-" or "not" etc.
-	expression = NIL, -- AstExpression
+	{`operation`,  ""},  -- "-" or "not" etc.
+	{`expression`, nil, ast="node"}, -- AstExpression
 }
 _G.!structAst"AstBinary:_AstExpression"{
-	operation = "",  -- "+" or "-" etc.
-	left      = NIL, -- AstExpression
-	right     = NIL, -- AstExpression
+	{`operation`, ""},  -- "+" or "-" etc.
+	{`left`,      nil, ast="node"}, -- AstExpression
+	{`right`,     nil, ast="node"}, -- AstExpression
 }
 _G.!structAst"AstAccess:_AstExpression"{
-	object = NIL, -- AstExpression
-	member = NIL, -- AstExpression
+	{`object`,          nil, ast="node"}, -- AstExpression
+	{`member`,          nil, ast="node"}, -- AstExpression
 	-- Type phase:
-	representedType = NIL, -- TypeInfo  (Not used anywhere. 2020-01-02)
+	{`representedType`, nil}, -- TypeInfo  (Not used anywhere. 2020-01-02)
 }
-local !struct"TableField"{ key=NIL, value=NIL }
+local !struct"TableField"{ {`key`,nil}, {`value`,nil} }
 _G.!structAst"AstTable:_AstExpression"{
-	-- [1]=tableField1, ...
+	{`fields`, {}, ast="fields"}, -- []TableField
 }
 _G.!structAst"AstCall:_AstExpression"{
-	couldBeTypeWithParameters = false,
-	isMethod                  = false,
-	surroundedByParenthesis   = false,
-	callee                    = NIL, -- AstExpression
-	arguments                 = {},  -- []AstExpression
+	{`couldBeTypeWithParameters`, false},
+	{`isMethod`,                  false},
+	{`surroundedByParenthesis`,   false},
+	{`callee`,                    nil, ast="node"}, -- AstExpression
+	{`arguments`,                 {},  ast="array"},  -- []AstExpression
 }
 _G.!structAst"AstTypeOf:_AstExpression"{
-	expression = NIL,
+	{`expression`, nil, ast="node"}, -- AstExpression
 	-- Type phase:
-	representedType = NIL,
+	{`representedType`, nil},
 }
 _G.!structAst"AstCast:_AstExpression"{
-	targetType = NIL, -- AstType
-	expression = NIL, -- AstExpression
+	{`targetType`, nil, ast="node"}, -- AstType
+	{`expression`, nil, ast="node"}, -- AstExpression
 }
 _G.!structAst"AstImport:_AstExpression"{
-	isLoad     = false,
-	importName = "",
+	{`isLoad`,     false},
+	{`importName`, ""},
 	-- Type phase:
-	fileScope  = NIL, -- AstFileScope
+	{`fileScope`,  nil}, -- AstFileScope
 }
 _G.!structAst"AstForeign:_AstExpression"{
-	source     = "", -- "lua"|"compiler"
-	sourceName = "", -- May be inferred from declaration.
-
+	{`source`,        ""}, -- "lua"|"compiler"
+	{`sourceName`,    ""}, -- May be inferred from declaration.
 	-- Type phase:
-	sourceId = "", -- Is source and sourceName combined.
-
+	{`sourceId`,      ""}, -- Is source and sourceName combined.
 	-- Bytecode phase:
-	valueConstant = NIL,
+	{`valueConstant`, nil},
 }
 
 _G.!structAst"AstUsing:_AstNode"{
-	expression = NIL, -- AstExpression
+	{`expression`,          nil, ast="node"}, -- AstExpression
 	-- Type phase:
-	scope               = NIL, -- AstScope
-	variableDeclaration = NIL, -- AstDeclaration
+	{`scope`,               nil}, -- AstScope
+	{`variableDeclaration`, nil}, -- AstDeclaration
 }
 
 _G.!structAst"AstArgument:_AstNode"{
-	declaration = NIL,   -- AstDeclaration
-	assignment  = NIL,   -- AstAssignment
-	group       = 0,     -- Arguments in the same group have the same type. This is a small optimization for the typer.
-	autobake    = 0,     -- 0=disabled, 1=enabled, 2=required  @Incomplete
-	isUsing     = false, -- Is it better to store this on declarations?
+	{`declaration`, nil, ast="node"}, -- AstDeclaration
+	{`assignment`,  nil, ast="node"}, -- AstAssignment
+	{`group`,       0},     -- Arguments in the same group have the same type. This is a small optimization for the typer.
+	{`autobake`,    0},     -- 0=disabled, 1=enabled, 2=required  @Incomplete
+	{`isUsing`,     false}, -- Is it better to store this on declarations?
 
 	-- For an input argument, this indicates optionality.
 	-- For an output argument, if there's a !must then it must not be adjusted away by the caller.
-	isRequired = false,
+	{`isRequired`,  false},
 }
 _G.!structAst"AstArguments:_AstNode"{
-	-- [1]=argument1, ...
+	{`arguments`, {}, ast="array"}, -- []AstArgument
 }
 
 _G.!structAst"AstDeclaration:_AstNode"{
-	name                 = NIL, -- AstIdentifier|AstVararg
-	type                 = nil, -- AstType  (If this is nil then the type is inferred from the value.)
-	notes                = {},  -- []AstNote  @Incomplete: Notes.
+	{`name`,                 nil, ast="node"},  -- AstIdentifier|AstVararg
+	{`type`,                 nil, ast="node"},  -- AstType  (If this is nil then the type is inferred from the value.)
+	{`notes`,                {},  ast="array"}, -- []AstNote  @Incomplete: Notes.
 
-	isGlobalOrExported   = false,
-	isConstant           = false,
-	canShadow            = false,
+	{`isGlobalOrExported`,   false},
+	{`isConstant`,           false},
+	{`canShadow`,            false},
 
-	assignment           = NIL, -- AstAssignment  (If this is nil then the name gets it's default value (which depends on the type, of which there must be only one.))
-	assignmentIndex      = 1,
+	{`assignment`,           nil}, -- AstAssignment  (If this is nil then the name gets it's default value (which depends on the type, of which there must be only one.))
+	{`assignmentIndex`,      1},
 
 	-- Type phase:
-	valueTypeInfo        = NIL, -- Type represented by the assigned value if isConstant. If this is set then the declared identifier can be used in places where a type is expected. Can be nil.
-	checkedRedeclaration = false,
-	overloads            = {},
-	overloadOf           = NIL, -- AstDeclaration  (If this is self then we're the base declaration for the overloads and the overloads array should be filled.)
-	overloadsLocked      = false,
+	{`valueTypeInfo`,        nil}, -- Type represented by the assigned value if isConstant. If this is set then the declared identifier can be used in places where a type is expected. Can be nil.
+	{`checkedRedeclaration`, false},
+	{`overloads`,            {}},
+	{`overloadOf`,           nil}, -- AstDeclaration  (If this is self then we're the base declaration for the overloads and the overloads array should be filled.)
+	{`overloadsLocked`,      false},
 
 	-- Bytecode phase:
-	valueConstant        = NIL,
-	topScopeName         = "",
-	localName            = "",
+	{`valueConstant`,        nil},
+	{`topScopeName`,         ""},
+	{`localName`,            ""},
 }
 
 _G.!structAst"AstAssignment:_AstNode"{
-	forDeclaration = false,
-	declarations   = NIL, -- []AstDeclaration  (Is set if forDeclaration is set.)
-	operation      = "=",
-	targets        = {},  -- []AstExpression
-	values         = {},  -- []AstExpression
+	{`forDeclaration`, false},
+	{`declarations`,   nil}, -- []AstDeclaration  (Is set if forDeclaration is set.)
+	{`operation`,      "="},
+	{`targets`,        {}, ast="array"}, -- []AstExpression
+	{`values`,         {}, ast="array"}, -- []AstExpression
 }
 
 !structAst"_AstJump:_AstNode"{}
 _G.!structAst"AstReturn:_AstJump"{
-	values = {}, -- []AstExpression
+	{`values`, {}, ast="array"}, -- []AstExpression
 }
 _G.!structAst"AstBreak:_AstJump"{
-	loopName = NIL, -- AstIdentifier
+	{`loopName`, nil, ast="node"}, -- AstIdentifier
 }
 _G.!structAst"AstContinue:_AstJump"{
-	loopName = NIL, -- AstIdentifier
+	{`loopName`, nil, ast="node"}, -- AstIdentifier
 }
 
 _G.!structAst"AstDefer:_AstNode"{
-	body = NIL, -- AstBlock
+	{`body`, nil, ast="node"}, -- AstBlock
 }
 
 !structAst"_AstScope:_AstNode"{
-	declarations = {}, -- []AstDeclaration  (Note that inner blocks have their own declarations.)
-	imports      = {}, -- []AstImport       (Excluding loads.)
-	usings       = {}, -- []AstUsing
-	-- [1]=statement1, ...
+	{`statements`,         {}, ast="array"}, -- []AstNode
+	{`declarations`,       {}}, -- []AstDeclaration  (Note that inner blocks have their own declarations.)
+	{`imports`,            {}}, -- []AstImport       (Excluding loads.)
+	{`usings`,             {}}, -- []AstUsing
 	-- Type phase:
-	declarationsInTree = {}, -- Includes all child scopes. Does not include shadows.
+	{`declarationsInTree`, {}}, -- Includes all child scopes. Does not include shadows.
 }
 _G.!structAst"AstBlock:_AstScope"{
 	_scopeType = "imperative",
 }
 _G.!structAst"AstFileScope:_AstScope"{
 	_scopeType = "declarative",
-	path       = "",
-	isModule   = false,
-	moduleName = "",
+	{`path`,       ""},
+	{`isModule`,   false},
+	{`moduleName`, ""},
 }
 _G.!structAst"AstGlobalScope:_AstScope"{
-	_scopeType     = "declarative",
-	firstFileScope = NIL, -- AstFileScope
-	fileScopes     = {},  -- []AstFileScope
+	_scopeType = "declarative",
+	{`fileScopes`,     {}},  -- []AstFileScope
+	{`firstFileScope`, nil}, -- AstFileScope  (@Cleanup: Remove this in favor of fileScopes[1].)
 }
 _G.!structAst"AstFor:_AstScope"{
-	_scopeType  = "imperative",
-	forType     = FOR_NUMERIC,
-	names       = {},  -- []AstIdentifier  These are never inferred, but instead copied to declarations. @Cleanup: Can we get rid of this in favor of the copy we currently make?
-	expressions = {},  -- []AstExpression  @Cleanup: Move these to statements in the AstFor scope?
-	body        = NIL, -- AstBlock
+	_scopeType = "imperative",
+	{`forType`,     FOR_NUMERIC},
+	{`names`,       {}},              -- []AstIdentifier  These are never inferred, but instead copied to declarations. @Cleanup: Can we get rid of this in favor of the copy we currently make?
+	{`expressions`, {}, ast="array"}, -- []AstExpression  @Cleanup: Move these into AstFor.statements?
+	{`body`,        nil},             -- AstBlock
 }
 !structAst"_AstScopeExpression:_AstScope"{
 	-- Type phase:
-	inferredType    = NIL, -- TypeInfo
-	representedType = NIL, -- TypeInfoStruct|TypeInfoEnum  (Used for AstEnum and AstStruct. Is nil otherwise.)
+	{`inferredType`,    nil}, -- TypeInfo
+	{`representedType`, nil}, -- TypeInfoStruct|TypeInfoEnum  (Used for AstEnum and AstStruct. Is nil otherwise.)
 }
 _G.!structAst"AstStruct:_AstScopeExpression"{
 	_scopeType = "declarative",
-	arguments  = NIL, -- AstArguments
+	{`arguments`, nil, ast="node"}, -- AstArguments
 }
 _G.!structAst"AstEnum:_AstScopeExpression"{
 	_scopeType = "declarative",
-	memberType = NIL, -- AstType
+	{`memberType`, nil, ast="node"}, -- AstType
 }
 _G.!structAst"AstLambda:_AstScopeExpression"{
-	_scopeType        = "imperative",
+	_scopeType = "imperative",
 
-	argumentsIn       = NIL, -- AstArguments
-	argumentsOut      = NIL, -- AstArguments
+	{`argumentsIn`,       nil},   -- AstArguments
+	{`argumentsOut`,      nil},   -- AstArguments
 
-	body              = NIL, -- AstBlock  (If this is nil then the lambda is a function signature. If bodyIsForeign is set then this is a dummy block.)
-	bodyIsForeign     = false, -- @Cleanup: Use AstForeign instead of all this stuff.
-	foreignSource     = "",
-	foreignSourceName = "",
+	{`body`,              nil},   -- AstBlock  (If this is nil then the lambda is a function signature. If bodyIsForeign is set then this is a dummy block.)
+	{`bodyIsForeign`,     false}, -- @Cleanup: Use AstForeign instead of all this stuff.
+	{`foreignSource`,     ""},
+	{`foreignSourceName`, ""},
 
-	bodyEndToken      = 1,   -- For better error messages.
+	{`bodyEndToken`,      1},     -- For better error messages.
 
 	-- Type phase:
-	foreignSourceId   = "",  -- Is foreignSource and foreignSourceName combined.
+	{`foreignSourceId`,   ""},    -- Is foreignSource and foreignSourceName combined.
 
 	-- Bytecode phase:
-	bytecodes         = {}, -- Filled if we're not a function signature.
+	{`bytecodes`,         {}},    -- Filled if we're not a function signature.
 }
 
 _G.!structAst"AstIf:_AstNode"{
-	condition   = NIL, -- AstExpression
-	branchTrue  = NIL, -- AstBlock
-	branchFalse = NIL, -- AstBlock
+	{`condition`,   nil, ast="node"}, -- AstExpression
+	{`branchTrue`,  nil, ast="node"}, -- AstBlock
+	{`branchFalse`, nil, ast="node"}, -- AstBlock
 }
 _G.!structAst"AstWhile:_AstNode"{
-	condition   = NIL, -- AstExpression
-	body        = NIL, -- AstBlock
+	{`condition`, nil, ast="node"}, -- AstExpression
+	{`body`,      nil, ast="node"}, -- AstBlock
 }
 
 _G.AST_NODE_TYPE_NAMES = !(nodeTypeNames)
@@ -530,7 +528,7 @@ function _G.parseTable(state, parentNode)
 		tableField.key                   = tableKey
 		!SET_OR_RETURN `tableField.value = parseExpression(state, tableNode)`
 
-		table.insert(tableNode, tableField)
+		table.insert(tableNode.fields, tableField)
 
 		tokType, tokValue = eatNextToken(state)
 		if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"}") then
@@ -614,8 +612,8 @@ function _G.parseArguments(state, parentNode, isInput, placeDeclared)
 			arg.group   = groupN
 			arg.isUsing = isUsing
 
-			table.insert(args,        arg)
-			table.insert(argsInGroup, arg)
+			table.insert(args.arguments, arg)
+			table.insert(argsInGroup,    arg)
 
 			local decl      = astNewNode(AstDeclaration, token, arg)
 			arg.declaration = decl
@@ -757,7 +755,7 @@ function _G.parseArguments(state, parentNode, isInput, placeDeclared)
 	end
 
 	if isInput then
-		for _, arg in ipairs(args) do
+		for _, arg in ipairs(args.arguments) do
 			arg.isRequired = (arg.assignment == nil and arg.declaration.name.nodeType ~= !(nodeTypes.AstVararg))
 		end
 	else
@@ -773,7 +771,7 @@ function _G.parseNamelessArguments(state, parentNode, placeDeclared)
 	for groupN = 1, math.huge do
 		local arg = astNewNode(AstArgument, state.nextToken, args)
 		arg.group = groupN
-		table.insert(args, arg)
+		table.insert(args.arguments, arg)
 
 		local decl                = astNewNode(AstDeclaration, arg.token, arg)
 		arg.declaration           = decl
@@ -1132,11 +1130,11 @@ function _G.parseDeclarationStatement(state, block, placeDeclared, declType)
 	--
 
 	for i = 1, #declarations do
-		table.insert(block,              declarations[i])
+		table.insert(block.statements,   declarations[i])
 		table.insert(block.declarations, declarations[i])
 	end
 	if assignment then
-		table.insert(block, assignment)
+		table.insert(block.statements, assignment)
 	end
 	if isUsing then
 		for _, decl in ipairs(declarations) do
@@ -1147,8 +1145,8 @@ function _G.parseDeclarationStatement(state, block, placeDeclared, declType)
 			ident.declaration = decl
 			using.expression  = ident
 
-			table.insert(block,        using)
-			table.insert(block.usings, using)
+			table.insert(block.statements, using)
+			table.insert(block.usings,     using)
 		end
 	end
 
@@ -1256,7 +1254,7 @@ function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 				!ERROR_OR_RETURN_FALSE `errorParsingNext(state, "Internal compiler error: Not inside a function.")`
 			end
 
-			if lambda.argumentsOut and lambda.argumentsOut[1] then
+			if lambda.argumentsOut and lambda.argumentsOut.arguments[1] then
 				!DO_OR_RETURN_FALSE `parseExpressionList(state, returnNode, returnNode.values)`
 			end
 		end
@@ -1433,7 +1431,7 @@ function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 		end
 
 		!SET_OR_RETURN_FALSE `forLoop.body = parseBlockOrScopedStatement(state, forLoop)`
-		table.insert(forLoop, forLoop.body)
+		table.insert(forLoop.statements, forLoop.body)
 
 		statement = forLoop
 
@@ -1486,7 +1484,7 @@ function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 	end
 
 	!ASSERT `statement`
-	table.insert(block, statement)
+	table.insert(block.statements, statement)
 
 	eatTrailingSemicolon(state)
 	return true
@@ -1497,6 +1495,15 @@ function _G.parseBlock(state, parentNode)
 
 	local blockStartToken     = state.nextToken-1
 	local block               = astNewNode(AstBlock, blockStartToken, parentNode)
+
+	!if DEBUG then
+		--[[
+		setmetatable(block, {__newindex=function(block, k, v)
+			assert(k ~= 1)
+			rawset(block, k, v)
+		end})
+		--]]
+	!end
 
 	local statementStartToken = blockStartToken
 	local lastNodeType        = 0
@@ -1532,7 +1539,7 @@ function _G.parseBlock(state, parentNode)
 			statementStartToken = state.nextToken
 			!DO_OR_RETURN `parseOneStatementButSometimesMoreAndAddToBlock(state, block)`
 
-			local statement = getLast(block)
+			local statement = getLast(block.statements)
 			lastNodeType    = statement.nodeType -- This is for return/break/continue check.
 		end
 	end
@@ -1605,7 +1612,7 @@ function _G.parseFileScope(state, parentNode, path, isModule, moduleName)
 			!SET_OR_RETURN `local import = parseImportOrLoad(state, fileScope)`
 			statement                    = import
 
-			table.insert(fileScope, import)
+			table.insert(fileScope.statements, import)
 
 			if not import.isLoad then
 				table.insert(fileScope.imports, import)
@@ -1615,8 +1622,8 @@ function _G.parseFileScope(state, parentNode, path, isModule, moduleName)
 			!SET_OR_RETURN `local using = parseUsing(state, fileScope)`
 			statement                   = using
 
-			table.insert(fileScope,        using)
-			table.insert(fileScope.usings, using)
+			table.insert(fileScope.statements, using)
+			table.insert(fileScope.usings,     using)
 
 		elseif isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),";") then
 			eatNextToken(state)
@@ -1651,7 +1658,7 @@ function _G.parseGlobalScope(state, firstFilePath)
 	local firstFileScope       = parseFileScope(state, globalScope, firstFilePath, false, "")
 	globalScope.firstFileScope = firstFileScope
 
-	table.insert(globalScope, firstFileScope)
+	table.insert(globalScope.statements, firstFileScope)
 	astMoveGlobalDeclarationsToGlobalScope(state, firstFileScope)
 
 	return globalScope
@@ -1725,9 +1732,9 @@ function _G.parseLambda(state, parentNode, allowBody)
 	else
 		!SET_OR_RETURN `local args = parseArguments(state, lambda, true, lambda)`
 		lambda.argumentsIn         = args
-		table.insert(lambda, args)
+		table.insert(lambda.statements, args)
 
-		for _, arg in ipairs(args) do
+		for _, arg in ipairs(args.arguments) do
 			table.insert(lambda.declarations, arg.declaration)
 
 			if arg.isUsing then
@@ -1739,8 +1746,8 @@ function _G.parseLambda(state, parentNode, allowBody)
 				ident.declaration = decl
 				using.expression  = ident
 
-				table.insert(lambda,        using)
-				table.insert(lambda.usings, using)
+				table.insert(lambda.statements, using)
+				table.insert(lambda.usings,     using)
 			end
 		end
 
@@ -1807,7 +1814,7 @@ function _G.parseLambda(state, parentNode, allowBody)
 
 		if args then
 			lambda.argumentsOut = args
-			table.insert(lambda, args)
+			table.insert(lambda.statements, args)
 		end
 	end
 
@@ -1817,9 +1824,10 @@ function _G.parseLambda(state, parentNode, allowBody)
 
 		if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"{") then
 			eatNextToken(state)
+
 			!SET_OR_RETURN `local block = parseBlock(state, lambda)`
 			lambda.body                 = block
-			table.insert(lambda, block)
+			table.insert(lambda.statements, block)
 
 			lambda.bodyEndToken = state.nextToken-1 -- The '}'.
 
@@ -1827,9 +1835,9 @@ function _G.parseLambda(state, parentNode, allowBody)
 			eatNextToken(state)
 			lambda.bodyIsForeign = true
 
-			local block     = astNewNode(AstBlock, state.nextToken-1, lambda) -- Dummy block.
-			lambda.body     = block
-			table.insert(lambda, block)
+			local block = astNewNode(AstBlock, state.nextToken-1, lambda) -- Dummy block.
+			lambda.body = block
+			table.insert(lambda.statements, block)
 
 			tokType, tokValue = eatNextToken(state)
 			if not isToken(tokType,tokValue, !(TOKEN_IDENTIFIER)) then
@@ -2537,7 +2545,7 @@ do
 			elseif node.nodeType == !(nodeTypes.AstTable) then
 				local tableNode = node
 				!!(CHILD_PRINT_START)
-				for i, tableField in ipairs(tableNode) do
+				for i, tableField in ipairs(tableNode.fields) do
 					if tableField.key   then  printNode(tableField.key,   indent+1, printed, printChildren, i.."K")  end
 					if tableField.value then  printNode(tableField.value, indent+1, printed, printChildren, i.."V")  end
 				end
@@ -2568,7 +2576,7 @@ do
 			elseif node.nodeType == !(nodeTypes.AstArguments) then
 				local args = node
 				!!(CHILD_PRINT_START)
-				printNodeList(args, indent+1, printed, printChildren)
+				printNodeList(args.arguments, indent+1, printed, printChildren)
 				!!(CHILD_PRINT_END)
 
 			elseif node.nodeType == !(nodeTypes.AstArgument) then
@@ -2684,7 +2692,7 @@ do
 			elseif node.nodeType == !(nodeTypes.AstGlobalScope) then
 				local globalScope = node
 				!!(CHILD_PRINT_START)
-				printNodeList(globalScope, indent+1, printed, printChildren)
+				printNodeList(globalScope.statements, indent+1, printed, printChildren)
 				!!(CHILD_PRINT_END)
 
 			elseif node.nodeType == !(nodeTypes.AstLiteral) then
@@ -2735,7 +2743,7 @@ do
 					local struct = node
 					printNodeList(struct.arguments, indent+1, printed, printChildren)
 				end
-				printNodeList(node, indent+1, printed, printChildren)
+				printNodeList(node.statements, indent+1, printed, printChildren)
 				!!(CHILD_PRINT_END)
 
 			else
@@ -2797,7 +2805,7 @@ function _G.astFindInTree(topNode, ...)
 	astVisitAllNodes(topNode, function(node)
 		if indexOf(nodeTypes, node.nodeType) then
 			nodeToReturn = node
-			return VISIT_BREAK
+			return !(VISIT_BREAK)
 		end
 	end)
 
@@ -2819,29 +2827,73 @@ end
 -- controlValue = VISIT_CONTINUE|VISIT_BREAK|VISIT_IGNORE_CHILDREN
 -- Note: VISIT_IGNORE_CHILDREN does nothing when using astVisitAllNodesLeavesFirst().
 do
-	local function visit(visited, cb, leavesFirst, container, key, node)
-		-- Note: We return true from this function if we want to break.
+	local visit -- Forward declaraion.
+
+	local VISITORS = {
 		!(
-		local INDENT = ("\t"):rep(3)
+		local TEMPLATE_FUNCTION_HEADER = "function--[[$name]](visited, cb, leavesFirst, node)"
+		local TEMPLATE_FUNCTION_FOOTER = "end,\n"
 
-		local function VISIT_IF_NOT_NIL(var) return function(fieldNames)
-			__LUA("\n",INDENT,"local subNode")
-			for _, fieldName in ipairs(fieldNames) do
-				__LUA("\n",INDENT,"subNode = ",var,".",fieldName)
-				__LUA("\n",INDENT,"if subNode and visit(visited, cb, leavesFirst, ",var,", ",toLua(fieldName),", subNode) then  return true  end")
+		local TEMPLATE_TRAVERSE_NODE_IF_SET = `
+			local subNode = node.$field
+			if subNode and visit(visited, cb, leavesFirst, node, $fieldLiteral, subNode) then  return true  end
+		`
+		local TEMPLATE_TRAVERSE_ARRAY = `
+			local arr = node.$field
+			for i, subNode in ipairs(arr) do
+				if visit(visited, cb, leavesFirst, arr, i, subNode) then  return true  end
 			end
-		end end
+		`
+		local TEMPLATE_TRAVERSE_ARRAY_IF_SET = `
+			local arr = node.$field
+			if arr then
+				for i, subNode in ipairs(arr) do
+					if visit(visited, cb, leavesFirst, arr, i, subNode) then  return true  end
+				end
+			end
+		`
+		local TEMPLATE_TRAVERSE_FIELDS = `
+			for _, tableField in ipairs(node.$field) do
+				local subNode = tableField.key
+				if subNode and visit(visited, cb, leavesFirst, tableField, $fieldLiteral, subNode) then  return true  end
+				subNode = tableField.value
+				if subNode and visit(visited, cb, leavesFirst, tableField, $fieldLiteral, subNode) then  return true  end
+			end
+		`
 
-		local function VISIT_LIST(var) return function(fieldNames)
-			__LUA("\n",INDENT,"local arr")
-			for _, fieldName in ipairs(fieldNames) do
-				__LUA("\n",INDENT,"arr = ",var) ; if fieldName ~= "" then  __LUA(".",fieldName)  end
-				__LUA("\n",INDENT,"for i, subNode in ipairs(arr) do")
-				__LUA("\n",INDENT,"\tif visit(visited, cb, leavesFirst, arr, i, subNode) then  return true  end")
-				__LUA("\n",INDENT,"end ")
+		for nodeType, name in ipairs(nodeTypeNames) do
+			local fields = structs[name] or error(name)
+
+			__LUA(templateToLua(TEMPLATE_FUNCTION_HEADER, {name=name}))
+
+			for _, field in ipairs(fields) do
+				local k = field[1]
+
+				if field.ast == "node" then
+					__LUA(templateToLua(TEMPLATE_TRAVERSE_NODE_IF_SET, {field=k, fieldLiteral=toLua(k)}))
+
+				elseif field.ast == "array" then
+					if field[2] then
+						__LUA(templateToLua(TEMPLATE_TRAVERSE_ARRAY, {field=k, fieldLiteral=toLua(k)}))
+					else
+						__LUA(templateToLua(TEMPLATE_TRAVERSE_ARRAY_IF_SET, {field=k, fieldLiteral=toLua(k)}))
+					end
+
+				elseif field.ast == "fields" then
+					__LUA(templateToLua(TEMPLATE_TRAVERSE_FIELDS, {field=k, fieldLiteral=toLua(k)}))
+
+				elseif field.ast then
+					error(field.ast)
+				end
 			end
-		end end
+
+			__LUA(templateToLua(TEMPLATE_FUNCTION_FOOTER, {}))
+		end
 		)
+	}
+
+	function visit(visited, cb, leavesFirst, container, key, node)
+		-- Note: We return true from this function if we want to break.
 
 		assert(not visited[node])
 		visited[node] = true
@@ -2855,48 +2907,8 @@ do
 			end
 		end
 
-		if     node.nodeType == !(nodeTypes.AstIdentifier)  then  -- void
-		elseif node.nodeType == !(nodeTypes.AstVararg)      then  -- void
-		elseif node.nodeType == !(nodeTypes.AstLiteral)     then  -- void
-		elseif node.nodeType == !(nodeTypes.AstType)        then
-			!VISIT_IF_NOT_NIL "node" {"functionHeader","arrayItemType"}
-			!VISIT_LIST "node" {"components"}
-			if node.arguments then
-				!VISIT_LIST "node" {"arguments"}
-			end
-		elseif node.nodeType == !(nodeTypes.AstUnary)       then  !VISIT_IF_NOT_NIL "node" {"expression"}
-		elseif node.nodeType == !(nodeTypes.AstBinary)      then  !VISIT_IF_NOT_NIL "node" {"left","right"}
-		elseif node.nodeType == !(nodeTypes.AstAccess)      then  !VISIT_IF_NOT_NIL "node" {"object","member"}
-		elseif node.nodeType == !(nodeTypes.AstTable)       then
-			for _, tableField in ipairs(node) do
-				!VISIT_IF_NOT_NIL "tableField" {"key","value"}
-			end
-		elseif node.nodeType == !(nodeTypes.AstCall)        then  !VISIT_IF_NOT_NIL "node" {"callee"} ; VISIT_LIST "node" {"arguments"}
-		elseif node.nodeType == !(nodeTypes.AstArgument)    then  !VISIT_IF_NOT_NIL "node" {"declaration","assignment"}
-		elseif node.nodeType == !(nodeTypes.AstArguments)   then  !VISIT_LIST "node" {""}
-		elseif node.nodeType == !(nodeTypes.AstLambda)      then  !VISIT_LIST "node" {""}
-		elseif node.nodeType == !(nodeTypes.AstTypeOf)      then  !VISIT_IF_NOT_NIL "node" {"expression"}
-		elseif node.nodeType == !(nodeTypes.AstCast)        then  !VISIT_IF_NOT_NIL "node" {"targetType","expression"}
-		elseif node.nodeType == !(nodeTypes.AstDeclaration) then  !VISIT_IF_NOT_NIL "node" {"name","type"} ; VISIT_LIST "node" {"notes"}
-		elseif node.nodeType == !(nodeTypes.AstAssignment)  then  !VISIT_LIST "node" {"targets","values"}
-		elseif node.nodeType == !(nodeTypes.AstReturn)      then  !VISIT_LIST "node" {"values"}
-		elseif node.nodeType == !(nodeTypes.AstBreak)       then  !VISIT_IF_NOT_NIL "node" {"loopName"}
-		elseif node.nodeType == !(nodeTypes.AstContinue)    then  !VISIT_IF_NOT_NIL "node" {"loopName"}
-		elseif node.nodeType == !(nodeTypes.AstDefer)       then  !VISIT_IF_NOT_NIL "node" {"body"}
-		elseif node.nodeType == !(nodeTypes.AstImport)      then  -- void
-		elseif node.nodeType == !(nodeTypes.AstForeign)     then  -- void
-		elseif node.nodeType == !(nodeTypes.AstUsing)       then  !VISIT_IF_NOT_NIL "node" {"expression"}
-		elseif node.nodeType == !(nodeTypes.AstIf)          then  !VISIT_IF_NOT_NIL "node" {"condition","branchTrue","branchFalse"}
-		elseif node.nodeType == !(nodeTypes.AstWhile)       then  !VISIT_IF_NOT_NIL "node" {"condition","body"}
-		elseif node.nodeType == !(nodeTypes.AstFor)         then  !VISIT_LIST "node" {"expressions",""}
-		elseif node.nodeType == !(nodeTypes.AstBlock)       then  !VISIT_LIST "node" {""}
-		elseif node.nodeType == !(nodeTypes.AstFileScope)   then  !VISIT_LIST "node" {""}
-		elseif node.nodeType == !(nodeTypes.AstGlobalScope) then  !VISIT_LIST "node" {""}
-		elseif node.nodeType == !(nodeTypes.AstStruct)      then  !VISIT_IF_NOT_NIL "node" {"arguments"}  ; VISIT_LIST "node" {""}
-		elseif node.nodeType == !(nodeTypes.AstEnum)        then  !VISIT_IF_NOT_NIL "node" {"memberType"} ; VISIT_LIST "node" {""}
-		else
-			errorUnhandledNodeType(state, node)
-		end
+		local visitor = VISITORS[node.nodeType] or errorInternal(state, node)
+		if visitor(visited, cb, leavesFirst, node) then  return true  end
 
 		if leavesFirst and cb(node, container, key) == !(VISIT_BREAK) then
 			return true
@@ -2921,7 +2933,7 @@ end
 function _G.astCopy(node, token, parent)
 	local copy
 
-	-- @Cleanup: Make preprocessor structs more declarative and better so we can generate this function instead of doing all this stuff manually...
+	-- @Cleanup: Generate this function instead of doing all this stuff manually. (See VISITORS)
 
 	if node.nodeType == !(nodeTypes.AstIdentifier) then
 		local ident        = node
@@ -2985,7 +2997,7 @@ function _G.astCopy(node, token, parent)
 end
 
 -- copies = astCopyArray( nodes [, token=sameAsSource, parent=sameAsSource ] )
-function astCopyArray(nodes, token, parent)
+function _G.astCopyArray(nodes, token, parent)
 	local copies = {}
 	for i, node in ipairs(nodes) do
 		copies[i] = astCopy(node, token, parent)

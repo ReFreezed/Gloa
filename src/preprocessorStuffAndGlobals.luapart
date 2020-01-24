@@ -143,8 +143,6 @@ _G.OPERATOR_PRECEDENCE = {
 	x^y^z             <-->  x^(y^z)
 ]]
 
-_G.NIL = {} -- Placeholder value representing nil values in structs in the metaprogram.
-
 
 
 _G.F       = string.format
@@ -152,30 +150,11 @@ _G.getByte = string.byte
 
 
 
--- !struct       "_Name[:Parent]" { field1=value1, ... }
--- local !struct "Name[:Parent]"  { field1=value1, ... }
--- _G.!struct    "Name[:Parent]"  { field1=value1, ... }
+-- !struct       "_Name[:Parent]" { {[1]=field1, [2]=fieldValue, option1=optionValue, ...}, ... }
+-- local !struct "Name[:Parent]"  { {[1]=field1, [2]=fieldValue, option1=optionValue, ...}, ... }
+-- _G.!struct    "Name[:Parent]"  { {[1]=field1, [2]=fieldValue, option1=optionValue, ...}, ... }
 do
-	--[[
-	local TEMPLATE_STRUCT_PREALLOC_PREPARATION = trimTemplate`
-		local __struct_$structN_preAllocated__ = {}
-		local __struct_$structN_index__        = math.huge
-	`
-	local TEMPLATE_STRUCT_PREALLOC_FUNCTION = trimTemplate`
-		$structName = function()
-			__struct_$structN_index__ = __struct_$structN_index__+1
-			if __struct_$structN_index__ > $count then
-				__struct_$structN_index__ = 1
-				for i = 1, $count do
-					__struct_$structN_preAllocated__[i] = $tableConstructor
-				end
-			end
-			return __struct_$structN_preAllocated__[__struct_$structN_index__]
-		end
-	`
-	]]
-
-	local structs      = {}
+	_G.structs         = {}
 	local structNumber = 0
 
 	function _G.struct(nameAndMaybeParent) return function(fields)
@@ -186,29 +165,36 @@ do
 			error(F("Duplicate struct '%s'.", name), 2)
 		end
 
-		local overrides     = fields._overrides
-		local preAllocate   = fields._preAllocate
-		fields._overrides   = nil
-		fields._preAllocate = nil
+		local overrides   = fields._overrides
+		fields._overrides = nil
 
 		if nameParent then
 			local fieldsParent = structs[nameParent] or error(F("No struct '%s'.", nameParent), 2)
 
-			for k, v in pairs(fieldsParent) do
-				if fields[k] ~= nil then
+			for i, fieldParent in ipairs(fieldsParent) do
+				local k = fieldParent[1]
+				if itemWith1(fields, 1, k) then
 					error(F("Existing field in parent: %s.%s", nameParent, k), 2)
 				end
-				fields[k] = v
+				table.insert(fields, i, fieldParent)
 			end
 
 			if overrides then
-				for k, v in pairs(overrides) do
-					if fieldsParent[k] == nil then
+				for _, field in ipairs(overrides) do
+					assert(type(field) == "table")
+					assert((field[2] ~= nil), k)
+
+					local k           = field[1]
+					local fieldParent = itemWith1(fieldsParent, 1, k)
+
+					if not fieldParent then
 						error(F("Non-existing field in parent: %s.%s", nameParent, k), 2)
 					end
-					assert((v ~= NIL),                         k)
-					assert((type(fieldsParent[k]) == type(v)), k)
-					fields[k] = v
+
+					assert((type(fieldParent[2]) == type(field[2])), k)
+
+					local i = indexOf(fields, fieldParent) or assert(false)
+					fields[i] = field
 				end
 			end
 
@@ -217,33 +203,21 @@ do
 		end
 
 		structs[name] = fields
+		-- table.insert(structs, fields)
 
 		if not name:find"^_" then
 			local fieldsToOutput = {}
 
-			for k, v in pairs(fields) do
-				if v ~= NIL then
-					fieldsToOutput[k] = v
-				end
+			for _, field in ipairs(fields) do
+				assert(type(field) == "table")
+
+				local k           = field[1]
+				fieldsToOutput[k] = field[2] -- May be nil.
 			end
 
-			if preAllocate then
-				error("Pre-allocation of tables doesn't seem any faster...", 2)
-
-				--[[
-				structNumber = structNumber+1
-
-				local values = {structN=structNumber, structName=name, count=preAllocate, tableConstructor=toLua(fieldsToOutput)}
-
-				preprocessorOutputAtTopOfFile(templateToLua(TEMPLATE_STRUCT_PREALLOC_PREPARATION, values))
-				__LUA(templateToLua(TEMPLATE_STRUCT_PREALLOC_FUNCTION, values))
-				]]
-
-			else
-				__LUA(name,"=function()")
-					__LUA("return")__VAL(fieldsToOutput)
-				__LUA("end")
-			end
+			__LUA(name,"=function()")
+				__LUA("return")__VAL(fieldsToOutput)
+			__LUA("end")
 		end
 	end end
 end

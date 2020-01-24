@@ -213,7 +213,7 @@ function _G.writeDefaultValueForStructMember(state, file, structInfo, member, no
 end
 
 local function findTableFieldInStructInitializer(tableNode, memberName)
-	for _, tableField in ipairs(tableNode) do
+	for _, tableField in ipairs(tableNode.fields) do
 		!ASSERT("tableField.key.nodeType == "..nodeTypes.AstLiteral)
 
 		if tableField.key.value == memberName then
@@ -272,9 +272,9 @@ function _G.writeExpression(state, file, expr)
 				!ASSERT("lambda.nodeType == "..nodeTypes.AstLambda)
 
 				-- Only write a value if the last non-vararg argument is optional.
-				local argLast = lambda.argumentsIn and getLast(lambda.argumentsIn)
+				local argLast = lambda.argumentsIn and getLast(lambda.argumentsIn.arguments)
 				if argLast and argLast.declaration.name.nodeType == !(nodeTypes.AstVararg) then
-					argLast = getLast(lambda.argumentsIn, 2)
+					argLast = getLast(lambda.argumentsIn.arguments, 2)
 				end
 
 				if argLast and not argLast.isRequired then
@@ -296,11 +296,11 @@ function _G.writeExpression(state, file, expr)
 						nodeError(state, callee, "ProgramWriter", "@Incomplete: Handle optional arguments if the last value in a call is a list of things.")
 					end
 
-					for i = #call.arguments+1, #lambda.argumentsIn do
+					for i = #call.arguments+1, #lambda.argumentsIn.arguments do
 						if not first then  file:write(", ")  end
 						first = false
 
-						local arg = lambda.argumentsIn[i]
+						local arg = lambda.argumentsIn.arguments[i]
 
 						if arg.assignment then -- Varargs are optional but have no default value (or zero default values, since it's a list).
 							writeExpression(state, file, arg.assignment.values[1])
@@ -395,7 +395,7 @@ function _G.writeExpression(state, file, expr)
 		file:write("{")
 
 		if tableNode.inferredType.tag == !(typeTags.TypeInfoTable) then
-			for i, tableField in ipairs(tableNode) do
+			for i, tableField in ipairs(tableNode.fields) do
 				if i > 1 then  file:write(", ")  end
 
 				if isExpressionLiteralStringAndValidLuaIdentifier(tableField.key) then
@@ -414,7 +414,7 @@ function _G.writeExpression(state, file, expr)
 		elseif tableNode.inferredType.tag == !(typeTags.TypeInfoArray) then
 			local items = {}
 
-			for _, tableField in ipairs(tableNode) do
+			for _, tableField in ipairs(tableNode.fields) do
 				!ASSERT("tableField.key.nodeType == "..nodeTypes.AstLiteral)
 
 				local literal     = tableField.key
@@ -535,10 +535,12 @@ end
 
 -- writeBlock( state, file, block, indent, nextLocalN, localsStack [, isElseif=false ] )
 function _G.writeBlock(state, file, block, indent, nextLocalN, localsStack, isElseif)
+	!ASSERT `not block[1]`
+
 	local outputDebugInfo = state.settings.outputDebugInfo
 	local indentStr       = ("\t"):rep(indent)
 
-	if not block[1] then
+	if not block.statements[1] then
 		if outputDebugInfo then
 			file:write(indentStr, "-- Empty block.\n")
 		end
@@ -548,7 +550,7 @@ function _G.writeBlock(state, file, block, indent, nextLocalN, localsStack, isEl
 	localsStack  = {{}, unpack(localsStack)}
 	local inDecl = false
 
-	for _, statement in ipairs(block) do
+	for _, statement in ipairs(block.statements) do
 		local nodeType = statement.nodeType
 
 		if nodeType == !(nodeTypes.AstDeclaration) then
@@ -642,10 +644,10 @@ function _G.writeBlock(state, file, block, indent, nextLocalN, localsStack, isEl
 
 			writeBlock(state, file, ifBranch.branchTrue, indent+1, nextLocalN, localsStack)
 
-			if not (ifBranch.branchFalse or EMPTY_TABLE)[1] then
+			if not (ifBranch.branchFalse and ifBranch.branchFalse.statements[1]) then
 				-- void
 
-			elseif not ifBranch.branchFalse[2] and ifBranch.branchFalse[1].nodeType == !(nodeTypes.AstIf) then
+			elseif not ifBranch.branchFalse.statements[2] and ifBranch.branchFalse.statements[1].nodeType == !(nodeTypes.AstIf) then
 				file:write(indentStr, "else") -- This will be followed by "if"
 				writeBlock(state, file, ifBranch.branchFalse, indent, nextLocalN, localsStack, true)
 
@@ -707,9 +709,9 @@ function _G.writeBlock(state, file, block, indent, nextLocalN, localsStack, isEl
 				file:write(" in ")
 
 				if objExpr.inferredType.tag == !(typeTags.TypeInfoArray) then
-					file:write("ipairs")
+					file:write("_IPAIRS")
 				elseif objExpr.inferredType.tag == !(typeTags.TypeInfoTable) then
-					file:write("pairs")
+					file:write("_PAIRS")
 				elseif objExpr.inferredType.tag == !(typeTags.TypeInfoStruct) then
 					errorUnhandledNodeType(state, objExpr)
 					-- writeConstantValueOrReference(state, file, interatorFuncConst?) -- @Incomplete: Output default iterator for the struct.
@@ -757,6 +759,8 @@ function _G.writeBlock(state, file, block, indent, nextLocalN, localsStack, isEl
 end
 
 function _G.writeFunction(state, file, lambda)
+	!ASSERT `not lambda.body[1]`
+
 	if lambda.bodyIsForeign then
 		file:write(state.foreignReferences[lambda.foreignSourceId])
 		return
@@ -767,7 +771,7 @@ function _G.writeFunction(state, file, lambda)
 	file:write("function(")
 
 	if lambda.argumentsIn then
-		for i, arg in ipairs(lambda.argumentsIn) do
+		for i, arg in ipairs(lambda.argumentsIn.arguments) do
 			if i > 1 then  file:write(", ")  end
 
 			local decl = arg.declaration
@@ -784,7 +788,7 @@ function _G.writeFunction(state, file, lambda)
 
 	file:write(")\n")
 
-	if lambda.body[1] then
+	if lambda.body.statements[1] then
 		writeBlock(state, file, lambda.body, 1, 1, localsStack)
 	elseif state.settings.outputDebugInfo then
 		file:write("\t-- Empty function.\n")
@@ -884,7 +888,7 @@ function _G.writeConstantValue(state, file, const)
 		local tableNode     = const.value
 		local indexedValues = {}
 
-		for _, tableField in ipairs(tableNode) do
+		for _, tableField in ipairs(tableNode.fields) do
 			indexedValues[tableField.key.value] = tableField.value
 		end
 
@@ -964,6 +968,8 @@ function _G.writeProgram(state)
 
 	file:write("local _MATH_MODF  = math.modf\n")  -- Used when casting float to int.
 	file:write("local _MATH_FLOOR = math.floor\n") -- Used for integer division.
+	file:write("local _IPAIRS     = ipairs\n")     -- Used for short-form array loops.
+	file:write("local _PAIRS      = pairs\n")      -- Used for short-form table loops.
 
 	-- Start of protected call around all user code.
 	file:write("local ok = xpcall(function()\n")

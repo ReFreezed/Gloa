@@ -32,6 +32,7 @@ collectgarbage("stop") -- Slight speed boost.
 local DIR_HERE = debug.getinfo(1, "S").source:match"^@(.+)":gsub("\\", "/"):gsub("/?[^/]+$", ""):gsub("^$", ".")
 
 -- Read build options.
+----------------------------------------------------------------
 local args               = {...}
 
 local pathGloaOut        = DIR_HERE.."/../gloa.lua"
@@ -78,6 +79,7 @@ while args[i] do
 end
 
 -- Build Glóa.
+----------------------------------------------------------------
 if not silent then  print("Building Glóa...")  end
 
 local chunk, err = loadfile(pathPp)
@@ -126,6 +128,19 @@ function pp.metaEnvironment.ASSERT(valueCode)
 	if debugMode then  pp.outputLua("assert(",valueCode,")")  end
 end
 
+function pp.metaEnvironment.indexOf(t, v)
+	for i = 1, #t do
+		if t[i] == v then  return i  end
+	end
+	return nil
+end
+function pp.metaEnvironment.itemWith1(t, k, v)
+	for i = 1, #t do
+		if t[i][k] == v then  return t[i], i  end
+	end
+	return nil, nil
+end
+
 pp.processFile{
 	pathIn          = DIR_HERE.."/main.lua2p",
 	pathOut         = pathGloaOut,
@@ -152,6 +167,7 @@ pp.processFile{
 }
 
 -- All done!
+----------------------------------------------------------------
 if not silent then
 	print(("Build completed in %.3f seconds."):format(os.clock()-buildStartTime))
 end

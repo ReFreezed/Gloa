@@ -38,7 +38,7 @@ local function structTypeInfo(nameAndParent)
 			lastTypeTag               = lastTypeTag+1
 
 			fields._overrides         = fields._overrides or {}
-			fields._overrides.tag     = lastTypeTag
+			table.insert(fields._overrides, {`tag`, lastTypeTag})
 
 			typeTags[name]            = lastTypeTag
 			typeTagNames[lastTypeTag] = name:gsub("^TypeInfo", ""):lower()
@@ -50,8 +50,8 @@ end
 )
 
 !struct"_TypeInfo"{
-	tag = 0, -- This is like a "type of type info". The word "type" is used in so many places so we call it "tag" here to make it less confusing...
-	id  = 0,
+	{`tag`, 0}, -- This is like a "type of type info". The word "type" is used in so many places so we call it "tag" here to make it less confusing...
+	{`id`,  0},
 }
 
 local !structTypeInfo"TypeInfoAny:_TypeInfo"{}
@@ -78,47 +78,47 @@ _G.!(local )!!SIMPLE_TYPE_TAG = {
 }
 
 local !structTypeInfo"TypeInfoArray:_TypeInfo"{
-	itemType = NIL, -- TypeInfo
+	{`itemType`, nil}, -- TypeInfo
 }
 
 local !structTypeInfo"TypeInfoVararg:_TypeInfo"{
-	itemType = NIL, -- TypeInfo
+	{`itemType`, nil}, -- TypeInfo
 }
 
 local !structTypeInfo"TypeInfoFunction:_TypeInfo"{ -- AKA function signature.
-	argumentTypesIn      = {}, -- []TypeInfo  @Cleanup: Use TypeInfoList here.
-	argumentTypesOut     = {}, -- []TypeInfo  @Cleanup: Use TypeInfoList here.
-	requiredArgumentsIn  = {}, -- []bool
-	requiredArgumentsOut = {}, -- []bool
-	polymorphic          = false,
-	inline               = false,
+	{`argumentTypesIn`,      {}}, -- []TypeInfo  @Cleanup: Use TypeInfoList here.
+	{`argumentTypesOut`,     {}}, -- []TypeInfo  @Cleanup: Use TypeInfoList here.
+	{`requiredArgumentsIn`,  {}}, -- []bool
+	{`requiredArgumentsOut`, {}}, -- []bool
+	{`polymorphic`,          false},
+	{`inline`,               false},
 }
 
 local !struct"TypeInfoStructMember"{
-	name     = "",
-	typeInfo = NIL,
+	{`name`,     ""},
+	{`typeInfo`, nil},
 }
 local !structTypeInfo"TypeInfoStruct:_TypeInfo"{
-	astNode               = NIL, -- AstStruct
-	name                  = "",  -- Filled in during definition.
-	arguments             = {},  -- []TypeInfo  @Incomplete: Polymorphism.  @Cleanup: Use TypeInfoList here.
-	members               = {},  -- []TypeInfoStructMember
-	hasMembers            = false,
-	polymorphSourceStruct = NIL, -- TypeInfoStruct  @Incomplete: Polymorphism.
+	{`astNode`,               nil}, -- AstStruct
+	{`name`,                  ""},  -- Filled in during definition.
+	{`arguments`,             {}},  -- []TypeInfo  @Incomplete: Polymorphism.  @Cleanup: Use TypeInfoList here.
+	{`members`,               {}},  -- []TypeInfoStructMember
+	{`hasMembers`,            false},
+	{`polymorphSourceStruct`, nil}, -- TypeInfoStruct  @Incomplete: Polymorphism.
 }
 
 local !struct"TypeInfoEnumMember"{
-	name = "",
+	{`name`, ""},
 }
 local !structTypeInfo"TypeInfoEnum:_TypeInfo"{
-	astNode        = NIL, -- AstEnum
-	name           = "",
-	memberTypeInfo = NIL, -- Must be one of these primitive types: int, string, type, bool or float.
-	members        = {},  -- []TypeInfoEnumMember
+	{`astNode`,        nil}, -- AstEnum
+	{`name`,           ""},
+	{`memberTypeInfo`, nil}, -- Must be one of these primitive types: int, string, type, bool or float.
+	{`members`,        {}},  -- []TypeInfoEnumMember
 }
 
 local !structTypeInfo"TypeInfoNamespace:_TypeInfo"{
-	scope = NIL, -- AstScope
+	{`scope`, nil}, -- AstScope
 }
 
 local !structTypeInfo"TypeInfoCompound:_TypeInfo"{
@@ -200,26 +200,34 @@ do
 end
 
 local function doesLambdaHaveSignature(lambda, funcSig)
-	if #(lambda.argumentsIn  or EMPTY_TABLE) ~= #funcSig.argumentTypesIn  then  return false  end
-	if #(lambda.argumentsOut or EMPTY_TABLE) ~= #funcSig.argumentTypesOut then  return false  end
+	if (lambda.argumentsIn  and #lambda.argumentsIn .arguments or 0) ~= #funcSig.argumentTypesIn  then  return false  end
+	if (lambda.argumentsOut and #lambda.argumentsOut.arguments or 0) ~= #funcSig.argumentTypesOut then  return false  end
 
-	for i, arg in ipairs(lambda.argumentsIn or EMPTY_TABLE) do
-		if arg.declaration.name.inferredType ~= funcSig.argumentTypesIn[i]      then  return false  end
-		if arg.isRequired                    ~= funcSig.requiredArgumentsIn[i]  then  return false  end
+	if lambda.argumentsIn then
+		for i, arg in ipairs(lambda.argumentsIn.arguments) do
+			if arg.declaration.name.inferredType ~= funcSig.argumentTypesIn[i]      then  return false  end
+			if arg.isRequired                    ~= funcSig.requiredArgumentsIn[i]  then  return false  end
+		end
 	end
-	for i, arg in ipairs(lambda.argumentsOut or EMPTY_TABLE) do
-		if arg.declaration.name.inferredType ~= funcSig.argumentTypesOut[i] then  return false  end
+	if lambda.argumentsOut then
+		for i, arg in ipairs(lambda.argumentsOut.arguments) do
+			if arg.declaration.name.inferredType ~= funcSig.argumentTypesOut[i] then  return false  end
+		end
 	end
 
 	return true
 end
 
 function _G.getTypeInfoForLambda(state, lambda)
-	for _, arg in ipairs(lambda.argumentsIn or EMPTY_TABLE) do
-		if not arg.declaration.name.inferredType then  return nil  end
+	if lambda.argumentsIn then
+		for _, arg in ipairs(lambda.argumentsIn.arguments) do
+			if not arg.declaration.name.inferredType then  return nil  end
+		end
 	end
-	for _, arg in ipairs(lambda.argumentsOut or EMPTY_TABLE) do
-		if not arg.declaration.name.inferredType then  return nil  end
+	if lambda.argumentsOut then
+		for _, arg in ipairs(lambda.argumentsOut.arguments) do
+			if not arg.declaration.name.inferredType then  return nil  end
+		end
 	end
 
 	for _, typeInfoCached in ipairs(state.allTypeInfos) do
@@ -230,13 +238,17 @@ function _G.getTypeInfoForLambda(state, lambda)
 
 	local funcSig = newTypeInfo(TypeInfoFunction)
 
-	for i, arg in ipairs(lambda.argumentsIn or EMPTY_TABLE) do
-		funcSig.argumentTypesIn[i]      = arg.declaration.name.inferredType
-		funcSig.requiredArgumentsIn[i]  = arg.isRequired
+	if lambda.argumentsIn then
+		for i, arg in ipairs(lambda.argumentsIn.arguments) do
+			funcSig.argumentTypesIn[i]      = arg.declaration.name.inferredType
+			funcSig.requiredArgumentsIn[i]  = arg.isRequired
+		end
 	end
-	for i, arg in ipairs(lambda.argumentsOut or EMPTY_TABLE) do
-		funcSig.argumentTypesOut[i]     = arg.declaration.name.inferredType
-		funcSig.requiredArgumentsOut[i] = arg.isRequired
+	if lambda.argumentsOut then
+		for i, arg in ipairs(lambda.argumentsOut.arguments) do
+			funcSig.argumentTypesOut[i]     = arg.declaration.name.inferredType
+			funcSig.requiredArgumentsOut[i] = arg.isRequired
+		end
 	end
 
 	table.insert(state.allTypeInfos, funcSig)
@@ -486,8 +498,8 @@ function _G.isDeclarationVisibleToNode(decl, node)
 			local declScope, declScopeChild = getClosestScope(decl.assignment or decl)
 
 			if declScope == block then
-				local imperativeIndexForDecl = indexOf(block, declScopeChild) or errorInternal()
-				local imperativeIndexForNode = indexOf(block, nodeScopeChild) or errorInternal()
+				local imperativeIndexForDecl = indexOf(block.statements, declScopeChild) or errorInternal()
+				local imperativeIndexForNode = indexOf(block.statements, nodeScopeChild) or errorInternal()
 
 				return (imperativeIndexForDecl < imperativeIndexForNode)
 
@@ -914,7 +926,7 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 		not isMember
 		and scope.nodeType == !(nodeTypes.AstLambda)
 		and scope.argumentsOut ~= nil
-		and indexOf(scope.argumentsOut, astFindParent(decl, !(nodeTypes.AstArgument))) ~= nil
+		and indexOf(scope.argumentsOut.arguments, astFindParent(decl, !(nodeTypes.AstArgument))) ~= nil
 	)
 
 	-- Check for redeclaration/shadowing (before we DEPEND_AND_RETURN).
@@ -1455,7 +1467,7 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 			end
 
 			for i = acceptedMin, 1, -1 do
-				local arg = lambda.argumentsIn[i]
+				local arg = lambda.argumentsIn.arguments[i]
 				if arg.isRequired then
 					break
 				else
@@ -1940,7 +1952,7 @@ end
 		assert(tableNode.nodeType == !(nodeTypes.AstTable))
 
 		if tableNode.inferredType.tag == !(typeTags.TypeInfoArray) then
-			for _, tableField in ipairs(tableNode) do
+			for _, tableField in ipairs(tableNode.fields) do
 				length = math.max(length, tableField.key.value)
 			end
 
@@ -2258,8 +2270,6 @@ end
 	local typeInfoRepresented = getTypeRepresentedByExpression(access.object)
 
 	if typeInfoObject.tag == !(typeTags.TypeInfoTable) then
-		local tableNode = typeInfoObject
-
 		if typeInfoMember.tag == !(typeTags.TypeInfoNone) then
 			typeError(state, access.member, "Table keys cannot be nil.")
 
@@ -2464,7 +2474,7 @@ end
 end
 
 !NODE_INFERRER `function nodeInferrers.AstTable(state, tableNode)`
-	for _, tableField in ipairs(tableNode) do
+	for _, tableField in ipairs(tableNode.fields) do
 		if not tableField.value.inferredType then
 			!DEPEND_AND_RETURN(`tableNode`, DEPEND_NODE_INFERRED, `tableField.value`)
 		elseif not tableField.key.inferredType then
@@ -2491,7 +2501,7 @@ end
 		local indexLiterals       = {}
 		local highestLiteralIndex = 0
 
-		for _, tableField in ipairs(tableNode) do
+		for _, tableField in ipairs(tableNode.fields) do
 			if tableField.key.inferredType.tag ~= !(typeTags.TypeInfoInt) then
 				typeError(
 					state, astGetExpressionVisuallyFurthestToTheLeft(tableField.key),
@@ -2548,7 +2558,7 @@ end
 
 		local keyLiterals = {}
 
-		for _, tableField in ipairs(tableNode) do
+		for _, tableField in ipairs(tableNode.fields) do
 			if tableField.key.inferredType.tag ~= !(typeTags.TypeInfoString) then
 				typeError(
 					state, astGetExpressionVisuallyFurthestToTheLeft(tableField.key),
@@ -2616,7 +2626,7 @@ end
 end
 
 !NODE_INFERRER `function nodeInferrers.AstArguments(state, args)`
-	for _, arg in ipairs(args) do
+	for _, arg in ipairs(args.arguments) do
 		if arg.queued.pipe <= !(PIPE_INFER) then
 			!DEPEND_AND_RETURN(`args`, DEPEND_NODE_INFERRED, `arg`)
 		end
@@ -2635,7 +2645,7 @@ end
 	-- Note: We don't require the body to inferred - just the "header".
 
 	if lambda.argumentsIn then
-		for _, arg in ipairs(lambda.argumentsIn) do
+		for _, arg in ipairs(lambda.argumentsIn.arguments) do
 			if arg.assignment and not isExpressionConstant(state, arg.assignment.values[1]) then
 				typeError(state, astGetExpressionVisuallyFurthestToTheLeft(arg.assignment.values[1]), "Non-constant default values for arguments are not supported yet.")
 			end
@@ -2827,6 +2837,7 @@ end
 			errorParsingNext(state, "Expected the end of the file.")
 		end
 
+		table.insert(globalScope.statements, fileScope)
 		if import.isLoad then
 			astMoveGlobalDeclarationsToGlobalScope(state, fileScope)
 		else
@@ -2982,7 +2993,7 @@ local function addDeclarationInForLoop(state, forLoop, name, typeInfo)
 	ident.inferredType  = typeInfo
 	decl.name           = ident
 
-	table.insert(forLoop,              decl)
+	table.insert(forLoop.statements,   decl)
 	table.insert(forLoop.declarations, decl)
 
 	addToQueueRecursively(state, decl, forLoop, #forLoop, !(PIPE_DONE))
@@ -3200,7 +3211,7 @@ end
 		struct.inferredType    = getTypeInfoForBuiltinType(state, "type")
 	end
 
-	for _, statement in ipairs(struct) do
+	for _, statement in ipairs(struct.statements) do
 		if statement.queued.pipe <= !(PIPE_INFER) then
 			!DEPEND_AND_RETURN(`struct`, DEPEND_NODE_INFERRED, `statement`)
 		end
@@ -3224,7 +3235,7 @@ end
 end
 
 !NODE_INFERRER `function nodeInferrers.AstEnum(state, enum)`
-	for _, statement in ipairs(enum) do
+	for _, statement in ipairs(enum.statements) do
 		if statement.nodeType == !(nodeTypes.AstDeclaration) then
 			-- Ignore declarations. We only need the assigned values to be inferred.
 
@@ -3247,6 +3258,7 @@ end
 	local enumMemberInfo
 
 	if enum.memberType then
+		!ASSERT `enum.memberType.typeName`
 		enumMemberInfo = getTypeInfoForBuiltinType(state, enum.memberType.typeName)
 	else
 		-- Just use the type of the first member as the wanted type for the enum.
@@ -3289,7 +3301,7 @@ end
 end
 
 !NODE_INFERRER `function nodeInferrers.AstFileScope(state, fileScope)`
-	for _, statement in ipairs(fileScope) do
+	for _, statement in ipairs(fileScope.statements) do
 		if statement.queued.pipe <= !(PIPE_INFER) then
 			!DEPEND_AND_RETURN(`fileScope`, DEPEND_NODE_INFERRED, `statement`)
 		end
@@ -3299,7 +3311,7 @@ end
 end
 
 !NODE_INFERRER `function nodeInferrers.AstGlobalScope(state, globalScope)`
-	for _, statement in ipairs(globalScope) do
+	for _, statement in ipairs(globalScope.statements) do
 		if statement.queued.pipe <= !(PIPE_INFER) then
 			!DEPEND_AND_RETURN(`globalScope`, DEPEND_NODE_INFERRED, `statement`)
 		end
@@ -3309,7 +3321,7 @@ end
 end
 
 !NODE_INFERRER `function nodeInferrers.AstBlock(state, block)`
-	for _, statement in ipairs(block) do
+	for _, statement in ipairs(block.statements) do
 		if statement.queued.pipe <= !(PIPE_INFER) then
 			!DEPEND_AND_RETURN(`block`, DEPEND_NODE_INFERRED, `statement`)
 		end
@@ -3395,7 +3407,7 @@ function _G.getLiteralValueFromExpressionIfConstant(state, expr)
 
 	elseif expr.nodeType == !(nodeTypes.AstTable) then
 		local tableNode = expr
-		for _, tableField in ipairs(tableNode) do
+		for _, tableField in ipairs(tableNode.fields) do
 			if not isExpressionConstant(state, tableField.key)   then  return false, nil  end
 			if not isExpressionConstant(state, tableField.value) then  return false, nil  end
 		end
@@ -3569,7 +3581,7 @@ local function createLambdaArgumentsFromTypes(state, typeInfos, lambda)
 
 		-- @Incomplete: Handle default values for input arguments. (Needed?)
 
-		args[i] = arg
+		args.arguments[i] = arg
 	end
 
 	return args
@@ -3580,11 +3592,11 @@ local function createLambdaFromSignature(state, funcSig, parent)
 
 	if funcSig.argumentTypesIn[1] then
 		lambda.argumentsIn = createLambdaArgumentsFromTypes(state, funcSig.argumentTypesIn, lambda)
-		table.insert(lambda, lambda.argumentsIn)
+		table.insert(lambda.statements, lambda.argumentsIn)
 	end
 	if funcSig.argumentTypesOut[1] then
 		lambda.argumentsOut = createLambdaArgumentsFromTypes(state, funcSig.argumentTypesOut, lambda)
-		table.insert(lambda, lambda.argumentsOut)
+		table.insert(lambda.statements, lambda.argumentsOut)
 	end
 
 	return lambda
