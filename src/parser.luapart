@@ -128,11 +128,10 @@ end
 	{`inferredType`, nil}, -- TypeInfo
 }
 _G.!structAst"AstIdentifier:_AstExpression"{
-	{`name`,          ""},
-	{`placeDeclared`, nil}, -- AstDeclaration|AstStruct|AstFor|AstLambda  (@Cleanup: We don't really use this.)
+	{`name`,        ""},
 	-- Type phase:
-	{`declaration`,   nil}, -- AstDeclaration
-	{`fromUsing`,     nil}, -- AstUsing
+	{`declaration`, nil}, -- AstDeclaration
+	{`fromUsing`,   nil}, -- AstUsing
 }
 _G.!structAst"AstVararg:AstIdentifier"{
 	_overrides = {{`name`,"..."}},
@@ -402,21 +401,14 @@ end
 
 
 
--- identifier = parseIdentifier( compilationState, parentNode [, placeDeclared ] )
---
--- placeDeclared should be set when they are declared, i.e. in declarations or
--- function argument lists (loose identifiers should have it be nil as we figure
--- it out during type inference (or maybe not?)).
---
-function _G.parseIdentifier(state, parentNode, placeDeclared)
+function _G.parseIdentifier(state, parentNode)
 	local tokType, tokValue, token = eatNextToken(state)
 	if tokType ~= !(TOKEN_IDENTIFIER) then
 		!ERROR_OR_RETURN `errorParsingLast(state, "Expected an identifier.")`
 	end
 
-	local ident         = astNewNode(AstIdentifier, token, parentNode)
-	ident.name          = tokValue
-	ident.placeDeclared = placeDeclared
+	local ident = astNewNode(AstIdentifier, token, parentNode)
+	ident.name  = tokValue
 
 	return ident
 end
@@ -575,9 +567,7 @@ local function concatNamesInArgumentGroupForError(argsInGroup)
 	return table.concat(names, "', '", 1, #names-1) .. "' and '" .. names[#names]
 end
 
--- parseArguments( compilationState, parentNode, isInput, placeDeclared )
--- placeDeclared = AstLambda|AstStruct
-function _G.parseArguments(state, parentNode, isInput, placeDeclared)
+function _G.parseArguments(state, parentNode, isInput)
 	local args            = astNewNode(AstArguments, state.nextToken, parentNode)
 	local takenNames      = {}
 	local gotVararg       = false
@@ -619,11 +609,10 @@ function _G.parseArguments(state, parentNode, isInput, placeDeclared)
 			arg.declaration = decl
 
 			if tokType == !(TOKEN_IDENTIFIER) then
-				local ident         = astNewNode(AstIdentifier, token, decl)
-				ident.name          = tokValue
-				ident.placeDeclared = placeDeclared
-				ident.declaration   = decl
-				decl.name           = ident
+				local ident       = astNewNode(AstIdentifier, token, decl)
+				ident.name        = tokValue
+				ident.declaration = decl
+				decl.name         = ident
 
 				if takenNames[ident.name] then
 					!ERROR_OR_RETURN `errorParsingLast(state, "Duplicate name '%s'.", ident.name)`
@@ -637,10 +626,9 @@ function _G.parseArguments(state, parentNode, isInput, placeDeclared)
 					!ERROR_OR_RETURN `errorParsing(state, argStartToken, "Cannot apply 'using' to varargs.")`
 				end
 
-				local vararg         = astNewNode(AstVararg, token, decl)
-				vararg.placeDeclared = placeDeclared
-				vararg.declaration   = decl
-				decl.name            = vararg
+				local vararg       = astNewNode(AstVararg, token, decl)
+				vararg.declaration = decl
+				decl.name          = vararg
 			end
 
 			tokType, tokValue = eatNextToken(state)
@@ -765,7 +753,7 @@ function _G.parseArguments(state, parentNode, isInput, placeDeclared)
 	return args
 end
 
-function _G.parseNamelessArguments(state, parentNode, placeDeclared)
+function _G.parseNamelessArguments(state, parentNode)
 	local args = astNewNode(AstArguments, state.nextToken, parentNode)
 
 	for groupN = 1, math.huge do
@@ -777,11 +765,10 @@ function _G.parseNamelessArguments(state, parentNode, placeDeclared)
 		arg.declaration           = decl
 		!SET_OR_RETURN `decl.type = parseExpression(state, decl)`
 
-		local ident         = astNewNode(AstIdentifier, decl.token, decl)
-		ident.name          = "_UNNAMED"..groupN
-		ident.placeDeclared = placeDeclared
-		ident.declaration   = decl
-		decl.name           = ident
+		local ident       = astNewNode(AstIdentifier, decl.token, decl)
+		ident.name        = "_UNNAMED"..groupN
+		ident.declaration = decl
+		decl.name         = ident
 
 		tokType, tokValue = peekNextToken(state)
 
@@ -800,7 +787,7 @@ function _G.parseStruct(state, parentNode)
 	local tokType, tokValue = eatNextToken(state)
 
 	if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"(") then
-		!SET_OR_RETURN `struct.arguments = parseArguments(state, struct, true, struct)`
+		!SET_OR_RETURN `struct.arguments = parseArguments(state, struct, true)`
 
 		tokType, tokValue = eatNextToken(state)
 		if not isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),")") then
@@ -823,7 +810,7 @@ function _G.parseStruct(state, parentNode)
 		-- Note: We allow a trailing comma/semicolon after the members.
 		while true do
 			local declType = !(DECLARATION_STRUCT)
-			!DO_OR_RETURN `parseDeclarationStatement(state, struct, struct, declType)`
+			!DO_OR_RETURN `parseDeclarationStatement(state, struct, declType)`
 
 			tokType, tokValue = eatNextToken(state)
 
@@ -874,7 +861,7 @@ function _G.parseEnum(state, parentNode)
 	-- Note: We allow a trailing comma/semicolon after the members.
 	while true do
 		local declType = !(DECLARATION_ENUM)
-		!DO_OR_RETURN `parseDeclarationStatement(state, enum, enum, declType)`
+		!DO_OR_RETURN `parseDeclarationStatement(state, enum, declType)`
 
 		tokType, tokValue = eatNextToken(state)
 
@@ -897,9 +884,9 @@ function _G.parseEnum(state, parentNode)
 	return enum
 end
 
--- success = parseDeclarationStatement( compilationState, parentBlock, placeDeclared=auto [, declarationType=DECLARATION_NORMAL ] )
+-- success = parseDeclarationStatement( compilationState, parentBlock [, declarationType=DECLARATION_NORMAL ] )
 -- declarationType = DECLARATION_NORMAL|DECLARATION_STRUCT|DECLARATION_ENUM
-function _G.parseDeclarationStatement(state, block, placeDeclared, declType)
+function _G.parseDeclarationStatement(state, block, declType)
 	--[[
 	local a = 0         -- Variable, inferred type.
 	local b:float = 0   -- Variable, explicit type.
@@ -959,7 +946,7 @@ function _G.parseDeclarationStatement(state, block, placeDeclared, declType)
 	local takenNames = {}
 
 	if declType == !(DECLARATION_NORMAL) then
-		!DO_OR_RETURN `parseNameList(state, block, declNames, nil)` -- Note: We update parent and placeDeclared here below.
+		!DO_OR_RETURN `parseNameList(state, block, declNames)` -- Note: We update parent here below.
 
 		for i, ident in ipairs(declNames) do
 			local decl              = astNewNode(AstDeclaration, declStartToken, block)
@@ -967,7 +954,6 @@ function _G.parseDeclarationStatement(state, block, placeDeclared, declType)
 			declarations[i]         = decl
 
 			ident.parent            = decl
-			ident.placeDeclared     = placeDeclared or decl
 			ident.declaration       = decl
 
 			decl.name               = ident
@@ -978,7 +964,7 @@ function _G.parseDeclarationStatement(state, block, placeDeclared, declType)
 		decl.isGlobalOrExported = isGlobalOrExported
 		table.insert(declarations, decl)
 
-		!SET_OR_RETURN `local ident = parseIdentifier(state, decl, (placeDeclared or decl))`
+		!SET_OR_RETURN `local ident = parseIdentifier(state, decl)`
 		ident.declaration           = decl
 		decl.name                   = ident
 		table.insert(declNames, ident)
@@ -1027,12 +1013,11 @@ function _G.parseDeclarationStatement(state, block, placeDeclared, declType)
 		assignment.declarations   = {}
 
 		for i, decl in ipairs(declarations) do
-			local identCopy         = astCopy(declNames[i], nil, assignment)
-			identCopy.placeDeclared = nil
-			assignment.targets[i]   = identCopy
+			local identCopy       = astCopy(declNames[i], nil, assignment)
+			assignment.targets[i] = identCopy
 
-			decl.assignment         = assignment
-			decl.assignmentIndex    = i
+			decl.assignment       = assignment
+			decl.assignmentIndex  = i
 
 			table.insert(assignment.declarations, decl)
 		end
@@ -1182,12 +1167,12 @@ function _G.parseAssignment(state, parentNode)
 end
 
 -- Add the names to the 'names' array.
--- success = parseNameList( compilationState, parentNode, names [, placeDeclared ] )
-function _G.parseNameList(state, parentNode, names, placeDeclared)
+-- success = parseNameList( compilationState, parentNode, names )
+function _G.parseNameList(state, parentNode, names)
 	local takenNames = {}
 
 	while true do
-		!SET_OR_RETURN_FALSE `local ident = parseIdentifier(state, parentNode, placeDeclared)`
+		!SET_OR_RETURN_FALSE `local ident = parseIdentifier(state, parentNode)`
 
 		if takenNames[ident.name] then
 			!ERROR_OR_RETURN_FALSE `errorParsingLast(state, "Duplicate name '%s'.", ident.name)`
@@ -1221,7 +1206,7 @@ function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 			isToken(tokType2,tokValue2, !(TOKEN_KEYWORD),"local")
 		)
 	then
-		!DO_OR_RETURN_FALSE `parseDeclarationStatement(state, block, nil)`
+		!DO_OR_RETURN_FALSE `parseDeclarationStatement(state, block)`
 		return true
 	end
 
@@ -1371,7 +1356,7 @@ function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 			-- for i = start, end [, step ]
 			if twoParter then
 				state.nextToken = forStartIndex
-				!DO_OR_RETURN_FALSE `parseNameList(state, forLoop, forLoop.names, forLoop)`
+				!DO_OR_RETURN_FALSE `parseNameList(state, forLoop, forLoop.names)`
 
 				if forLoop.names[2] then
 					!ERROR_OR_RETURN_FALSE `errorParsing(state, forLoop.names[2].token, "Expected only one name in numeric 'for' loop.")`
@@ -1398,7 +1383,7 @@ function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 			-- for v1, ... : obj
 			if twoParter then
 				state.nextToken = forStartIndex
-				!DO_OR_RETURN_FALSE `parseNameList(state, forLoop, forLoop.names, forLoop)`
+				!DO_OR_RETURN_FALSE `parseNameList(state, forLoop, forLoop.names)`
 
 				tokType, tokValue = eatNextToken(state) -- Should eat the ':'.
 				assert(isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),":"))
@@ -1422,7 +1407,7 @@ function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 		-- for v1, ... in iter [, state [, init ] ]
 		else
 			state.nextToken = forStartIndex
-			!DO_OR_RETURN_FALSE `parseNameList(state, forLoop, forLoop.names, forLoop)`
+			!DO_OR_RETURN_FALSE `parseNameList(state, forLoop, forLoop.names)`
 
 			tokType, tokValue = eatNextToken(state) -- Should eat the 'in'.
 			assert(isToken(tokType,tokValue, !(TOKEN_KEYWORD),"in"))
@@ -1605,7 +1590,7 @@ function _G.parseFileScope(state, parentNode, path, isModule, moduleName)
 				isToken(tokType2,tokValue2, !(TOKEN_KEYWORD),"local","global","export")
 			)
 		then
-			!DO_OR_RETURN `parseDeclarationStatement(state, fileScope, nil)`
+			!DO_OR_RETURN `parseDeclarationStatement(state, fileScope)`
 
 		elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"import","load") then
 			-- @Incomplete: Warn about duplicate imports? Maybe not necessay as things will only ever be imported once anyway.
@@ -1730,7 +1715,7 @@ function _G.parseLambda(state, parentNode, allowBody)
 		eatNextToken(state)
 
 	else
-		!SET_OR_RETURN `local args = parseArguments(state, lambda, true, lambda)`
+		!SET_OR_RETURN `local args = parseArguments(state, lambda, true)`
 		lambda.argumentsIn         = args
 		table.insert(lambda.statements, args)
 
@@ -1792,7 +1777,7 @@ function _G.parseLambda(state, parentNode, allowBody)
 				eatNextToken(state)
 
 			else
-				!SET_OR_RETURN `args = parseArguments(state, lambda, false, lambda)`
+				!SET_OR_RETURN `args = parseArguments(state, lambda, false)`
 
 				tokType, tokValue = eatNextToken(state)
 				if not isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),")") then
@@ -1804,12 +1789,12 @@ function _G.parseLambda(state, parentNode, allowBody)
 			tokType, tokValue = peekNextToken(state)
 			if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"->") then
 				state.nextToken = argsOutStartToken
-				!SET_OR_RETURN `args = parseNamelessArguments(state, lambda, lambda)` -- Replace any output arguments we just parsed.
+				!SET_OR_RETURN `args = parseNamelessArguments(state, lambda)` -- Replace any output arguments we just parsed.
 			end
 
 		-- (...) -> type, ...
 		else
-			!SET_OR_RETURN `args = parseNamelessArguments(state, lambda, lambda)`
+			!SET_OR_RETURN `args = parseNamelessArguments(state, lambda)`
 		end
 
 		if args then
@@ -2936,12 +2921,11 @@ function _G.astCopy(node, token, parent)
 	-- @Cleanup: Generate this function instead of doing all this stuff manually. (See VISITORS)
 
 	if node.nodeType == !(nodeTypes.AstIdentifier) then
-		local ident        = node
-		copy               = astNewNode(AstIdentifier, (token or ident.token), (parent or ident.parent))
-		copy.name          = ident.name
-		copy.placeDeclared = ident.placeDeclared
-		copy.declaration   = ident.declaration
-		copy.inferredType  = ident.inferredType
+		local ident       = node
+		copy              = astNewNode(AstIdentifier, (token or ident.token), (parent or ident.parent))
+		copy.name         = ident.name
+		copy.declaration  = ident.declaration
+		copy.inferredType = ident.inferredType
 
 	elseif node.nodeType == !(nodeTypes.AstLiteral) then
 		local literal      = node

@@ -534,25 +534,21 @@ function _G.printDeclarationChain(file, state, decl, typeName)
 	for _ = 1, !(MAX_CHAIN_LENGTH) do
 		typeMessage(file, state, decl.name, "Info", "...here is '%s' declared.", typeName)
 
-		local placeDeclared = decl.name.placeDeclared -- @Cleanup: Can we use decl.name.declaration instead here?
-		if not placeDeclared then  break  end
+		local declCurrent = decl.name.declaration -- @Cleanup: Can we use decl.name.declaration instead here?
+		if not declCurrent then  break  end
 
-		decl = nil
+		decl            = nil
+		local valueExpr = declCurrent.assignment and declCurrent.assignment.values[declCurrent.assignmentIndex]
 
-		if placeDeclared.nodeType == !(nodeTypes.AstDeclaration) then
-			local declCurrent = placeDeclared
-			local valueNode   = declCurrent.assignment and declCurrent.assignment.values[declCurrent.assignmentIndex]
+		if valueExpr then
+			while valueExpr.replacing do
+				valueExpr = valueExpr.replacing -- Caused by simplifications of constants.
+			end
 
-			if valueNode then
-				while valueNode.replacing do
-					valueNode = valueNode.replacing -- Caused by simplifications of constants.
-				end
-
-				if valueNode.nodeType == !(nodeTypes.AstIdentifier) then
-					local ident = valueNode
-					typeName    = ident.name
-					decl        = ident.declaration or findDeclaration(state, ident, typeName, declCurrent)
-				end
+			if valueExpr.nodeType == !(nodeTypes.AstIdentifier) then
+				local ident = valueExpr
+				typeName    = ident.name
+				decl        = ident.declaration or findDeclaration(state, ident, typeName, declCurrent)
 			end
 		end
 
@@ -1152,9 +1148,6 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 			if decl.isConstant then  io.stdout:write(" (CONST)")  end
 			if typeInfoForDecl then  io.stdout:write(" (VALUE ", getFriendlyTypeInfoName(typeInfoForDecl), ")")  end
 			io.stdout:write(" IN ")
-			if decl.name.placeDeclared ~= getClosestScopeForDeclaration(state, decl) then
-				io.stdout:write(AST_NODE_TYPE_NAMES[decl.name.placeDeclared.nodeType], " > ")
-			end
 			astPrint(getClosestScopeForDeclaration(state, decl))
 		end
 	!end
@@ -1834,7 +1827,6 @@ end
 		end
 
 	elseif identOrVararg.parent.parent.nodeType ~= !(nodeTypes.AstArgument) and not doesTypeHaveAnyDefaultValue(identOrVararg.inferredType) then
-		astPrintTree(identOrVararg.parent.parent)
 		!ASSERT `not decl.isConstant` -- This should have been detected in inferIdentifierOrVararg() (I think).
 		typeError(state, identOrVararg, "Variables in type group '%s' must have a specified initial value.", TYPE_TAG_NAMES[identOrVararg.inferredType.tag])
 	end
@@ -2439,8 +2431,7 @@ end
 
 		assert(decl.isConstant)
 
-		local ident         = astCopy(decl.name, access.token, access.parent)
-		ident.placeDeclared = nil
+		local ident = astCopy(decl.name, access.token, access.parent)
 
 		-- addUnqueuedChildrenToQueueRecursively(state, ident, !(PIPE_BYTECODE)) -- Not needed for identifiers.
 		replaceQueuedNodeAndUnqueueOldTree(state, access, ident)
@@ -2461,8 +2452,7 @@ end
 			!DEPEND_AND_RETURN(`access`, DEPEND_NODE_INFERRED, `decl.name`)
 		end
 
-		local ident         = astCopy(decl.name, access.token, access.parent)
-		ident.placeDeclared = nil
+		local ident = astCopy(decl.name, access.token, access.parent)
 
 		-- addUnqueuedChildrenToQueueRecursively(state, ident, !(PIPE_BYTECODE)) -- Not needed for identifiers.
 		replaceQueuedNodeAndUnqueueOldTree(state, access, ident)
@@ -2984,14 +2974,12 @@ end
 local function addDeclarationInForLoop(state, forLoop, name, typeInfo)
 	-- @Incomplete: Care about name shadowing.
 
-	local decl          = astNewNode(AstDeclaration, forLoop.token, forLoop)
-
-	local ident         = astNewNode(AstIdentifier, decl.token, decl)
-	ident.name          = name
-	ident.placeDeclared = forLoop
-	ident.declaration   = decl
-	ident.inferredType  = typeInfo
-	decl.name           = ident
+	local decl         = astNewNode(AstDeclaration, forLoop.token, forLoop)
+	local ident        = astNewNode(AstIdentifier, decl.token, decl)
+	ident.name         = name
+	ident.declaration  = decl
+	ident.inferredType = typeInfo
+	decl.name          = ident
 
 	table.insert(forLoop.statements,   decl)
 	table.insert(forLoop.declarations, decl)
@@ -3565,19 +3553,18 @@ local function createLambdaArgumentsFromTypes(state, typeInfos, lambda)
 	local args = astNewNode(AstArguments, lambda.token, lambda)
 
 	for i, argTypeInfo in ipairs(typeInfos) do
-		local arg           = astNewNode(AstArgument,    lambda.token, args)
-		local decl          = astNewNode(AstDeclaration, lambda.token, arg)
-		local ident         = astNewNode(AstIdentifier,  lambda.token, decl)
+		local arg          = astNewNode(AstArgument,    lambda.token, args)
+		local decl         = astNewNode(AstDeclaration, lambda.token, arg)
+		local ident        = astNewNode(AstIdentifier,  lambda.token, decl)
 
-		ident.name          = "_"..i
-		ident.placeDeclared = lambda
-		ident.declaration   = declaration
-		ident.inferredType  = argTypeInfo
+		ident.name         = "_"..i
+		ident.declaration  = declaration
+		ident.inferredType = argTypeInfo
 
-		decl.name           = ident
+		decl.name          = ident
 
-		arg.declaration     = decl
-		arg.group           = i
+		arg.declaration    = decl
+		arg.group          = i
 
 		-- @Incomplete: Handle default values for input arguments. (Needed?)
 
