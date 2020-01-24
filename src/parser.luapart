@@ -21,6 +21,7 @@
 	eatNextToken, peekNextToken, peekLastToken, putBackLastToken, eatTrailingSemicolon
 	errorParsing*, parserMessage*
 	errorUnhandledNodeType, errorUnhandledType
+	isNodeAt
 	nodeError, nodeMessage, where
 	parse*
 
@@ -178,8 +179,8 @@ _G.!structAst"AstCall:_AstExpression"{
 	{`couldBeTypeWithParameters`, false},
 	{`isMethod`,                  false},
 	{`surroundedByParenthesis`,   false},
-	{`callee`,                    nil, ast="node"}, -- AstExpression
-	{`arguments`,                 {},  ast="array"},  -- []AstExpression
+	{`callee`,                    nil, ast="node"},  -- AstExpression
+	{`arguments`,                 {},  ast="array"}, -- []AstExpression
 }
 _G.!structAst"AstTypeOf:_AstExpression"{
 	{`expression`, nil, ast="node"}, -- AstExpression
@@ -189,6 +190,7 @@ _G.!structAst"AstTypeOf:_AstExpression"{
 _G.!structAst"AstCast:_AstExpression"{
 	{`targetType`, nil, ast="node"}, -- AstType
 	{`expression`, nil, ast="node"}, -- AstExpression
+	{`isImplicit`, false},           -- Implicit casts include e.g. 'if "foo" {...}'
 }
 _G.!structAst"AstImport:_AstExpression"{
 	{`isLoad`,     false},
@@ -2380,20 +2382,22 @@ end
 
 function _G.errorUnhandledNodeType(state, node)
 	!if DEBUG then
-		print()
-		astPrintTree(node)
-		print()
+		printerr()
 		printTraceback(io.stderr, 2)
+		printerr()
+		astPrintTree(io.stderr, node)
+		printerr()
 	!end
 	nodeError(state, node, "Debug", "Internal compiler error: Incomplete: Unhandled node type '%s'.", (AST_NODE_TYPE_NAMES[node.nodeType] or node.nodeType))
 end
 
 function _G.errorUnhandledType(state, node, typeInfo)
 	!if DEBUG then
-		print()
-		astPrintTree(node)
-		print()
+		printerr()
 		printTraceback(io.stderr, 2)
+		printerr()
+		astPrintTree(io.stderr, node)
+		printerr()
 	!end
 	nodeError(state, node, "Debug", "Internal compiler error: Incomplete: Unhandled type '%s'.", getFriendlyTypeInfoName(typeInfo))
 end
@@ -3030,6 +3034,26 @@ function _G.astGetDepth(node)
 	end
 
 	return depth
+end
+
+
+
+-- isNodeAt( state, node, filePath [, lineNumber=any ] )
+function _G.isNodeAt(state, node, targetPath, targetLn)
+	local token  = node.token
+	local tokens = state.tokens
+	local path   = tokens.file[token] or errorInternal("No tokens.")
+
+	if path ~= targetPath then  return false  end
+	if not targetLn       then  return true  end
+
+	-- Temp until tokens.line1 has useful values.
+	local buffer     = state.fileBuffers[path] or errorInternal("No file buffer for '%s'.", path)
+	local ptr        = tokens.position1[token]
+	local _, nlCount = buffer:sub(1, ptr-1):gsub("\n", "%0")
+	local ln         = nlCount+1
+
+	return ln == targetLn
 end
 
 
