@@ -151,7 +151,17 @@ function _G.writeAccess(state, file, access)
 	end
 end
 
-function _G.writeCast(state, file, cast)
+-- writeCast( state, file, cast [, nameToCast ] )
+-- nameToCast is only used by AstConditional.
+function _G.writeCast(state, file, cast, nameToCast)
+	!local WRITE_EXPRESSION = trimTemplate`
+		if nameToCast then
+			file:write(nameToCast)
+		else
+			writeExpression(state, file, cast.expression)
+		end
+	`
+
 	local typeInfoSource = adjustTypeToOne(state, cast.expression.inferredType, true)
 	local typeInfoTarget = cast.inferredType
 
@@ -162,31 +172,31 @@ function _G.writeCast(state, file, cast)
 		or typeInfoSource.tag == !(typeTags.TypeInfoCompound)
 		or typeInfoTarget.tag == !(typeTags.TypeInfoCompound)
 	then
-		writeExpression(state, file, cast.expression)
+		!!(WRITE_EXPRESSION)
 
 	-- int -> float
 	elseif typeInfoSource.tag == !(typeTags.TypeInfoInt) and typeInfoTarget.tag == !(typeTags.TypeInfoFloat) then
-		writeExpression(state, file, cast.expression)
+		!!(WRITE_EXPRESSION)
 
 	-- float -> int
 	elseif typeInfoSource.tag == !(typeTags.TypeInfoFloat) and typeInfoTarget.tag == !(typeTags.TypeInfoInt) then
 		file:write("(_MATH_MODF(")
-		writeExpression(state, file, cast.expression)
+		!!(WRITE_EXPRESSION)
 		file:write("))")
 
 	-- (numeric) -> bool
 	elseif isTypeNumeric(typeInfoSource) and typeInfoTarget.tag == !(typeTags.TypeInfoBool) then
-		writeExpression(state, file, cast.expression)
+		!!(WRITE_EXPRESSION)
 		file:write(" ~= 0")
 
 	-- string -> bool
 	elseif typeInfoSource.tag == !(typeTags.TypeInfoString) and typeInfoTarget.tag == !(typeTags.TypeInfoBool) then
-		writeExpression(state, file, cast.expression)
+		!!(WRITE_EXPRESSION)
 		file:write(' ~= ""')
 
 	-- array -> bool
 	elseif typeInfoSource.tag == !(typeTags.TypeInfoArray) and typeInfoTarget.tag == !(typeTags.TypeInfoBool) then
-		writeExpression(state, file, cast.expression)
+		!!(WRITE_EXPRESSION)
 		file:write("[1] ~= nil")
 
 	-- (whatever) -> any
@@ -194,11 +204,11 @@ function _G.writeCast(state, file, cast)
 	elseif typeInfoSource.tag == !(typeTags.TypeInfoAny) or typeInfoTarget.tag == !(typeTags.TypeInfoAny) then
 		-- The user better know what they're doing!
 		-- @Incomplete: Compiler setting for runtime checks of 'any' and 'compound' casts.
-		writeExpression(state, file, cast.expression)
+		!!(WRITE_EXPRESSION)
 
 	-- enum -> (real enum member type)
 	elseif typeInfoSource.tag == !(typeTags.TypeInfoEnum) and typeInfoTarget == typeInfoSource.memberTypeInfo then
-		writeExpression(state, file, cast.expression)
+		!!(WRITE_EXPRESSION)
 
 	else
 		errorInternal(state, cast, "Incomplete: Handle casting from %s to %s.", getFriendlyTypeInfoName(typeInfoSource), getFriendlyTypeInfoName(typeInfoTarget))
@@ -237,6 +247,18 @@ local function findTableFieldInStructInitializer(tableNode, memberName)
 	end
 
 	return nil
+end
+
+local function doesTypeContainBoolOrNone(typeInfo)
+	if isAny(typeInfo.tag, !(typeTags.TypeInfoBool),!(typeTags.TypeInfoNone),!(typeTags.TypeInfoAny)) then  return true  end
+
+	if typeInfo.tag ~= !(typeTags.TypeInfoCompound) then  return false  end
+	local compound = typeInfo
+
+	for _, compoundItem in ipairs(compound) do
+		if isAny(compoundItem.tag, !(typeTags.TypeInfoBool),!(typeTags.TypeInfoNone)) then  return true  end
+	end
+	return false
 end
 
 function _G.writeExpression(state, file, expr)
@@ -469,6 +491,79 @@ function _G.writeExpression(state, file, expr)
 	elseif expr.nodeType == !(nodeTypes.AstForeign) then
 		local foreign = expr
 		writeConstantValueOrReference(state, file, foreign.valueConstant)
+
+	elseif expr.nodeType == !(nodeTypes.AstConditional) then
+		-- @Incomplete: Handle vararg in the self-invoking functions. (We can probably just add it as an extra argument.)
+		local conditional = expr
+		local hasVararg   = false
+
+		astVisitAllNodes(conditional, function(node)
+			if node.nodeType == !(nodeTypes.AstVararg) then
+				hasVararg = true
+				return !(VISIT_BREAK)
+			elseif isScope(node) then
+				return !(VISIT_IGNORE_CHILDREN)
+			end
+		end)
+
+		-- Ternary.
+		if not conditional.conditionAndBranchTrue then
+			if doesTypeContainBoolOrNone(adjustTypeToOne(state, conditional.branchTrue.inferredType, true)) then
+				-- (function(x) if x then return a else return b end end)(x)
+				file:write("(function(_CONDITION")
+				if hasVararg then  file:write(", ...")  end
+				file:write(") if _CONDITION then return ")
+				writeExpression(state, file, conditional.branchTrue)
+				file:write(" else return ")
+				writeExpression(state, file, conditional.branchFalse)
+				file:write(" end end)(")
+				writeExpression(state, file, conditional.condition)
+				if hasVararg then  file:write(", ...")  end
+				file:write(")")
+			else
+				-- x and a or b
+				file:write("(")
+				writeExpression(state, file, conditional.condition)
+				file:write(" and ")
+				writeExpression(state, file, conditional.branchTrue)
+				file:write(" or ")
+				writeExpression(state, file, conditional.branchFalse)
+				file:write(")")
+			end
+
+		-- Binary (with implicit cast).
+		-- @Optimize: Output 'a or b' whenever possible.
+		elseif conditional.conditionAndBranchTrue ~= conditional.condition then
+			-- (function(x) if x then return x else return y end end)(x)
+			local cast = conditional.condition
+			assert(cast.nodeType   == !(nodeTypes.AstCast))
+			assert(cast.expression == conditional.conditionAndBranchTrue)
+			assert(cast.isImplicit)
+
+			file:write("(function(_CONDITION")
+			if hasVararg then  file:write(", ...")  end
+			file:write(") if ")
+			writeCast(state, file, cast, "_CONDITION")
+			file:write(" then return _CONDITION else return ")
+			writeExpression(state, file, conditional.branchFalse)
+			file:write(" end end)(")
+			writeExpression(state, file, cast.expression)
+			if hasVararg then  file:write(", ...")  end
+			file:write(")")
+
+		-- Binary (without implicit cast).
+		-- @Optimize: Output 'a or b' whenever possible.
+		else
+			-- (function(x) if x then return x else return y end end)(x)
+			file:write("(function(_CONDITION")
+			if hasVararg then  file:write(", ...")  end
+			file:write(") if _CONDITION then return _CONDITION else return ")
+			writeExpression(state, file, conditional.branchFalse)
+			file:write(" end end)(")
+			writeExpression(state, file, conditional.condition)
+			if hasVararg then  file:write(", ...")  end
+			file:write(")")
+		end
 
 	else
 		errorUnhandledNodeType(state, expr)

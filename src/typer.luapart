@@ -1869,6 +1869,7 @@ end
 
 	-- @Incomplete: Guard against functions returning nothing. (Add that check in
 	-- adjustTypeToOne() and update all places where that function is called.)
+	-- :CheckVoidFunction
 	typeInfo = adjustTypeToOne(state, typeInfo, true)
 
 	if isAny(unary.operation, "+","-") then
@@ -2874,6 +2875,46 @@ end
 	inferIfOrWhile(state, whileLoop)
 end
 
+!NODE_INFERRER `function nodeInferrers.AstConditional(state, conditional)`
+	local typeInfo = conditional.condition.inferredType
+	if not typeInfo then
+		!DEPEND_AND_RETURN(`conditional`, DEPEND_NODE_INFERRED, `conditional.condition`)
+	end
+	if conditional.branchTrue and not conditional.branchTrue.inferredType then
+		!DEPEND_AND_RETURN(`conditional`, DEPEND_NODE_INFERRED, `conditional.branchTrue`)
+	end
+	if not conditional.branchFalse.inferredType then
+		!DEPEND_AND_RETURN(`conditional`, DEPEND_NODE_INFERRED, `conditional.branchFalse`)
+	end
+
+	typeInfo = adjustTypeToOne(state, typeInfo, true) -- :CheckVoidFunction
+
+	if typeInfo.tag ~= !(typeTags.TypeInfoBool) then
+		-- Note: This wrap will not affect conditional.conditionAndBranchTrue which is the actual expression we use in the output.
+		wrapInImplicitCast(state, conditional.condition, getTypeInfoForBuiltinType(state, "bool"), true)
+		return
+	end
+
+	local branchTrue    = conditional.branchTrue or conditional.conditionAndBranchTrue
+
+	local typeInfoTrue  = adjustTypeToOne(state, branchTrue.inferredType,              true)
+	local typeInfoFalse = adjustTypeToOne(state, conditional.branchFalse.inferredType, true)
+
+	if typeInfoTrue ~= typeInfoFalse then
+		typeError(
+			state, astGetExpressionVisuallyFurthestToTheLeft(conditional.branchFalse),
+			"Type mismatch in conditional. (Left branch is %s, right branch is %s)",
+			getFriendlyTypeInfoName(typeInfoTrue),
+			getFriendlyTypeInfoName(typeInfoFalse)
+		)
+	end
+
+	conditional.inferredType = typeInfoTrue
+	moveToPipe(state, conditional, !(PIPE_DONE))
+
+	-- @Optimize: Remove/replace the branch if the condition is statically known.
+end
+
 local function addDeclarationInForLoop(state, forLoop, name, typeInfo)
 	-- @Incomplete: Care about name shadowing.
 
@@ -3536,6 +3577,18 @@ end
 local function simplifyCast(state, cast)
 	local exprTypeInfo = cast.expression.inferredType
 	local castTypeInfo = cast.inferredType
+
+	local parent = cast.parent
+	if
+		parent.nodeType == !(nodeTypes.AstConditional)
+		and parent.conditionAndBranchTrue
+		and parent.conditionAndBranchTrue ~= parent.condition
+		and cast == parent.condition
+	then
+		-- Simplifying this cast would mess up the output. Example situation:
+		-- local x = if myString "a" else "b"
+		return
+	end
 
 	if exprTypeInfo == castTypeInfo then
 		errorInternal(state, cast) -- This should have been simplified away already.

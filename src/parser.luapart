@@ -206,6 +206,12 @@ _G.!structAst"AstForeign:_AstExpression"{
 	-- Bytecode phase:
 	{`valueConstant`, nil},
 }
+_G.!structAst"AstConditional:_AstExpression"{
+	{`condition`,              nil, ast="node"}, -- AstExpression
+	{`branchTrue`,             nil, ast="node"}, -- AstExpression  (If this is nil then condition (or rather conditionAndBranchTrue) is used for this branch.)
+	{`conditionAndBranchTrue`, nil},             -- AstExpression
+	{`branchFalse`,            nil, ast="node"}, -- AstExpression
+}
 
 _G.!structAst"AstUsing:_AstNode"{
 	{`expression`,          nil, ast="node"}, -- AstExpression
@@ -2087,6 +2093,28 @@ function _G.parseExpression(state, parentNode, prevOpPrecedence, expectLeftValue
 	elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"foreign") then
 		!SET_OR_RETURN `expr = parseForeign(state, parentNode)`
 
+	-- Conditional.
+	elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"if") then
+		local conditional = astNewNode(AstConditional, exprStartToken, parentNode)
+
+		!SET_OR_RETURN_FALSE `conditional.condition = parseExpression(state, conditional)`
+
+		tokType, tokValue = peekNextToken(state)
+		if not isToken(tokType,tokValue, !(TOKEN_KEYWORD),"else") then
+			!SET_OR_RETURN_FALSE `conditional.branchTrue = parseExpression(state, conditional)`
+		else
+			conditional.conditionAndBranchTrue = conditional.condition
+		end
+
+		tokType, tokValue = eatNextToken(state)
+		if not isToken(tokType,tokValue, !(TOKEN_KEYWORD),"else") then
+			!ERROR_OR_RETURN `errorParsingLast(state, "Expected 'else'.")`
+		end
+
+		!SET_OR_RETURN_FALSE `conditional.branchFalse = parseExpression(state, conditional)`
+
+		expr = conditional
+
 	else
 		!ERROR_OR_RETURN `errorParsingLast(state, "Expected an expression.")`
 	end
@@ -2622,6 +2650,14 @@ do
 				if ifBranch.condition   then  printNode(ifBranch.condition,   indent+1, printed, printChildren)           end
 				if ifBranch.branchTrue  then  printNode(ifBranch.branchTrue,  indent+1, printed, printChildren, "TRUE")   end
 				if ifBranch.branchFalse then  printNode(ifBranch.branchFalse, indent+1, printed, printChildren, "FALSE")  end
+				!!(CHILD_PRINT_END)
+
+			elseif node.nodeType == !(nodeTypes.AstConditional) then
+				local conditional = node
+				!!(CHILD_PRINT_START)
+				if conditional.condition   then  printNode(conditional.condition,   indent+1, printed, printChildren)           end
+				if conditional.branchTrue  then  printNode(conditional.branchTrue,  indent+1, printed, printChildren, "TRUE")   end
+				if conditional.branchFalse then  printNode(conditional.branchFalse, indent+1, printed, printChildren, "FALSE")  end
 				!!(CHILD_PRINT_END)
 
 			elseif node.nodeType == !(nodeTypes.AstWhile) then
