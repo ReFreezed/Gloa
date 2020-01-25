@@ -14,7 +14,7 @@
 	getAssignmentValue
 	getClosestScope, getClosestScopeForDeclaration, isScope, isScopeDeclarative, isScopeImperative
 	inferNode
-	isExpressionConstant, getLiteralValueFromExpressionIfConstant
+	isExpressionConstant
 	isPartOfAnyDeclaration
 	isTypeSimple, isTypeCompatibleWith, adjustTypeToOne
 	newTypeInfo, isTypeBuiltin, getTypeInfo*
@@ -1873,7 +1873,7 @@ end
 
 	if isAny(unary.operation, "+","-") then
 		-- @Incomplete: Allow int|float compound type here (or disallow declarations of that specific compound type).
-		if not isAny(typeInfo.tag, !(typeTags.TypeInfoInt),!(typeTags.TypeInfoFloat)) then
+		if not isTypeNumeric(typeInfo) then
 			typeError(
 				state, unary.expression,
 				"Unary numeric operation (%s): Expected a float or int. (Got %s)",
@@ -1905,70 +1905,8 @@ end
 
 	unary.inferredType = typeInfo
 
-	--
-	-- Inferring complete! Now simplify the expression if it's constant.
-	--
-	-- @Incomplete: Simplify these kinds of expressions (including implicit casts): not (str ~= "") => str == ""
-	--
-
-	local isConst, v = getLiteralValueFromExpressionIfConstant(state, unary.expression)
-	if not isConst then
-		moveToPipe(state, unary, !(PIPE_DONE))
-
-	!for _, opArithmetic in ipairs{"+","-"} do
-	elseif unary.operation == !(opArithmetic) then
-		local literal = astNewNode(AstLiteral, unary.token, unary.parent)
-
-		literal.literalType
-			=  typeInfo.tag == !(typeTags.TypeInfoInt)   and !(LITERAL_INTEGER)
-			or typeInfo.tag == !(typeTags.TypeInfoFloat) and !(LITERAL_FLOAT)
-			or errorInternal(getFriendlyTypeInfoName(typeInfo))
-
-		literal.value        = !!(opArithmetic ~= "+" and opArithmetic or "") v
-		literal.inferredType = typeInfo
-
-		replaceQueuedNodeAndUnqueueOldTree(state, unary, literal)
-		moveToPipe(state, literal, !(PIPE_BYTECODE))
-	!end
-
-	elseif unary.operation == "not" then
-		local literal        = astNewNode(AstLiteral, unary.token, unary.parent)
-		literal.literalType  = !(LITERAL_BOOLEAN)
-		literal.value        = not v
-		literal.inferredType = typeInfo
-		replaceQueuedNodeAndUnqueueOldTree(state, unary, literal)
-		moveToPipe(state, literal, !(PIPE_BYTECODE))
-
-	elseif unary.operation == "#" then
-		local tableNode = followIdentifiersToConstantValue(unary.expression)
-		local length    = 0
-
-		assert(tableNode.nodeType == !(nodeTypes.AstTable))
-
-		if tableNode.inferredType.tag == !(typeTags.TypeInfoArray) then
-			for _, tableField in ipairs(tableNode.fields) do
-				length = math.max(length, tableField.key.value)
-			end
-
-		elseif tableNode.inferredType.tag == !(typeTags.TypeInfoTable) then
-			errorUnhandledNodeType(state, unary)
-
-		else
-			errorInternal()
-		end
-
-		local literal        = astNewNode(AstLiteral, unary.token, unary.parent)
-		literal.literalType  = !(LITERAL_INTEGER)
-		literal.value        = length
-		literal.inferredType = typeInfo
-		replaceQueuedNodeAndUnqueueOldTree(state, unary, literal)
-		moveToPipe(state, literal, !(PIPE_BYTECODE))
-
-	else
-		errorUnhandledNodeType(state, unary)
-	end
-
-	-- astPrintTree(unary.parent)
+	moveToPipe(state, unary, !(PIPE_DONE))
+	simplifyExpressionIfConstant(state, unary)
 end
 
 local function isArrayItemOrTableFieldCheck(state, binary, typeInfoL, typeInfoR)
@@ -2057,6 +1995,8 @@ end
 	typeInfoL = adjustTypeToOne(state, typeInfoL, true)
 	typeInfoR = adjustTypeToOne(state, typeInfoR, true)
 
+	local typeInfo
+
 	-- Numeric operation.
 	if isAny(binary.operation, "+","-","*","^","%","/","//") then
 		if not (isTypeNumeric(typeInfoL) and isTypeNumeric(typeInfoR)) then
@@ -2130,77 +2070,10 @@ end
 		errorUnhandledNodeType(state, binary)
 	end
 
-	assert(typeInfo)
-	binary.inferredType = typeInfo
+	binary.inferredType = typeInfo or errorInternal()
 
-	--
-	-- Inferring complete! Now simplify the expression if it's constant.
-	--
-	-- @Incomplete: Simplify these kinds of expressions: (1+x)+2 => (1+2)+x => 3+x
-	-- @Incomplete: Simplify these kinds of expressions: 1 + -x => 1 - x
-	--
-
-	local isConstL, valueL = getLiteralValueFromExpressionIfConstant(state, binary.left)
-	local isConstR, valueR = getLiteralValueFromExpressionIfConstant(state, binary.right)
-
-	if not (isConstL and isConstR) then
-		moveToPipe(state, binary, !(PIPE_DONE))
-
-	!for _, opArithmeticKeepType in ipairs{"+","-","*","^","%"} do
-	elseif binary.operation == !(opArithmeticKeepType) then
-		local literal = astNewNode(AstLiteral, binary.token, binary.parent)
-
-		literal.literalType
-			=  typeInfo.tag == !(typeTags.TypeInfoInt)   and !(LITERAL_INTEGER)
-			or typeInfo.tag == !(typeTags.TypeInfoFloat) and !(LITERAL_FLOAT)
-			or errorInternal(getFriendlyTypeInfoName(typeInfo))
-
-		literal.value        = valueL !!(opArithmeticKeepType) valueR -- This should produce the correct result for any combination of int and float.
-		literal.inferredType = typeInfo
-
-		replaceQueuedNodeAndUnqueueOldTree(state, binary, literal)
-		moveToPipe(state, literal, !(PIPE_BYTECODE))
-	!end
-
-	elseif binary.operation == "/" then
-		local literal        = astNewNode(AstLiteral, binary.token, binary.parent)
-		literal.literalType  = !(LITERAL_FLOAT)
-		literal.value        = valueL/valueR
-		literal.inferredType = typeInfo
-		replaceQueuedNodeAndUnqueueOldTree(state, binary, literal)
-		moveToPipe(state, literal, !(PIPE_BYTECODE))
-
-	elseif binary.operation == "//" then
-		local literal        = astNewNode(AstLiteral, binary.token, binary.parent)
-		literal.literalType  = !(LITERAL_INTEGER)
-		literal.value        = math.floor(valueL/valueR)
-		literal.inferredType = typeInfo
-		replaceQueuedNodeAndUnqueueOldTree(state, binary, literal)
-		moveToPipe(state, literal, !(PIPE_BYTECODE))
-
-	!for _, opComparison in ipairs{"<",">","<=",">=","==","~=","and","or"} do
-	elseif binary.operation == !(opComparison) then
-		local literal        = astNewNode(AstLiteral, binary.token, binary.parent)
-		literal.literalType  = !(LITERAL_BOOLEAN)
-		literal.value        = valueL !!(opComparison) valueR
-		literal.inferredType = typeInfo
-		replaceQueuedNodeAndUnqueueOldTree(state, binary, literal)
-		moveToPipe(state, literal, !(PIPE_BYTECODE))
-	!end
-
-	elseif binary.operation == ".." then
-		local literal        = astNewNode(AstLiteral, binary.token, binary.parent)
-		literal.literalType  = !(LITERAL_STRING)
-		literal.value        = valueL..valueR -- @Speed: Concatinate more than two values at a time. (Probably need to update parsing stage.)
-		literal.inferredType = typeInfo
-		replaceQueuedNodeAndUnqueueOldTree(state, binary, literal)
-		moveToPipe(state, literal, !(PIPE_BYTECODE))
-
-	else
-		errorUnhandledNodeType(state, binary)
-	end
-
-	-- astPrintTree(binary.parent)
+	moveToPipe(state, binary, !(PIPE_DONE))
+	simplifyExpressionIfConstant(state, binary)
 end
 
 function _G.getConstantNameOrTriggerError(state, node)
@@ -2752,10 +2625,7 @@ end
 	elseif isTypeCompatibleWith(exprTypeInfo, castTypeInfo) then
 		-- void  (Valid cast.)
 
-	elseif
-		isAny(castTypeInfo.tag, !(typeTags.TypeInfoFloat),!(typeTags.TypeInfoInt)) and
-		isAny(exprTypeInfo.tag, !(typeTags.TypeInfoFloat),!(typeTags.TypeInfoInt))
-	then
+	elseif isTypeNumeric(castTypeInfo) and isTypeNumeric(exprTypeInfo) then
 		-- void  (Valid cast.)
 
 	elseif castTypeInfo.tag == !(typeTags.TypeInfoBool) and isAny(
@@ -2770,11 +2640,7 @@ end
 	elseif exprTypeInfo.tag == !(typeTags.TypeInfoEnum) and isTypeCompatibleWith(castTypeInfo, exprTypeInfo.memberTypeInfo) then
 		-- void  (Enum members can cast to the real member type.)
 
-	elseif
-		exprTypeInfo.tag == !(typeTags.TypeInfoEnum) and
-		isAny(castTypeInfo.tag,                !(typeTags.TypeInfoFloat),!(typeTags.TypeInfoInt)) and
-		isAny(exprTypeInfo.memberTypeInfo.tag, !(typeTags.TypeInfoFloat),!(typeTags.TypeInfoInt))
-	then
+	elseif exprTypeInfo.tag == !(typeTags.TypeInfoEnum) and isTypeNumeric(castTypeInfo) and isTypeNumeric(exprTypeInfo.memberTypeInfo) then
 		-- We need two casts to happen in sequence here so we wrap ourselves in another cast.
 		wrapInImplicitCast(state, cast, exprTypeInfo.memberTypeInfo, false)
 
@@ -3361,117 +3227,80 @@ end
 
 
 
--- expressionIsConstant, literalValue = getLiteralValueFromExpressionIfConstant( compilationState, expression )
 -- Note: It's assumed that the expression tree has all types figured out.
---
--- @Cleanup: All constant expressions that can result in a literal value should have been simplified into an AstLiteral.
--- That means we don't really need to return a literal here - the caller can just grab it from the literal node.
--- We also return a number for types which is not very good but currently needed for binary simplifications...
--- @Refactor this function to only figure out whether the expression is constant and move the code into isExpressionConstant().
---
-function _G.getLiteralValueFromExpressionIfConstant(state, expr)
+function _G.isExpressionConstant(state, expr)
 	-- @Incomplete: Return an AstNode?
 
 	if expr.nodeType == !(nodeTypes.AstLiteral) then
-		local literal = expr
-		return true, literal.value
+		return true
 
 	elseif expr.nodeType == !(nodeTypes.AstIdentifier) then
 		local ident = expr
 		local decl  = ident.declaration or errorInternal()
 
-		if not decl.isConstant then  return false, nil  end
+		if not decl.isConstant then  return false  end
 
 		!ASSERT `decl.assignment` -- Constant declarations must have a value.
 
 		local valueExpr = getAssignmentValue(state, ident, decl.assignment.values, decl.assignmentIndex)
-		return getLiteralValueFromExpressionIfConstant(state, valueExpr)
+		return isExpressionConstant(state, valueExpr)
 
 	elseif isAny(expr.nodeType, !(nodeTypes.AstType),!(nodeTypes.AstTypeOf)) then
-		return true, expr.representedType.id -- All types are constant, just like literals.
+		return true--, expr.representedType.id -- All types are constant, just like literals.
 
 	elseif isAny(expr.nodeType, !(nodeTypes.AstStruct),!(nodeTypes.AstEnum)) then
-		return true, expr.representedType.id -- Structs and enums are types (which are constant, just like literals).
+		return true--, expr.representedType.id -- Structs and enums are types (which are constant, just like literals).
 	elseif expr.nodeType == !(nodeTypes.AstLambda) then
 		local lambda = expr
-		return true, lambda.inferredType.id -- Lambdas (which are function signatures) are types too.
+		return true--, lambda.inferredType.id -- Lambdas (which are function signatures) are types too, thus constant.
 
 	elseif expr.nodeType == !(nodeTypes.AstCast) then
-		local cast       = expr
-		local isConst, v = getLiteralValueFromExpressionIfConstant(state, cast.expression)
-		if not isConst then  return false, nil  end
+		local cast = expr
+		return isExpressionConstant(state, cast.expression)
 
-		local castTypeInfo = cast.inferredType
+	elseif expr.nodeType == !(nodeTypes.AstUnary) then
+		local unary = expr
+		return isExpressionConstant(state, unary.expression)
 
-		if castTypeInfo.tag == !(typeTags.TypeInfoInt) then
-			return true, (math.modf(v))
-
-		elseif castTypeInfo.tag == !(typeTags.TypeInfoFloat) then
-			return true, v
-
-		elseif castTypeInfo.tag == !(typeTags.TypeInfoType) then
-			return true, getTypeRepresentedByExpression(cast.targetType).id
-
-		elseif castTypeInfo.tag == !(typeTags.TypeInfoBool) then
-			local exprTypeInfo = cast.expression.inferredType
-			if isAny(exprTypeInfo.tag, !(typeTags.TypeInfoInt),!(typeTags.TypeInfoFloat)) then
-				return true, v ~= 0
-			elseif exprTypeInfo.tag == !(typeTags.TypeInfoString) then
-				return true, v ~= ""
-			elseif exprTypeInfo.tag == !(typeTags.TypeInfoArray) then
-				local tableNode = followIdentifiersToConstantValue(cast.expression)
-				assert(tableNode.nodeType == !(nodeTypes.AstTable))
-				return true, tableNode.fields[1] ~= "" -- (Assume the array literal is valid.)
-			else
-				errorInternal(state, cast, "Unhandled cast to bool: %s", getFriendlyTypeInfoName(castTypeInfo))
-			end
-
-		else
-			errorInternal(state, cast, "Unhandled cast: %s", getFriendlyTypeInfoName(castTypeInfo))
-		end
-
-	elseif isAny(expr.nodeType, !(nodeTypes.AstUnary),!(nodeTypes.AstBinary)) then
-		return false, nil -- We don't check child nodes as these operations should have been simplified into 'expr' where this function is called.
+	elseif expr.nodeType == !(nodeTypes.AstBinary) then
+		local binary = expr
+		return (isExpressionConstant(state, binary.left) and isExpressionConstant(state, binary.right))
 
 	elseif expr.nodeType == !(nodeTypes.AstCall) then
-		return false, nil -- Calls are always a runtime operation.
+		return false -- Calls are always a runtime operation.
 
 	elseif expr.nodeType == !(nodeTypes.AstAccess) then
 		local access              = expr
 		local typeInfoRepresented = getTypeRepresentedByExpression(access.object)
 
 		if typeInfoRepresented and typeInfoRepresented.tag == !(typeTags.TypeInfoEnum) then
-			return true, nil
+			return true
 		else
-			return false, nil -- Other accesses resolving to constants should have simplified to something else already (I think).
+			return false -- Other accesses resolving to constants should have simplified to something else already (I think).
 		end
 
 	elseif expr.nodeType == !(nodeTypes.AstImport) then
-		return true, nil -- Namespaces, just like types, are always constant.
+		return true -- Namespaces, just like types, are always constant.
 
 	elseif expr.nodeType == !(nodeTypes.AstTable) then
 		local tableNode = expr
 		for _, tableField in ipairs(tableNode.fields) do
-			if not isExpressionConstant(state, tableField.key)   then  return false, nil  end
-			if not isExpressionConstant(state, tableField.value) then  return false, nil  end
+			if not isExpressionConstant(state, tableField.key)   then  return false  end
+			if not isExpressionConstant(state, tableField.value) then  return false  end
 		end
-		return true, nil
+		return true
 
 	elseif expr.nodeType == !(nodeTypes.AstVararg) then
-		return false, nil
+		return false
 
 	elseif expr.nodeType == !(nodeTypes.AstForeign) then
-		-- Technically foreign values are constant at runtime, but since we don't know
+		-- Technically foreign values are seen as constant at runtime, but since we don't know
 		-- what they are at compile-time we (usually) treat them as runtime values.
-		return false, nil
+		return false
 
 	else
 		errorUnhandledNodeType(state, expr)
 	end
-end
-
-function _G.isExpressionConstant(state, expr)
-	return (getLiteralValueFromExpressionIfConstant(state, expr))
 end
 
 
@@ -3705,73 +3534,82 @@ function _G.simplifyTypeExpression(state, expr, typeInfoRepresented)
 end
 
 local function simplifyCast(state, cast)
-	local isConst, v = getLiteralValueFromExpressionIfConstant(state, cast.expression)
-	!ASSERT `isConst`
+	local exprTypeInfo = cast.expression.inferredType
+	local castTypeInfo = cast.inferredType
 
-	local typeInfoSource = cast.expression.inferredType
-	local typeInfoTarget = cast.inferredType
-
-	if typeInfoSource == typeInfoTarget then
-		errorInternal(state, cast) -- This should have been simlified away.
+	if exprTypeInfo == castTypeInfo then
+		errorInternal(state, cast) -- This should have been simplified away already.
 
 	-- int -> float
-	elseif typeInfoSource.tag == !(typeTags.TypeInfoInt) and typeInfoTarget.tag == !(typeTags.TypeInfoFloat) then
-		assert(type(v) == "number")
+	elseif exprTypeInfo.tag == !(typeTags.TypeInfoInt) and castTypeInfo.tag == !(typeTags.TypeInfoFloat) then
+		assert(cast.expression.nodeType == !(nodeTypes.AstLiteral))
+		assert(type(cast.expression.value) == "number")
+
 		local literal        = astNewNode(AstLiteral, cast.token, cast.parent)
 		literal.literalType  = !(LITERAL_FLOAT)
-		literal.value        = v
-		literal.inferredType = typeInfoTarget
+		literal.value        = cast.expression.value
+		literal.inferredType = castTypeInfo
+
 		replaceQueuedNodeAndUnqueueOldTree(state, cast, literal)
 		moveToPipe(state, literal, !(PIPE_BYTECODE))
 
 	-- float -> int
-	elseif typeInfoSource.tag == !(typeTags.TypeInfoFloat) and typeInfoTarget.tag == !(typeTags.TypeInfoInt) then
-		assert(type(v) == "number")
+	elseif exprTypeInfo.tag == !(typeTags.TypeInfoFloat) and castTypeInfo.tag == !(typeTags.TypeInfoInt) then
+		assert(cast.expression.nodeType == !(nodeTypes.AstLiteral))
+		assert(type(cast.expression.value) == "number")
+
 		local literal        = astNewNode(AstLiteral, cast.token, cast.parent)
 		literal.literalType  = !(LITERAL_INTEGER)
-		literal.value        = math.modf(v)
-		literal.inferredType = typeInfoTarget
+		literal.value        = math.modf(cast.expression.value)
+		literal.inferredType = castTypeInfo
+
 		replaceQueuedNodeAndUnqueueOldTree(state, cast, literal)
 		moveToPipe(state, literal, !(PIPE_BYTECODE))
 
 	-- (numeric) -> bool
-	elseif isAny(typeInfoSource.tag, !(typeTags.TypeInfoInt),!(typeTags.TypeInfoFloat)) and typeInfoTarget.tag == !(typeTags.TypeInfoBool) then
-		assert(type(v) == "number")
+	elseif isTypeNumeric(exprTypeInfo) and castTypeInfo.tag == !(typeTags.TypeInfoBool) then
+		assert(cast.expression.nodeType == !(nodeTypes.AstLiteral))
+		assert(type(cast.expression.value) == "number")
+
 		local literal        = astNewNode(AstLiteral, cast.token, cast.parent)
 		literal.literalType  = !(LITERAL_BOOLEAN)
-		literal.value        = v ~= 0
-		literal.inferredType = typeInfoTarget
+		literal.value        = cast.expression.value ~= 0
+		literal.inferredType = castTypeInfo
+
 		replaceQueuedNodeAndUnqueueOldTree(state, cast, literal)
 		moveToPipe(state, literal, !(PIPE_BYTECODE))
 
 	-- string -> bool
-	elseif typeInfoSource.tag == !(typeTags.TypeInfoString) and typeInfoTarget.tag == !(typeTags.TypeInfoBool) then
-		assert(type(v) == "string")
+	elseif exprTypeInfo.tag == !(typeTags.TypeInfoString) and castTypeInfo.tag == !(typeTags.TypeInfoBool) then
+		assert(cast.expression.nodeType == !(nodeTypes.AstLiteral))
+		assert(type(cast.expression.value) == "string")
+
 		local literal        = astNewNode(AstLiteral, cast.token, cast.parent)
 		literal.literalType  = !(LITERAL_BOOLEAN)
-		literal.value        = v ~= ""
-		literal.inferredType = typeInfoTarget
+		literal.value        = cast.expression.value ~= ""
+		literal.inferredType = castTypeInfo
+
 		replaceQueuedNodeAndUnqueueOldTree(state, cast, literal)
 		moveToPipe(state, literal, !(PIPE_BYTECODE))
 
 	-- array -> bool
-	elseif typeInfoSource.tag == !(typeTags.TypeInfoArray) and typeInfoTarget.tag == !(typeTags.TypeInfoBool) then
+	elseif exprTypeInfo.tag == !(typeTags.TypeInfoArray) and castTypeInfo.tag == !(typeTags.TypeInfoBool) then
 		local tableNode = followIdentifiersToConstantValue(cast.expression)
 		assert(tableNode.nodeType == !(nodeTypes.AstTable))
 
 		local literal        = astNewNode(AstLiteral, cast.token, cast.parent)
 		literal.literalType  = !(LITERAL_BOOLEAN)
 		literal.value        = tableNode.fields[1] ~= nil -- (Assume the array literal is valid.)
-		literal.inferredType = typeInfoTarget
+		literal.inferredType = castTypeInfo
 
 		replaceQueuedNodeAndUnqueueOldTree(state, cast, literal)
 		moveToPipe(state, literal, !(PIPE_BYTECODE))
 
 	-- enum -> enumMemberType (int, float, string, bool or type)
-	elseif typeInfoSource.tag == !(typeTags.TypeInfoEnum) and isTypeCompatibleWith(typeInfoSource.memberTypeInfo, typeInfoTarget) then
-		local castIsDirect = (typeInfoTarget == typeInfoSource.memberTypeInfo)
+	elseif exprTypeInfo.tag == !(typeTags.TypeInfoEnum) and isTypeCompatibleWith(exprTypeInfo.memberTypeInfo, castTypeInfo) then
+		local castIsDirect = (castTypeInfo == exprTypeInfo.memberTypeInfo)
 
-		local enumInfo = typeInfoSource
+		local enumInfo = exprTypeInfo
 		local ident    = cast.expression
 		assert(ident.nodeType == !(nodeTypes.AstIdentifier)) -- All constant enum member references should have been simplified to an identifier.
 
@@ -3779,32 +3617,32 @@ local function simplifyCast(state, cast)
 		local decl       = findDeclarationInScope(state, enumInfo.astNode, memberName, false)
 		local valueExpr  = decl.assignment.values[1]
 
-		if BUILTIN_TYPE_TAG_TO_LITERAL_TYPE[typeInfoTarget.tag] then
+		if BUILTIN_TYPE_TAG_TO_LITERAL_TYPE[castTypeInfo.tag] then
 			local literal = valueExpr
 			assert(literal.nodeType == !(nodeTypes.AstLiteral))
 
 			local literalCopy = astCopy(literal, cast.token)
 
 			if castIsDirect then
-				assert(literalCopy.inferredType == typeInfoTarget)
+				assert(literalCopy.inferredType == castTypeInfo)
 
-			elseif typeInfoSource.memberTypeInfo.tag == !(typeTags.TypeInfoInt) and typeInfoTarget.tag == !(typeTags.TypeInfoFloat) then
+			elseif exprTypeInfo.memberTypeInfo.tag == !(typeTags.TypeInfoInt) and castTypeInfo.tag == !(typeTags.TypeInfoFloat) then
 				literalCopy.literalType  = !(LITERAL_FLOAT)
-				literalCopy.inferredType = typeInfoTarget
+				literalCopy.inferredType = castTypeInfo
 
 			else
 				errorInternal(
 					state, cast,
 					"Incomplete: Implicitly cast enum from %s to %s.",
-					getFriendlyTypeInfoName(typeInfoSource.memberTypeInfo),
-					getFriendlyTypeInfoName(typeInfoTarget)
+					getFriendlyTypeInfoName(exprTypeInfo.memberTypeInfo),
+					getFriendlyTypeInfoName(castTypeInfo)
 				)
 			end
 
 			replaceQueuedNodeAndUnqueueOldTree(state, cast, literalCopy)
 			moveToPipe(state, literalCopy, !(PIPE_BYTECODE))
 
-		elseif typeInfoTarget.tag == !(typeTags.TypeInfoType) then
+		elseif castTypeInfo.tag == !(typeTags.TypeInfoType) then
 			assert(castIsDirect)
 
 			local typeNode = valueExpr
@@ -3817,16 +3655,222 @@ local function simplifyCast(state, cast)
 			moveToPipe(state, typeNodeCopy, !(PIPE_DONE))
 
 		else
-			errorInternal(state, cast, "Incomplete: Handle casting enum to %s.", getFriendlyTypeInfoName(typeInfoTarget))
+			errorInternal(state, cast, "Incomplete: Handle casting enum to %s.", getFriendlyTypeInfoName(castTypeInfo))
 		end
 
 	else
 		errorInternal(
 			state, cast,
 			"Incomplete: Handle casting constant from %s to %s.",
-			getFriendlyTypeInfoName(typeInfoSource),
-			getFriendlyTypeInfoName(typeInfoTarget)
+			getFriendlyTypeInfoName(exprTypeInfo),
+			getFriendlyTypeInfoName(castTypeInfo)
 		)
+	end
+end
+
+local function simplifyUnary(state, unary)
+	-- @Incomplete: Simplify these kinds of expressions (including implicit casts): not (str ~= "") => str == ""
+	local typeInfo = unary.inferredType
+
+	if nil then
+
+	!for _, opArithmetic in ipairs{"+","-"} do
+	elseif unary.operation == !(opArithmetic) then
+		assert(unary.expression.nodeType == !(nodeTypes.AstLiteral))
+		assert(type(unary.expression.value) == "number")
+
+		local literal = astNewNode(AstLiteral, unary.token, unary.parent)
+
+		literal.literalType
+			=  typeInfo.tag == !(typeTags.TypeInfoInt)   and !(LITERAL_INTEGER)
+			or typeInfo.tag == !(typeTags.TypeInfoFloat) and !(LITERAL_FLOAT)
+			or errorInternal(getFriendlyTypeInfoName(typeInfo))
+
+		literal.value        = !!(opArithmetic ~= "+" and opArithmetic or "") unary.expression.value
+		literal.inferredType = typeInfo
+
+		replaceQueuedNodeAndUnqueueOldTree(state, unary, literal)
+		moveToPipe(state, literal, !(PIPE_BYTECODE))
+	!end
+
+	elseif unary.operation == "not" then
+		assert(unary.expression.nodeType == !(nodeTypes.AstLiteral))
+		assert(type(unary.expression.value) == "boolean")
+
+		local literal        = astNewNode(AstLiteral, unary.token, unary.parent)
+		literal.literalType  = !(LITERAL_BOOLEAN)
+		literal.value        = not unary.expression.value
+		literal.inferredType = typeInfo
+
+		replaceQueuedNodeAndUnqueueOldTree(state, unary, literal)
+		moveToPipe(state, literal, !(PIPE_BYTECODE))
+
+	elseif unary.operation == "#" then
+		local tableNode = followIdentifiersToConstantValue(unary.expression)
+		local length    = 0
+		assert(tableNode.nodeType == !(nodeTypes.AstTable))
+
+		if tableNode.inferredType.tag == !(typeTags.TypeInfoArray) then
+			for _, tableField in ipairs(tableNode.fields) do
+				length = math.max(length, tableField.key.value)
+			end
+
+		elseif tableNode.inferredType.tag == !(typeTags.TypeInfoTable) then
+			errorUnhandledNodeType(state, unary)
+
+		else
+			errorInternal(state, tableNode)
+		end
+
+		local literal        = astNewNode(AstLiteral, unary.token, unary.parent)
+		literal.literalType  = !(LITERAL_INTEGER)
+		literal.value        = length
+		literal.inferredType = typeInfo
+
+		replaceQueuedNodeAndUnqueueOldTree(state, unary, literal)
+		moveToPipe(state, literal, !(PIPE_BYTECODE))
+
+	else
+		errorUnhandledNodeType(state, unary)
+	end
+end
+
+local function simplifyBinary(state, binary)
+	!local ASSERT_BOTH_OPERANDS_NUMERIC_LITERALS = templateToLua(
+		`
+			assert(binary.left.nodeType  == $nodeTypeLiteral)
+			assert(binary.right.nodeType == $nodeTypeLiteral)
+			assert(type(binary.left.value)  == "number")
+			assert(type(binary.right.value) == "number")
+		`, {
+			nodeTypeLiteral = toLua(nodeTypes.AstLiteral),
+		}
+	)
+
+	-- @Incomplete: Simplify these kinds of expressions: (1+x)+2 => (1+2)+x => 3+x
+	-- @Incomplete: Simplify these kinds of expressions: 1 + -x => 1 - x
+	local typeInfo = binary.inferredType
+
+	if nil then
+		-- void
+
+	!for _, opArithmeticKeepType in ipairs{"+","-","*","^","%"} do
+	elseif binary.operation == !(opArithmeticKeepType) then
+		!!(ASSERT_BOTH_OPERANDS_NUMERIC_LITERALS)
+
+		local literal = astNewNode(AstLiteral, binary.token, binary.parent)
+
+		literal.literalType
+			=  typeInfo.tag == !(typeTags.TypeInfoInt)   and !(LITERAL_INTEGER)
+			or typeInfo.tag == !(typeTags.TypeInfoFloat) and !(LITERAL_FLOAT)
+			or errorInternal(getFriendlyTypeInfoName(typeInfo))
+
+		literal.value        = binary.left.value !!(opArithmeticKeepType) binary.right.value -- This should produce the correct result for any combination of int and float.
+		literal.inferredType = typeInfo
+
+		replaceQueuedNodeAndUnqueueOldTree(state, binary, literal)
+		moveToPipe(state, literal, !(PIPE_BYTECODE))
+	!end
+
+	elseif binary.operation == "/" then
+		!!(ASSERT_BOTH_OPERANDS_NUMERIC_LITERALS)
+
+		local literal        = astNewNode(AstLiteral, binary.token, binary.parent)
+		literal.literalType  = !(LITERAL_FLOAT)
+		literal.value        = binary.left.value / binary.right.value
+		literal.inferredType = typeInfo
+
+		replaceQueuedNodeAndUnqueueOldTree(state, binary, literal)
+		moveToPipe(state, literal, !(PIPE_BYTECODE))
+
+	elseif binary.operation == "//" then
+		!!(ASSERT_BOTH_OPERANDS_NUMERIC_LITERALS)
+
+		local literal        = astNewNode(AstLiteral, binary.token, binary.parent)
+		literal.literalType  = !(LITERAL_INTEGER)
+		literal.value        = math.floor(binary.left.value / binary.right.value)
+		literal.inferredType = typeInfo
+
+		replaceQueuedNodeAndUnqueueOldTree(state, binary, literal)
+		moveToPipe(state, literal, !(PIPE_BYTECODE))
+
+	!for _, opComparison in ipairs{"<",">","<=",">="} do
+	elseif binary.operation == !(opComparison) then
+		assert(binary.left.nodeType  == !(nodeTypes.AstLiteral))
+		assert(binary.right.nodeType == !(nodeTypes.AstLiteral))
+		assert(type(binary.left.value) == type(binary.right.value))
+		assert(isAny(type(binary.left.value), "number","string"))
+
+		local literal        = astNewNode(AstLiteral, binary.token, binary.parent)
+		literal.literalType  = !(LITERAL_BOOLEAN)
+		literal.value        = binary.left.value !!(opComparison) binary.right.value
+		literal.inferredType = typeInfo
+
+		replaceQueuedNodeAndUnqueueOldTree(state, binary, literal)
+		moveToPipe(state, literal, !(PIPE_BYTECODE))
+	!end
+
+	!for _, opEquality in ipairs{"==","~="} do
+	elseif binary.operation == !(opEquality) then
+		assert(type(binary.left.value) == type(binary.right.value))
+
+		local valueL, valueR
+
+		if binary.left.nodeType == !(nodeTypes.AstLiteral) then
+			assert(binary.right.nodeType == !(nodeTypes.AstLiteral))
+			valueL = binary.left.value
+			valueR = binary.right.value
+
+		elseif binary.left.nodeType == !(nodeTypes.AstType) then
+			assert(binary.right.nodeType == !(nodeTypes.AstType))
+			valueL = binary.left.representedType.id
+			valueR = binary.right.representedType.id
+
+		else
+			errorInternal(state, binary)
+		end
+
+		local literal        = astNewNode(AstLiteral, binary.token, binary.parent)
+		literal.literalType  = !(LITERAL_BOOLEAN)
+		literal.value        = valueL !!(opEquality) valueR
+		literal.inferredType = typeInfo
+
+		replaceQueuedNodeAndUnqueueOldTree(state, binary, literal)
+		moveToPipe(state, literal, !(PIPE_BYTECODE))
+	!end
+
+	!for _, opLogical in ipairs{"and","or"} do
+	elseif binary.operation == !(opLogical) then
+		assert(binary.left.nodeType  == !(nodeTypes.AstLiteral))
+		assert(binary.right.nodeType == !(nodeTypes.AstLiteral))
+		assert(type(binary.left.value)  == "boolean")
+		assert(type(binary.right.value) == "boolean")
+
+		local literal        = astNewNode(AstLiteral, binary.token, binary.parent)
+		literal.literalType  = !(LITERAL_BOOLEAN)
+		literal.value        = binary.left.value !!(opLogical) binary.right.value
+		literal.inferredType = typeInfo
+
+		replaceQueuedNodeAndUnqueueOldTree(state, binary, literal)
+		moveToPipe(state, literal, !(PIPE_BYTECODE))
+	!end
+
+	elseif binary.operation == ".." then
+		assert(binary.left.nodeType  == !(nodeTypes.AstLiteral))
+		assert(binary.right.nodeType == !(nodeTypes.AstLiteral))
+		assert(type(binary.left.value)  == "string")
+		assert(type(binary.right.value) == "string")
+
+		local literal        = astNewNode(AstLiteral, binary.token, binary.parent)
+		literal.literalType  = !(LITERAL_STRING)
+		literal.value        = binary.left.value .. binary.right.value -- @Speed: Concatinate more than two values at a time. (Probably need to update parsing stage.)
+		literal.inferredType = typeInfo
+
+		replaceQueuedNodeAndUnqueueOldTree(state, binary, literal)
+		moveToPipe(state, literal, !(PIPE_BYTECODE))
+
+	else
+		errorUnhandledNodeType(state, binary)
 	end
 end
 
@@ -3868,7 +3912,9 @@ function _G.simplifyExpressionIfConstant(state, expr)
 		-- At this point we should have a literal to copy. Hopefully the expression we copy
 		-- has been simplified into a literal if it wasn't a literal to begin with.
 		local valueExpr = getAssignmentValue(state, decl.name, decl.assignment.values, decl.assignmentIndex)
-		assert(valueExpr.nodeType == !(nodeTypes.AstLiteral))
+		if valueExpr.nodeType ~= !(nodeTypes.AstLiteral) then
+			errorInternal(state, valueExpr)
+		end
 
 		local copy = astCopy(valueExpr, ident.token)
 
@@ -3883,10 +3929,10 @@ function _G.simplifyExpressionIfConstant(state, expr)
 
 	elseif expr.nodeType == !(nodeTypes.AstCast) then
 		simplifyCast(state, expr)
-
-	--
-	-- @Cleanup: Move simplification of AstUnary and AstBinary here.
-	--
+	elseif expr.nodeType == !(nodeTypes.AstUnary) then
+		simplifyUnary(state, expr)
+	elseif expr.nodeType == !(nodeTypes.AstBinary) then
+		simplifyBinary(state, expr)
 
 	else
 		-- void
