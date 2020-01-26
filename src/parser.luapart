@@ -1230,13 +1230,18 @@ local function parseIfBranch(state, ifOrStaticIf, isFileScope)
 	if isFileScope then
 		!ASSERT("ifOrStaticIf.nodeType == "..nodeTypes.AstStaticIf)
 
-		local tokType, tokValue, token = eatNextToken(state)
-		if not isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"{") then
-			!ERROR_OR_RETURN_FALSE `errorParsingAfterLast(state, "Static if: '{' is currently required at file-level.")` -- @UX
-		end
+		local tokType, tokValue, token = peekNextToken(state)
 
+		-- This block will never get inferred - it's just for storing statements we
+		-- may potentially use. (Should we have a dedicated node type for this?)
 		block = astNewNode(AstBlock, token, ifOrStaticIf)
-		!DO_OR_RETURN `parseFileScopeStatements(state, block, false)`
+
+		if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"{") then
+			eatNextToken(state) -- '{'
+			!DO_OR_RETURN `parseFileScopeStatements(state, block, false, false)` -- @Cleanup: Make a parseBlockOrScopedStatement() equivalent for file scope.
+		else
+			!DO_OR_RETURN `parseFileScopeStatements(state, block, false, true)`
+		end
 
 	else
 		!SET_OR_RETURN `block = parseBlockOrScopedStatement(state, ifOrStaticIf)`
@@ -1249,7 +1254,8 @@ function _G.parseIfOrStaticIf(state, parentNode, isFileScope)
 	local tokType, tokValue, token = eatNextToken(state)
 	!ASSERT(F("isToken(tokType,tokValue, %d,%q) or isToken(tokType,tokValue, %d,%q)", TOKEN_KEYWORD,"if", TOKEN_DIRECTIVE,"if"))
 
-	local ifOrStaticIf                      = astNewNode((tokType == !(TOKEN_KEYWORD) and AstIf or AstStaticIf), token, parentNode)
+	local AstNodeType                       = tokType == !(TOKEN_KEYWORD) and AstIf or AstStaticIf
+	local ifOrStaticIf                      = astNewNode(AstNodeType, token, parentNode)
 	!SET_OR_RETURN `ifOrStaticIf.condition  = parseExpression(state, ifOrStaticIf)`
 	!SET_OR_RETURN `ifOrStaticIf.branchTrue = parseIfBranch(state, ifOrStaticIf, isFileScope)`
 
@@ -1257,6 +1263,15 @@ function _G.parseIfOrStaticIf(state, parentNode, isFileScope)
 
 	if isToken(tokType,tokValue, !(TOKEN_KEYWORD),"else") then
 		eatNextToken(state)
+
+		-- Make !if...elseif work.
+		if AstNodeType == AstStaticIf then
+			tokType, tokValue, token = peekNextToken(state)
+			if isToken(tokType,tokValue, !(TOKEN_KEYWORD),"if") and state.tokens.position1[token] == state.tokens.position1[token-1]+4 then
+				state.tokens.type[token] = !(TOKEN_DIRECTIVE) -- Just make the 'if' into '!if'.
+			end
+		end
+
 		!SET_OR_RETURN `ifOrStaticIf.branchFalse = parseIfBranch(state, ifOrStaticIf, isFileScope)`
 	end
 
@@ -1677,9 +1692,9 @@ function _G.parseImportOrLoad(state, parentNode)
 	return import
 end
 
--- success = parseFileScopeStatements( state, parentBlock, isTopLevel )
+-- success = parseFileScopeStatements( state, parentBlock, isTopLevel, singleStatement )
 -- WARNING: parentBlock is currently modified even if success==false!
-function _G.parseFileScopeStatements(state, block, isTopLevel)
+function _G.parseFileScopeStatements(state, block, isTopLevel, singleStatement)
 	while true do
 		local tokType,  tokValue, token = peekNextToken(state, 1)
 		local tokType2, tokValue2       = peekNextToken(state, 2)
@@ -1724,16 +1739,18 @@ function _G.parseFileScopeStatements(state, block, isTopLevel)
 			eatNextToken(state)
 			if not state.soft then  parserMessageLine(io.stderr, state, token, "Warning", "Empty statement.")  end -- :EmptyStatement
 
-		elseif not isTopLevel and isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"}") then
+		elseif not (isTopLevel or singleStatement) and isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"}") then
 			eatNextToken(state)
 			break
 		else
-			if isTopLevel then
+			if isTopLevel or singleStatement then
 				!ERROR_OR_RETURN_FALSE `errorParsingNext(state, "Expected file-level declaration.")`
 			else
 				!ERROR_OR_RETURN_FALSE `errorParsingNext(state, "Expected '}'.")`
 			end
 		end
+
+		if singleStatement then  break  end
 	end
 
 	return true
@@ -1745,7 +1762,7 @@ function _G.parseFileScope(state, parentNode, path, isModule, moduleName)
 	fileScope.isModule   = isModule
 	fileScope.moduleName = moduleName
 
-	!DO_OR_RETURN `parseFileScopeStatements(state, fileScope, true)`
+	!DO_OR_RETURN `parseFileScopeStatements(state, fileScope, true, false)`
 
 	return fileScope
 end
