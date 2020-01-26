@@ -2837,6 +2837,30 @@ end
 	moveToPipe(state, foreign, !(PIPE_BYTECODE))
 end
 
+!NODE_INFERRER `function nodeInferrers.AstAssert(state, assertNode)`
+	local expr     = assertNode.expression
+	local typeInfo = expr.inferredType
+
+	if not typeInfo then
+		!DEPEND_AND_RETURN(`assertNode`, DEPEND_NODE_INFERRED, `expr`)
+	end
+
+	if typeInfo.tag ~= !(typeTags.TypeInfoBool) then
+		wrapInImplicitCast(state, expr, getTypeInfoForBuiltinType(state, "bool"), true)
+		return
+	end
+
+	if not isExpressionConstant(state, expr) then
+		typeError(state, astGetExpressionVisuallyFurthestToTheLeft(expr), "Expression is not constant.")
+	elseif not (expr.nodeType == !(nodeTypes.AstLiteral) and expr.literalType == !(LITERAL_BOOLEAN)) then
+		errorInternal(state, astGetExpressionVisuallyFurthestToTheLeft(expr), "Constant expression did not result in a boolean literal.")
+	elseif not expr.value then
+		typeError(state, assertNode, "Assertion failed!")
+	end
+
+	moveToPipe(state, assertNode, !(PIPE_DONE))
+end
+
 local function inferIfOrWhile(state, ifOrWhile)
 	local typeInfo = ifOrWhile.condition.inferredType
 	if not typeInfo then
