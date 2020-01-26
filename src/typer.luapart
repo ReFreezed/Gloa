@@ -2895,6 +2895,75 @@ end
 	inferIfOrWhile(state, whileLoop)
 end
 
+!NODE_INFERRER `function nodeInferrers.AstStaticIf(state, staticIf)`
+	local cond     = staticIf.condition
+	local typeInfo = cond.inferredType
+
+	if not typeInfo then
+		!DEPEND_AND_RETURN(`staticIf`, DEPEND_NODE_INFERRED, `cond`)
+	end
+
+	typeInfo = adjustTypeToOne(state, typeInfo, true) -- :CheckVoidFunction
+
+	if typeInfo.tag ~= !(typeTags.TypeInfoBool) then
+		wrapInImplicitCast(state, cond, getTypeInfoForBuiltinType(state, "bool"), true)
+		return
+	end
+
+	if not isExpressionConstant(state, cond) then
+		typeError(state, astGetExpressionVisuallyFurthestToTheLeft(cond), "Static if: The condition must be a constant expression.")
+	elseif not (cond.nodeType == !(nodeTypes.AstLiteral) and cond.literalType == !(LITERAL_BOOLEAN)) then
+		errorInternal(state, astGetExpressionVisuallyFurthestToTheLeft(cond), "Constant condition expression did not result in a boolean literal.")
+	end
+
+	local scope = staticIf.parent
+	assert(isScope(scope))
+
+	local statements     = scope.statements
+	local statementIndex = indexOf(statements, staticIf) or errorInternal(state, staticIf)
+	local statementsNew  = {}
+
+	local branchToUse = (cond.value and staticIf.branchTrue or staticIf.branchFalse)
+
+	if branchToUse then
+		!ASSERT("branchToUse.nodeType == "..nodeTypes.AstBlock)
+		addUnqueuedChildrenToQueueRecursively(state, branchToUse)
+
+		for iNew, statement in ipairs(branchToUse.statements) do
+			statement.parent    = scope
+			statementsNew[iNew] = statement
+		end
+		for _, decl in ipairs(branchToUse.declarations) do
+			table.insert(scope.declarations, decl)
+		end
+		for _, import in ipairs(branchToUse.imports) do
+			table.insert(scope.imports, import)
+		end
+		for _, using in ipairs(branchToUse.usings) do
+			table.insert(scope.usings, using)
+		end
+	end
+
+	for i = statementIndex+1, #statements do
+		table.insert(statementsNew, statements[i])
+	end
+
+	local iNew = 0
+	for i = statementIndex, math.max(#statements, statementIndex + #statementsNew - 1) do
+		iNew          = iNew+1
+		statements[i] = statementsNew[iNew]
+	end
+
+	for i = statementIndex, #statements do
+		local statement            = statements[i]
+		statement.queued.container = statements
+		statement.queued.key       = i
+	end
+
+	moveToPipe(state, staticIf, !(PIPE_DONE)) -- Not sure if needed.
+	unqueue(staticIf) -- @Robustness: Check if the correct thing happens for things waiting on staticIf (i.e. the scope).
+end
+
 !NODE_INFERRER `function nodeInferrers.AstConditional(state, conditional)`
 	local typeInfo = conditional.condition.inferredType
 	if not typeInfo then

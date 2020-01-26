@@ -357,6 +357,7 @@ _G.!structAst"AstIf:_AstNode"{
 	{`branchTrue`,  nil, ast="node"}, -- AstBlock
 	{`branchFalse`, nil, ast="node"}, -- AstBlock
 }
+_G.!structAst"AstStaticIf:AstIf"{}
 _G.!structAst"AstWhile:_AstNode"{
 	{`condition`,      nil, ast="node"}, -- AstExpression
 	{`body`,           nil, ast="node"}, -- AstBlock
@@ -1223,6 +1224,45 @@ function _G.parseAssert(state, parentNode)
 	return assertNode
 end
 
+local function parseIfBranch(state, ifOrStaticIf, isFileScope)
+	local block
+
+	if isFileScope then
+		!ASSERT("ifOrStaticIf.nodeType == "..nodeTypes.AstStaticIf)
+
+		local tokType, tokValue, token = eatNextToken(state)
+		if not isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"{") then
+			!ERROR_OR_RETURN_FALSE `errorParsingAfterLast(state, "Static if: '{' is currently required at file-level.")` -- @UX
+		end
+
+		block = astNewNode(AstBlock, token, ifOrStaticIf)
+		!DO_OR_RETURN `parseFileScopeStatements(state, block, false)`
+
+	else
+		!SET_OR_RETURN `block = parseBlockOrScopedStatement(state, ifOrStaticIf)`
+	end
+
+	return block
+end
+
+function _G.parseIfOrStaticIf(state, parentNode, isFileScope)
+	local tokType, tokValue, token = eatNextToken(state)
+	!ASSERT(F("isToken(tokType,tokValue, %d,%q) or isToken(tokType,tokValue, %d,%q)", TOKEN_KEYWORD,"if", TOKEN_DIRECTIVE,"if"))
+
+	local ifOrStaticIf                      = astNewNode((tokType == !(TOKEN_KEYWORD) and AstIf or AstStaticIf), token, parentNode)
+	!SET_OR_RETURN `ifOrStaticIf.condition  = parseExpression(state, ifOrStaticIf)`
+	!SET_OR_RETURN `ifOrStaticIf.branchTrue = parseIfBranch(state, ifOrStaticIf, isFileScope)`
+
+	tokType, tokValue = peekNextToken(state)
+
+	if isToken(tokType,tokValue, !(TOKEN_KEYWORD),"else") then
+		eatNextToken(state)
+		!SET_OR_RETURN `ifOrStaticIf.branchFalse = parseIfBranch(state, ifOrStaticIf, isFileScope)`
+	end
+
+	return ifOrStaticIf
+end
+
 local function getBreakableNameFromSimpleExpression(expr)
 	if expr.nodeType == !(nodeTypes.AstIdentifier) then
 		return expr.name
@@ -1368,20 +1408,8 @@ function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 	) then
 		!ERROR_OR_RETURN_FALSE `errorParsingNext(state, "@Incomplete: if x == {case...}")`
 
-	elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"if") then
-		local ifBranch = astNewNode(AstIf, state.nextToken, block)
-		eatNextToken(state)
-
-		!SET_OR_RETURN_FALSE `ifBranch.condition  = parseExpression(state, ifBranch)`
-		!SET_OR_RETURN_FALSE `ifBranch.branchTrue = parseBlockOrScopedStatement(state, ifBranch)`
-
-		statement         = ifBranch
-		tokType, tokValue = peekNextToken(state)
-
-		if isToken(tokType,tokValue, !(TOKEN_KEYWORD),"else") then
-			eatNextToken(state)
-			!SET_OR_RETURN_FALSE `ifBranch.branchFalse = parseBlockOrScopedStatement(state, ifBranch)`
-		end
+	elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"if") or isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"if") then
+		!ERROR_OR_RETURN_FALSE `statement = parseIfOrStaticIf(state, block, false)`
 
 	elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"while") then
 		local whileLoop = astNewNode(AstWhile, state.nextToken, block)
@@ -1649,17 +1677,14 @@ function _G.parseImportOrLoad(state, parentNode)
 	return import
 end
 
-function _G.parseFileScope(state, parentNode, path, isModule, moduleName)
-	local fileScope      = astNewNode(AstFileScope, state.nextToken, parentNode)
-	fileScope.path       = path
-	fileScope.isModule   = isModule
-	fileScope.moduleName = moduleName
-
+-- success = parseFileScopeStatements( state, parentBlock, isTopLevel )
+-- WARNING: parentBlock is currently modified even if success==false!
+function _G.parseFileScopeStatements(state, block, isTopLevel)
 	while true do
 		local tokType,  tokValue, token = peekNextToken(state, 1)
 		local tokType2, tokValue2       = peekNextToken(state, 2)
 
-		if not tokType then
+		if not tokType and isTopLevel then
 			break
 
 		elseif
@@ -1668,37 +1693,59 @@ function _G.parseFileScope(state, parentNode, path, isModule, moduleName)
 				isToken(tokType2,tokValue2, !(TOKEN_KEYWORD),"local","global","export")
 			)
 		then
-			!DO_OR_RETURN `parseDeclarationStatement(state, fileScope)`
+			!DO_OR_RETURN_FALSE `parseDeclarationStatement(state, block)`
 
 		elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"import","load") then
 			-- @Incomplete: Warn about duplicate imports? Maybe not necessay as things will only ever be imported once anyway.
-			!SET_OR_RETURN `local import = parseImportOrLoad(state, fileScope)`
+			!SET_OR_RETURN_FALSE `local import = parseImportOrLoad(state, block)`
 			statement                    = import
 
-			table.insert(fileScope.statements, import)
+			table.insert(block.statements, import)
 			if not import.isLoad then
-				table.insert(fileScope.imports, import)
+				table.insert(block.imports, import)
 			end
 
 		elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"using") then
-			!SET_OR_RETURN `local using = parseUsing(state, fileScope)`
+			!SET_OR_RETURN_FALSE `local using = parseUsing(state, block)`
 			statement                   = using
 
-			table.insert(fileScope.statements, using)
-			table.insert(fileScope.usings,     using)
+			table.insert(block.statements, using)
+			table.insert(block.usings,     using)
 
 		elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"assert") then
-			!SET_OR_RETURN `local assertNode = parseAssert(state, fileScope)`
-			table.insert(fileScope.statements, assertNode)
+			!SET_OR_RETURN_FALSE `local assertNode = parseAssert(state, block)`
+			table.insert(block.statements, assertNode)
+
+		elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"if") then
+			!ERROR_OR_RETURN_FALSE `local ifOrStaticIf = parseIfOrStaticIf(state, block, true)`
+			table.insert(block.statements, ifOrStaticIf)
 
 		elseif isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),";") then
 			eatNextToken(state)
 			if not state.soft then  parserMessageLine(io.stderr, state, token, "Warning", "Empty statement.")  end -- :EmptyStatement
 
+		elseif not isTopLevel and isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"}") then
+			eatNextToken(state)
+			break
 		else
-			!ERROR_OR_RETURN `errorParsingNext(state, "Expected file level declaration.")`
+			if isTopLevel then
+				!ERROR_OR_RETURN_FALSE `errorParsingNext(state, "Expected file-level declaration.")`
+			else
+				!ERROR_OR_RETURN_FALSE `errorParsingNext(state, "Expected '}'.")`
+			end
 		end
 	end
+
+	return true
+end
+
+function _G.parseFileScope(state, parentNode, path, isModule, moduleName)
+	local fileScope      = astNewNode(AstFileScope, state.nextToken, parentNode)
+	fileScope.path       = path
+	fileScope.isModule   = isModule
+	fileScope.moduleName = moduleName
+
+	!DO_OR_RETURN `parseFileScopeStatements(state, fileScope, true)`
 
 	return fileScope
 end
@@ -2717,7 +2764,7 @@ do
 				if cast.expression then  printNode(cast.expression, indent+1, printed, printChildren)  end
 				!!(CHILD_PRINT_END)
 
-			elseif node.nodeType == !(nodeTypes.AstIf) then
+			elseif node.nodeType == !(nodeTypes.AstIf) or node.nodeType == !(nodeTypes.AstStaticIf) then
 				local ifBranch = node
 				!!(CHILD_PRINT_START)
 				if ifBranch.condition   then  printNode(ifBranch.condition,   indent+1, printed, printChildren)           end
@@ -2755,7 +2802,7 @@ do
 				printNodeList(returnNode.values, indent+1, printed, printChildren)
 				!!(CHILD_PRINT_END)
 
-			elseif isAny(node.nodeType, !(nodeTypes.AstBreak), !(nodeTypes.AstContinue)) then
+			elseif isAny(node.nodeType, !(nodeTypes.AstBreak),!(nodeTypes.AstContinue)) then
 				local breakOrContinue = node
 				if breakOrContinue.loopName then  write(" (", breakOrContinue.loopName.name, ")")  end
 				write("\n")
@@ -2791,6 +2838,12 @@ do
 				local globalScope = node
 				!!(CHILD_PRINT_START)
 				printNodeList(globalScope.statements, indent+1, printed, printChildren)
+				!!(CHILD_PRINT_END)
+
+			elseif node.nodeType == !(nodeTypes.AstAssert) then
+				local assertNode = node
+				!!(CHILD_PRINT_START)
+				printNode(assertNode.expression, indent+1, printed, printChildren)
 				!!(CHILD_PRINT_END)
 
 			elseif node.nodeType == !(nodeTypes.AstLiteral) then
@@ -2923,7 +2976,7 @@ end
 -- astVisitAllNodesLeavesFirst( topNode, callback )
 -- [ controlValue = ] callback( node, container, key )  -- Not return anything is the same as returning VISIT_CONTINUE.
 -- controlValue = VISIT_CONTINUE|VISIT_BREAK|VISIT_IGNORE_CHILDREN
--- Note: VISIT_IGNORE_CHILDREN does nothing when using astVisitAllNodesLeavesFirst().
+-- Note: VISIT_IGNORE_CHILDREN triggers an error in astVisitAllNodesLeavesFirst().
 do
 	local visit -- Forward declaraion.
 
@@ -2998,7 +3051,9 @@ do
 
 		if not leavesFirst then
 			local controlValue = cb(node, container, key)
-			if controlValue == !(VISIT_BREAK) then
+			if not controlValue then
+				-- void
+			elseif controlValue == !(VISIT_BREAK) then
 				return true
 			elseif controlValue == !(VISIT_IGNORE_CHILDREN) then
 				return false
@@ -3008,8 +3063,15 @@ do
 		local visitor = VISITORS[node.nodeType] or errorInternal(state, node)
 		if visitor(visited, cb, leavesFirst, node) then  return true  end
 
-		if leavesFirst and cb(node, container, key) == !(VISIT_BREAK) then
-			return true
+		if leavesFirst then
+			local controlValue = cb(node, container, key)
+			if not controlValue then
+				-- void
+			elseif controlValue == !(VISIT_BREAK) then
+				return true
+			elseif controlValue == !(VISIT_IGNORE_CHILDREN) then
+				errorInternal("VISIT_IGNORE_CHILDREN does not work when visiting leaves first.")
+			end
 		end
 
 		return false

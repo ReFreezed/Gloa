@@ -10,7 +10,7 @@
 --==============================================================
 
 	addDependency
-	addToQueue, addToQueueRecursively, pokeAndQueueUnqueuedNodeIntoTree, unqueue, unqueueChildrenRecursively, replaceQueuedNode, replaceQueuedNodeAndUnqueueOldTree, cutOutPartOfNodeTree
+	addToQueueRecursively, pokeAndQueueUnqueuedNodeIntoTree, unqueue, unqueueChildrenRecursively, replaceQueuedNode, replaceQueuedNodeAndUnqueueOldTree, cutOutPartOfNodeTree
 	errorPipesAreStuck
 	moveToPipe, moveToNextPipe, moveTreeToNextPipe, moveToNextRelevantPipe, moveTreeToNextRelevantPipe
 
@@ -99,17 +99,17 @@ end
 
 
 local !struct"Queued"{
-	{`node`,              nil}, -- AstNode
-	{`container`,         nil},
-	{`key`,               nil},
+	{`node`,              nil},       -- AstNode
+	{`container`,         nil},       -- Any table.
+	{`key`,               nil},       -- String or integer.
 	{`pipe`,              PIPE_NONE},
-	{`pipeHighestExited`, PIPE_NONE},
-	{`waitingOn`,         nil}, -- Dependency
+	{`pipeHighestExited`, PIPE_NONE}, -- (Not really used. @Cleanup)
+	{`waitingOn`,         nil},       -- Dependency
 	{`unqueued`,          false},
 }
 
 -- addToQueue( state, node, container=nil, key=nil, pipe [, pipeHighestExited=pipe-1 ] )
-function _G.addToQueue(state, node, container, key, pipe, pipeHighestExited)
+local function addToQueue(state, node, container, key, pipe, pipeHighestExited)
 	-- astPrint(node)
 	!ASSERT `not node.queued`
 
@@ -137,23 +137,70 @@ function _G.addToQueue(state, node, container, key, pipe, pipeHighestExited)
 end
 
 -- addToQueueRecursively( state, topNode [, containerForTopNode, keyForTopNode, pipe=PIPE_INFER ] )
-function _G.addToQueueRecursively(state, topNode, container0, key0, pipe)
-	pipe = pipe or !(PIPE_INFER)
+-- Note: Skips AstStaticIf branches.
+do
+	local function registerNodesToAddToQueue(state, topNode, nodesToAdd)
+		astVisitAllNodes(topNode, function(node)
+			nodesToAdd[node] = true
+			if node.nodeType == !(nodeTypes.AstStaticIf) then
+				registerNodesToAddToQueue(state, node.condition, nodesToAdd)
+				return !(VISIT_IGNORE_CHILDREN)
+			end
+		end)
+	end
 
-	astVisitAllNodesLeavesFirst(topNode, function(node, container, key)
-		addToQueue(state, node, (container or container0), (key or key0), pipe)
-	end)
+	function _G.addToQueueRecursively(state, topNode, container0, key0, pipe)
+		pipe = pipe or !(PIPE_INFER)
+
+		local nodesToAdd = {}
+		registerNodesToAddToQueue(state, topNode, nodesToAdd)
+
+		astVisitAllNodesLeavesFirst(topNode, function(node, container, key)
+			if nodesToAdd[node] then
+				addToQueue(state, node, (container or container0), (key or key0), pipe)
+			end
+		end)
+	end
 end
 
 -- addUnqueuedChildrenToQueueRecursively( state, topNode [, pipe=PIPE_INFER ] )
-function _G.addUnqueuedChildrenToQueueRecursively(state, topNode, pipe)
-	pipe = pipe or !(PIPE_INFER)
+-- Note: Ignores children of already queued nodes.
+-- Note: Skips AstStaticIf branches.
+do
+	local function registerNodesToAddToQueue(state, topNode, nodesToAdd)
+		astVisitAllNodes(topNode, function(node)
+			if node == topNode then
+				-- void
 
-	astVisitAllNodesLeavesFirst(topNode, function(node, container, key)
-		if node == topNode then  return                           end
-		if node.queued     then  return !(VISIT_IGNORE_CHILDREN)  end
-		addToQueue(state, node, container, key, pipe)
-	end)
+			elseif node.queued then
+				return !(VISIT_IGNORE_CHILDREN)
+
+			else
+				nodesToAdd[node] = true
+
+				if node.nodeType == !(nodeTypes.AstStaticIf) then
+					if not node.condition.queued then
+						nodesToAdd[node.condition] = true
+						registerNodesToAddToQueue(state, node.condition, nodesToAdd)
+					end
+					return !(VISIT_IGNORE_CHILDREN)
+				end
+			end
+		end)
+	end
+
+	function _G.addUnqueuedChildrenToQueueRecursively(state, topNode, pipe)
+		pipe = pipe or !(PIPE_INFER)
+
+		local nodesToAdd = {}
+		registerNodesToAddToQueue(state, topNode, nodesToAdd)
+
+		astVisitAllNodesLeavesFirst(topNode, function(node, container, key)
+			if nodesToAdd[node] then
+				addToQueue(state, node, container, key, pipe)
+			end
+		end)
+	end
 end
 
 -- pokeAndQueueUnqueuedNodeIntoTree( state, nodeAtTargetPosition, newNode, containerInNewNode, keyInContainerInNewNode [, pipe=PIPE_INFER ] )
