@@ -817,33 +817,29 @@ function _G.parseStruct(state, parentNode)
 		!ERROR_OR_RETURN `errorParsingAfterPrevious(state, "Expected '{'.")`
 	end
 
-	tokType, tokValue = peekNextToken(state)
+	-- Note: We allow a trailing comma/semicolon after the last member.
+	while true do
+		tokType, tokValue = peekNextToken(state)
 
-	if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"}") then
-		eatNextToken(state)
-
-	else
-		-- Note: We allow a trailing comma/semicolon after the members.
-		while true do
+		if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"}") then
+			eatNextToken(state)
+			break
+		elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"assert") then
+			!SET_OR_RETURN_FALSE `local assertNode = parseAssert(state, struct)`
+			table.insert(struct.statements, assertNode)
+		else
 			local declType = !(DECLARATION_STRUCT)
 			!DO_OR_RETURN `parseDeclarationStatement(state, struct, declType)`
+		end
 
-			tokType, tokValue = eatNextToken(state)
+		tokType, tokValue = eatNextToken(state)
 
-			if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),",",";") then
-				-- Continue the loop.
-			elseif isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"}") then
-				break
-			else
-				!ERROR_OR_RETURN `errorParsingAfterPrevious(state, "Expected '}'.")`
-			end
-
-			tokType, tokValue = peekNextToken(state)
-
-			if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"}") then
-				eatNextToken(state)
-				break
-			end
+		if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),",",";") then
+			-- Continue the loop.
+		elseif isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"}") then
+			break
+		else
+			!ERROR_OR_RETURN `errorParsingAfterPrevious(state, "Expected '}'.")`
 		end
 	end
 
@@ -1215,6 +1211,18 @@ function _G.parseNameList(state, parentNode, names)
 	return true
 end
 
+function _G.parseAssert(state, parentNode)
+	local tokType, tokValue, token = eatNextToken(state)
+	if not isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"assert") then
+		!ERROR_OR_RETURN `errorParsingLast(state, "Expected !assert.")`
+	end
+
+	local assertNode                      = astNewNode(AstAssert, token, parentNode)
+	!SET_OR_RETURN `assertNode.expression = parseExpression(state, assertNode)`
+
+	return assertNode
+end
+
 local function getBreakableNameFromSimpleExpression(expr)
 	if expr.nodeType == !(nodeTypes.AstIdentifier) then
 		return expr.name
@@ -1488,8 +1496,8 @@ function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 		statement = forLoop
 
 	elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"using") then
-		!SET_OR_RETURN `local using = parseUsing(state, block)`
-		statement                   = using
+		!SET_OR_RETURN_FALSE `local using = parseUsing(state, block)`
+		statement                         = using
 
 		table.insert(block.usings, using)
 
@@ -1502,11 +1510,7 @@ function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 		end
 
 	elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"assert") then
-		local assertNode = astNewNode(AstAssert, state.nextToken, block)
-		eatNextToken(state)
-
-		!SET_OR_RETURN `assertNode.expression = parseExpression(state, assertNode)`
-		statement                             = assertNode
+		!SET_OR_RETURN_FALSE `statement = parseAssert(state, block)`
 
 	else
 		state.soft     = true
@@ -1672,7 +1676,6 @@ function _G.parseFileScope(state, parentNode, path, isModule, moduleName)
 			statement                    = import
 
 			table.insert(fileScope.statements, import)
-
 			if not import.isLoad then
 				table.insert(fileScope.imports, import)
 			end
@@ -1683,6 +1686,10 @@ function _G.parseFileScope(state, parentNode, path, isModule, moduleName)
 
 			table.insert(fileScope.statements, using)
 			table.insert(fileScope.usings,     using)
+
+		elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"assert") then
+			!SET_OR_RETURN `local assertNode = parseAssert(state, fileScope)`
+			table.insert(fileScope.statements, assertNode)
 
 		elseif isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),";") then
 			eatNextToken(state)
