@@ -896,9 +896,10 @@ end
 -- declarationType = DECLARATION_NORMAL|DECLARATION_STRUCT|DECLARATION_ENUM
 function _G.parseDeclarationStatement(state, block, declType)
 	--[[
-	local a = 0         -- Variable, inferred type.
+	local a := 0        -- Variable, inferred type.
+	local a  = 0        -- Variable, inferred type (same as the above).
 	local b:float = 0   -- Variable, explicit type.
-	local c:float       -- Variable, getting a default value.
+	local c:float       -- Variable, getting the default value for the type.
 	local A :: 0        -- Constant, inferred type.
 	local B:float : 0   -- Constant, explicit type.
 	local a,b,c = 0,f() -- Multiples always have either inferred type...
@@ -984,7 +985,9 @@ function _G.parseDeclarationStatement(state, block, declType)
 	local typesStartToken = state.nextToken -- Dummy position, kinda.
 	tokType, tokValue     = peekNextToken(state)
 
-	-- Type is specified and/or we have a constant.
+	-- local x: someType
+	-- local x := value
+	-- local x :: value
 	if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),":") then
 		eatNextToken(state)
 
@@ -992,7 +995,7 @@ function _G.parseDeclarationStatement(state, block, declType)
 		tokType, tokValue = peekNextToken(state)
 
 		-- Inferred type.
-		if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),":") then
+		if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),":","=") then
 			-- void
 
 		-- Specified type.
@@ -1005,8 +1008,11 @@ function _G.parseDeclarationStatement(state, block, declType)
 			end
 		end
 
-	-- We must have = or : after the identifier, for specified or inferred type.
-	elseif not isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"=") then
+	-- local x = value
+	elseif isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"=") then
+		-- void
+
+	else
 		!ERROR_OR_RETURN `errorParsingAfterLast(state, "Expected ':' or '='.")`
 	end
 
