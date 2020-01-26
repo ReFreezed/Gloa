@@ -493,7 +493,6 @@ function _G.writeExpression(state, file, expr)
 		writeConstantValueOrReference(state, file, foreign.valueConstant)
 
 	elseif expr.nodeType == !(nodeTypes.AstConditional) then
-		-- @Incomplete: Handle vararg in the self-invoking functions. (We can probably just add it as an extra argument.)
 		local conditional = expr
 		local hasVararg   = false
 
@@ -643,6 +642,31 @@ local function allocateArgumentName(state, localsStack, name, n)
 	return allocateName(state, localsStack, name, n, "A", "_A")
 end
 
+local function writeLoopBodyAndFooter(state, file, loop, indent, nextLocalN, localsStack)
+	local indentStr = ("\t"):rep(indent)
+
+	if not (loop.hasNamedBreaks or state.loopStack[1]) then
+		writeBlock(state, file, loop.body, indent+1, nextLocalN, localsStack)
+		file:write(indentStr, "end\n")
+		return
+	end
+
+	if not state.loopStack[1] then
+		file:write(indentStr, "\tlocal _BREAK = 0\n")
+	end
+
+	table.insert(state.loopStack, loop)
+	writeBlock(state, file, loop.body, indent+1, nextLocalN, localsStack)
+	file:write(indentStr, "end\n")
+	table.remove(state.loopStack)
+
+	if state.loopStack[2] then
+		file:write(indentStr, "if _BREAK > 0 then  _BREAK = _BREAK-1 ; break  end\n")
+	elseif state.loopStack[1] then
+		file:write(indentStr, "if _BREAK > 0 then  break  end\n")
+	end
+end
+
 -- writeBlock( state, file, block, indent, nextLocalN, localsStack [, isElseif=false ] )
 function _G.writeBlock(state, file, block, indent, nextLocalN, localsStack, isElseif)
 	!ASSERT `not block[1]`
@@ -729,13 +753,6 @@ function _G.writeBlock(state, file, block, indent, nextLocalN, localsStack, isEl
 				file:write("\n")
 			end
 
-		elseif nodeType == !(nodeTypes.AstBreak) then
-			local breakNode = statement
-			if breakNode.loopName then
-				errorUnhandledNodeType(state, breakNode)
-			end
-			file:write(indentStr, "break\n")
-
 		elseif nodeType == !(nodeTypes.AstBlock) then
 			local block = statement
 			file:write(indentStr, "do\n")
@@ -771,12 +788,11 @@ function _G.writeBlock(state, file, block, indent, nextLocalN, localsStack, isEl
 		elseif nodeType == !(nodeTypes.AstWhile) then
 			-- @Optimize: Don't output an empty body.
 			local whileLoop = statement
+
 			file:write(indentStr, "while ")
 			writeExpression(state, file, whileLoop.condition)
 			file:write(" do\n")
-
-			writeBlock(state, file, whileLoop.body, indent+1, nextLocalN, localsStack)
-			file:write(indentStr, "end\n")
+			writeLoopBodyAndFooter(state, file, whileLoop, indent, nextLocalN, localsStack)
 
 		elseif nodeType == !(nodeTypes.AstFor) then
 			-- @Optimize: Don't output an empty body.
@@ -801,10 +817,8 @@ function _G.writeBlock(state, file, block, indent, nextLocalN, localsStack, isEl
 					file:write(", ")
 					writeExpression(state, file, values[3])
 				end
-
 				file:write(" do\n")
-				writeBlock(state, file, forLoop.body, indent+1, nextLocalN, localsStack)
-				file:write(indentStr, "end\n")
+				writeLoopBodyAndFooter(state, file, forLoop, indent, nextLocalN, localsStack)
 
 			elseif forLoop.forType == !(FOR_SHORT) then
 				local objExpr = forLoop.expressions[1]
@@ -832,9 +846,7 @@ function _G.writeBlock(state, file, block, indent, nextLocalN, localsStack, isEl
 				file:write("(")
 				writeExpression(state, file, objExpr)
 				file:write(") do\n")
-
-				writeBlock(state, file, forLoop.body, indent+1, nextLocalN, localsStack)
-				file:write(indentStr, "end\n")
+				writeLoopBodyAndFooter(state, file, forLoop, indent, nextLocalN, localsStack)
 
 			else--if forLoop.forType == !(FOR_ITERATOR) then
 				file:write(indentStr, "for ")
@@ -843,17 +855,24 @@ function _G.writeBlock(state, file, block, indent, nextLocalN, localsStack, isEl
 					if i > 1 then  file:write(", ")  end
 					writeIdentifierName(state, file, decl.name)
 				end
-
 				file:write(" in ")
-
 				for i, valueExpr in ipairs(forLoop.expressions) do
 					if i > 1 then  file:write(", ")  end
 					writeExpression(state, file, valueExpr)
 				end
-
 				file:write(" do\n")
-				writeBlock(state, file, forLoop.body, indent+1, nextLocalN, localsStack)
-				file:write(indentStr, "end\n")
+				writeLoopBodyAndFooter(state, file, forLoop, indent, nextLocalN, localsStack)
+			end
+
+		elseif nodeType == !(nodeTypes.AstBreak) then
+			local breakNode = statement
+
+			if breakNode.loop then
+				local i                 = indexOf(state.loopStack, breakNode.loop) or errorInternal(state, breakNode)
+				local outerLoopsToBreak = #state.loopStack-i
+				file:write(indentStr, "_BREAK = ",outerLoopsToBreak," ; break\n")
+			else
+				file:write(indentStr, "break\n")
 			end
 
 		elseif isAny(nodeType, !(nodeTypes.AstImport),!(nodeTypes.AstUsing)) then
