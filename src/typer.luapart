@@ -9,6 +9,7 @@
 --=
 --==============================================================
 
+	checkBinaryOperation
 	findDeclaration, findDeclarationInScope, findMemberDeclaration, isDeclarationVisibleToNode, printDeclarationChain
 	followIdentifiersToConstantValue
 	getAssignmentValue
@@ -20,6 +21,7 @@
 	newTypeInfo, isTypeBuiltin, getTypeInfo*
 	simplifyExpressionIfConstant, simplifyTypeExpression
 	typeError, typeMessage
+	wrapInImplicitCast
 
 --============================================================]]
 
@@ -1079,7 +1081,7 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 		!ASSERT `assignment, "Missing both assignment and types from declaration."`
 		!ASSERT `not vararg`
 
-		local _, valueTypeInfo = getAssignmentValue(state, ident, assignment.values, decl.assignmentIndex)
+		local _, valueTypeInfo = getAssignmentValue(state, ident, assignment.values, decl.assignmentIndex, nil, nil, nil)
 		typeInfo               = adjustTypeToOne(state, valueTypeInfo, true)
 	end
 
@@ -1088,7 +1090,7 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 
 	-- Check if the value is constant.
 	if decl.isConstant then
-		local valueExpr, valueTypeInfo = getAssignmentValue(state, ident, assignment.values, decl.assignmentIndex)
+		local valueExpr, valueTypeInfo = getAssignmentValue(state, ident, assignment.values, decl.assignmentIndex, nil, nil, nil)
 		typeInfoForDecl = getTypeRepresentedByExpression(valueExpr)
 
 		if isEnumMember then
@@ -1224,7 +1226,7 @@ end
 
 		for _, typeExpr in ipairs(typeNode.components) do
 			!(
-			local ERROR_DUPLICATE_TYPE_CODE = `
+			local TEMPLATE_ERROR_DUPLICATE_TYPE = `
 				printerr()
 				typeMessage(io.stderr, state, typeExpr, "Error", "Duplicate type specified in $siteTitle.")
 				if isFromCompound[$typeInfoVar] then
@@ -1243,7 +1245,7 @@ end
 				exitFailure()
 			`
 			local function ERROR_DUPLICATE_TYPE(siteTitle, typeInfoVar)
-				local lua = ERROR_DUPLICATE_TYPE_CODE:gsub("$(%w+)", {
+				local lua = templateToLua(TEMPLATE_ERROR_DUPLICATE_TYPE, {
 					siteTitle   = siteTitle,
 					typeInfoVar = typeInfoVar,
 				})
@@ -1795,11 +1797,11 @@ end
 		--
 		if typeExpr and identOrVararg.nodeType ~= !(nodeTypes.AstVararg) then
 			local ident = identOrVararg
-			valueExpr = getAssignmentValue(state, ident, decl.assignment.values, decl.assignmentIndex, ident.inferredType)
+			valueExpr = getAssignmentValue(state, ident, decl.assignment.values, decl.assignmentIndex, ident.inferredType, nil, nil)
 		end
 
 		if scopeIsDeclarative or decl.isConstant then
-			valueExpr = valueExpr or getAssignmentValue(state, identOrVararg, decl.assignment.values, decl.assignmentIndex)
+			valueExpr = valueExpr or getAssignmentValue(state, identOrVararg, decl.assignment.values, decl.assignmentIndex, nil, nil, nil)
 
 			if isExpressionConstant(state, valueExpr) then
 				-- void
@@ -1967,17 +1969,96 @@ local function isValidEqualityCheck(state, binary, typeInfoL, typeInfoR)
 	return false
 end
 
-!NODE_INFERRER `function nodeInferrers.AstBinary(state, binary)`
-	local typeInfoL = binary.left.inferredType
-	local typeInfoR = binary.right.inferredType
-
+-- resultingTypeInfo = checkBinaryOperation( state, expressionForError, mainExpression, leftExpression, rightExpression, binaryOperation, typeInfoL, typeInfoR, inAssignment )
+-- Resurns nil if a cast was added and we're now waiting for it to infer.
+function _G.checkBinaryOperation(state, exprForError, exprMain,exprL,exprR, binOp, typeInfoL,typeInfoR, inAssignment)
 	!local TYPE_MISMATCH = `typeError(
-		state, binary,
+		state, exprForError,
 		"Binary operation (%s): Type mismatch for operands. (Left is %s, right is %s)",
-		binary.operation,
+		binOp,
 		getFriendlyTypeInfoName(typeInfoL),
 		getFriendlyTypeInfoName(typeInfoR)
 	)`
+
+	-- Numeric operation.
+	if isAny(binOp, "+","-","*","^","%","/","//") then
+		if not (isTypeNumeric(typeInfoL) and isTypeNumeric(typeInfoR)) then
+			typeError(
+				state, exprMain,
+				"Binary numeric operation (%s): Expected operands to be numeric. (Got %s and %s)",
+				binOp,
+				getFriendlyTypeInfoName(typeInfoL),
+				getFriendlyTypeInfoName(typeInfoR)
+			)
+		end
+
+		if binOp == "/" then
+			return getTypeInfoForBuiltinType(state, "float")
+		elseif binOp == "//" then
+			return getTypeInfoForBuiltinType(state, "int")
+		elseif isAny(!(typeTags.TypeInfoFloat), typeInfoL.tag,typeInfoR.tag) then
+			return getTypeInfoForBuiltinType(state, "float")
+		else
+			return getTypeInfoForBuiltinType(state, "int")
+		end
+
+	-- Comparison.
+	elseif isAny(binOp, "<",">","<=",">=") then
+		if typeInfoL ~= typeInfoR then
+			!!(TYPE_MISMATCH)
+		elseif not isAny(typeInfoL.tag, !(typeTags.TypeInfoInt),!(typeTags.TypeInfoFloat),!(typeTags.TypeInfoString)) then
+			typeError(
+				state, exprMain,
+				"Binary comparison (%s): Expected a float, int or string. (Got %s)",
+				binOp,
+				getFriendlyTypeInfoName(typeInfoL)
+			)
+		end
+
+		return getTypeInfoForBuiltinType(state, "bool")
+
+	-- Equality.
+	elseif isAny(binOp, "==","~=") then
+		if not isValidEqualityCheck(state, exprForError, typeInfoL, typeInfoR) then
+			!!(TYPE_MISMATCH)
+		end
+		return getTypeInfoForBuiltinType(state, "bool")
+
+	-- Boolean operation.
+	elseif isAny(binOp, "and","or") then
+		local bothAreBool = true
+		local typeInfo    = getTypeInfoForBuiltinType(state, "bool")
+
+		if typeInfoL.tag ~= !(typeTags.TypeInfoBool) then
+			!ASSERT `not inAssignment`
+			bothAreBool = false
+			wrapInImplicitCast(state, exprL, typeInfo, true)
+		end
+		if typeInfoR.tag ~= !(typeTags.TypeInfoBool) then
+			bothAreBool = false
+			wrapInImplicitCast(state, exprR, typeInfo, true)
+		end
+
+		if not bothAreBool then  return nil  end
+		return typeInfo
+
+	-- String concatenation.
+	elseif binOp == ".." then
+		if typeInfoL.tag ~= !(typeTags.TypeInfoString) then
+			typeError(state, exprL, "String concatenation expected a string. (Got %s)", getFriendlyTypeInfoName(typeInfoL))
+		elseif typeInfoR.tag ~= !(typeTags.TypeInfoString) then
+			typeError(state, exprR, "String concatenation expected a string. (Got %s)", getFriendlyTypeInfoName(typeInfoR))
+		end
+		return getTypeInfoForBuiltinType(state, "string")
+
+	else
+		errorUnhandledNodeType(state, exprForError)
+	end
+end
+
+!NODE_INFERRER `function nodeInferrers.AstBinary(state, binary)`
+	local typeInfoL = binary.left.inferredType
+	local typeInfoR = binary.right.inferredType
 
 	if not typeInfoL then
 		!DEPEND_AND_RETURN(`binary`, DEPEND_NODE_INFERRED, `binary.left`)
@@ -1996,82 +2077,10 @@ end
 	typeInfoL = adjustTypeToOne(state, typeInfoL, true)
 	typeInfoR = adjustTypeToOne(state, typeInfoR, true)
 
-	local typeInfo
+	local typeInfo = checkBinaryOperation(state, binary, binary.left,binary.left,binary.right, binary.operation, typeInfoL,typeInfoR, false)
+	if not typeInfo then  return  end
 
-	-- Numeric operation.
-	if isAny(binary.operation, "+","-","*","^","%","/","//") then
-		if not (isTypeNumeric(typeInfoL) and isTypeNumeric(typeInfoR)) then
-			typeError(
-				state, binary.left,
-				"Binary numeric operation (%s): Expected operands to be numeric. (Got %s and %s)",
-				binary.operation,
-				getFriendlyTypeInfoName(typeInfoL),
-				getFriendlyTypeInfoName(typeInfoR)
-			)
-		end
-
-		if binary.operation == "/" then
-			typeInfo = getTypeInfoForBuiltinType(state, "float")
-		elseif binary.operation == "//" then
-			typeInfo = getTypeInfoForBuiltinType(state, "int")
-		elseif isAny(!(typeTags.TypeInfoFloat), typeInfoL.tag,typeInfoR.tag) then
-			typeInfo = getTypeInfoForBuiltinType(state, "float")
-		else
-			typeInfo = getTypeInfoForBuiltinType(state, "int")
-		end
-
-	-- Comparison.
-	elseif isAny(binary.operation, "<",">","<=",">=") then
-		if typeInfoL ~= typeInfoR then
-			!!(TYPE_MISMATCH)
-		elseif not isAny(typeInfoL.tag, !(typeTags.TypeInfoInt),!(typeTags.TypeInfoFloat),!(typeTags.TypeInfoString)) then
-			typeError(
-				state, binary.left,
-				"Binary comparison (%s): Expected a float, int or string. (Got %s)",
-				binary.operation,
-				getFriendlyTypeInfoName(typeInfoL)
-			)
-		end
-
-		typeInfo = getTypeInfoForBuiltinType(state, "bool")
-
-	-- Equality.
-	elseif isAny(binary.operation, "==","~=") then
-		if not isValidEqualityCheck(state, binary, typeInfoL, typeInfoR) then
-			!!(TYPE_MISMATCH)
-		end
-		typeInfo = getTypeInfoForBuiltinType(state, "bool")
-
-	-- Boolean operation.
-	elseif isAny(binary.operation, "and","or") then
-		local bothAreBool = true
-		typeInfo          = getTypeInfoForBuiltinType(state, "bool")
-
-		if typeInfoL.tag ~= !(typeTags.TypeInfoBool) then
-			bothAreBool = false
-			wrapInImplicitCast(state, binary.left, typeInfo, true)
-		end
-		if typeInfoR.tag ~= !(typeTags.TypeInfoBool) then
-			bothAreBool = false
-			wrapInImplicitCast(state, binary.right, typeInfo, true)
-		end
-
-		if not bothAreBool then  return  end
-
-	-- String concatenation.
-	elseif binary.operation == ".." then
-		if typeInfoL ~= typeInfoR then
-			!!(TYPE_MISMATCH)
-		elseif typeInfoL.tag ~= !(typeTags.TypeInfoString) then
-			typeError(state, binary.left, "String concatenation expected a string. (Got %s)", getFriendlyTypeInfoName(typeInfoL))
-		end
-		typeInfo = getTypeInfoForBuiltinType(state, "string")
-
-	else
-		errorUnhandledNodeType(state, binary)
-	end
-
-	binary.inferredType = typeInfo or errorInternal()
+	binary.inferredType = typeInfo
 
 	moveToPipe(state, binary, !(PIPE_DONE))
 	simplifyExpressionIfConstant(state, binary)
@@ -2249,7 +2258,7 @@ end
 			checkForStaticAccessThatUsesWhatLooksLikeRuntimeCode(state, access.object, access.member)
 		end
 
-		local valueExpr = getAssignmentValue(state, decl.name, decl.assignment.values, decl.assignmentIndex)
+		local valueExpr = getAssignmentValue(state, decl.name, decl.assignment.values, decl.assignmentIndex, nil, nil, nil)
 		local replacement
 
 		if valueExpr.nodeType == !(nodeTypes.AstLiteral) then
@@ -2679,7 +2688,7 @@ end
 	for _, targetExpr in ipairs(assignment.targets) do
 		if not isAny(targetExpr.nodeType, !(nodeTypes.AstIdentifier),!(nodeTypes.AstAccess)) then
 			!ifDEBUG`astPrint(targetExpr)`
-			typeError(state, astGetExpressionVisuallyFurthestToTheLeft(targetExpr), "Invalid assignment target. Expected a variable name or field.")
+			typeError(state, astGetExpressionVisuallyFurthestToTheLeft(targetExpr), "Invalid assignment target. Expected a variable name or object field.")
 		end
 	end
 
@@ -2690,7 +2699,7 @@ end
 
 	if not isEnumMemberDecl then
 		for i, targetExpr in ipairs(assignment.targets) do
-			getAssignmentValue(state, targetExpr, assignment.values, i, targetExpr.inferredType)
+			getAssignmentValue(state, targetExpr, assignment.values, i, targetExpr.inferredType, assignment.binaryOperation, nil)
 		end
 	end
 
@@ -3114,7 +3123,7 @@ end
 
 			-- @Incomplete: Complain if getAssignmentValue() can return a fourth value.
 
-			local iterExpr, iterTypeInfo = getAssignmentValue(state, forLoop, values, 1, nil, "loop value")
+			local iterExpr, iterTypeInfo = getAssignmentValue(state, forLoop, values, 1, nil, nil, "loop value")
 
 			if iterTypeInfo.tag ~= !(typeTags.TypeInfoFunction) then
 				typeError(state, iterExpr, "Expected a function. (Got %s)", getFriendlyTypeInfoName(iterTypeInfo))
@@ -3156,8 +3165,8 @@ end
 				)
 			end
 
-			local stateExpr, stateTypeInfo = getAssignmentValue(state, forLoop, values, 2, nil, "loop value")
-			local initExpr,  initTypeInfo  = getAssignmentValue(state, forLoop, values, 3, nil, "loop value")
+			local stateExpr, stateTypeInfo = getAssignmentValue(state, forLoop, values, 2, nil, nil, "loop value")
+			local initExpr,  initTypeInfo  = getAssignmentValue(state, forLoop, values, 3, nil, nil, "loop value")
 
 			if not isTypeCompatibleWith(adjustTypeToOne(state, stateTypeInfo, true), iterTypeInfo.argumentTypesIn[1]) then
 				typeError(
@@ -3392,7 +3401,7 @@ function _G.isExpressionConstant(state, expr)
 
 		!ASSERT `decl.assignment` -- Constant declarations must have a value.
 
-		local valueExpr = getAssignmentValue(state, ident, decl.assignment.values, decl.assignmentIndex)
+		local valueExpr = getAssignmentValue(state, ident, decl.assignment.values, decl.assignmentIndex, nil, nil, nil)
 		return isExpressionConstant(state, valueExpr)
 
 	elseif isAny(expr.nodeType, !(nodeTypes.AstType),!(nodeTypes.AstTypeOf)) then
@@ -3455,76 +3464,99 @@ end
 
 
 
--- expression, typeInfo = getAssignmentValue( state, assignmentTarget, values, valueIndex [, expectedTypeInfo=any, targetTerm="assignment target" ] )
+-- expression, typeInfo = getAssignmentValue( state, assignmentTarget, values, valueIndex, expectedTypeInfo=any, extraBinaryOperation="", targetTerm="assignment target" )
 -- Note: Vararg node/type may be returned.
-function _G.getAssignmentValue(state, targetExpr, values, i, typeInfoExpected, targetTerm)
+function _G.getAssignmentValue(state, targetExpr, values, i, typeInfoExpected, binOp, targetTerm)
 	!(
-		local TEMPLATE_TARGET_NAME = trimTemplate`(
-			targetExpr.nodeType == $nodeTypeIdent  and " ('"..targetExpr.name.."')" or
-			targetExpr.nodeType == $nodeTypeAccess and targetExpr.member.nodeType == $nodeTypeLiteral and targetExpr.member.literalType == $literalTypeString and " ('"..targetExpr.member.value.."')" or
-			""
-		)`
-		local TARGET_NAME = templateToLua(TEMPLATE_TARGET_NAME, {
-			nodeTypeIdent     = nodeTypes.AstIdentifier,
-			nodeTypeAccess    = nodeTypes.AstAccess,
-			nodeTypeLiteral   = nodeTypes.AstLiteral,
-			literalTypeString = LITERAL_STRING,
+	local TEMPLATE_TARGET_NAME = trimTemplate`
+		targetExpr.nodeType == $nodeTypeIdent  and " ('"..targetExpr.name.."')" or
+		targetExpr.nodeType == $nodeTypeAccess and targetExpr.member.nodeType == $nodeTypeLiteral and targetExpr.member.literalType == $literalTypeString and " ('"..targetExpr.member.value.."')" or
+		""
+	`
+	local TARGET_NAME = templateToLua(TEMPLATE_TARGET_NAME, {
+		nodeTypeIdent     = nodeTypes.AstIdentifier,
+		nodeTypeAccess    = nodeTypes.AstAccess,
+		nodeTypeLiteral   = nodeTypes.AstLiteral,
+		literalTypeString = LITERAL_STRING,
+	})
+
+	local TEMPLATE_CALL_RETURNS_NOTHING = trimTemplate`
+		typeError(state, call, "Called function returns nothing for %s #%d%s (return value #%d).", targetTerm, i, $targetName, argIndex)
+	`
+	local CALL_RETURNS_NOTHING = templateToLua(TEMPLATE_CALL_RETURNS_NOTHING, {
+		targetName = TARGET_NAME,
+	})
+
+	local TEMPLATE_CHECK_TYPE_COMPATABILITY_AND_MAYBE_RETURN = `
+		if binOp == "" then
+			if isTypeCompatibleWith($valueTypeInfoAdjusted, typeInfoExpected) then  return $valueExpr, $valueTypeInfo  end
+
+		else
+			$valueTypeInfoAdjusted = checkBinaryOperation(
+				state,
+				targetExpr,
+				$valueExpr, targetExpr, $valueExpr,
+				binOp,
+				typeInfoExpected, $valueTypeInfoAdjusted,
+				true
+			) or errorInternal()
+
+			if not isTypeCompatibleWith($valueTypeInfoAdjusted, typeInfoExpected) then
+				typeError(
+					state, targetExpr,
+					"Type mismatch between %s #%d%s (%s) and result of binary operation (%s) (%s).",
+					targetTerm, i, $targetName, getFriendlyTypeInfoName(typeInfoExpected),
+					binOp, getFriendlyTypeInfoName($valueTypeInfoAdjusted))
+			end
+
+			return $valueExpr, $valueTypeInfo
+		end
+	`
+	local function CHECK_TYPE_COMPATABILITY_AND_MAYBE_RETURN(valueExprVar, typeInfoVar, typeInfoAdjustedVar)
+		local lua = templateToLua(TEMPLATE_CHECK_TYPE_COMPATABILITY_AND_MAYBE_RETURN, {
+			valueExpr             = valueExprVar,
+			valueTypeInfo         = typeInfoVar,
+			valueTypeInfoAdjusted = typeInfoAdjustedVar,
+			targetName            = TARGET_NAME,
 		})
-		local TEMPLATE_CALL_RETURNS_NOTHING = trimTemplate`
-			typeError(state, call, "Called function returns nothing for %s #%d%s (return value #%d).", targetTerm, i, $targetName, argIndex)
-		`
-		local CALL_RETURNS_NOTHING = templateToLua(TEMPLATE_CALL_RETURNS_NOTHING, {
-			targetName = TARGET_NAME,
-		})
+		__LUA(lua)
+	end
 	)
 
-	targetTerm      = targetTerm or "assignment target"
+	binOp      = binOp      or ""
+	targetTerm = targetTerm or "assignment target"
+
 	local valueExpr = values[i]
 
 	if valueExpr then
-		local valueTypeInfoToReturn = valueExpr.inferredType
+		local valueTypeInfo = valueExpr.inferredType
 
-		if valueTypeInfoToReturn.tag == !(typeTags.TypeInfoList) then
-			valueTypeInfoToReturn = valueTypeInfoToReturn[1]
+		if valueTypeInfo.tag == !(typeTags.TypeInfoList) then
+			valueTypeInfo = valueTypeInfo[1]
 
-			if not valueTypeInfoToReturn then
+			if not valueTypeInfo then
 				local call     = valueExpr
 				local argIndex = 1
 				!!(CALL_RETURNS_NOTHING)
 			end
 		end
 
-		if not typeInfoExpected then
-			return valueExpr, valueTypeInfoToReturn
-		end
+		if not typeInfoExpected then  return valueExpr, valueTypeInfo  end
 
-		local valueTypeInfo = adjustTypeToOne(state, valueTypeInfoToReturn, true)
+		local valueTypeInfoAdjusted = adjustTypeToOne(state, valueTypeInfo, true)
+		!CHECK_TYPE_COMPATABILITY_AND_MAYBE_RETURN(`valueExpr`, `valueTypeInfo`, `valueTypeInfoAdjusted`)
 
-		if isTypeCompatibleWith(valueTypeInfo, typeInfoExpected) then
-			return valueExpr, valueTypeInfoToReturn
-		end
+		local messageFormat
+			=   valueTypeInfoAdjusted.tag == !(typeTags.TypeInfoFunction) and typeInfoExpected.tag == !(typeTags.TypeInfoFunction)
+			and "Function signature is different from %s #%d%s. (Wanted %s, got %s)"
+			or  "Value type mismatch for %s #%d%s. (Wanted %s, got %s)"
 
-		if valueTypeInfo.tag == !(typeTags.TypeInfoFunction) and typeInfoExpected.tag == !(typeTags.TypeInfoFunction) then
-			typeError(
-				state, valueExpr,
-				"Function signature is different from %s #%d%s. (Wanted %s, got %s)",
-				targetTerm,
-				i,
-				!!(TARGET_NAME),
-				getFriendlyTypeInfoName(typeInfoExpected),
-				getFriendlyTypeInfoName(valueTypeInfo)
-			)
-		else
-			typeError(
-				state, valueExpr,
-				"Value type mismatch for %s #%d%s. (Wanted %s, got %s)",
-				targetTerm,
-				i,
-				!!(TARGET_NAME),
-				getFriendlyTypeInfoName(typeInfoExpected),
-				getFriendlyTypeInfoName(valueTypeInfo)
-			)
-		end
+		typeError(
+			state, valueExpr, messageFormat,
+			targetTerm, i, !!(TARGET_NAME),
+			getFriendlyTypeInfoName(typeInfoExpected),
+			getFriendlyTypeInfoName(valueTypeInfoAdjusted)
+		)
 	end
 
 	valueExpr = values[#values]
@@ -3556,22 +3588,19 @@ function _G.getAssignmentValue(state, targetExpr, values, i, typeInfoExpected, t
 			!!(CALL_RETURNS_NOTHING)
 		end
 
-		if typeInfoExpected and not isTypeCompatibleWith(adjustTypeToOne(state, typeInfoForOutArg, true), typeInfoExpected) then
-			local calleeName = (call.callee.nodeType == !(nodeTypes.AstIdentifier) and " of '"..call.callee.name.."'" or "")
-			typeError(
-				state, call,
-				"The type of return value #%d%s (%s) does not match the type of %s #%d%s (%s).",
-				argIndex,
-				calleeName,
-				getFriendlyTypeInfoName(adjustTypeToOne(state, typeInfoForOutArg, true)),
-				targetTerm,
-				i,
-				!!(TARGET_NAME),
-				getFriendlyTypeInfoName(typeInfoExpected)
-			)
-		end
+		if not typeInfoExpected then  return call, typeInfoForOutArg  end
 
-		return call, typeInfoForOutArg
+		local typeInfoForOutArgAdjusted = adjustTypeToOne(state, typeInfoForOutArg, true)
+		!CHECK_TYPE_COMPATABILITY_AND_MAYBE_RETURN(`call`, `typeInfoForOutArg`, `typeInfoForOutArgAdjusted`)
+
+		local calleeName = (call.callee.nodeType == !(nodeTypes.AstIdentifier) and " of '"..call.callee.name.."'" or "")
+
+		typeError(
+			state, call,
+			"The type of return value #%d%s (%s) does not match the type of %s #%d%s (%s).",
+			argIndex, calleeName, getFriendlyTypeInfoName(typeInfoForOutArgAdjusted),
+			targetTerm, i, !!(TARGET_NAME), getFriendlyTypeInfoName(typeInfoExpected)
+		)
 
 	elseif valueExpr.nodeType == !(nodeTypes.AstVararg) and not valueExpr.surroundedByParenthesis then
 		local vararg = valueExpr
@@ -3652,7 +3681,7 @@ function _G.simplifyTypeExpression(state, expr, typeInfoRepresented)
 	elseif typeInfoRepresented.tag == !(typeTags.TypeInfoFunction) then
 		-- local decl = typeInfo.declaration
 		-- if decl then
-		-- 	local lambda = getAssignmentValue(state, decl.name, decl.assignment.values, decl.assignmentIndex)
+		-- 	local lambda = getAssignmentValue(state, decl.name, decl.assignment.values, decl.assignmentIndex, nil, nil, nil)
 		-- 	assert(lambda.nodeType == !(nodeTypes.AstLambda))
 		-- 	assert(not lambda.body)
 		-- 	typeNode.functionHeader = astCopy(lambda) -- Do we need to update the location info of the lambda to where typeNode/expr is?
@@ -4073,7 +4102,7 @@ function _G.simplifyExpressionIfConstant(state, expr)
 
 		-- At this point we should have a literal to copy. Hopefully the expression we copy
 		-- has been simplified into a literal if it wasn't a literal to begin with.
-		local valueExpr = getAssignmentValue(state, decl.name, decl.assignment.values, decl.assignmentIndex)
+		local valueExpr = getAssignmentValue(state, decl.name, decl.assignment.values, decl.assignmentIndex, nil, nil, nil)
 		if valueExpr.nodeType ~= !(nodeTypes.AstLiteral) then
 			errorInternal(state, valueExpr)
 		end

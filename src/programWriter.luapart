@@ -102,17 +102,53 @@ function _G.writeStringLiteral(file, name)
 	file:write(s)
 end
 
-function _G.writeStringConcatenation(state, file, binary)
-	if binary.left.nodeType == !(nodeTypes.AstBinary) and binary.left.operation == ".." then
-		writeStringConcatenation(state, file, binary.left)
+-- writeStringConcatenation( state, file, left:AstNode|string, right:AstNode|string )
+function _G.writeStringConcatenation(state, file, left, right)
+	if type(left) == "string" then
+		file:write(left)
+	elseif left.nodeType == !(nodeTypes.AstBinary) and left.operation == ".." then
+		writeStringConcatenation(state, file, left.left, left.right)
 	else
-		writeExpression(state, file, binary.left)
+		writeExpression(state, file, left)
 	end
+
 	file:write(" .. ")
-	if binary.right.nodeType == !(nodeTypes.AstBinary) and binary.right.operation == ".." then
-		writeStringConcatenation(state, file, binary.right)
+
+	if type(right) == "string" then
+		file:write(right)
+	elseif right.nodeType == !(nodeTypes.AstBinary) and right.operation == ".." then
+		writeStringConcatenation(state, file, right.left, right.right)
 	else
-		writeExpression(state, file, binary.right)
+		writeExpression(state, file, right)
+	end
+end
+
+-- writeBinaryOperation( state, file, left:AstNode|string, right:AstNode|string, binaryOperation )
+function _G.writeBinaryOperation(state, file, left, right, binOp)
+	!(
+	local function WRITE_OPERAND(sideCode)
+		__LUA("if type(",sideCode,") == 'string' then  file:write(",sideCode,")  else  writeExpression(state, file, ",sideCode,")  end")
+	end
+	)
+
+	if binOp == ".." then
+		file:write("(")
+		writeStringConcatenation(state, file, left, right) -- This makes sure consecutive string concatenations appear as one operation without any parenthesis.
+		file:write(")")
+
+	elseif binOp == "//" then
+		file:write("_MATH_FLOOR(")
+		!WRITE_OPERAND `left`
+		file:write(" / ")
+		!WRITE_OPERAND `right`
+		file:write(")")
+
+	else
+		file:write("(")
+		!WRITE_OPERAND `left`
+		file:write(" ", binOp, " ")
+		!WRITE_OPERAND `right`
+		file:write(")")
 	end
 end
 
@@ -363,26 +399,7 @@ function _G.writeExpression(state, file, expr)
 
 	elseif expr.nodeType == !(nodeTypes.AstBinary) then
 		local binary = expr
-
-		if binary.operation == ".." then
-			file:write("(")
-			writeStringConcatenation(state, file, binary) -- This makes sure consecutive string concatenations appear as one operation without any parenthesis.
-			file:write(")")
-
-		elseif binary.operation == "//" then
-			file:write("_MATH_FLOOR(")
-			writeExpression(state, file, binary.left)
-			file:write(" / ")
-			writeExpression(state, file, binary.right)
-			file:write(")")
-
-		else
-			file:write("(")
-			writeExpression(state, file, binary.left)
-			file:write(" ", binary.operation, " ")
-			writeExpression(state, file, binary.right)
-			file:write(")")
-		end
+		writeBinaryOperation(state, file, binary.left, binary.right, binary.operation)
 
 	elseif expr.nodeType == !(nodeTypes.AstLiteral) then
 		local literal = expr
@@ -698,10 +715,6 @@ function _G.writeBlock(state, file, block, indent, nextLocalN, localsStack, isEl
 
 				if decl.assignment then
 					inDecl = true
-					if decl.assignmentIndex == 1 then
-						file:write(indentStr, "local ")
-					end
-
 				else
 					local tag = decl.name.inferredType.tag
 					file:write(indentStr, "local ", decl.localName, " = ")
@@ -713,23 +726,116 @@ function _G.writeBlock(state, file, block, indent, nextLocalN, localsStack, isEl
 			end
 
 		elseif nodeType == !(nodeTypes.AstAssignment) then
-			if not skipNextAssignment then
-				local assignment = statement
-				assert(assignment.operation == "=", "@Incomplete: Support more than '='.")
+			local assignment = statement
+			if skipNextAssignment then
+				-- void
 
-				if not inDecl then
-					file:write(indentStr)
-				end
+			elseif assignment.operation == "=" then
+				file:write(indentStr)
+				if inDecl then  file:write("local ")  end
+
 				for i, targetExpr in ipairs(assignment.targets) do
 					if i > 1 then  file:write(", ")  end
 					writeExpression(state, file, targetExpr)
 				end
+
 				file:write(" ", assignment.operation, " ")
-				for i, expr in ipairs(assignment.values) do
+
+				for i, valueExpr in ipairs(assignment.values) do
 					if i > 1 then  file:write(", ")  end
-					writeExpression(state, file, expr)
+					writeExpression(state, file, valueExpr)
 				end
+
 				file:write(";\n") -- The ';' removes ambiguity is some cases.
+
+			else
+				!ASSERT `not inDecl`
+				file:write(indentStr, "do\n")
+
+				-- Get target objects and values.
+				file:write(indentStr, "\tlocal ")
+				local first   = true
+				local accessN = 0
+
+				for _, targetExpr in ipairs(assignment.targets) do
+					if targetExpr.nodeType == !(nodeTypes.AstAccess) then
+						local access = targetExpr
+
+						if not first then  file:write(", ")  end
+						first = false
+
+						-- @Optimize: Don't store the object and/or member like this if it's unnecessary.
+						accessN = accessN+1
+						file:write("_OBJECT", accessN, ", _MEMBER", accessN) -- @Robustness: Ensure unique names.
+					end
+				end
+
+				for i, targetExpr in ipairs(assignment.targets) do
+					if not first then  file:write(", ")  end
+					first = false
+
+					file:write("_VALUE", i) -- @Robustness: Ensure unique names.
+				end
+
+				file:write(" = ")
+				first = true
+
+				for _, targetExpr in ipairs(assignment.targets) do
+					if targetExpr.nodeType == !(nodeTypes.AstAccess) then
+						local access = targetExpr
+
+						if not first then  file:write(", ")  end
+						first = false
+
+						writeExpression(state, file, access.object)
+						file:write(", ")
+						writeExpression(state, file, access.member)
+					end
+				end
+
+				for _, valueExpr in ipairs(assignment.values) do
+					if not first then  file:write(", ")  end
+					first = false
+
+					writeExpression(state, file, valueExpr)
+				end
+
+				file:write("\n")
+
+				-- Assign to targets.
+				local targetsToWrite = {}
+				file:write(indentStr, "\t")
+				first   = true
+				accessN = 0
+
+				for i, target in ipairs(assignment.targets) do
+					if not first then  file:write(", ")  end
+					first = false
+
+					if target.nodeType == !(nodeTypes.AstAccess) then
+						accessN = accessN+1
+						target  = F("_OBJECT%d[_MEMBER%d]", accessN, accessN)
+						file:write(target)
+					else
+						writeExpression(state, file, target)
+					end
+
+					targetsToWrite[i] = target
+				end
+
+				file:write(" = ")
+				first   = true
+				accessN = 0
+
+				for i, target in ipairs(targetsToWrite) do
+					if not first then  file:write(", ")  end
+					first = false
+
+					writeBinaryOperation(state, file, target, "_VALUE"..i, assignment.binaryOperation)
+				end
+
+				file:write("\n")
+				file:write(indentStr, "end\n")
 			end
 
 			inDecl             = false
@@ -1237,11 +1343,11 @@ function _G.writeProgram(state)
 		)
 
 	elseif mainFuncDecl.name.inferredType.argumentTypesIn[1] then
-		local lambda = getAssignmentValue(state, mainFuncDecl.name, mainFuncDecl.assignment.values, mainFuncDecl.assignmentIndex)
+		local lambda = getAssignmentValue(state, mainFuncDecl.name, mainFuncDecl.assignment.values, mainFuncDecl.assignmentIndex, nil, nil, nil)
 		nodeError(state, lambda.argumentsIn, "ProgramWriter", "Program entry point function must not take any arguments.")
 
 	elseif mainFuncDecl.name.inferredType.argumentTypesOut[1] then
-		local lambda = getAssignmentValue(state, mainFuncDecl.name, mainFuncDecl.assignment.values, mainFuncDecl.assignmentIndex)
+		local lambda = getAssignmentValue(state, mainFuncDecl.name, mainFuncDecl.assignment.values, mainFuncDecl.assignmentIndex, nil, nil, nil)
 		nodeError(state, lambda.argumentsOut, "ProgramWriter", "Program entry point function must not return any values.")
 	end
 
