@@ -123,18 +123,37 @@ function _G.writeStringConcatenation(state, file, left, right)
 	end
 end
 
--- writeBinaryOperation( state, file, left:AstNode|string, right:AstNode|string, binaryOperation )
-function _G.writeBinaryOperation(state, file, left, right, binOp)
+function _G.shouldOperationHaveSurroundingParentheses(node)
+	local parent = node.parent
+	return not (
+		isAny(
+			parent.nodeType,
+			!(nodeTypes.AstCast), -- Casts should always add their own parentheses.
+			!(nodeTypes.AstAssignment),
+			!(nodeTypes.AstCall), -- Both callee and arguments.
+			!(nodeTypes.AstReturn),
+			!(nodeTypes.AstIf),
+			!(nodeTypes.AstFor),
+			!(nodeTypes.AstWhile)
+		)
+		or parent.nodeType == !(nodeTypes.AstAccess) and node == parent.member -- The member should be inside [].
+	)
+end
+
+-- writeBinaryOperation( state, file, left:AstNode|string, right:AstNode|string, binaryOperation [, binary ] )
+function _G.writeBinaryOperation(state, file, left, right, binOp, binary)
 	!(
 	local function WRITE_OPERAND(sideCode)
 		__LUA("if type(",sideCode,") == 'string' then  file:write(",sideCode,")  else  writeExpression(state, file, ",sideCode,")  end")
 	end
 	)
 
+	local addParens = (binary and shouldOperationHaveSurroundingParentheses(binary))
+
 	if binOp == ".." then
-		file:write("(")
-		writeStringConcatenation(state, file, left, right) -- This makes sure consecutive string concatenations appear as one operation without any parenthesis.
-		file:write(")")
+		if addParens then  file:write("(")  end
+		writeStringConcatenation(state, file, left, right) -- This makes sure consecutive string concatenations appear as one operation without any parentheses.
+		if addParens then  file:write(")")  end
 
 	elseif binOp == "//" then
 		file:write("_MATH_FLOOR(")
@@ -144,11 +163,11 @@ function _G.writeBinaryOperation(state, file, left, right, binOp)
 		file:write(")")
 
 	else
-		file:write("(")
+		if addParens then  file:write("(")  end
 		!WRITE_OPERAND `left`
 		file:write(" ", binOp, " ")
 		!WRITE_OPERAND `right`
-		file:write(")")
+		if addParens then  file:write(")")  end
 	end
 end
 
@@ -216,9 +235,9 @@ function _G.writeCast(state, file, cast, nameToCast)
 
 	-- float -> int
 	elseif typeInfoSource.tag == !(typeTags.TypeInfoFloat) and typeInfoTarget.tag == !(typeTags.TypeInfoInt) then
-		file:write("(_MATH_MODF(")
+		file:write("_MATH_MODF(") -- Note: math.modf() returns two values.
 		!!(WRITE_EXPRESSION)
-		file:write("))")
+		file:write(")")
 
 	-- (numeric) -> bool
 	elseif isTypeNumeric(typeInfoSource) and typeInfoTarget.tag == !(typeTags.TypeInfoBool) then
@@ -302,7 +321,7 @@ function _G.writeExpression(state, file, expr)
 		local call   = expr
 		local callee = call.callee
 
-		if call.surroundedByParenthesis then  file:write("(")  end
+		if call.surroundedByParentheses then  file:write("(")  end
 
 		if callee.nodeType == !(nodeTypes.AstIdentifier) then
 			assert(callee.declaration.valueConstant)
@@ -311,9 +330,9 @@ function _G.writeExpression(state, file, expr)
 			writeExpression(state, file, callee)
 		end
 
-		local argsNeedParenthesis = true
-		--[[ @Incomplete: Consider optional arguments if omitting parenthesis.
-		local argsNeedParenthesis = not (
+		local argsNeedParentheses = true
+		--[[ @Incomplete: Consider optional arguments if omitting parentheses.
+		local argsNeedParentheses = not (
 			#call.arguments == 1 and (
 				call.arguments[1].nodeType == !(nodeTypes.AstTable)
 				or (
@@ -324,7 +343,7 @@ function _G.writeExpression(state, file, expr)
 		)
 		]]
 
-		if argsNeedParenthesis then  file:write("(")  end
+		if argsNeedParentheses then  file:write("(")  end
 
 		local first = true
 
@@ -356,11 +375,11 @@ function _G.writeExpression(state, file, expr)
 						argExprLast and (
 							(
 								argExprLast.inferredType.tag == !(typeTags.TypeInfoVararg)
-								and not argExprLast.surroundedByParenthesis
+								and not argExprLast.surroundedByParentheses
 							)
 							or (
 								argExprLast.inferredType.tag == !(typeTags.TypeInfoList)
-								and not argExprLast.surroundedByParenthesis
+								and not argExprLast.surroundedByParentheses
 								and argExprLast.inferredType[2]
 							)
 						)
@@ -383,23 +402,29 @@ function _G.writeExpression(state, file, expr)
 			end
 		end
 
-		if argsNeedParenthesis then  file:write(")")  end
+		if argsNeedParentheses then  file:write(")")  end
 
-		if call.surroundedByParenthesis then  file:write(")")  end
+		if call.surroundedByParentheses then  file:write(")")  end
 
 	elseif expr.nodeType == !(nodeTypes.AstUnary) then
 		local unary = expr
+
 		if unary.operation == "+" then
 			writeExpression(state, file, unary.expression)
+
 		else
-			file:write("(", unary.operation, " ")
+			local addParens = shouldOperationHaveSurroundingParentheses(unary)
+
+			if addParens then  file:write("(")  end
+			file:write(unary.operation)
+			if unary.operation:find"%w" then  file:write(" ")  end
 			writeExpression(state, file, unary.expression)
-			file:write(")")
+			if addParens then  file:write(")")  end
 		end
 
 	elseif expr.nodeType == !(nodeTypes.AstBinary) then
 		local binary = expr
-		writeBinaryOperation(state, file, binary.left, binary.right, binary.operation)
+		writeBinaryOperation(state, file, binary.left, binary.right, binary.operation, binary)
 
 	elseif expr.nodeType == !(nodeTypes.AstLiteral) then
 		local literal = expr
@@ -434,7 +459,7 @@ function _G.writeExpression(state, file, expr)
 
 	elseif expr.nodeType == !(nodeTypes.AstVararg) then
 		local vararg = expr
-		file:write(vararg.surroundedByParenthesis and "(...)" or "...")
+		file:write(vararg.surroundedByParentheses and "(...)" or "...")
 
 	elseif expr.nodeType == !(nodeTypes.AstAccess) then
 		local access = expr

@@ -136,7 +136,7 @@ _G.!structAst"AstIdentifier:_AstExpression"{
 }
 _G.!structAst"AstVararg:AstIdentifier"{
 	_overrides = {{`name`,"..."}},
-	{`surroundedByParenthesis`, false},
+	{`surroundedByParentheses`, false},
 }
 _G.!structAst"AstLiteral:_AstExpression"{
 	{`literalType`,   0},
@@ -178,7 +178,7 @@ _G.!structAst"AstTable:_AstExpression"{
 _G.!structAst"AstCall:_AstExpression"{
 	{`couldBeTypeWithParameters`, false},
 	{`isMethod`,                  false},
-	{`surroundedByParenthesis`,   false},
+	{`surroundedByParentheses`,   false},
 	{`callee`,                    nil, ast="node"},  -- AstExpression
 	{`arguments`,                 {},  ast="array"}, -- []AstExpression
 }
@@ -1574,7 +1574,7 @@ function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 
 		elseif exprTest.nodeType == !(nodeTypes.AstCall) then
 			local call = exprTest
-			--[[ @Incomplete :ParenthesisAmbiguityError
+			--[[ @Incomplete :ParenthesesAmbiguityError
 			if
 				isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"(")
 				and call.callee.nodeType == !(nodeTypes.AstCall)
@@ -2010,7 +2010,7 @@ function _G.parseExpression(state, parentNode, prevOpPrecedence, expectLeftValue
 	local tokType3, tokValue3                = peekNextToken(state, 2)
 	local expr, token
 
-	local encounteredParenthesis = false
+	local encounteredParentheses = false
 
 	-- Function call or type with parameters.
 	--
@@ -2120,16 +2120,16 @@ function _G.parseExpression(state, parentNode, prevOpPrecedence, expectLeftValue
 			expr                    = typeNode
 		end
 
-	-- Parenthesis (must be detected after lambda).
+	-- Parentheses (must be detected after lambda).
 	elseif isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"(") then
-		encounteredParenthesis = true
+		encounteredParentheses = true
 		!SET_OR_RETURN `expr   = parseExpression(state, parentNode)`
 
 		if isAny(expr.nodeType, !(nodeTypes.AstCall), !(nodeTypes.AstVararg)) then
 			-- This is so we know whether to adjust the return values to one or not in certain situations.
 			-- Note: Functions with a return argument after the first one marked as #must cannot have their
 			-- return arguments adjusted to one.
-			expr.surroundedByParenthesis = true
+			expr.surroundedByParentheses = true
 		end
 
 		tokType, tokValue = eatNextToken(state)
@@ -2138,9 +2138,9 @@ function _G.parseExpression(state, parentNode, prevOpPrecedence, expectLeftValue
 			!ERROR_OR_RETURN `errorParsingAfterPrevious(state, "Expected ')'.")`
 		end
 
-		--[[ @Incomplete :ParenthesisAmbiguityError
+		--[[ @Incomplete :ParenthesesAmbiguityError
 		if expectLeftValue and expr.nodeType == !(nodeTypes.AstIdentifier) then
-			!ERROR_OR_RETURN `errorParsing(state, exprStartToken, "Unexpected parenthesis around identifier.")`
+			!ERROR_OR_RETURN `errorParsing(state, exprStartToken, "Unexpected parentheses around identifier.")`
 		end
 		--]]
 
@@ -2410,8 +2410,8 @@ function _G.parseExpression(state, parentNode, prevOpPrecedence, expectLeftValue
 
 	if expectLeftValue then
 		if expr.nodeType == !(nodeTypes.AstIdentifier) then
-			if encounteredParenthesis then
-				!ERROR_OR_RETURN `errorParsing(state, exprStartToken, "Unexpected parenthesis around identifier.")` -- :ParenthesisAmbiguityError
+			if encounteredParentheses then
+				!ERROR_OR_RETURN `errorParsing(state, exprStartToken, "Unexpected parentheses around identifier.")` -- :ParenthesesAmbiguityError
 			end
 		elseif expr.nodeType == !(nodeTypes.AstAccess) then
 			-- void
@@ -2712,7 +2712,7 @@ do
 				assert(not (call.couldBeTypeWithParameters and call.isMethod))
 				if call.couldBeTypeWithParameters then  write(" (couldBeType)")    end
 				if call.isMethod                  then  write(" (method)")         end
-				if call.surroundedByParenthesis   then  write(" (adjustArgsTo1)")  end
+				if call.surroundedByParentheses   then  write(" (adjustArgsTo1)")  end
 				!!(CHILD_PRINT_START)
 				if call.callee then  printNode(call.callee, indent+1, printed, printChildren)  end
 				printNodeList(call.arguments, indent+1, printed, printChildren, "ARG")
@@ -2850,7 +2850,7 @@ do
 
 			elseif node.nodeType == !(nodeTypes.AstVararg) then
 				local vararg = node
-				if vararg.surroundedByParenthesis then  write(" (adjustTo1)")  end
+				if vararg.surroundedByParentheses then  write(" (adjustTo1)")  end
 				write("\n")
 
 			elseif node.nodeType == !(nodeTypes.AstGlobalScope) then
