@@ -65,6 +65,7 @@ local !structTypeInfo"TypeInfoString:_TypeInfo"{}
 local !structTypeInfo"TypeInfoTable:_TypeInfo"{}
 local !structTypeInfo"TypeInfoType:_TypeInfo"{}
 
+local !structTypeInfo"TypeInfoPlaceholder:_TypeInfo"{}
 local !structTypeInfo"TypeInfoForeignDummy:_TypeInfo"{}
 
 _G.!(local )!!SIMPLE_TYPE_TAG = {
@@ -92,8 +93,7 @@ local !structTypeInfo"TypeInfoFunction:_TypeInfo"{ -- AKA function signature.
 	{`argumentTypesOut`,     {}}, -- []TypeInfo  @Cleanup: Use TypeInfoList here.
 	{`requiredArgumentsIn`,  {}}, -- []bool
 	{`requiredArgumentsOut`, {}}, -- []bool
-	{`polymorphic`,          false},
-	{`inline`,               false},
+	{`isPolymorphic`,        false},
 }
 
 local !struct"TypeInfoStructMember"{
@@ -161,15 +161,16 @@ do
 	local builtinTypeInfos = {}
 
 	local BUILTIN_TYPE_STRUCTS = {
-		["any"]     = TypeInfoAny,
-		["bool"]    = TypeInfoBool,
-		["int"]     = TypeInfoInt,
-		["none"]    = TypeInfoNone,
-		["float"]   = TypeInfoFloat,
-		["string"]  = TypeInfoString,
-		["table"]   = TypeInfoTable,
-		["type"]    = TypeInfoType, -- The result of e.g. type_of(int) or type_of(type_of(expression)).
-		["foreign"] = TypeInfoForeignDummy, -- Dummy type used for foreign constants in bytecode pipe and forward.
+		["any"]         = TypeInfoAny,
+		["bool"]        = TypeInfoBool,
+		["int"]         = TypeInfoInt,
+		["none"]        = TypeInfoNone,
+		["float"]       = TypeInfoFloat,
+		["string"]      = TypeInfoString,
+		["table"]       = TypeInfoTable,
+		["type"]        = TypeInfoType,         -- The result of e.g. type_of(int) or type_of(type_of(expression)).
+		["placeholder"] = TypeInfoPlaceholder,  -- Used in polymorphic functions.
+		["foreign"]     = TypeInfoForeignDummy, -- Dummy type used for foreign constants in bytecode pipe and forward.
 	}
 
 	function _G.getTypeInfoForBuiltinType(state, typeName)
@@ -189,14 +190,15 @@ do
 	-- bool, typeName = isTypeBuiltin( typeInfo )
 	function _G.isTypeBuiltin(typeInfo)
 		!ASSERT `typeInfo`
-		if typeInfo == builtinTypeInfos["any"]    then  return true, "any"     end
-		if typeInfo == builtinTypeInfos["bool"]   then  return true, "bool"    end
-		if typeInfo == builtinTypeInfos["int"]    then  return true, "int"     end
-		if typeInfo == builtinTypeInfos["none"]   then  return true, "none"    end
-		if typeInfo == builtinTypeInfos["float"]  then  return true, "float"   end
-		if typeInfo == builtinTypeInfos["string"] then  return true, "string"  end
-		if typeInfo == builtinTypeInfos["table"]  then  return true, "table"   end
-		if typeInfo == builtinTypeInfos["type"]   then  return true, "type"    end
+		if typeInfo == builtinTypeInfos["any"]         then  return true, "any"          end
+		if typeInfo == builtinTypeInfos["bool"]        then  return true, "bool"         end
+		if typeInfo == builtinTypeInfos["int"]         then  return true, "int"          end
+		if typeInfo == builtinTypeInfos["none"]        then  return true, "none"         end
+		if typeInfo == builtinTypeInfos["float"]       then  return true, "float"        end
+		if typeInfo == builtinTypeInfos["string"]      then  return true, "string"       end
+		if typeInfo == builtinTypeInfos["table"]       then  return true, "table"        end
+		if typeInfo == builtinTypeInfos["type"]        then  return true, "type"         end
+		if typeInfo == builtinTypeInfos["placeholder"] then  return true, "placeholder"  end
 		return false, ""
 	end
 end
@@ -216,6 +218,8 @@ local function doesLambdaHaveSignature(lambda, funcSig)
 			if arg.declaration.name.inferredType ~= funcSig.argumentTypesOut[i] then  return false  end
 		end
 	end
+
+	if lambda.isPolymorphic ~= funcSig.isPolymorphic then  return false  end
 
 	return true
 end
@@ -238,7 +242,8 @@ function _G.getTypeInfoForLambda(state, lambda)
 		end
 	end
 
-	local funcSig = newTypeInfo(TypeInfoFunction)
+	local funcSig         = newTypeInfo(TypeInfoFunction)
+	funcSig.isPolymorphic = lambda.isPolymorphic
 
 	if lambda.argumentsIn then
 		for i, arg in ipairs(lambda.argumentsIn.arguments) do
@@ -356,7 +361,7 @@ function _G.getTypeRepresentedByExpression(expr)
 		return ident.declaration.valueTypeInfo -- May be nil.
 
 	elseif expr.inferredType.tag == !(typeTags.TypeInfoType) then
-		errorUnhandledNodeType(state, expr)
+		errorInternal("Incomplete: Unhandled node type: %s", getFriendlyTypeInfoName(expr.inferredType))
 	else
 		return nil
 	end
@@ -828,6 +833,12 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 	local ident  = not vararg                                       and identOrVararg or nil
 	local decl   = identOrVararg.declaration
 
+	if decl and decl.isBake then
+		identOrVararg.inferredType = getTypeInfoForBuiltinType(state, "type")
+		decl.valueTypeInfo         = getTypeInfoForBuiltinType(state, "placeholder")
+		return
+	end
+
 	-- 1. Loose identifier.
 	if not isPartOfAnyDeclaration(identOrVararg) then
 		if not decl then
@@ -844,6 +855,7 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 
 		-- Overloaded names refer to multiple things, so that's an error!
 		-- @Incomplete: Add a way to refer to a specific overload.
+		-- @Incomplete: Handle polymorphic functions similarly.
 		if decl.overloadOf and ident and ident.parent.nodeType ~= !(nodeTypes.AstCall) then
 			local declBase = ident.declaration
 			while declBase.overloadOf and declBase.overloadOf ~= declBase do  declBase = declBase.overloadOf  end
@@ -1634,6 +1646,12 @@ end
 		end
 	!end
 
+	if calleeTypeInfo.isPolymorphic then
+		-- @Incomplete: Find previous similar morph or copy the function and clear type info etc.
+		--              Remember: We need the callee to be a constant reference to an AstLambda!
+		errorInternal(state, callee, "@Incomplete: Polymorphic functions.")
+	end
+
 	local realArguments     = (call.isMethod and {call, unpack(call.arguments)} or call.arguments)
 	local realArgumentTypes = {}
 
@@ -1785,7 +1803,10 @@ end
 
 	-- @Incomplete: decl.notes (if we make them structured, which we should!)
 
-	if decl.assignment then
+	if decl.isBake then
+		-- void
+
+	elseif decl.assignment then
 		local scope              = getClosestScope(decl) or errorInternal()
 		local scopeIsDeclarative = isScopeDeclarative(scope)
 		local valueExpr
@@ -2846,6 +2867,10 @@ end
 	moveToPipe(state, foreign, !(PIPE_BYTECODE))
 end
 
+!NODE_INFERRER `function nodeInferrers.AstBake(state, bake)`
+	errorParsing(state, bake.token, "Unexpected '$'.")
+end
+
 !NODE_INFERRER `function nodeInferrers.AstAssert(state, assertNode)`
 	local expr     = assertNode.expression
 	local typeInfo = expr.inferredType
@@ -3398,6 +3423,7 @@ function _G.isExpressionConstant(state, expr)
 		local decl  = ident.declaration or errorInternal()
 
 		if not decl.isConstant then  return false  end
+		if decl.isBake         then  return true   end
 
 		!ASSERT `decl.assignment` -- Constant declarations must have a value.
 
@@ -3622,7 +3648,7 @@ local function createLambdaArgumentsFromTypes(state, typeInfos, lambda)
 		local ident        = astNewNode(AstIdentifier,  lambda.token, decl)
 
 		ident.name         = "_"..i
-		ident.declaration  = declaration
+		ident.declaration  = decl
 		ident.inferredType = argTypeInfo
 
 		decl.name          = ident
@@ -4147,6 +4173,10 @@ function _G.isTypeCompatibleWith(typeToCheck, otherType)
 	!local SCORE = 0x10000
 	if typeToCheck == otherType then  return true, !(SCORE)  end
 
+	-- Placeholders cannot actually be checked - we just say they are compatible with everything until the situation is handled elsewhere.
+	!local SCORE = .1
+	if typeToCheck.tag == !(typeTags.TypeInfoPlaceholder) or otherType.tag == !(typeTags.TypeInfoPlaceholder) then  return true, !(SCORE)  end
+
 	-- Everything is compatible with the 'any' type. The user better know what they're doing!
 	!local SCORE = 0x1
 	if typeToCheck.tag == !(typeTags.TypeInfoAny) or otherType.tag == !(typeTags.TypeInfoAny) then  return true, !(SCORE)  end
@@ -4242,6 +4272,11 @@ end
 
 -- Returns nil if we're now waiting for something. Errors on failure.
 -- typeInfo = getExpectedTypeInfo( state, node [, strict=false ] )
+--
+-- @Incomplete: Check for polymorphism at calling sites!
+-- @Incomplete: Check for polymorphism at calling sites!
+-- @Incomplete: Check for polymorphism at calling sites!
+--
 function _G.getExpectedTypeInfo(state, node, strict)
 	!local NO_EXPECTATION = `typeError(state, node, "Could not determine what type is expected here.")`
 	local nodeType        = node.parent.nodeType

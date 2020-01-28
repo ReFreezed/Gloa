@@ -9,7 +9,7 @@
 --=
 --==============================================================
 
-	astCopy, astCopyArray
+	astCopy
 	astFindParent, astFindCommonParent, astHasParent, astFindInTree
 	astGetDepth
 	astGetExpressionVisuallyFurthestToTheLeft, astGetCalleeVisuallyFurthestToTheLeft
@@ -131,8 +131,8 @@ end
 _G.!structAst"AstIdentifier:_AstExpression"{
 	{`name`,        ""},
 	-- Type phase:
-	{`declaration`, nil}, -- AstDeclaration
-	{`fromUsing`,   nil}, -- AstUsing
+	{`declaration`, nil, astRef="node"}, -- AstDeclaration
+	{`fromUsing`,   nil, astRef="node"}, -- AstUsing
 }
 _G.!structAst"AstVararg:AstIdentifier"{
 	_overrides = {{`name`,"..."}},
@@ -142,45 +142,45 @@ _G.!structAst"AstLiteral:_AstExpression"{
 	{`literalType`,   0},
 	{`value`,         nil}, -- The value depends on what literalType is. Could be a number, string or whatever.
 	-- Bytecode phase:
-	{`valueConstant`, nil},
+	{`valueConstant`, nil}, -- Constant
 }
 _G.!structAst"AstType:_AstExpression"{
-	{`kind`,            TYPE_KIND_UNSET}, -- TYPE_KIND_SIMPLE_BUILTIN|TYPE_KIND_SIMPLE_USER|TYPE_KIND_FUNCTION|TYPE_KIND_ARRAY|TYPE_KIND_PARAMETERIZED_STRUCT|TYPE_KIND_COMPOUND
+	{`functionHeader`,  nil, ast="node"},    -- AstLambda without a body. This is used to create the actual function type.
+	{`arrayItemType`,   nil, ast="node"},    -- AstType
+	{`arguments`,       nil, ast="array"},   -- []AstExpression  (Is set for parameterized structs.)
+	{`components`,      {},  ast="array"},   -- []AstExpression  (Used if kind is TYPE_KIND_COMPOUND.)
+	{`kind`,            TYPE_KIND_UNSET},    -- TYPE_KIND_SIMPLE_BUILTIN|TYPE_KIND_SIMPLE_USER|TYPE_KIND_FUNCTION|TYPE_KIND_ARRAY|TYPE_KIND_PARAMETERIZED_STRUCT|TYPE_KIND_COMPOUND
 	{`isUserType`,      false},
 	{`typeName`,        ""},
-	{`functionHeader`,  nil, ast="node"},  -- AstLambda without a body. This is used to create the actual function type.
-	{`arrayItemType`,   nil, ast="node"},  -- AstType
-	{`arguments`,       nil, ast="array"}, -- []AstExpression  (Is set for parameterized structs.)
-	{`components`,      {},  ast="array"}, -- []AstExpression  (Used if kind is TYPE_KIND_COMPOUND.)
 	-- Type phase:
-	{`representedType`, nil}, -- TypeInfo
-	{`declaration`,     nil}, -- AstDeclaration
+	{`representedType`, nil},                -- TypeInfo
+	{`declaration`,     nil, astRef="node"}, -- AstDeclaration
 }
 _G.!structAst"AstUnary:_AstExpression"{
-	{`operation`,  ""},  -- "-" or "not" etc.
 	{`expression`, nil, ast="node"}, -- AstExpression
+	{`operation`,  ""},              -- "-" or "not" etc.
 }
 _G.!structAst"AstBinary:_AstExpression"{
-	{`operation`, ""},  -- "+" or "-" etc.
 	{`left`,      nil, ast="node"}, -- AstExpression
 	{`right`,     nil, ast="node"}, -- AstExpression
+	{`operation`, ""},  -- "+" or "-" etc.
 }
 _G.!structAst"AstAccess:_AstExpression"{
 	{`object`,          nil, ast="node"}, -- AstExpression
 	{`member`,          nil, ast="node"}, -- AstExpression
 	-- Type phase:
-	{`representedType`, nil}, -- TypeInfo  (Not used anywhere. 2020-01-02)
+	{`representedType`, nil},             -- TypeInfo  (Not used anywhere. 2020-01-02)
 }
 local !struct"TableField"{ {`key`,nil}, {`value`,nil} }
 _G.!structAst"AstTable:_AstExpression"{
 	{`fields`, {}, ast="fields"}, -- []TableField
 }
 _G.!structAst"AstCall:_AstExpression"{
+	{`callee`,                    nil, ast="node"},  -- AstExpression
+	{`arguments`,                 {},  ast="array"}, -- []AstExpression
 	{`couldBeTypeWithParameters`, false},
 	{`isMethod`,                  false},
 	{`surroundedByParentheses`,   false},
-	{`callee`,                    nil, ast="node"},  -- AstExpression
-	{`arguments`,                 {},  ast="array"}, -- []AstExpression
 }
 _G.!structAst"AstTypeOf:_AstExpression"{
 	{`expression`, nil, ast="node"}, -- AstExpression
@@ -196,7 +196,7 @@ _G.!structAst"AstImport:_AstExpression"{
 	{`isLoad`,     false},
 	{`importName`, ""},
 	-- Type phase:
-	{`fileScope`,  nil}, -- AstFileScope
+	{`fileScope`,  nil, astRef="node"}, -- AstFileScope
 }
 _G.!structAst"AstForeign:_AstExpression"{
 	{`source`,        ""}, -- "lua"|"compiler"
@@ -204,20 +204,23 @@ _G.!structAst"AstForeign:_AstExpression"{
 	-- Type phase:
 	{`sourceId`,      ""}, -- Is source and sourceName combined.
 	-- Bytecode phase:
-	{`valueConstant`, nil},
+	{`valueConstant`, nil}, -- Constant
 }
 _G.!structAst"AstConditional:_AstExpression"{
-	{`condition`,              nil, ast="node"}, -- AstExpression
-	{`branchTrue`,             nil, ast="node"}, -- AstExpression  (If this is nil then condition (or rather conditionAndBranchTrue) is used for this branch.)
-	{`conditionAndBranchTrue`, nil},             -- AstExpression
-	{`branchFalse`,            nil, ast="node"}, -- AstExpression
+	{`condition`,              nil, ast="node"},    -- AstExpression
+	{`branchTrue`,             nil, ast="node"},    -- AstExpression  (If this is nil then condition (or rather conditionAndBranchTrue) is used for this branch.)
+	{`branchFalse`,            nil, ast="node"},    -- AstExpression
+	{`conditionAndBranchTrue`, nil, astRef="node"}, -- AstExpression
+}
+_G.!structAst"AstBake:_AstExpression"{
+	{`name`, nil, ast="node"}, -- AstIdentifier
 }
 
 _G.!structAst"AstUsing:_AstNode"{
-	{`expression`,          nil, ast="node"}, -- AstExpression
+	{`expression`,          nil, ast="node"},    -- AstExpression
 	-- Type phase:
-	{`scope`,               nil}, -- AstScope
-	{`variableDeclaration`, nil}, -- AstDeclaration
+	{`scope`,               nil, astRef="node"}, -- AstScope
+	{`variableDeclaration`, nil, astRef="node"}, -- AstDeclaration
 }
 
 _G.!structAst"AstAssert:_AstNode"{
@@ -246,31 +249,32 @@ _G.!structAst"AstDeclaration:_AstNode"{
 
 	{`isGlobalOrExported`,   false},
 	{`isConstant`,           false},
+	{`isBake`,               false},
 	{`canShadow`,            false},
 
-	{`assignment`,           nil}, -- AstAssignment  (If this is nil then the name gets it's default value (which depends on the type, of which there must be only one.))
+	{`assignment`,           nil, astRef="node"}, -- AstAssignment  (If this is nil then the name gets it's default value (which depends on the type, of which there must be only one.))
 	{`assignmentIndex`,      1},
 
 	-- Type phase:
 	{`valueTypeInfo`,        nil}, -- Type represented by the assigned value if isConstant. If this is set then the declared identifier can be used in places where a type is expected. Can be nil.
 	{`checkedRedeclaration`, false},
 	{`overloads`,            {}},
-	{`overloadOf`,           nil}, -- AstDeclaration  (If this is self then we're the base declaration for the overloads and the overloads array should be filled.)
+	{`overloadOf`,           nil, astRef="node"}, -- AstDeclaration  (If this is self then we're the base declaration for the overloads and the overloads array should be filled.)
 	{`overloadsLocked`,      false},
 
 	-- Bytecode phase:
-	{`valueConstant`,        nil},
+	{`valueConstant`,        nil}, -- Constant
 	{`topScopeName`,         ""},
 	{`localName`,            ""},
 }
 
 _G.!structAst"AstAssignment:_AstNode"{
+	{`targets`,         {},  ast="array"},    -- []AstExpression
+	{`values`,          {},  ast="array"},    -- []AstExpression
 	{`forDeclaration`,  false},
-	{`declarations`,    nil}, -- []AstDeclaration  (Is set if forDeclaration is set.)
+	{`declarations`,    nil, astRef="array"}, -- []AstDeclaration  (Is set if forDeclaration is set.)
 	{`operation`,       "="},
 	{`binaryOperation`, ""},
-	{`targets`,         {}, ast="array"}, -- []AstExpression
-	{`values`,          {}, ast="array"}, -- []AstExpression
 }
 
 !structAst"_AstJump:_AstNode"{}
@@ -278,12 +282,12 @@ _G.!structAst"AstReturn:_AstJump"{
 	{`values`, {}, ast="array"}, -- []AstExpression
 }
 _G.!structAst"AstBreak:_AstJump"{
-	{`loopName`, nil}, -- AstIdentifier
-	{`loop`,     nil}, -- AstFor|AstWhile
+	{`loopName`, nil, ast=nil      }, -- AstIdentifier  (Never inferred.)
+	{`loop`,     nil, astRef="node"}, -- AstFor|AstWhile
 }
 _G.!structAst"AstContinue:_AstJump"{
-	{`loopName`, nil}, -- AstIdentifier
-	{`loop`,     nil}, -- AstFor|AstWhile
+	{`loopName`, nil, ast=nil      }, -- AstIdentifier  (Never inferred.)
+	{`loop`,     nil, astRef="node"}, -- AstFor|AstWhile
 }
 
 _G.!structAst"AstDefer:_AstNode"{
@@ -291,12 +295,12 @@ _G.!structAst"AstDefer:_AstNode"{
 }
 
 !structAst"_AstScope:_AstNode"{
-	{`statements`,         {}, ast="array"}, -- []AstNode
-	{`declarations`,       {}}, -- []AstDeclaration  (Note that inner blocks have their own declarations.)
-	{`imports`,            {}}, -- []AstImport       (Excluding loads.)
-	{`usings`,             {}}, -- []AstUsing
+	{`statements`,         {}, ast="array"},    -- []AstNode
+	{`declarations`,       {}, astRef="array"}, -- []AstDeclaration  (Note that inner blocks have their own declarations.)
+	{`imports`,            {}, astRef="array"}, -- []AstImport       (Excluding loads.)
+	{`usings`,             {}, astRef="array"}, -- []AstUsing
 	-- Type phase:
-	{`declarationsInTree`, {}}, -- Includes all child scopes. Does not include shadows.
+	{`declarationsInTree`, {}, doNotCopy=true}, -- Includes all child scopes. Does not include shadows.
 }
 _G.!structAst"AstBlock:_AstScope"{
 	_scopeType = "imperative",
@@ -309,15 +313,15 @@ _G.!structAst"AstFileScope:_AstScope"{
 }
 _G.!structAst"AstGlobalScope:_AstScope"{
 	_scopeType = "declarative",
-	{`fileScopes`,     {}},  -- []AstFileScope
-	{`firstFileScope`, nil}, -- AstFileScope  (@Cleanup: Remove this in favor of fileScopes[1].)
+	{`fileScopes`,     {},  astRef="array"}, -- []AstFileScope
+	{`firstFileScope`, nil, astRef="node"},  -- AstFileScope  (@Cleanup: Remove this in favor of fileScopes[1].)
 }
 _G.!structAst"AstFor:_AstScope"{
 	_scopeType = "imperative",
+	{`expressions`,    {},  ast="array"},   -- []AstExpression  @Cleanup: Move these into AstFor.statements?
+	{`names`,          {},  ast=nil    },   -- []AstIdentifier  These are never inferred, but instead copied to declarations. @Cleanup: Can we get rid of this in favor of the copy we currently make?
 	{`forType`,        FOR_NUMERIC},
-	{`names`,          {}},              -- []AstIdentifier  These are never inferred, but instead copied to declarations. @Cleanup: Can we get rid of this in favor of the copy we currently make?
-	{`expressions`,    {}, ast="array"}, -- []AstExpression  @Cleanup: Move these into AstFor.statements?
-	{`body`,           nil},             -- AstBlock
+	{`body`,           nil, astRef="node"}, -- AstBlock
 	{`hasNamedBreaks`, false},
 }
 !structAst"_AstScopeExpression:_AstScope"{
@@ -336,15 +340,18 @@ _G.!structAst"AstEnum:_AstScopeExpression"{
 _G.!structAst"AstLambda:_AstScopeExpression"{
 	_scopeType = "imperative",
 
-	{`argumentsIn`,       nil},   -- AstArguments
-	{`argumentsOut`,      nil},   -- AstArguments
+	{`argumentsIn`,       nil, astRef="node"}, -- AstArguments
+	{`argumentsOut`,      nil, astRef="node"}, -- AstArguments
 
-	{`body`,              nil},   -- AstBlock  (If this is nil then the lambda is a function signature. If bodyIsForeign is set then this is a dummy block.)
+	{`body`,              nil, astRef="node"},   -- AstBlock  (If this is nil then the lambda is a function signature. If bodyIsForeign is set then this is a dummy block.)
 	{`bodyIsForeign`,     false}, -- @Cleanup: Use AstForeign instead of all this stuff.
 	{`foreignSource`,     ""},
 	{`foreignSourceName`, ""},
 
 	{`bodyEndToken`,      1},     -- For better error messages.
+
+	{`bakes`,             {}},    -- []AstDeclaration
+	{`isPolymorphic`,     false},
 
 	-- Type phase:
 	{`foreignSourceId`,   ""},    -- Is foreignSource and foreignSourceName combined.
@@ -1864,6 +1871,31 @@ function _G.parseLambda(state, parentNode, allowBody)
 	else
 		!SET_OR_RETURN `local args = parseArguments(state, lambda, true)`
 		lambda.argumentsIn         = args
+
+		astVisitAllNodes(args, function(node, container, key)
+			if node.nodeType == !(nodeTypes.AstBake) then
+				lambda.isPolymorphic = true
+
+				local bake = node
+
+				local decl            = astNewNode(AstDeclaration, bake.token, lambda)
+				bake.name.declaration = decl
+				decl.name             = astCopy(bake.name, nil, decl)
+				decl.isConstant       = true
+				decl.isBake           = true
+
+				table.insert(lambda.statements,   decl)
+				table.insert(lambda.declarations, decl)
+				table.insert(lambda.bakes,        decl)
+
+				-- We don't need the AstBake node anymore so just cut it out.
+				container[key]   = bake.name
+				bake.name.parent = bake.parent
+
+				return !(VISIT_IGNORE_CHILDREN)
+			end
+		end)
+
 		table.insert(lambda.statements, args)
 
 		for _, arg in ipairs(args.arguments) do
@@ -2253,6 +2285,12 @@ function _G.parseExpression(state, parentNode, prevOpPrecedence, expectLeftValue
 		!SET_OR_RETURN_FALSE `conditional.branchFalse = parseExpression(state, conditional)`
 
 		expr = conditional
+
+	-- Baked parameter.
+	elseif isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"$") then
+		local bake                = astNewNode(AstBake, exprStartToken, parentNode)
+		!SET_OR_RETURN `bake.name = parseIdentifier(state, bake)`
+		expr                      = bake
 
 	else
 		!ERROR_OR_RETURN `errorParsingLast(state, "Expected an expression.")`
@@ -2661,7 +2699,7 @@ do
 				local access = node
 				write(" (")
 				write(
-					access.object and access.inferredType and getFriendlyTypeInfoName(
+					access.object and access.object.inferredType and getFriendlyTypeInfoName(
 						getTypeRepresentedByExpression(access.object)
 						or access.object.inferredType
 					)
@@ -2722,11 +2760,12 @@ do
 				local lambda     = node
 				local assignment = astFindParent(lambda, !(nodeTypes.AstAssignment))
 				local i          = assignment and assignment.forDeclaration and indexOf(assignment.values, lambda)
-				if i then  write(" (", assignment.targets[i].name, ")")  end
+				if lambda.isPolymorphic then  write(" (polymorphic)")                       end
+				if i                    then  write(" (", assignment.targets[i].name, ")")  end
 				!!(CHILD_PRINT_START)
 				if lambda.argumentsIn  then  printNode(lambda.argumentsIn,  indent+1, printed, printChildren, "IN")   end
 				if lambda.argumentsOut then  printNode(lambda.argumentsOut, indent+1, printed, printChildren, "OUT")  end
-				if lambda.body then  printNode(lambda.body, indent+1, printed, printChildren)  end
+				if lambda.body         then  printNode(lambda.body,         indent+1, printed, printChildren)         end
 				!!(CHILD_PRINT_END)
 
 			elseif node.nodeType == !(nodeTypes.AstArguments) then
@@ -2865,6 +2904,12 @@ do
 				printNode(assertNode.expression, indent+1, printed, printChildren)
 				!!(CHILD_PRINT_END)
 
+			elseif node.nodeType == !(nodeTypes.AstBake) then
+				local bake = node
+				!!(CHILD_PRINT_START)
+				printNode(bake.name, indent+1, printed, printChildren)
+				!!(CHILD_PRINT_END)
+
 			elseif node.nodeType == !(nodeTypes.AstLiteral) then
 				local literal = node
 				write(" (")
@@ -3001,12 +3046,14 @@ do
 
 	local VISITORS = {
 		!(
-		local TEMPLATE_FUNCTION_HEADER = "function--[[$name]](visited, cb, leavesFirst, node)"
-		local TEMPLATE_FUNCTION_FOOTER = "end,\n"
+		local TEMPLATE_FUNCTION_HEADER, TEMPLATE_FUNCTION_FOOTER = `
+			[$nodeType--[[$name]]] = function(visited, cb, leavesFirst, node)
+				`,`
+			end,
+		`
 
 		local TEMPLATE_TRAVERSE_NODE_IF_SET = `
-			local subNode = node.$field
-			if subNode and visit(visited, cb, leavesFirst, node, $fieldLiteral, subNode) then  return true  end
+			if node.$field and visit(visited, cb, leavesFirst, node, $fieldLiteral, node.$field) then  return true  end
 		`
 		local TEMPLATE_TRAVERSE_ARRAY = `
 			local arr = node.$field
@@ -3024,17 +3071,15 @@ do
 		`
 		local TEMPLATE_TRAVERSE_FIELDS = `
 			for _, tableField in ipairs(node.$field) do
-				local subNode = tableField.key
-				if subNode and visit(visited, cb, leavesFirst, tableField, $fieldLiteral, subNode) then  return true  end
-				subNode = tableField.value
-				if subNode and visit(visited, cb, leavesFirst, tableField, $fieldLiteral, subNode) then  return true  end
+				if tableField.key   and visit(visited, cb, leavesFirst, tableField, $fieldLiteral, tableField.key  ) then  return true  end
+				if tableField.value and visit(visited, cb, leavesFirst, tableField, $fieldLiteral, tableField.value) then  return true  end
 			end
 		`
 
 		for nodeType, name in ipairs(nodeTypeNames) do
 			local fields = structs[name] or error(name)
 
-			__LUA(templateToLua(TEMPLATE_FUNCTION_HEADER, {name=name}))
+			__LUA(templateToLua(TEMPLATE_FUNCTION_HEADER, {nodeType=nodeType, name=name}, (nodeType == 1 and -3 or -1)))
 
 			for _, field in ipairs(fields) do
 				local k = field[1]
@@ -3057,7 +3102,7 @@ do
 				end
 			end
 
-			__LUA(templateToLua(TEMPLATE_FUNCTION_FOOTER, {}))
+			__LUA(templateToLua(TEMPLATE_FUNCTION_FOOTER, {}, -1))
 		end
 		)
 	}
@@ -3065,7 +3110,10 @@ do
 	function visit(visited, cb, leavesFirst, container, key, node)
 		-- Note: We return true from this function if we want to break.
 
-		assert(not visited[node])
+		if visited[node] then
+			!ifDEBUG `astPrintTree(node)`
+			errorInternal("Node already visited.")
+		end
 		visited[node] = true
 
 		if not leavesFirst then
@@ -3107,80 +3155,179 @@ end
 
 
 
--- copy = astCopy( node [, token=node.token, parent=node.parent ] )
--- Note: Copies the whole tree. We also don't touch any queued.
-function _G.astCopy(node, token, parent)
-	local copy
+do
+	local copyTree -- Forward declaraion.
 
-	-- @Cleanup: Generate this function instead of doing all this stuff manually. (See VISITORS)
+	local COPIERS = {
+		!(
+		local TEMPLATE_FUNCTION_HEADER, TEMPLATE_FUNCTION_FOOTER = `
+			[$nodeType--[[$name]]] = function(node, token, parent, copies)
+				local copy   = astNewNode($name, token, parent)
+				copies[node] = copy
+				`,`
+				return copy
+			end,
+		`
 
-	if node.nodeType == !(nodeTypes.AstIdentifier) then
-		local ident       = node
-		copy              = astNewNode(AstIdentifier, (token or ident.token), (parent or ident.parent))
-		copy.name         = ident.name
-		copy.declaration  = ident.declaration
-		copy.inferredType = ident.inferredType
+		local TEMPLATE_COPY_VALUE = `
+			copy.$field = node.$field
+		`
+		local TEMPLATE_COPY_VALUE_ARRAY = `
+			copy.$field = {unpack(node.$field)}
+		`
+		local TEMPLATE_COPY_VALUE_ARRAY_IF_SET = `
+			copy.$field = node.$field and {unpack(node.$field)}
+		`
+		local TEMPLATE_COPY_NODE_IF_SET = `
+			copy.$field = node.$field and copyTree(node.$field, token, copy, copies)
+		`
+		local TEMPLATE_COPY_ARRAY = `
+			local arrCopy = copy.$field
+			for i, subNode in ipairs(node.$field) do
+				arrCopy[i] = copyTree(subNode, token, copy, copies)
+			end
+		`
+		local TEMPLATE_COPY_ARRAY_IF_SET = `
+			if node.$field then
+				local arrCopy = copy.$field or {}
+				copy.$field   = arrCopy
+				for i, subNode in ipairs(node.$field) do
+					arrCopy[i] = copyTree(subNode, token, copy, copies)
+				end
+			end
+		`
+		local TEMPLATE_COPY_FIELDS = `
+			local fieldsCopy = copy.$field
 
-	elseif node.nodeType == !(nodeTypes.AstLiteral) then
-		local literal      = node
-		copy               = astNewNode(AstLiteral, (token or literal.token), (parent or literal.parent))
-		copy.literalType   = literal.literalType
-		copy.value         = literal.value
-		copy.inferredType  = literal.inferredType
-		copy.valueConstant = literal.valueConstant
+			for i, tableField in ipairs(node.$field) do
+				local tableFieldCopy = TableField()
+				tableFieldCopy.key   = tableField.key and copyTree(tableField.key, token, copy, copies)
+				tableFieldCopy.value = tableField.value and copyTree(tableField.value, token, copy, copies)
+				fieldsCopy[i]        = tableFieldCopy
+			end
+		`
 
-	elseif node.nodeType == !(nodeTypes.AstType) then
-		local typeNode       = node
-		copy                 = astNewNode(AstType, (token or typeNode.token), (parent or typeNode.parent))
-		copy.kind            = typeNode.kind
-		copy.isUserType      = typeNode.isUserType
-		copy.typeName        = typeNode.typeName
-		copy.functionHeader  = typeNode.functionHeader and astCopy(typeNode.functionHeader, token, copy)
-		copy.arrayItemType   = typeNode.arrayItemType     and astCopy(typeNode.arrayItemType,     token, copy)
-		copy.arguments       = typeNode.arguments         and astCopyArray(typeNode.arguments,    token, copy)
-		copy.components      = astCopyArray(typeNode.components, token, copy)
-		copy.inferredType    = typeNode.inferredType
-		copy.representedType = typeNode.representedType
-		copy.declaration     = typeNode.declaration
+		local fieldsToIgnore = {}
+		for _, field in ipairs(structs._AstNode) do
+			fieldsToIgnore[field[1]] = true
+		end
 
-	elseif node.nodeType == !(nodeTypes.AstForeign) then
-		local foreign      = node
-		copy               = astNewNode(AstForeign, (token or foreign.token), (parent or foreign.parent))
-		copy.source        = foreign.source
-		copy.sourceName    = foreign.sourceName
-		copy.sourceId      = foreign.sourceId
-		copy.inferredType  = foreign.inferredType
-		copy.valueConstant = foreign.valueConstant
+		for nodeType, name in ipairs(nodeTypeNames) do
+			local fields = structs[name] or error(name)
 
-	elseif node.nodeType == !(nodeTypes.AstUnary) then
-		local unary       = node
-		copy              = astNewNode(AstUnary, (token or unary.token), (parent or unary.parent))
-		copy.operation    = unary.operation
-		copy.expression   = unary.expression and astCopy(unary.expression, token, copy)
-		copy.inferredType = unary.inferredType
+			__LUA(templateToLua(TEMPLATE_FUNCTION_HEADER, {nodeType=nodeType, name=name}, (nodeType == 1 and -3 or -1), -1))
 
-	elseif node.nodeType == !(nodeTypes.AstBinary) then
-		local binary      = node
-		copy              = astNewNode(AstBinary, (token or binary.token), (parent or binary.parent))
-		copy.operation    = binary.operation
-		copy.left         = binary.left  and astCopy(binary.left,  token, copy)
-		copy.right        = binary.right and astCopy(binary.right, token, copy)
-		copy.inferredType = binary.inferredType
+			for _, field in ipairs(fields) do
+				local k = field[1]
 
-	else
-		errorInternal("Incomplete: Copy '%s' nodes.", AST_NODE_TYPE_NAMES[node.nodeType] or "?")
+				if fieldsToIgnore[k] or field.doNotCopy then
+					-- void
+
+				elseif field.ast == "node" then
+					__LUA(templateToLua(TEMPLATE_COPY_NODE_IF_SET, {field=k}))
+
+				elseif field.ast == "array" then
+					if field[2] then
+						__LUA(templateToLua(TEMPLATE_COPY_ARRAY, {field=k}))
+					else
+						__LUA(templateToLua(TEMPLATE_COPY_ARRAY_IF_SET, {field=k}))
+					end
+
+				elseif field.ast == "fields" then
+					__LUA(templateToLua(TEMPLATE_COPY_FIELDS, {field=k}))
+
+				elseif field.ast then
+					error(field.ast)
+
+				else
+					if field.astRef ~= "array" then
+						__LUA(templateToLua(TEMPLATE_COPY_VALUE, {field=k}))
+					elseif field[2] then
+						__LUA(templateToLua(TEMPLATE_COPY_VALUE_ARRAY, {field=k}))
+					else
+						__LUA(templateToLua(TEMPLATE_COPY_VALUE_ARRAY_IF_SET, {field=k}))
+					end
+				end
+			end
+
+			__LUA(templateToLua(TEMPLATE_FUNCTION_FOOTER, {}, -1, -1))
+		end
+		)
+	}
+
+	function copyTree(node, token, parent, copies)
+		!ASSERT `not copies[node]`
+		local copier = COPIERS[node.nodeType] or errorInternal(state, node)
+		return copier(node, (token or node.token), (parent or node.parent), copies)
 	end
 
-	return copy or errorInternal()
-end
+	local FIXERS = {
+		!(
+		local TEMPLATE_FUNCTION_HEADER, TEMPLATE_FUNCTION_FOOTER = `
+			[$nodeType--[[$name]]] = function(copy, copies)
+				`,`
+			end,
+		`
 
--- copies = astCopyArray( nodes [, token=sameAsSource, parent=sameAsSource ] )
-function _G.astCopyArray(nodes, token, parent)
-	local copies = {}
-	for i, node in ipairs(nodes) do
-		copies[i] = astCopy(node, token, parent)
+		local TEMPLATE_FIX_NODE = `
+			copy.$field = copies[copy.$field] or copy.$field
+		`
+		local TEMPLATE_FIX_ARRAY = `
+			local arrCopy = copy.$field
+			for i, subCopy in ipairs(arrCopy) do
+				arrCopy[i] = copies[subCopy] or subCopy
+			end
+		`
+		local TEMPLATE_FIX_ARRAY_IF_SET = `
+			local arrCopy = copy.$field
+			if arrCopy then
+				for i, subCopy in ipairs(arrCopy) do
+					arrCopy[i] = copies[subCopy] or subCopy
+				end
+			end
+		`
+
+		for nodeType, name in ipairs(nodeTypeNames) do
+			local fields = structs[name] or error(name)
+
+			__LUA(templateToLua(TEMPLATE_FUNCTION_HEADER, {nodeType=nodeType, name=name}, (nodeType == 1 and -3 or -1), -1))
+
+			for _, field in ipairs(fields) do
+				local k = field[1]
+
+				if not field.astRef then
+					-- void
+				elseif field.astRef == "node" then
+					__LUA(templateToLua(TEMPLATE_FIX_NODE, {field=k}))
+				elseif field.astRef == "array" then
+					if field[2] then
+						__LUA(templateToLua(TEMPLATE_FIX_ARRAY, {field=k}))
+					else
+						__LUA(templateToLua(TEMPLATE_FIX_ARRAY_IF_SET, {field=k}))
+					end
+				else
+					error(field.astRef)
+				end
+			end
+
+			__LUA(templateToLua(TEMPLATE_FUNCTION_FOOTER, {}, -1, -1))
+		end
+		)
+	}
+
+	-- copy = astCopy( node [, token=node.token, parent=node.parent ] )
+	-- Note: Copies the whole tree. We also don't touch any queued.
+	function _G.astCopy(node, token, parent)
+		local copies = {}
+		local copy   = copyTree(node, token, parent, copies)
+
+		astVisitAllNodes(copy, function(copy)
+			local fixer = FIXERS[copy.nodeType] or errorInternal(state, copy)
+			fixer(copy, copies)
+		end)
+
+		return copy
 	end
-	return copies
 end
 
 

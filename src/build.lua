@@ -93,52 +93,9 @@ pp.metaEnvironment.GLOA_DIR = debugMode and dirGloa or ""
 
 pp.metaEnvironment.RUNTIME_ERROR_PREFIX = debugMode and runtimeErrorPrefix or ""
 
-pp.metaEnvironment.F = string.format
-
 local luaSegments = {}
 function pp.metaEnvironment.preprocessorOutputAtTopOfFile(lua)
 	table.insert(luaSegments, lua)
-end
-
-function pp.metaEnvironment.trimTemplate(lua)
-	return (lua:gsub("%s+", " "):gsub("^ ", ""):gsub(" $", ""))
-end
-function pp.metaEnvironment.templateToLua(template, values)
-	return (template:gsub("$(%a%w*)", values))
-end
-
-function pp.metaEnvironment.outputCommaSeparatedValues(...)
-	for i = 1, select("#", ...) do
-		if i > 1 then  pp.outputLua(",")  end
-		pp.outputValue((select(i, ...)))
-	end
-end
-
--- Convert an array of values to a set (where the table keys are the values and the table values are 'true').
-function pp.metaEnvironment.Set(values)
-	local set = {}
-	for _, v in ipairs(values) do
-		set[v] = true
-	end
-	return set
-end
-
--- Output an assert() in DEBUG mode.
-function pp.metaEnvironment.ASSERT(valueCode)
-	if debugMode then  pp.outputLua("assert(",valueCode,")")  end
-end
-
-function pp.metaEnvironment.indexOf(t, v)
-	for i = 1, #t do
-		if t[i] == v then  return i  end
-	end
-	return nil
-end
-function pp.metaEnvironment.itemWith1(t, k, v)
-	for i = 1, #t do
-		if t[i][k] == v then  return t[i], i  end
-	end
-	return nil, nil
 end
 
 pp.processFile{

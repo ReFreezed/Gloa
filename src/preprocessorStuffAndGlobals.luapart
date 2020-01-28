@@ -150,6 +150,10 @@ _G.getByte = string.byte
 
 
 
+-- function _G.preprocessorOutputAtTopOfFile(lua) end -- Defined in build.lua
+
+
+
 -- !struct       "_Name[:Parent]" { {[1]=field1, [2]=fieldValue, option1=optionValue, ...}, ... }
 -- local !struct "Name[:Parent]"  { {[1]=field1, [2]=fieldValue, option1=optionValue, ...}, ... }
 -- _G.!struct    "Name[:Parent]"  { {[1]=field1, [2]=fieldValue, option1=optionValue, ...}, ... }
@@ -232,7 +236,10 @@ function _G.ifNotDEBUG(lua)
 	if not DEBUG then  __LUA(lua)  end
 end
 
-
+-- Output an assert() only in DEBUG mode.
+function _G.ASSERT(valueCode)
+	if DEBUG then  __LUA("assert(",valueCode,")")  end
+end
 
 function _G.debugger()
 	if DEBUGGER then
@@ -240,6 +247,77 @@ function _G.debugger()
 		lua = "--[[ Debugger: ]]"..lua:gsub("%-%-%[%[.-%]%]", ""):gsub("%-%-[^\n]+", ""):gsub("[\n\t]+", " "):gsub("   +", "  ")
 		__LUA(lua)
 	end
+end
+
+
+
+function _G.trimTemplate(lua)
+	return (lua:gsub("%s+", " "):gsub("^ ", ""):gsub(" $", ""))
+end
+
+-- templateToLua( template, values [, indentFirstLine=0, indentRest=0 ] )
+function _G.templateToLua(template, values, indentFirst, indentRest)
+	local lua = template:gsub("$(%a%w*)", values)
+	lua       = lua:gsub("^%s*\n", ""):gsub("[^%S\n]+$", "")
+
+	if not indentFirst then
+		-- void
+	elseif indentFirst < 0 then
+		lua = lua:sub(1-indentFirst)
+	elseif indentRest > 0 then
+		lua = ("\t"):rep(indentFirst)..lua
+	end
+
+	if not indentRest then
+		-- void
+	elseif indentRest < 0 then
+		lua = lua:gsub("()([^\n]+)", function(ptr, line)
+			if ptr > 1 then  return line:sub(1-indentRest)  end
+		end)
+	elseif indentRest > 0 then
+		local indentStr = ("\t"):rep(indentRest)
+		lua = lua:gsub("()([^\n]+)", function(ptr, line)
+			if ptr > 1 then  return indentStr..line  end
+		end)
+	end
+
+	return lua
+end
+
+
+
+function _G.outputCommaSeparatedValues(...)
+	for i = 1, select("#", ...) do
+		if i > 1 then  __LUA(",")  end
+		__VAL((select(i, ...)))
+	end
+end
+
+
+
+-- Convert an array of values to a set (where the table keys are the values and the table values are 'true').
+function _G.Set(values)
+	local set = {}
+	for _, v in ipairs(values) do
+		set[v] = true
+	end
+	return set
+end
+
+
+
+function _G.indexOf(t, v)
+	for i = 1, #t do
+		if t[i] == v then  return i  end
+	end
+	return nil
+end
+
+function _G.itemWith1(t, k, v)
+	for i = 1, #t do
+		if t[i][k] == v then  return t[i], i  end
+	end
+	return nil, nil
 end
 )
 
