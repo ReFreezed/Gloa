@@ -9,10 +9,10 @@
 --=
 --==============================================================
 
-	addDependency
+	addDependency, getExistingDependency
 	addToQueueRecursively, pokeAndQueueUnqueuedNodeIntoTree, unqueue, unqueueChildrenRecursively, replaceQueuedNode, replaceQueuedNodeAndUnqueueOldTree, cutOutPartOfNodeTree
 	errorPipesAreStuck
-	moveToPipe, moveToNextPipe, moveTreeToNextPipe, moveToNextRelevantPipe, moveTreeToNextRelevantPipe
+	moveToPipe, moveToNextPipe, moveTreeToNextPipe, moveToNextRelevantPipe, moveTreeToNextRelevantPipe, moveChildrenToNextRelevantPipe
 
 --============================================================]]
 
@@ -41,34 +41,38 @@ function _G.addDependency(state, dependent, dependType, dependOn, extraData)
 		end
 	!end
 
+	if getExistingDependency(state, dependent, dependType, dependOn) then
+		printTraceback(io.stderr, 2)
+		printerr()
+
+		!ifDEBUG `astPrint(dependent)`
+		nodeMessage(io.stderr, state, dependent, "Error", "Pipes", "Internal compiler error: Trying to add dependency twice.")
+
+		if isAny(dependType, !(DEPEND_NODE_INFERRED),!(DEPEND_NODE_EMITTED)) then
+			!ifDEBUG `astPrint(dependOn)`
+			nodeMessage(io.stderr, state, dependOn, "Info", "Pipes", "...depending on this.")
+		end
+
+		exitFailure()
+	end
+
+	dependent = dependent.queued
+
 	if isAny(dependType, !(DEPEND_NODE_INFERRED),!(DEPEND_NODE_EMITTED)) then
-		assert(dependent ~= dependOn)
+		assert(dependent ~= dependOn.node)
 		dependOn = dependOn.queued
 	end
 
 	local dependency      = Dependency()
-	dependency.dependent  = dependent.queued
+	dependency.dependent  = dependent
 	dependency.dependType = dependType
 	dependency.dependOn   = dependOn
 	dependency.extraData  = extraData
 
-	if dependent.queued.waitingOn then
-		dependent.queued.waitingOn.next = dependency
+	if dependent.waitingOn then
+		dependent.waitingOn.next = dependency
 	else
-		dependent.queued.waitingOn = dependency
-	end
-
-	if itemWith3(state.dependencies, "dependent",dependency.dependent, "dependType",dependency.dependType, "dependOn",dependency.dependOn) then
-		printTraceback(io.stderr, 2)
-		printerr()
-
-		nodeMessage(io.stderr, state, dependent, "Error", "Pipes", "Internal compiler error: Trying to add dependency twice.")
-
-		if isAny(dependType, !(DEPEND_NODE_INFERRED),!(DEPEND_NODE_EMITTED)) then
-			nodeMessage(io.stderr, state, dependOn.node, "Info", "Pipes", "...depending on this.")
-		end
-
-		exitFailure()
+		dependent.waitingOn      = dependency
 	end
 
 	table.insert(state.dependencies, dependency)
@@ -94,6 +98,16 @@ function _G.addDependency(state, dependent, dependType, dependOn, extraData)
 		end
 		--]]
 	!end
+end
+
+function _G.getExistingDependency(state, dependent, dependType, dependOn)
+	dependent = dependent.queued
+
+	if isAny(dependType, !(DEPEND_NODE_INFERRED),!(DEPEND_NODE_EMITTED)) then
+		dependOn = dependOn.queued
+	end
+
+	return itemWith3(state.dependencies, "dependent",dependent, "dependType",dependType, "dependOn",dependOn)
 end
 
 
@@ -316,8 +330,19 @@ function _G.moveToNextRelevantPipe(state, node)
 	local pipe = node.queued.pipe
 
 	if pipe == !(PIPE_INFER) then
-		if isAny(node.nodeType, !(nodeTypes.AstLiteral),!(nodeTypes.AstLambda),!(nodeTypes.AstDeclaration),!(nodeTypes.AstAccess),!(nodeTypes.AstForeign)) then
+		if isAny(node.nodeType, !(nodeTypes.AstLiteral),!(nodeTypes.AstDeclaration),!(nodeTypes.AstAccess),!(nodeTypes.AstForeign)) then
 			moveToNextPipe(state, node, !(PIPE_BYTECODE))
+
+		elseif node.nodeType == !(nodeTypes.AstLambda) then
+			local lambda = node
+			if lambda.isPolymorphic then
+				moveToPipe(state, lambda, !(PIPE_DONE))
+			elseif lambda.body then
+				moveToNextPipe(state, lambda, !(PIPE_BYTECODE))
+			else
+				moveToPipe(state, lambda, !(PIPE_DONE))
+			end
+
 		else
 			moveToPipe(state, node, !(PIPE_DONE))
 		end
@@ -337,7 +362,24 @@ function _G.moveTreeToNextRelevantPipe(state, topNode)
 	local currentPipe = topNode.queued.pipe
 
 	astVisitAllNodes(topNode, function(node)
-		assert(node.queued.pipe == currentPipe, currentPipe.." "..node.queued.pipe)
+		if node.queued.pipe ~= currentPipe then
+			errorInternal("A child node is in an unexpected pipe. (Expected %d, was %d)", currentPipe, node.queued.pipe)
+		end
+		moveToNextRelevantPipe(state, node)
+	end)
+end
+
+function _G.moveChildrenToNextRelevantPipe(state, topNode)
+	local currentPipe = nil
+
+	astVisitAllNodes(topNode, function(node)
+		if node == topNode then  return  end
+
+		currentPipe = currentPipe or node.queued.pipe
+
+		if node.queued.pipe ~= currentPipe then
+			errorInternal("A child node is in an unexpected pipe. (Expected %d, was %d)", currentPipe, node.queued.pipe)
+		end
 		moveToNextRelevantPipe(state, node)
 	end)
 end

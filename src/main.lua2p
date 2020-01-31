@@ -290,11 +290,11 @@ xpcall(function()
 	!end
 
 	!ifDEBUG`if not debug_onlyParse then`
-		local queue    = state.queue
-		local lastPipe = !(PIPE_DONE-1)
+		local queue     = state.queue
+		local finalPipe = !(PIPE_DONE-1)
 
 		!if DEBUG then
-			if debug_onlyInferTypes then  lastPipe = !(PIPE_INFER)  end
+			if debug_onlyInferTypes then  finalPipe = !(PIPE_INFER)  end
 		!end
 
 		addToQueueRecursively(state, globalScope)
@@ -324,7 +324,7 @@ xpcall(function()
 					waitCount = waitCount+1
 
 				!if DEBUG then
-				elseif queued.pipe > lastPipe then
+				elseif queued.pipe > finalPipe then
 					-- void
 				!end
 
@@ -352,7 +352,7 @@ xpcall(function()
 				for _, queued in ipairs(queue) do
 					if queued.unqueued then
 						-- void
-					elseif queued.pipe <= lastPipe then
+					elseif queued.pipe <= finalPipe then
 						allDone = false
 						break
 					end
@@ -418,7 +418,7 @@ xpcall(function()
 					printerr()
 
 					for _, queued in ipairs(queue) do
-						if not queued.unqueued and queued.pipe <= lastPipe then
+						if not queued.unqueued and queued.pipe <= finalPipe then
 							printCount = printCount+1
 
 							if printCount > 10 then
@@ -426,13 +426,24 @@ xpcall(function()
 								break
 							end
 
+							local dependency = queued.waitingOn
+
+							astPrint(queued.node)
 							nodeMessage(
 								io.stderr, state, queued.node, "DEBUG", nil,
-								"%s (exited:%s, pipe:%s)",
-								AST_NODE_TYPE_NAMES[queued.node.nodeType],
+								"pipe=%s, exited=%s%s",
+								PIPE_TITLES[queued.pipe],
 								PIPE_TITLES[queued.pipeHighestExited],
-								PIPE_TITLES[queued.pipe]
+								dependency and ", waiting" or ""
 							)
+
+							if dependency and isAny(dependency.dependType, !(DEPEND_NODE_INFERRED),!(DEPEND_NODE_EMITTED)) then
+								astPrint(dependency.dependOn.node)
+								nodeMessage(
+									io.stderr, state, dependency.dependOn.node, "DEBUG", nil,
+									"...waiting on this."
+								)
+							end
 						end
 					end
 

@@ -150,7 +150,6 @@ _G.!structAst"AstType:_AstExpression"{
 	{`arguments`,       nil, ast="array"},   -- []AstExpression  (Is set for parameterized structs.)
 	{`components`,      {},  ast="array"},   -- []AstExpression  (Used if kind is TYPE_KIND_COMPOUND.)
 	{`kind`,            TYPE_KIND_UNSET},    -- TYPE_KIND_SIMPLE_BUILTIN|TYPE_KIND_SIMPLE_USER|TYPE_KIND_FUNCTION|TYPE_KIND_ARRAY|TYPE_KIND_PARAMETERIZED_STRUCT|TYPE_KIND_COMPOUND
-	{`isUserType`,      false},
 	{`typeName`,        ""},
 	-- Type phase:
 	{`representedType`, nil},                -- TypeInfo
@@ -249,14 +248,14 @@ _G.!structAst"AstDeclaration:_AstNode"{
 
 	{`isGlobalOrExported`,   false},
 	{`isConstant`,           false},
-	{`isBake`,               false},
 	{`canShadow`,            false},
+	{`addedByPolymorph`,     false},
 
 	{`assignment`,           nil, astRef="node"}, -- AstAssignment  (If this is nil then the name gets it's default value (which depends on the type, of which there must be only one.))
 	{`assignmentIndex`,      1},
 
 	-- Type phase:
-	{`valueTypeInfo`,        nil}, -- Type represented by the assigned value if isConstant. If this is set then the declared identifier can be used in places where a type is expected. Can be nil.
+	{`valueTypeInfo`,        nil}, -- TypeInfo  Type represented by the assigned value if isConstant. If this is set then the declared identifier can be used in places where a type is expected. Can be nil.
 	{`checkedRedeclaration`, false},
 	{`overloads`,            {}},
 	{`overloadOf`,           nil, astRef="node"}, -- AstDeclaration  (If this is self then we're the base declaration for the overloads and the overloads array should be filled.)
@@ -269,12 +268,16 @@ _G.!structAst"AstDeclaration:_AstNode"{
 }
 
 _G.!structAst"AstAssignment:_AstNode"{
-	{`targets`,         {},  ast="array"},    -- []AstExpression
-	{`values`,          {},  ast="array"},    -- []AstExpression
-	{`forDeclaration`,  false},
-	{`declarations`,    nil, astRef="array"}, -- []AstDeclaration  (Is set if forDeclaration is set.)
-	{`operation`,       "="},
-	{`binaryOperation`, ""},
+	{`targets`,          {},  ast="array"},    -- []AstExpression
+	{`values`,           {},  ast="array"},    -- []AstExpression
+
+	{`forDeclaration`,   false},
+	{`declarations`,     nil, astRef="array"}, -- []AstDeclaration  (Is set if forDeclaration is set.)
+
+	{`operation`,        "="},
+	{`binaryOperation`,  ""},
+
+	{`addedByPolymorph`, false},
 }
 
 !structAst"_AstJump:_AstNode"{}
@@ -348,10 +351,11 @@ _G.!structAst"AstLambda:_AstScopeExpression"{
 	{`foreignSource`,     ""},
 	{`foreignSourceName`, ""},
 
-	{`bodyEndToken`,      1},     -- For better error messages.
+	{`bodyEndToken`,      1}, -- For better error messages.
 
-	{`bakes`,             {}},    -- []AstDeclaration
+	{`bakeDeclarations`,  {},  astRef="array"}, -- []AstDeclaration
 	{`isPolymorphic`,     false},
+	{`polymorphs`,        {},  astRef="array"}, -- []AstLambda
 
 	-- Type phase:
 	{`foreignSourceId`,   ""},    -- Is foreignSource and foreignSourceName combined.
@@ -1872,28 +1876,54 @@ function _G.parseLambda(state, parentNode, allowBody)
 		!SET_OR_RETURN `local args = parseArguments(state, lambda, true)`
 		lambda.argumentsIn         = args
 
-		astVisitAllNodes(args, function(node, container, key)
-			if node.nodeType == !(nodeTypes.AstBake) then
-				lambda.isPolymorphic = true
+		local takenNames = {}
 
-				local bake = node
+		-- Add declarations for values that will be baked (only types so far).
+		astVisitAllNodes(args, function(node)
+			if node.nodeType ~= !(nodeTypes.AstBake) then  return  end
 
-				local decl            = astNewNode(AstDeclaration, bake.token, lambda)
-				bake.name.declaration = decl
-				decl.name             = astCopy(bake.name, nil, decl)
-				decl.isConstant       = true
-				decl.isBake           = true
+			lambda.isPolymorphic = true
 
-				table.insert(lambda.statements,   decl)
-				table.insert(lambda.declarations, decl)
-				table.insert(lambda.bakes,        decl)
+			local bake = node
+			local name = bake.name.name
 
-				-- We don't need the AstBake node anymore so just cut it out.
-				container[key]   = bake.name
-				bake.name.parent = bake.parent
-
-				return !(VISIT_IGNORE_CHILDREN)
+			if takenNames[name] then
+				!ERROR_OR_RETURN `
+					printerr()
+					parserMessage(io.stderr, state, bake.name.token,  "Error", "Duplicate placeholder type name '%s'.", name)
+					parserMessage(io.stderr, state, takenNames[name], "Info",  "...previous name is here.")
+					exitFailure()
+				`
 			end
+			takenNames[name] = bake.name.token
+
+			-- Declaration.
+			-- @Incomplete: Check for duplicate baked names.
+			local decl            = astNewNode(AstDeclaration, bake.token, lambda)
+			bake.name.declaration = decl
+			decl.name             = astCopy(bake.name, nil, decl)
+			decl.isConstant       = true
+
+			table.insert(lambda.statements,       decl)
+			table.insert(lambda.declarations,     decl)
+			table.insert(lambda.bakeDeclarations, decl)
+
+			-- Placeholder assignment.
+			local assignment          = astNewNode(AstAssignment, bake.token, lambda)
+			assignment.forDeclaration = true
+			assignment.declarations   = {decl}
+			assignment.targets[1]     = astCopy(decl.name, nil, assignment)
+
+			decl.assignment           = assignment -- assignmentIndex remains the default 1.
+
+			local typeNode            = astNewNode(AstType, bake.token, assignment)
+			typeNode.kind             = !(TYPE_KIND_SIMPLE_BUILTIN)
+			typeNode.typeName         = "placeholder"
+			assignment.values[1]      = typeNode
+
+			table.insert(lambda.statements, assignment)
+
+			return !(VISIT_IGNORE_CHILDREN)
 		end)
 
 		table.insert(lambda.statements, args)
@@ -2146,7 +2176,6 @@ function _G.parseExpression(state, parentNode, prevOpPrecedence, expectLeftValue
 		else
 			local typeNode          = astNewNode(AstType, lambda.token, parentNode)
 			typeNode.kind           = !(TYPE_KIND_FUNCTION)
-			typeNode.isUserType     = true
 			typeNode.functionHeader = lambda
 			lambda.parent           = typeNode
 			expr                    = typeNode
@@ -2215,9 +2244,8 @@ function _G.parseExpression(state, parentNode, prevOpPrecedence, expectLeftValue
 	elseif isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"[") and isToken(tokType2,tokValue2, !(TOKEN_PUNCTUATION),"]") then
 		eatNextToken(state) -- ']'
 
-		local typeNode      = astNewNode(AstType, exprStartToken, parentNode)
-		typeNode.kind       = !(TYPE_KIND_ARRAY)
-		typeNode.isUserType = true
+		local typeNode = astNewNode(AstType, exprStartToken, parentNode)
+		typeNode.kind  = !(TYPE_KIND_ARRAY)
 
 		!SET_OR_RETURN `typeNode.arrayItemType = parseExpression(state, typeNode)`
 		expr                                   = typeNode
@@ -2666,6 +2694,7 @@ do
 		write(AST_NODE_TYPE_NAMES[node.nodeType] or "?")
 		write(" @", node.s)
 		if node.parent then  write(" ^", node.parent.s)  end
+		if node.queued then  write(node.queued.waitingOn and " w" or " q")  end
 
 		if printed[node] then
 			write("  !!! ERROR: RECURSION DETECTED !!!\n")
@@ -2721,7 +2750,8 @@ do
 
 			elseif node.nodeType == !(nodeTypes.AstDeclaration) then
 				local decl = node
-				if decl.assignment then  write(" (assignment i=", decl.assignmentIndex, ")")  end
+				if decl.addedByPolymorph then  write(" (addedByPolymorph)")                         end
+				if decl.assignment       then  write(" (assignment i=", decl.assignmentIndex, ")")  end
 				if decl.isConstant and decl.isGlobalOrExported then
 					write(" (global/exported const)")
 				elseif decl.isConstant then
@@ -2729,7 +2759,7 @@ do
 				elseif decl.isGlobalOrExported then
 					write(" (global/exported)")
 				end
-				if decl.valueTypeInfo then  write("(value=", getFriendlyTypeInfoName(decl.valueTypeInfo), ")")  end
+				if decl.valueTypeInfo then  write(" (value=", getFriendlyTypeInfoName(decl.valueTypeInfo), ")")  end
 
 				!!(CHILD_PRINT_START)
 				if decl.name then  printNode(decl.name, indent+1, printed, printChildren)  end
@@ -2754,18 +2784,6 @@ do
 				!!(CHILD_PRINT_START)
 				if call.callee then  printNode(call.callee, indent+1, printed, printChildren)  end
 				printNodeList(call.arguments, indent+1, printed, printChildren, "ARG")
-				!!(CHILD_PRINT_END)
-
-			elseif node.nodeType == !(nodeTypes.AstLambda) then
-				local lambda     = node
-				local assignment = astFindParent(lambda, !(nodeTypes.AstAssignment))
-				local i          = assignment and assignment.forDeclaration and indexOf(assignment.values, lambda)
-				if lambda.isPolymorphic then  write(" (polymorphic)")                       end
-				if i                    then  write(" (", assignment.targets[i].name, ")")  end
-				!!(CHILD_PRINT_START)
-				if lambda.argumentsIn  then  printNode(lambda.argumentsIn,  indent+1, printed, printChildren, "IN")   end
-				if lambda.argumentsOut then  printNode(lambda.argumentsOut, indent+1, printed, printChildren, "OUT")  end
-				if lambda.body         then  printNode(lambda.body,         indent+1, printed, printChildren)         end
 				!!(CHILD_PRINT_END)
 
 			elseif node.nodeType == !(nodeTypes.AstArguments) then
@@ -2806,7 +2824,8 @@ do
 
 			elseif node.nodeType == !(nodeTypes.AstAssignment) then
 				local assignment = node
-				if assignment.forDeclaration then  write(" (forDeclaration)")  end
+				if assignment.forDeclaration   then  write(" (forDeclaration)")    end
+				if assignment.addedByPolymorph then  write(" (addedByPolymorph)")  end
 				write(" (", assignment.operation, ")")
 				!!(CHILD_PRINT_START)
 				printNodeList(assignment.targets, indent+1, printed, printChildren)
@@ -2943,11 +2962,18 @@ do
 				write(")\n")
 
 			elseif node.declarations then -- AstScope and substructs.
-				if node.nodeType == !(nodeTypes.AstFileScope) then
+				if node.nodeType == !(nodeTypes.AstLambda) then
+					local lambda     = node
+					local assignment = astFindParent(lambda, !(nodeTypes.AstAssignment))
+					local i          = assignment and assignment.forDeclaration and indexOf(assignment.values, lambda)
+					if lambda.isPolymorphic then  write(" (polymorphs=", #lambda.polymorphs, ")")  end
+					if i                    then  write(" (", assignment.targets[i].name,     ")")  end
+
+				elseif node.nodeType == !(nodeTypes.AstFileScope) then
 					local fileScope = node
 					write(" (", fileScope.path, ")")
-				end
-				if isAny(node.nodeType, !(nodeTypes.AstStruct),!(nodeTypes.AstEnum)) then
+
+				elseif isAny(node.nodeType, !(nodeTypes.AstStruct),!(nodeTypes.AstEnum)) then
 					local structOrEnum = node
 					local typeInfo     = structOrEnum.representedType
 					if typeInfo and typeInfo.name ~= "" then  write(" (", typeInfo.name, ")")  end
@@ -3162,7 +3188,7 @@ do
 		!(
 		local TEMPLATE_FUNCTION_HEADER, TEMPLATE_FUNCTION_FOOTER = `
 			[$nodeType--[[$name]]] = function(node, token, parent, copies)
-				local copy   = astNewNode($name, token, parent)
+				local copy   = astNewNode($name, (token or node.token), parent)
 				copies[node] = copy
 				`,`
 				return copy
@@ -3258,7 +3284,7 @@ do
 	function copyTree(node, token, parent, copies)
 		!ASSERT `not copies[node]`
 		local copier = COPIERS[node.nodeType] or errorInternal(state, node)
-		return copier(node, (token or node.token), (parent or node.parent), copies)
+		return copier(node, token, (parent or node.parent), copies)
 	end
 
 	local FIXERS = {
@@ -3315,7 +3341,8 @@ do
 		)
 	}
 
-	-- copy = astCopy( node [, token=node.token, parent=node.parent ] )
+	-- copy, copies = astCopy( node [, token=node.token, parent=node.parent ] )
+	-- copies = { [node1]=copy1, ... }
 	-- Note: Copies the whole tree. We also don't touch any queued.
 	function _G.astCopy(node, token, parent)
 		local copies = {}
@@ -3326,7 +3353,7 @@ do
 			fixer(copy, copies)
 		end)
 
-		return copy
+		return copy, copies
 	end
 end
 

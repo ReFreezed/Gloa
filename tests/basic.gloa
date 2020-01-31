@@ -656,8 +656,52 @@ local testStaticStuff :: () {
 	)
 }
 
-local testPolymorphism :: () {
-	-- local insert :: (arr:[]$T, value:T) !foreign lua "table.insert"
-	-- local ints : []int
-	-- insert(ints, 5)
+local testPolymorphism :: (...:int) {
+	do {
+		local insert :: (arr:[]$T, value:T) !foreign lua "table.insert"
+		local ints: []int
+		insert(ints, 5)
+	}
+	do {
+		local poly :: (...:$T) {}
+		local get  :: () -> (i:int, s:string, ...:int) { return 99, "" }
+		poly(...)
+		poly(1, get(), ...)
+	}
+	do {
+		local poly :: (...:$T) {}
+		local get  :: () -> (...:int) { return }
+		poly(5, get())
+		poly(get())
+	}
+	do {
+		local poly :: (i:int|none, ...:$T) {}
+		poly(..., "")
+	}
+
+	-- Errors:
+
+	-- do {
+	-- 	local insert :: (arr:[]$T, value:T) !foreign lua "table.insert"
+	-- 	local ints: []int
+	-- 	insert(ints, "") -- Type mismatch.
+	-- }
+
+	-- do {
+	-- 	local func :: (...:$T) {}
+	-- 	func("", ...) -- Type mismatch.
+	-- }
+
+	-- do {
+	-- 	local func :: (...:$T) {}
+	-- 	local get  :: () -> (s:string, ...:int) { return "", 0 }
+	-- 	func(get()) -- Type mismatch.
+	-- }
+
+	-- @Incomplete: Should be error.
+	-- do {
+	-- 	local func :: (...:int) {}
+	-- 	local get  :: () -> (...:int) { return 0 }
+	-- 	func((get())) -- The parenthesis may result in nil, which is an error!
+	-- }
 }

@@ -103,10 +103,10 @@ local !struct"TypeInfoStructMember"{
 local !structTypeInfo"TypeInfoStruct:_TypeInfo"{
 	{`astNode`,               nil}, -- AstStruct
 	{`name`,                  ""},  -- Filled in during definition.
-	{`arguments`,             {}},  -- []TypeInfo  @Incomplete: Polymorphism.  @Cleanup: Use TypeInfoList here.
+	{`arguments`,             {}},  -- []TypeInfo  @Incomplete: Polymorphic structs.  @Cleanup: Use TypeInfoList here.
 	{`members`,               {}},  -- []TypeInfoStructMember
 	{`hasMembers`,            false},
-	{`polymorphSourceStruct`, nil}, -- TypeInfoStruct  @Incomplete: Polymorphism.
+	{`polymorphSourceStruct`, nil}, -- TypeInfoStruct
 }
 
 local !struct"TypeInfoEnumMember"{
@@ -352,18 +352,37 @@ function _G.getTypeRepresentedByExpression(expr)
 	elseif expr.nodeType == !(nodeTypes.AstCast) then
 		local cast = expr
 		return
-			cast.inferredType.tag == !(typeTags.TypeInfoType)
+			cast.inferredType.tag == !(typeTags.TypeInfoType) -- Is this check needed?
 			and getTypeRepresentedByExpression(cast.expression)
 			or  nil
 
 	elseif expr.nodeType == !(nodeTypes.AstIdentifier) then
 		local ident = expr
 		return ident.declaration.valueTypeInfo -- May be nil.
+	elseif expr.nodeType == !(nodeTypes.AstBake) then
+		local bake = expr
+		return bake.name.declaration.valueTypeInfo -- May be nil.
 
 	elseif expr.inferredType.tag == !(typeTags.TypeInfoType) then
 		errorInternal("Incomplete: Unhandled node type: %s", getFriendlyTypeInfoName(expr.inferredType))
 	else
 		return nil
+	end
+end
+
+-- Note: The expression must already be inferred!
+function _G.requireTypeRepresentedByExpression(state, expr)
+	local typeInfoRepresented = getTypeRepresentedByExpression(expr)
+	if typeInfoRepresented then  return typeInfoRepresented  end
+
+	local typeInfo = expr.inferredType
+
+	if typeInfo.tag ~= !(typeTags.TypeInfoType) then
+		typeError(state, expr, "Expected a type. (Got %s)", getFriendlyTypeInfoName(typeInfo))
+	elseif not isExpressionConstant(state, expr) then
+		typeError(state, expr, "Expected a constant. (Got variable of type '%s')", getFriendlyTypeInfoName(typeInfo))
+	else
+		errorInternal(state, expr)
 	end
 end
 
@@ -621,6 +640,16 @@ function _G.getFriendlyTypeInfoName(typeInfo)
 
 		name = table.concat(typeTexts, "|")
 
+	elseif typeInfo.tag == !(typeTags.TypeInfoList) then
+		local listSig   = typeInfo
+		local typeTexts = {}
+
+		for i, typeInfo in ipairs(listSig) do
+			typeTexts[i] = getFriendlyTypeInfoName(typeInfo)
+		end
+
+		name = "list("..table.concat(typeTexts, ", ")..")"
+
 	elseif typeInfo.tag == !(typeTags.TypeInfoArray) then
 		local arraySig = typeInfo
 		name           = "array("..getFriendlyTypeInfoName(arraySig.itemType)..")"
@@ -832,12 +861,6 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 	local vararg = identOrVararg.nodeType == !(nodeTypes.AstVararg) and identOrVararg or nil
 	local ident  = not vararg                                       and identOrVararg or nil
 	local decl   = identOrVararg.declaration
-
-	if decl and decl.isBake then
-		identOrVararg.inferredType = getTypeInfoForBuiltinType(state, "type")
-		decl.valueTypeInfo         = getTypeInfoForBuiltinType(state, "placeholder")
-		return
-	end
 
 	-- 1. Loose identifier.
 	if not isPartOfAnyDeclaration(identOrVararg) then
@@ -1083,10 +1106,7 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 
 	-- Specified type.
 	if typeExpr then
-		typeInfo = getTypeRepresentedByExpression(typeExpr)
-		if not typeInfo then
-			typeError(state, typeExpr, "This is not a type. (It is %s)", getFriendlyTypeInfoName(typeExpr.inferredType))
-		end
+		typeInfo = requireTypeRepresentedByExpression(state, typeExpr)
 
 	-- Infer type from value.
 	else
@@ -1181,11 +1201,13 @@ end
 	local typeInfo, typeInfoRepresented
 
 	!if DEBUG then
+		--[[
 		if typeNode.kind == !(TYPE_KIND_UNSET) then
 			astPrintTree(typeNode)
 			where(state, typeNode)
 			errorInternal()
 		end
+		--]]
 	!end
 
 	if typeNode.kind == !(TYPE_KIND_SIMPLE_BUILTIN) then
@@ -1211,10 +1233,8 @@ end
 			!DEPEND_AND_RETURN(`typeNode`, DEPEND_NODE_INFERRED, `itemTypeNode`)
 		end
 
-		local itemTypeInfo = getTypeRepresentedByExpression(itemTypeNode)
-		if not itemTypeInfo then
-			typeError(state, itemTypeNode, "This is not a type. (It is %s)", getFriendlyTypeInfoName(itemTypeNode.inferredType))
-		elseif itemTypeInfo.tag == !(typeTags.TypeInfoNone) then
+		local itemTypeInfo = requireTypeRepresentedByExpression(state, itemTypeNode)
+		if itemTypeInfo.tag == !(typeTags.TypeInfoNone) then
 			typeError(state, itemTypeNode, "Arrays cannot contain nil.")
 		end
 
@@ -1265,10 +1285,7 @@ end
 			end
 			)
 
-			local componentType = getTypeRepresentedByExpression(typeExpr)
-			if not componentType then
-				typeError(state, typeExpr, "This is not a type. (It is %s)", getFriendlyTypeInfoName(typeExpr.inferredType))
-			end
+			local componentType = requireTypeRepresentedByExpression(state, typeExpr)
 
 			if componentType.tag == !(typeTags.TypeInfoCompound) then
 				-- Unpack the sub-compound type so we don't end up with compound types of other compound types.
@@ -1509,7 +1526,7 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 		local exprForError        = getArgumentNodeForError(callOrReturnNode, valueIndex, firstExtraValueExpr)
 		local prefix              = requestedMax+acceptedMax == math.huge and "Incorrect number of" or "Too many"
 		local thingsStr           = callOrReturnNode.nodeType == !(nodeTypes.AstCall) and "arguments" or "values to return"
-		local gotStr              = requestedMax == math.huge and "variable amount" or F("%d", requestedMax)
+		local gotStr              = (requestedMax ~= math.huge and F("%d", requestedMin)) or (requestedMin == 0 and "variable amount") or F("%d + variable amount", requestedMin)
 
 		typeError(state, exprForError, "%s %s. (Wanted %d, got %s)", prefix, thingsStr, acceptedMax, gotStr) -- Note: acceptedMax is never infinite here.
 	end
@@ -1585,6 +1602,238 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 	return true, compatibilityScoreSum
 end
 
+local function getPathToNode(state, topNode, node)
+	!ASSERT `topNode`
+	local locations = {}
+
+	while node ~= topNode do
+		local loc = {node=node.parent, container=node.queued.container, key=node.queued.key}
+		table.insert(locations, loc)
+		node = node.parent or errorInternal(state, topNode)
+	end
+
+	return reverseArray(locations)
+end
+
+local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments, realArgumentTypes)
+	local ident = call.callee
+	if ident.nodeType ~= !(nodeTypes.AstIdentifier) then
+		errorInternal(state, ident, "Expected an identifier. Referring to unknown polymorphic function.")
+	end
+
+	local decl = ident.declaration
+	if not decl.isConstant then
+		errorInternal(state, ident, "Identifier is not a constant.")
+	end
+
+	local lambda = decl.assignment.values[decl.assignmentIndex] or errorInternal(state, decl)
+	assert(lambda.nodeType == !(nodeTypes.AstLambda))
+
+	if lambda.body.queued.pipe <= !(PIPE_INFER) then
+		!DEPEND_AND_RETURN(`call`, DEPEND_NODE_INFERRED, `lambda.body`) -- Not sure if really needed. Maybe we just shouldn't infer most of polymorphic functions.
+	end
+
+	checkIfValuesMatchArgumentTypes(state, call, realArguments, realArgumentTypes, calleeTypeInfo.argumentTypesIn) -- Basically checks everything but placeholders.
+
+	local lambdaMorphedMatch = nil
+	for _, morphLambda in ipairs(lambda.polymorphs) do
+		-- @Incomplete: Find previous matching morph(s).
+	end
+
+	if lambdaMorphedMatch then
+		errorInternal("@Incomplete")
+		return
+	end
+
+	-- Create declaration for the morphed lambda.
+	local morphDecl            = astNewNode(AstDeclaration, lambda.token, lambda)
+	morphDecl.isConstant       = true
+	morphDecl.addedByPolymorph = true
+
+	local morphIdent       = astNewNode(AstIdentifier, morphDecl.token, morphDecl)
+	morphIdent.name        = "_POLY"..(#lambda.polymorphs+1) -- @UX: Include the existing name if there is one.
+	morphIdent.declaration = morphDecl
+	morphDecl.name         = morphIdent
+
+	local morphAssignment            = astNewNode(AstAssignment, lambda.token, lambda)
+	morphAssignment.forDeclaration   = true
+	morphAssignment.declarations     = {morphDecl}
+	morphAssignment.addedByPolymorph = true
+	morphDecl.assignment             = morphAssignment
+
+	local morphLambda = astCopy(lambda, nil, morphAssignment)
+
+	-- Don't keep copies of previous polymorphs we've made - that would quickly create a mess!
+	-- (@Speed: Don't even copy them in the first place.)
+	do
+		morphLambda.isPolymorphic = false
+		morphLambda.polymorphs    = {}
+
+		for i, statement in ipairsr(morphLambda.statements) do
+			if isAny(statement.nodeType, !(nodeTypes.AstDeclaration),!(nodeTypes.AstAssignment)) and statement.addedByPolymorph then
+				table.remove(morphLambda.statements, i) -- Should be fast enough. There shouldn't be that many statements in lambdas.
+			end
+		end
+	end
+
+	morphAssignment.targets[1] = astCopy(morphIdent, nil, morphAssignment)
+	morphAssignment.values[1]  = morphLambda
+	table.insert(lambda.polymorphs, morphLambda)
+
+	local placeholderType = getTypeInfoForBuiltinType(state, "placeholder")
+
+	astVisitAllNodes(morphLambda, function(node, container, key)
+		-- @Robustness @Robustness @Robustness: So much @Hack!
+		node.inferredType    = nil
+		node.valueTypeInfo   = nil
+		node.representedType = nil
+
+		-- AstBake nodes are only used before baking.
+		-- @Incomplete: Handle polymorphic functions inside other polymorphic functions.
+		if node.nodeType == !(nodeTypes.AstBake) then
+			local bake       = node
+			container[key]   = bake.name
+			bake.name.parent = bake.parent
+			return !(VISIT_IGNORE_CHILDREN)
+		end
+	end)
+
+	-- Fill in baked values in morphed lambda.
+	local bakeIndex = 0
+	!ASSERT `lambda.argumentsIn`
+
+	for argIndex, arg in ipairs(lambda.argumentsIn.arguments) do
+		local declTypeExpr = arg.declaration.type -- This is probably an AstType.
+
+		astVisitAllNodes(declTypeExpr, function(node)
+			if node.nodeType ~= !(nodeTypes.AstBake) then  return  end
+
+			local bake = node
+			bakeIndex  = bakeIndex+1
+
+			-- @Incomplete: Handle optional arguments.
+			local valueExpr     = realArguments    [argIndex] or errorInternal(state, bake)
+			local valueTypeInfo = realArgumentTypes[argIndex] or errorInternal(state, valueExpr)
+
+			if valueTypeInfo.tag == !(typeTags.TypeInfoList) then
+				valueTypeInfo = valueTypeInfo[1] or errorInternal(state, valueExpr) -- :CheckVoidFunction
+			end
+			valueTypeInfo = adjustTypeToOne(state, valueTypeInfo)
+
+			for _, loc in ipairs(getPathToNode(state, declTypeExpr, bake)) do
+				if loc.node.nodeType == !(nodeTypes.AstType) then
+					if loc.node.kind == !(TYPE_KIND_ARRAY) then
+						if valueTypeInfo.tag ~= !(typeTags.TypeInfoArray) then
+							typeError(
+								state, valueExpr,
+								"Polymorphic call: Unexpected type. (Wanted an array, got %s)",
+								getFriendlyTypeInfoName(valueTypeInfo)
+							)
+						end
+						local arraySig = valueTypeInfo
+						valueTypeInfo  = arraySig.itemType or errorInternal(state, valueExpr)
+
+					else
+						errorUnhandledNodeType(state, loc.node)
+					end
+				else
+					errorUnhandledNodeType(state, loc.node)
+				end
+			end
+
+			local declBaked = morphLambda.bakeDeclarations[bakeIndex] or errorInternal(state, bake)
+			local typeNode  = declBaked.assignment.values[1]          or errorInternal(state, bake)
+
+			typeNode.inferredType    = getTypeInfoForBuiltinType(state, "type")
+			typeNode.representedType = valueTypeInfo or errorInternal(state, valueExpr)
+
+			-- For debugging:
+			typeNode.typeName = ":generatedAutoInferredTypeNode:"
+			typeNode.kind     = !(TYPE_KIND_UNSET)
+		end)
+	end
+	!ASSERT `bakeIndex == #lambda.bakeDeclarations`
+
+	-- Update the source lambda, add queueds etc.
+	local i              = #lambda.statements+1
+	lambda.statements[i] = morphDecl
+	addToQueueRecursively(state, morphDecl, lambda.statements, i, !(PIPE_INFER))
+
+	local i              = #lambda.statements+1
+	lambda.statements[i] = morphAssignment
+	addToQueueRecursively(state, morphAssignment, lambda.statements, i, !(PIPE_INFER))
+
+	for _, declBaked in ipairs(morphLambda.bakeDeclarations) do
+		moveToNextRelevantPipe(state, declBaked.assignment.values[1])
+	end
+
+	-- Update the callee to represent the correct polymorph.
+	ident.declaration  = morphDecl
+	ident.inferredType = nil
+
+	moveToPipe(state, ident, !(PIPE_INFER)) -- Re-infer callee.
+
+	-- !DEPEND_AND_RETURN(`call`, DEPEND_NODE_INFERRED, `ident`) -- This is an error as the same dependency already exists!
+	local dependency      = getExistingDependency(state, call, !(DEPEND_NODE_INFERRED), ident) or errorInternal()
+	call.queued.waitingOn = dependency
+end
+
+local function handleOverloadedCall(state, call, realArguments, realArgumentTypes)
+	local ident             = call.callee
+	local declBase          = ident.declaration
+	local matchingOverloads = {}
+
+	while declBase.overloadOf ~= declBase do  declBase = declBase.overloadOf  end
+
+	for _, declOverload in ipairs(declBase.overloads) do
+		local calleeTypeInfoOverload = declOverload.name.inferredType
+
+		!ASSERT("calleeTypeInfoOverload.tag == "..typeTags.TypeInfoFunction)
+
+		local doesMatch, compatibilityScore = checkIfValuesMatchArgumentTypes(
+			state, call, realArguments, realArgumentTypes, calleeTypeInfoOverload.argumentTypesIn, true, declOverload
+		)
+		if doesMatch then
+			table.insert(matchingOverloads, {declaration=declOverload, score=compatibilityScore})
+		end
+	end
+
+	if not matchingOverloads[1] then
+		printerr()
+		typeMessage(io.stderr, state, ident, "Error", "Did not find any matching overload to call.")
+		for i, declOverload in ipairs(declBase.overloads) do
+			typeMessage(io.stderr, state, declOverload.name, "Info", "...overload #%d.", i)
+		end
+		exitFailure()
+	end
+
+	table.sort(matchingOverloads, function(a, b)
+		return a.score > b.score
+	end)
+
+	local highscore = matchingOverloads[1].score
+
+	if matchingOverloads[2] and matchingOverloads[2].score == highscore then
+		printerr()
+		typeMessage(io.stderr, state, ident, "Error", "There are several matching overloads.")
+		for i, overloadData in ipairs(matchingOverloads) do
+			if overloadData.score < highscore then  break  end
+			typeMessage(io.stderr, state, overloadData.declaration.name, "Info", "...overload #%d.", i)
+		end
+		exitFailure()
+	end
+
+	local decl           = matchingOverloads[1].declaration
+	local calleeTypeInfo = decl.name.inferredType
+
+	-- Update the callee to represent the correct overload.
+	-- @Robustness: Is this safe? I don't think anything except the calls itself depends directly on, and uses values from, any callee.
+	ident.declaration  = decl
+	ident.inferredType = calleeTypeInfo
+
+	return calleeTypeInfo
+end
+
 !NODE_INFERRER `function nodeInferrers.AstCall(state, call)`
 	local callee         = call.callee
 	local calleeTypeInfo = callee.inferredType
@@ -1646,12 +1895,6 @@ end
 		end
 	!end
 
-	if calleeTypeInfo.isPolymorphic then
-		-- @Incomplete: Find previous similar morph or copy the function and clear type info etc.
-		--              Remember: We need the callee to be a constant reference to an AstLambda!
-		errorInternal(state, callee, "@Incomplete: Polymorphic functions.")
-	end
-
 	local realArguments     = (call.isMethod and {call, unpack(call.arguments)} or call.arguments)
 	local realArgumentTypes = {}
 
@@ -1663,60 +1906,16 @@ end
 		table.insert(realArgumentTypes, arg.inferredType)
 	end
 
-	-- Handle overloads.
-	if callee.nodeType == !(nodeTypes.AstIdentifier) and callee.declaration.overloadOf then
-		local ident             = callee
-		local declBase          = ident.declaration
-		local matchingOverloads = {}
+	-- Polymorphic call.
+	if calleeTypeInfo.isPolymorphic then
+		handlePolymorphicCall(state, call, calleeTypeInfo, realArguments, realArgumentTypes)
+		return -- Wait for the polymorphed function to infer.
 
-		while declBase.overloadOf ~= declBase do  declBase = declBase.overloadOf  end
+	-- Overloaded call.
+	elseif callee.nodeType == !(nodeTypes.AstIdentifier) and callee.declaration.overloadOf then
+		calleeTypeInfo = handleOverloadedCall(state, call, realArguments, realArgumentTypes) or errorInternal(state, call)
 
-		for _, declOverload in ipairs(declBase.overloads) do
-			local calleeTypeInfoOverload = declOverload.name.inferredType
-
-			!ASSERT("calleeTypeInfoOverload.tag == "..typeTags.TypeInfoFunction)
-
-			local doesMatch, compatibilityScore = checkIfValuesMatchArgumentTypes(
-				state, call, realArguments, realArgumentTypes, calleeTypeInfoOverload.argumentTypesIn, true, declOverload
-			)
-			if doesMatch then
-				table.insert(matchingOverloads, {declaration=declOverload, score=compatibilityScore})
-			end
-		end
-
-		if not matchingOverloads[1] then
-			printerr()
-			typeMessage(io.stderr, state, ident, "Error", "Did not find any matching overload to call.")
-			for i, declOverload in ipairs(declBase.overloads) do
-				typeMessage(io.stderr, state, declOverload.name, "Info", "...overload #%d.", i)
-			end
-			exitFailure()
-		end
-
-		table.sort(matchingOverloads, function(a, b)
-			return a.score > b.score
-		end)
-
-		local highscore = matchingOverloads[1].score
-
-		if matchingOverloads[2] and matchingOverloads[2].score == highscore then
-			printerr()
-			typeMessage(io.stderr, state, ident, "Error", "There are several matching overloads.")
-			for i, overloadData in ipairs(matchingOverloads) do
-				if overloadData.score < highscore then  break  end
-				typeMessage(io.stderr, state, overloadData.declaration.name, "Info", "...overload #%d.", i)
-			end
-			exitFailure()
-		end
-
-		local decl     = matchingOverloads[1].declaration
-		calleeTypeInfo = decl.name.inferredType
-
-		-- Update the callee to represent the correct overload.
-		-- @Robustness: Is this safe? I don't think anything except the calls itself depends directly on, and uses values from, any callee.
-		ident.declaration  = decl
-		ident.inferredType = calleeTypeInfo
-
+	-- Plain call.
 	else
 		checkIfValuesMatchArgumentTypes(state, call, realArguments, realArgumentTypes, calleeTypeInfo.argumentTypesIn)
 	end
@@ -1777,10 +1976,7 @@ end
 			!DEPEND_AND_RETURN(`decl`, DEPEND_NODE_INFERRED, `typeExpr`)
 		end
 
-		local typeInfoRepresented = getTypeRepresentedByExpression(typeExpr)
-		if not typeInfoRepresented then
-			typeError(state, typeExpr, "This is not a type. (It is %s)", getFriendlyTypeInfoName(typeExpr.inferredType))
-		end
+		local typeInfoRepresented = requireTypeRepresentedByExpression(state, typeExpr)
 
 		if decl.parent.nodeType == !(nodeTypes.AstArgument) then
 			-- void  (Ignore function arguments.)
@@ -1803,10 +1999,7 @@ end
 
 	-- @Incomplete: decl.notes (if we make them structured, which we should!)
 
-	if decl.isBake then
-		-- void
-
-	elseif decl.assignment then
+	if decl.assignment then
 		local scope              = getClosestScope(decl) or errorInternal()
 		local scopeIsDeclarative = isScopeDeclarative(scope)
 		local valueExpr
@@ -2109,11 +2302,7 @@ end
 
 function _G.getConstantNameOrTriggerError(state, node)
 	if not (node.nodeType == !(nodeTypes.AstLiteral) and node.literalType == !(LITERAL_STRING)) then
-		typeError(
-			state, astGetExpressionVisuallyFurthestToTheLeft(node),
-			"Expected a name constant after %s.",
-			getFriendlyTypeInfoName(node.inferredType)
-		)
+		typeError(state, astGetExpressionVisuallyFurthestToTheLeft(node), "Expected a name constant as the member.")
 	end
 
 	local literal = node
@@ -2590,11 +2779,7 @@ end
 		lambda.foreignSourceId = lambda.foreignSource.." "..lambda.foreignSourceName
 	end
 
-	if lambda.body then
-		moveToNextPipe(state, lambda, !(PIPE_BYTECODE))
-	else
-		moveToPipe(state, lambda, !(PIPE_DONE))
-	end
+	moveToNextRelevantPipe(state, lambda)
 end
 
 !NODE_INFERRER `function nodeInferrers.AstTypeOf(state, typeOf)`
@@ -2641,12 +2826,7 @@ end
 		!DEPEND_AND_RETURN(`cast`, DEPEND_NODE_INFERRED, `cast.expression`)
 	end
 
-	local castTypeInfo = cast.inferredType or getTypeRepresentedByExpression(cast.targetType)
-	if not castTypeInfo then
-		!ASSERT `cast.targetType`
-		typeError(state, cast.targetType, "This is not a type. (It is %s)", getFriendlyTypeInfoName(cast.targetType.inferredType))
-	end
-
+	local castTypeInfo = cast.inferredType or requireTypeRepresentedByExpression(state, cast.targetType)
 	local exprTypeInfo = adjustTypeToOne(state, cast.expression.inferredType, true)
 
 	if castTypeInfo == exprTypeInfo then
@@ -2868,7 +3048,17 @@ end
 end
 
 !NODE_INFERRER `function nodeInferrers.AstBake(state, bake)`
-	errorParsing(state, bake.token, "Unexpected '$'.")
+	if not bake.name.inferredType then
+		!DEPEND_AND_RETURN(`bake`, DEPEND_NODE_INFERRED, `bake.name`)
+	end
+
+	local scope, statement = getClosestScope(bake)
+	if not (scope and scope.nodeType == !(nodeTypes.AstLambda) and statement == scope.argumentsIn) then
+		errorParsing(state, bake.token, "Unexpected '$'.")
+	end
+
+	bake.inferredType = bake.name.inferredType
+	moveToPipe(state, bake, !(PIPE_DONE))
 end
 
 !NODE_INFERRER `function nodeInferrers.AstAssert(state, assertNode)`
@@ -3413,8 +3603,6 @@ end
 
 -- Note: It's assumed that the expression tree has all types figured out.
 function _G.isExpressionConstant(state, expr)
-	-- @Incomplete: Return an AstNode?
-
 	if expr.nodeType == !(nodeTypes.AstLiteral) then
 		return true
 
@@ -3423,7 +3611,6 @@ function _G.isExpressionConstant(state, expr)
 		local decl  = ident.declaration or errorInternal()
 
 		if not decl.isConstant then  return false  end
-		if decl.isBake         then  return true   end
 
 		!ASSERT `decl.assignment` -- Constant declarations must have a value.
 
@@ -3679,63 +3866,64 @@ local function createLambdaFromSignature(state, funcSig, parent)
 	return lambda
 end
 
-function _G.simplifyTypeExpression(state, expr, typeInfoRepresented)
-	!ASSERT `typeInfoRepresented`
+local function createTypeNodeFromInfo(state, typeRepresented, token, parent)
+	local typeNode            = astNewNode(AstType, token, parent)
+	local isBuiltin, typeName = isTypeBuiltin(typeRepresented)
 
-	local typeInfo            = expr.inferredType
-	local typeNode            = astNewNode(AstType, expr.token, expr.parent)
-	local isBuiltin, typeName = isTypeBuiltin(typeInfoRepresented)
-
-	typeNode.isUserType      = not isBuiltin
-	typeNode.inferredType    = typeInfo
-	typeNode.representedType = typeInfoRepresented
+	typeNode.inferredType    = getTypeInfoForBuiltinType(state, "type")
+	typeNode.representedType = typeRepresented
 
 	if isBuiltin then
-		typeNode.kind     = !(TYPE_KIND_SIMPLE_BUILTIN)
-		typeNode.typeName = typeName
+		typeNode.kind           = !(TYPE_KIND_SIMPLE_BUILTIN)
+		typeNode.typeName       = typeName
 
-	elseif typeInfoRepresented.tag == !(typeTags.TypeInfoStruct) then
-		local structInfo  = typeInfoRepresented
-		typeNode.kind     = !(TYPE_KIND_SIMPLE_USER)
-		typeNode.typeName = structInfo.name
+	elseif typeRepresented.tag == !(typeTags.TypeInfoStruct) then
+		local structInfo        = typeRepresented
+		typeNode.kind           = !(TYPE_KIND_SIMPLE_USER)
+		typeNode.typeName       = structInfo.name
 
-	elseif typeInfoRepresented.tag == !(typeTags.TypeInfoEnum) then
-		local enumInfo    = typeInfoRepresented
-		typeNode.kind     = !(TYPE_KIND_SIMPLE_USER)
-		typeNode.typeName = enumInfo.name
+	elseif typeRepresented.tag == !(typeTags.TypeInfoEnum) then
+		local enumInfo          = typeRepresented
+		typeNode.kind           = !(TYPE_KIND_SIMPLE_USER)
+		typeNode.typeName       = enumInfo.name
 
-	elseif typeInfoRepresented.tag == !(typeTags.TypeInfoFunction) then
-		-- local decl = typeInfo.declaration
-		-- if decl then
-		-- 	local lambda = getAssignmentValue(state, decl.name, decl.assignment.values, decl.assignmentIndex, nil, nil, nil)
-		-- 	assert(lambda.nodeType == !(nodeTypes.AstLambda))
-		-- 	assert(not lambda.body)
-		-- 	typeNode.functionHeader = astCopy(lambda) -- Do we need to update the location info of the lambda to where typeNode/expr is?
-		-- else
-			local funcSig           = typeInfoRepresented
-			typeNode.kind           = !(TYPE_KIND_FUNCTION)
-			typeNode.functionHeader = createLambdaFromSignature(state, funcSig, typeNode)
-		-- end
+	elseif typeRepresented.tag == !(typeTags.TypeInfoFunction) then
+		local funcSig           = typeRepresented
+		typeNode.kind           = !(TYPE_KIND_FUNCTION)
+		typeNode.functionHeader = createLambdaFromSignature(state, funcSig, typeNode)
 
-		addUnqueuedChildrenToQueueRecursively(state, typeNode, !(PIPE_BYTECODE))
+	elseif typeRepresented.tag == !(typeTags.TypeInfoCompound) then
+		typeNode.kind           = !(TYPE_KIND_COMPOUND)
 
-		astVisitAllNodes(typeNode.functionHeader, function(node)
-			if node ~= typeNode and node.nodeType ~= !(nodeTypes.AstDeclaration) then
-				moveToPipe(state, node, !(PIPE_DONE))
-			end
-		end)
+	elseif typeRepresented.tag == !(typeTags.TypeInfoArray) then
+		local arraySig          = typeRepresented
+		typeNode.kind           = !(TYPE_KIND_ARRAY)
+		typeNode.arrayItemType  = createTypeNodeFromInfo(state, arraySig.itemType, token, typeNode)
 
-	elseif typeInfoRepresented.tag == !(typeTags.TypeInfoCompound) then
-		typeNode.kind = !(TYPE_KIND_COMPOUND)
-
-	elseif typeInfoRepresented.tag == !(typeTags.TypeInfoVararg) then
+	elseif typeRepresented.tag == !(typeTags.TypeInfoVararg) then
 		errorInternal() -- When do we get here?
-
 	else
-		errorInternal("Incomplete: Handle type tag '%s'.", TYPE_TAG_NAMES[typeInfoRepresented.tag])
+		!ifDEBUG `print(getFriendlyTypeInfoName(typeRepresented))`
+		errorInternal("Incomplete: Handle type tag '%s'.", TYPE_TAG_NAMES[typeRepresented.tag])
 	end
 
-	replaceQueuedNodeAndUnqueueOldTree(state, expr, typeNode)
+	return typeNode
+end
+
+function _G.simplifyTypeExpression(state, expr, typeRepresented)
+	!ASSERT `typeRepresented`
+	if not (
+		typeRepresented.tag == !(typeTags.TypeInfoPlaceholder) or
+		typeRepresented.tag == !(typeTags.TypeInfoCompound) and itemWith1(typeRepresented, "tag", !(typeTags.TypeInfoPlaceholder))
+		-- @Incomplete: We need to check function types too for placeholders.
+	) then
+		local typeNode = createTypeNodeFromInfo(state, typeRepresented, expr.token, expr.parent)
+
+		addUnqueuedChildrenToQueueRecursively(state, typeNode, !(PIPE_INFER))
+		moveChildrenToNextRelevantPipe(state, typeNode)
+
+		replaceQueuedNodeAndUnqueueOldTree(state, expr, typeNode)
+	end
 end
 
 local function simplifyCast(state, cast)
@@ -4044,6 +4232,7 @@ local function simplifyBinary(state, binary)
 			valueR = binary.right.representedType.id
 
 		else
+			!ifDEBUG `astPrintTree(binary)`
 			errorInternal(state, binary)
 		end
 
