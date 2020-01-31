@@ -20,7 +20,7 @@
 	isTypeSimple, isTypeCompatibleWith, adjustTypeToOne
 	newTypeInfo, isTypeBuiltin, getTypeInfo*
 	simplifyExpressionIfConstant, simplifyTypeExpression
-	typeError, typeMessage
+	typeError, typeError2, typeMessage
 	wrapInImplicitCast
 
 --============================================================]]
@@ -89,8 +89,8 @@ local !structTypeInfo"TypeInfoVararg:_TypeInfo"{
 }
 
 local !structTypeInfo"TypeInfoFunction:_TypeInfo"{ -- AKA function signature.
-	{`argumentTypesIn`,      {}}, -- []TypeInfo  @Cleanup: Use TypeInfoList here.
-	{`argumentTypesOut`,     {}}, -- []TypeInfo  @Cleanup: Use TypeInfoList here.
+	{`argumentTypesIn`,      {}}, -- []TypeInfo  @Cleanup: Use TypeInfoList here?
+	{`argumentTypesOut`,     {}}, -- []TypeInfo  @Cleanup: Use TypeInfoList here?
 	{`requiredArgumentsIn`,  {}}, -- []bool
 	{`requiredArgumentsOut`, {}}, -- []bool
 	{`isPolymorphic`,        false},
@@ -103,7 +103,7 @@ local !struct"TypeInfoStructMember"{
 local !structTypeInfo"TypeInfoStruct:_TypeInfo"{
 	{`astNode`,               nil}, -- AstStruct
 	{`name`,                  ""},  -- Filled in during definition.
-	{`arguments`,             {}},  -- []TypeInfo  @Incomplete: Polymorphic structs.  @Cleanup: Use TypeInfoList here.
+	{`arguments`,             {}},  -- []TypeInfo  @Incomplete: Polymorphic structs.  @Cleanup: Use TypeInfoList here?
 	{`members`,               {}},  -- []TypeInfoStructMember
 	{`hasMembers`,            false},
 	{`polymorphSourceStruct`, nil}, -- TypeInfoStruct
@@ -587,6 +587,12 @@ end
 function _G.typeError(state, node, s, ...)
 	return nodeError(state, node, "Typer", s, ...)
 end
+function _G.typeError2(state, node1, s1, node2, s2)
+	printerr()
+	typeMessage(io.stderr, state, node1, "Error", "%s", s1)
+	typeMessage(io.stderr, state, node2, "Info",  "%s", s2)
+	exitFailure()
+end
 
 -- typeMessage( [ outputFile=io.stdout, ] compilationState, node, label, formatString, ... )
 function _G.typeMessage(file, state, node, label, s, ...)
@@ -791,24 +797,16 @@ local function checkRedeclaration(state, ident, decl, isMember, scope)
 
 		elseif scope ~= scopeExisting then
 			local identEarly, identLate = getEarlyAndLateForRedeclarationError(state, declExisting.name, ident)
-			printerr()
-			typeMessage(
-				io.stderr, state, identLate,
-				"Error", "Trying to add a new overload to '%s' which is in another scope. Overloads must currently be declared in the same scope.",
-				ident.name
+			typeError2(state,
+				identLate,  F("Trying to add a new overload to '%s' which is in another scope. Overloads must currently be declared in the same scope.", ident.name),
+				identEarly, F("...here is the previous function.")
 			)
-			typeMessage(io.stderr, state, identEarly, "Info", "...here is the previous function.")
-			exitFailure()
 
 		elseif declExisting.overloadsLocked then
-			printerr()
-			typeMessage(
-				io.stderr, state, declExisting.name,
-				"Error", "Trying to add a new overload to '%s' after it's type has been inferred. Overloads currently has to happen in the same 'parsing cycle'.",
-				ident.name
+			typeError2(state,
+				declExisting.name, F("Trying to add a new overload to '%s' after it's type has been inferred. Overloads currently has to happen in the same 'parsing cycle'.", ident.name),
+				ident,             F("...this is the new overload.")
 			)
-			typeMessage(io.stderr, state, ident, "Info", "...this is the new overload.")
-			exitFailure()
 
 		else
 			decl.overloadOf = declExisting
@@ -818,6 +816,19 @@ local function checkRedeclaration(state, ident, decl, isMember, scope)
 			local lambdaExisting = declExisting.assignment.values[declExisting.assignmentIndex]
 
 			assert(not lambdaExisting.inferredType)
+
+			-- For now, polymorphic functions cannot be overloaded. Though maybe it should be allowed? Not sure!
+			if lambda.isPolymorphic or lambdaExisting.isPolymorphic then
+				local lambdaPoly  = lambda
+				local lambdaOther = lambdaExisting
+				if not lambda.isPolymorphic then
+					lambdaPoly, lambdaOther = lambdaOther, lambdaPoly
+				end
+				typeError2(state,
+					lambdaPoly,  F("Cannot overload polymorphic function '%s'.", ident.name),
+					lambdaOther, F("...here is the other function.")
+				)
+			end
 
 			-- This dependency means lambdaExisting won't get inferred until earliest next cycle
 			-- by which time all overloads should have been added (I think). This should work as
@@ -830,10 +841,10 @@ local function checkRedeclaration(state, ident, decl, isMember, scope)
 	-- Non-shadow.
 	elseif not decl.canShadow then
 		local identEarly, identLate, extraMessageEarly, extraMessageLate = getEarlyAndLateForRedeclarationError(state, declExisting.name, ident)
-		printerr()
-		typeMessage(io.stderr, state, identLate,  "Error", "'%s' has already been declared.%s", ident.name, extraMessageLate)
-		typeMessage(io.stderr, state, identEarly, "Info",  "...it was declared here.%s", extraMessageEarly)
-		exitFailure()
+		typeError2(state,
+			identLate,  F("'%s' has already been declared.%s", ident.name, extraMessageLate),
+			identEarly, F("...it was declared here.%s", extraMessageEarly)
+		)
 
 	-- Shadow in same scope.
 	elseif
@@ -845,10 +856,10 @@ local function checkRedeclaration(state, ident, decl, isMember, scope)
 			and getClosestScope(scope)          == scopeExisting
 		)
 	then
-		printerr()
-		typeMessage(io.stderr, state, ident,             "Error", "'%s' has already been declared in the same scope (which means name shadowing does not work).", ident.name)
-		typeMessage(io.stderr, state, declExisting.name, "Info",  "...it was declared here.")
-		exitFailure()
+		typeError2(state,
+			ident,             F("'%s' has already been declared in the same scope (which means name shadowing does not work).", ident.name),
+			declExisting.name, F("...it was declared here.")
+		)
 
 	-- Shadowing something in an outer (or inner?) scope.
 	-- @Robustness: Don't allow file-scope variables to be shadows (just like constants)?
@@ -1016,14 +1027,10 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 
 				if funcSig1 == funcSig2 then
 					local identEarly, identLate = getEarlyAndLateForRedeclarationError(state, decl1.name, decl2.name)
-					printerr()
-					typeMessage(
-						io.stderr, state, identLate,
-						"Error", "Call signatures for function overloads for '%s' are identical. (%s)",
-						ident.name, getFriendlyTypeInfoName(funcSig1)
+					typeError2(state,
+						identLate,  F("Call signatures for function overloads for '%s' are identical. (%s)", ident.name, getFriendlyTypeInfoName(funcSig1)),
+						identEarly, F("...here is the other function.")
 					)
-					typeMessage(io.stderr, state, identEarly, "Info",  "...here is the other function.")
-					exitFailure()
 				end
 
 				-- local requiredCount1 = 0
@@ -1033,8 +1040,8 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 				for argIndex = 1, math.min(#argTypes1, #argTypes2)+1 do
 					local argTypeInfo1 = argTypes1[argIndex]
 					local argTypeInfo2 = argTypes2[argIndex]
-					argTypeInfo1       = argTypeInfo1 and adjustTypeToOne(state, argTypeInfo1)
-					argTypeInfo2       = argTypeInfo2 and adjustTypeToOne(state, argTypeInfo2)
+					argTypeInfo1       = argTypeInfo1 and adjustTypeToOne(state, decl1.name, argTypeInfo1)
+					argTypeInfo2       = argTypeInfo2 and adjustTypeToOne(state, decl2.name, argTypeInfo2)
 
 					local isRequired1  = argTypeInfo1 ~= nil and argRequireds1[argIndex]
 					local isRequired2  = argTypeInfo2 ~= nil and argRequireds2[argIndex]
@@ -1044,10 +1051,10 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 
 					if not (isRequired1 or isRequired2) then
 						local identEarly, identLate = getEarlyAndLateForRedeclarationError(state, decl1.name, decl2.name)
-						printerr()
-						typeMessage(io.stderr, state, identEarly, "Error", "Call signatures for function overloads (%s) are too similar.", ident.name)
-						typeMessage(io.stderr, state, identLate,  "Info",  "...here is the other function.")
-						exitFailure()
+						typeError2(state,
+							identEarly, F("Call signatures for function overloads (%s) are too similar.", ident.name),
+							identLate,  F("...here is the other function.")
+						)
 					end
 
 					if not (argTypeInfo1 and argTypeInfo1 == argTypeInfo2) then  break  end
@@ -1056,24 +1063,22 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 				--[[ This is a bit too restrictive!
 				if requiredCount1 == requiredCount2 then
 					for argIndex = 1, requiredCount1 do
-						local argTypeInfo1 = adjustTypeToOne(state, argTypes1[argIndex])
-						local argTypeInfo2 = adjustTypeToOne(state, argTypes2[argIndex])
+						local argTypeInfo1 = adjustTypeToOne(state, decl1.name, argTypes1[argIndex])
+						local argTypeInfo2 = adjustTypeToOne(state, decl2.name, argTypes2[argIndex])
 						if
 							isTypeCompatibleWith(argTypeInfo1, argTypeInfo2) or
 							isTypeCompatibleWith(argTypeInfo2, argTypeInfo1)
 						then
 							local identEarly, identLate = getEarlyAndLateForRedeclarationError(state, decl1.name, decl2.name)
-							printerr()
-							typeMessage(
-								io.stderr, state, identEarly,
-								"Error", "Call signatures for function overloads (%s) are too similar. (Argument #%d, %s vs. %s)",
-								ident.name,
-								argIndex,
-								getFriendlyTypeInfoName(argTypeInfo1),
-								getFriendlyTypeInfoName(argTypeInfo2)
+							typeError2(state,
+								identEarly, F("Call signatures for function overloads (%s) are too similar. (Argument #%d, %s vs. %s)",
+									ident.name,
+									argIndex,
+									getFriendlyTypeInfoName(argTypeInfo1),
+									getFriendlyTypeInfoName(argTypeInfo2)
+								)
+								identLate, F("...here is the other function.")
 							)
-							typeMessage(io.stderr, state, identLate, "Info", "...here is the other function.")
-							exitFailure()
 						end
 					end
 				end
@@ -1113,8 +1118,8 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 		!ASSERT `assignment, "Missing both assignment and types from declaration."`
 		!ASSERT `not vararg`
 
-		local _, valueTypeInfo = getAssignmentValue(state, ident, assignment.values, decl.assignmentIndex, nil, nil, nil)
-		typeInfo               = adjustTypeToOne(state, valueTypeInfo, true)
+		local valueExpr, valueTypeInfo = getAssignmentValue(state, ident, assignment.values, decl.assignmentIndex, nil, nil, nil)
+		typeInfo                       = adjustTypeToOne(state, valueExpr, valueTypeInfo, true)
 	end
 
 	assert(typeInfo)
@@ -1512,6 +1517,7 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 		local prefix       = requestedMax+acceptedMax == math.huge and "Incorrect number of" or "Missing"
 		local thingsStr    = callOrReturnNode.nodeType == !(nodeTypes.AstCall) and "arguments" or "values to return"
 		local gotStr       = (requestedMax ~= math.huge and F("%d", requestedMin)) or (requestedMin == 0 and "variable amount") or F("%d + variable amount", requestedMin)
+
 		typeError(state, exprForError, "%s %s. (Wanted %d, got %s)", prefix, thingsStr, acceptedMin, gotStr)
 
 	-- Too many values.
@@ -1555,8 +1561,8 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 			end
 
 			local adjustVarargToIncludeNil   = not (valueTypeInfo.tag == !(typeTags.TypeInfoVararg) and typeInfoToMatch.tag == !(typeTags.TypeInfoVararg))
-			local valueTypeInfoAdjusted      = adjustTypeToOne(state, valueTypeInfo, adjustVarargToIncludeNil) -- We have a value with a type.
-			local typeInfoToMatchAdjusted    = adjustTypeToOne(state, typeInfoToMatch) -- We want a specific type.
+			local valueTypeInfoAdjusted      = adjustTypeToOne(state, valueExpr,        valueTypeInfo, adjustVarargToIncludeNil) -- We have a value with a type.
+			local typeInfoToMatchAdjusted    = adjustTypeToOne(state, callOrReturnNode, typeInfoToMatch)                         -- We want a specific type.
 			isCompatible, compatibilityScore = isTypeCompatibleWith(valueTypeInfoAdjusted, typeInfoToMatchAdjusted)
 
 			if not isCompatible then
@@ -1577,8 +1583,8 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 		-- Vararg (0..inf values) OR other (1 value).
 		else
 			local adjustVarargToIncludeNil   = not (valueTypeInfo.tag == !(typeTags.TypeInfoVararg) and typeInfoToMatch.tag == !(typeTags.TypeInfoVararg))
-			local valueTypeInfoAdjusted      = adjustTypeToOne(state, valueTypeInfo, adjustVarargToIncludeNil) -- We have a value with a type.
-			local typeInfoToMatchAdjusted    = adjustTypeToOne(state, typeInfoToMatch) -- We want a specific type.
+			local valueTypeInfoAdjusted      = adjustTypeToOne(state, valueExpr,        valueTypeInfo, adjustVarargToIncludeNil) -- We have a value with a type.
+			local typeInfoToMatchAdjusted    = adjustTypeToOne(state, callOrReturnNode, typeInfoToMatch)                         -- We want a specific type.
 			isCompatible, compatibilityScore = isTypeCompatibleWith(valueTypeInfoAdjusted, typeInfoToMatchAdjusted)
 
 			if not isCompatible then
@@ -1772,10 +1778,7 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 			local valueExpr     = realArguments    [argIndex] or errorInternal(state, bake)
 			local valueTypeInfo = realArgumentTypes[argIndex] or errorInternal(state, valueExpr)
 
-			if valueTypeInfo.tag == !(typeTags.TypeInfoList) then
-				valueTypeInfo = valueTypeInfo[1] or errorInternal(state, valueExpr) -- :CheckVoidFunction
-			end
-			valueTypeInfo = adjustTypeToOne(state, valueTypeInfo)
+			valueTypeInfo = adjustTypeToOne(state, valueExpr, valueTypeInfo)
 
 			for _, loc in ipairs(getPathToNode(state, declTypeExpr, bake)) do
 				if loc.node.nodeType == !(nodeTypes.AstType) then
@@ -1888,9 +1891,9 @@ end
 		end
 	end
 
-	for _, arg in ipairs(call.arguments) do
-		if not arg.inferredType then
-			!DEPEND_AND_RETURN(`call`, DEPEND_NODE_INFERRED, `arg`)
+	for _, argExpr in ipairs(call.arguments) do
+		if not argExpr.inferredType then
+			!DEPEND_AND_RETURN(`call`, DEPEND_NODE_INFERRED, `argExpr`)
 		end
 	end
 
@@ -1932,11 +1935,15 @@ end
 	local realArgumentTypes = {}
 
 	if call.isMethod then
-		local typeInfo = callee.object.inferredType
-		realArgumentTypes[1] = adjustTypeToOne(state, typeInfo) -- Is adjustTypeToOne necessary? @Cleanup
+		local typeInfo       = callee.object.inferredType
+		realArgumentTypes[1] = adjustTypeToOne(state, callee.object, typeInfo, true) -- Is adjustTypeToOne necessary? @Cleanup
 	end
-	for _, arg in ipairs(call.arguments) do
-		table.insert(realArgumentTypes, arg.inferredType)
+	for _, argExpr in ipairs(call.arguments) do
+		local typeInfo = argExpr.inferredType
+		if isAny(argExpr.nodeType, !(nodeTypes.AstVararg),!(nodeTypes.AstCall)) and argExpr.surroundedByParentheses then
+			typeInfo = adjustTypeToOne(state, argExpr, typeInfo, true)
+		end
+		table.insert(realArgumentTypes, typeInfo)
 	end
 
 	-- Polymorphic call.
@@ -2116,10 +2123,7 @@ end
 		!DEPEND_AND_RETURN(`unary`, DEPEND_NODE_INFERRED, `unary.expression`)
 	end
 
-	-- @Incomplete: Guard against functions returning nothing. (Add that check in
-	-- adjustTypeToOne() and update all places where that function is called.)
-	-- :CheckVoidFunction
-	typeInfo = adjustTypeToOne(state, typeInfo, true)
+	typeInfo = adjustTypeToOne(state, unary.expression, typeInfo, true)
 
 	if isAny(unary.operation, "+","-") then
 		-- @Incomplete: Allow int|float compound type here (or disallow declarations of that specific compound type).
@@ -2314,15 +2318,8 @@ end
 		!DEPEND_AND_RETURN(`binary`, DEPEND_NODE_INFERRED, `binary.right`)
 	end
 
-	if typeInfoL.tag == !(typeTags.TypeInfoList) and not typeInfoL[1] then
-		typeError(state, binary.left, "Function call returns nothing. (Expected at least one value.)")
-	end
-	if typeInfoR.tag == !(typeTags.TypeInfoList) and not typeInfoR[1] then
-		typeError(state, binary.right, "Function call returns nothing. (Expected at least one value.)")
-	end
-
-	typeInfoL = adjustTypeToOne(state, typeInfoL, true)
-	typeInfoR = adjustTypeToOne(state, typeInfoR, true)
+	typeInfoL = adjustTypeToOne(state, binary.left,  typeInfoL, true)
+	typeInfoR = adjustTypeToOne(state, binary.right, typeInfoR, true)
 
 	local typeInfo = checkBinaryOperation(state, binary, binary.left,binary.left,binary.right, binary.operation, typeInfoL,typeInfoR, false)
 	if not typeInfo then  return  end
@@ -2361,10 +2358,10 @@ local function checkForStaticAccessThatUsesWhatLooksLikeRuntimeCode(state, topNo
 				and node == node.parent.member -- We know this is an access because astVisitAllNodes() visit parents first.
 			)
 		) then
-			printerr()
-			typeMessage(io.stderr, state, staticObjectNode, "Error", "Trying to access a static object using code that looks like it's supposed to do something at runtime. Ambigous intension.")
-			typeMessage(io.stderr, state, node,             "Info",  "...this looks like a runtime expression.")
-			exitFailure()
+			typeError2(state,
+				staticObjectNode, F("Trying to access a static object using code that looks like it's supposed to do something at runtime. Ambigous intension."),
+				node,             F("...this looks like a runtime expression.")
+			)
 		end
 	end)
 end
@@ -2380,15 +2377,8 @@ end
 		!DEPEND_AND_RETURN(`access`, DEPEND_NODE_INFERRED, `access.member`)
 	end
 
-	if typeInfoObject.tag == !(typeTags.TypeInfoList) and not typeInfoObject[1] then
-		typeError(state, access.object, "Function call returns nothing. (Expected at least one value.)")
-	end
-	if typeInfoMember.tag == !(typeTags.TypeInfoList) and not typeInfoMember[1] then
-		typeError(state, access.member, "Function call returns nothing. (Expected at least one value.)")
-	end
-
-	typeInfoObject = adjustTypeToOne(state, typeInfoObject, true)
-	typeInfoMember = adjustTypeToOne(state, typeInfoMember, true)
+	typeInfoObject = adjustTypeToOne(state, access.object, typeInfoObject, true)
+	typeInfoMember = adjustTypeToOne(state, access.member, typeInfoMember, true)
 
 	local isDirectObj    = access.object.inferredType == typeInfoObject
 	local isDirectMember = access.member.inferredType == typeInfoMember
@@ -2538,9 +2528,9 @@ end
 				obj.parent = call
 
 				-- Update all argument queueds.
-				for i, arg in ipairs(call.arguments) do
-					arg.queued.container = call.arguments
-					arg.queued.key       = i
+				for i, argExpr in ipairs(call.arguments) do
+					argExpr.queued.container = call.arguments
+					argExpr.queued.key       = i
 				end
 
 				-- Update callee using access. (Note: access==callee)
@@ -2671,21 +2661,21 @@ end
 			local arrayIndex = literal.value
 
 			if indexLiterals[arrayIndex] then
-				printerr()
-				typeMessage(io.stderr, state, literal,                   "Error", "Duplicate index %d.", arrayIndex)
-				typeMessage(io.stderr, state, indexLiterals[arrayIndex], "Info",  "...first occurance is here.")
-				exitFailure()
+				typeError2(state,
+					literal,                   F("Duplicate index %d.", arrayIndex),
+					indexLiterals[arrayIndex], F("...first occurance is here.")
+				)
 			end
 
 			indexLiterals[arrayIndex] = literal
 			highestLiteralIndex       = math.max(highestLiteralIndex, arrayIndex)
 
-			if not isTypeCompatibleWith(adjustTypeToOne(state, tableField.value.inferredType, true), arraySig.itemType) then
+			if not isTypeCompatibleWith(adjustTypeToOne(state, tableField.value, tableField.value.inferredType, true), arraySig.itemType) then
 				typeError(
 					state, astGetExpressionVisuallyFurthestToTheLeft(tableField.value),
 					"Array item type mismatch. (Wanted %s, got %s)",
 					getFriendlyTypeInfoName(arraySig.itemType),
-					getFriendlyTypeInfoName(adjustTypeToOne(state, tableField.value.inferredType, true))
+					getFriendlyTypeInfoName(adjustTypeToOne(state, tableField.value, tableField.value.inferredType, true))
 				)
 			end
 		end
@@ -2728,10 +2718,10 @@ end
 			local memberName    = memberLiteral.value
 
 			if keyLiterals[memberName] then
-				printerr()
-				typeMessage(io.stderr, state, memberLiteral,           "Error", "Duplicate field '%s'.", memberName)
-				typeMessage(io.stderr, state, keyLiterals[memberName], "Info",  "...first occurance is here.")
-				exitFailure()
+				typeError2(state,
+					memberLiteral,           F("Duplicate field '%s'.", memberName),
+					keyLiterals[memberName], F("...first occurance is here.")
+				)
 			end
 
 			keyLiterals[memberName] = memberLiteral
@@ -2745,7 +2735,7 @@ end
 				typeError(state, memberLiteral, "'%s' is not a member of %s.", memberName, getFriendlyTypeInfoName(structInfo))
 			end
 
-			if not isTypeCompatibleWith(adjustTypeToOne(state, tableField.value.inferredType, true), member.typeInfo) then
+			if not isTypeCompatibleWith(adjustTypeToOne(state, tableField.value, tableField.value.inferredType, true), member.typeInfo) then
 				typeError(
 					state, astGetExpressionVisuallyFurthestToTheLeft(tableField.value),
 					"Type mismatch for struct field '%s'. (Wanted %s, got %s)",
@@ -2860,7 +2850,7 @@ end
 	end
 
 	local castTypeInfo = cast.inferredType or requireTypeRepresentedByExpression(state, cast.targetType)
-	local exprTypeInfo = adjustTypeToOne(state, cast.expression.inferredType, true)
+	local exprTypeInfo = adjustTypeToOne(state, cast.expression, cast.expression.inferredType, true)
 
 	if castTypeInfo == exprTypeInfo then
 		cutOutPartOfNodeTree(state, cast, cast.expression)
@@ -3055,10 +3045,10 @@ end
 			usingEarly, usingLate = usingLate, usingEarly
 		end
 
-		printerr()
-		typeMessage(io.stderr, state, usingLate,  "Error", "Duplicate using in the same scope.")
-		typeMessage(io.stderr, state, usingEarly, "Info",  "...first using is here.")
-		exitFailure()
+		typeError2(state,
+			usingLate,  F("Duplicate using in the same scope."),
+			usingEarly, F("...first using is here.")
+		)
 	end
 
 	using.scope = usingScope
@@ -3119,24 +3109,17 @@ end
 end
 
 local function inferIfOrWhile(state, ifOrWhile)
-	local typeInfo = ifOrWhile.condition.inferredType
+	local cond     = ifOrWhile.condition
+	local typeInfo = cond.inferredType
+
 	if not typeInfo then
-		!DEPEND_AND_RETURN(`ifOrWhile`, DEPEND_NODE_INFERRED, `ifOrWhile.condition`)
+		!DEPEND_AND_RETURN(`ifOrWhile`, DEPEND_NODE_INFERRED, `cond`)
 	end
 
-	if typeInfo.tag == !(typeTags.TypeInfoList) then
-		local listSig = typeInfo
-		typeInfo      = listSig[1]
-
-		if not typeInfo then
-			typeError(state, ifOrWhile.condition, "Function call returns nothing. (Expected a boolean.)")
-		end
-	end
-
-	typeInfo = adjustTypeToOne(state, typeInfo, true)
+	typeInfo = adjustTypeToOne(state, cond, typeInfo, true)
 
 	if typeInfo.tag ~= !(typeTags.TypeInfoBool) then
-		wrapInImplicitCast(state, ifOrWhile.condition, getTypeInfoForBuiltinType(state, "bool"), true)
+		wrapInImplicitCast(state, cond, getTypeInfoForBuiltinType(state, "bool"), true)
 		return
 	end
 
@@ -3160,7 +3143,7 @@ end
 		!DEPEND_AND_RETURN(`staticIf`, DEPEND_NODE_INFERRED, `cond`)
 	end
 
-	typeInfo = adjustTypeToOne(state, typeInfo, true) -- :CheckVoidFunction
+	typeInfo = adjustTypeToOne(state, cond, typeInfo, true)
 
 	if typeInfo.tag ~= !(typeTags.TypeInfoBool) then
 		wrapInImplicitCast(state, cond, getTypeInfoForBuiltinType(state, "bool"), true)
@@ -3222,9 +3205,11 @@ end
 end
 
 !NODE_INFERRER `function nodeInferrers.AstConditional(state, conditional)`
-	local typeInfo = conditional.condition.inferredType
+	local cond     = conditional.condition
+	local typeInfo = cond.inferredType
+
 	if not typeInfo then
-		!DEPEND_AND_RETURN(`conditional`, DEPEND_NODE_INFERRED, `conditional.condition`)
+		!DEPEND_AND_RETURN(`conditional`, DEPEND_NODE_INFERRED, `cond`)
 	end
 	if conditional.branchTrue and not conditional.branchTrue.inferredType then
 		!DEPEND_AND_RETURN(`conditional`, DEPEND_NODE_INFERRED, `conditional.branchTrue`)
@@ -3233,22 +3218,23 @@ end
 		!DEPEND_AND_RETURN(`conditional`, DEPEND_NODE_INFERRED, `conditional.branchFalse`)
 	end
 
-	typeInfo = adjustTypeToOne(state, typeInfo, true) -- :CheckVoidFunction
+	typeInfo = adjustTypeToOne(state, cond, typeInfo, true)
 
 	if typeInfo.tag ~= !(typeTags.TypeInfoBool) then
 		-- Note: This wrap will not affect conditional.conditionAndBranchTrue which is the actual expression we use in the output.
-		wrapInImplicitCast(state, conditional.condition, getTypeInfoForBuiltinType(state, "bool"), true)
+		wrapInImplicitCast(state, cond, getTypeInfoForBuiltinType(state, "bool"), true)
 		return
 	end
 
 	local branchTrue    = conditional.branchTrue or conditional.conditionAndBranchTrue
+	local branchFalse   = conditional.branchFalse
 
-	local typeInfoTrue  = adjustTypeToOne(state, branchTrue.inferredType,              true)
-	local typeInfoFalse = adjustTypeToOne(state, conditional.branchFalse.inferredType, true)
+	local typeInfoTrue  = adjustTypeToOne(state, branchTrue,  branchTrue.inferredType,  true)
+	local typeInfoFalse = adjustTypeToOne(state, branchFalse, branchFalse.inferredType, true)
 
 	if typeInfoTrue ~= typeInfoFalse then
 		typeError(
-			state, astGetExpressionVisuallyFurthestToTheLeft(conditional.branchFalse),
+			state, astGetExpressionVisuallyFurthestToTheLeft(branchFalse),
 			"Type mismatch in conditional. (Left branch is %s, right branch is %s)",
 			getFriendlyTypeInfoName(typeInfoTrue),
 			getFriendlyTypeInfoName(typeInfoFalse)
@@ -3416,20 +3402,20 @@ end
 			local stateExpr, stateTypeInfo = getAssignmentValue(state, forLoop, values, 2, nil, nil, "loop value")
 			local initExpr,  initTypeInfo  = getAssignmentValue(state, forLoop, values, 3, nil, nil, "loop value")
 
-			if not isTypeCompatibleWith(adjustTypeToOne(state, stateTypeInfo, true), iterTypeInfo.argumentTypesIn[1]) then
+			if not isTypeCompatibleWith(adjustTypeToOne(state, stateExpr, stateTypeInfo, true), iterTypeInfo.argumentTypesIn[1]) then
 				typeError(
 					state, stateExpr,
 					"Type mismatch for iterator state (value #2). (Wanted %s, got %s)",
 					getFriendlyTypeInfoName(iterTypeInfo.argumentTypesIn[1]),
-					getFriendlyTypeInfoName(adjustTypeToOne(state, stateTypeInfo, true))
+					getFriendlyTypeInfoName(adjustTypeToOne(state, stateExpr, stateTypeInfo, true))
 				)
 			end
-			if not isTypeCompatibleWith(adjustTypeToOne(state, initTypeInfo, true), iterTypeInfo.argumentTypesIn[2]) then
+			if not isTypeCompatibleWith(adjustTypeToOne(state, initExpr, initTypeInfo, true), iterTypeInfo.argumentTypesIn[2]) then
 				typeError(
 					state, initExpr,
 					"Type mismatch for initial control value (value #3). (Wanted %s, got %s)",
 					getFriendlyTypeInfoName(iterTypeInfo.argumentTypesIn[2]),
-					getFriendlyTypeInfoName(adjustTypeToOne(state, initTypeInfo, true))
+					getFriendlyTypeInfoName(adjustTypeToOne(state, initExpr, initTypeInfo, true))
 				)
 			end
 
@@ -3789,7 +3775,7 @@ function _G.getAssignmentValue(state, targetExpr, values, i, typeInfoExpected, b
 
 		if not typeInfoExpected then  return valueExpr, valueTypeInfo  end
 
-		local valueTypeInfoAdjusted = adjustTypeToOne(state, valueTypeInfo, true)
+		local valueTypeInfoAdjusted = adjustTypeToOne(state, valueExpr, valueTypeInfo, true)
 		!CHECK_TYPE_COMPATABILITY_AND_MAYBE_RETURN(`valueExpr`, `valueTypeInfo`, `valueTypeInfoAdjusted`)
 
 		local messageFormat
@@ -3836,7 +3822,7 @@ function _G.getAssignmentValue(state, targetExpr, values, i, typeInfoExpected, b
 
 		if not typeInfoExpected then  return call, typeInfoForOutArg  end
 
-		local typeInfoForOutArgAdjusted = adjustTypeToOne(state, typeInfoForOutArg, true)
+		local typeInfoForOutArgAdjusted = adjustTypeToOne(state, call, typeInfoForOutArg, true)
 		!CHECK_TYPE_COMPATABILITY_AND_MAYBE_RETURN(`call`, `typeInfoForOutArg`, `typeInfoForOutArgAdjusted`)
 
 		local calleeName = (call.callee.nodeType == !(nodeTypes.AstIdentifier) and " of '"..call.callee.name.."'" or "")
@@ -4445,7 +4431,7 @@ function _G.isTypeCompatibleWith(typeToCheck, otherType)
 	return false, 0
 end
 
--- singleTypeInfo = adjustTypeToOne( state, typeInfo [, adjustVarargToIncludeNil=false ] )
+-- singleTypeInfo = adjustTypeToOne( state, expressionForError, typeInfo [, adjustVarargToIncludeNil=false ] )
 -- Types that aren't single: TypeInfoVararg and TypeInfoList.
 do
 	local function compareIdsOfTypes(a, b)
@@ -4473,14 +4459,16 @@ do
 		return getTypeInfoForCompoundType(state, typeInfos)
 	end
 
-	function _G.adjustTypeToOne(state, typeInfo, adjustVarargToIncludeNil)
+	function _G.adjustTypeToOne(state, exprForError, typeInfo, adjustVarargToIncludeNil)
 		if typeInfo.tag == !(typeTags.TypeInfoList) then
 			typeInfo = typeInfo[1]
+			if not typeInfo then
+				typeError(state, exprForError, "Function call returns nothing. (Expected at least one value.)") -- Note: "Nothing" is not the same as vararg of zero length.
+			end
 		end
 
 		if typeInfo.tag == !(typeTags.TypeInfoVararg) then
 			typeInfo = typeInfo.itemType
-
 			if adjustVarargToIncludeNil then
 				typeInfo = adjustVarargItemTypeToOneAndToIncludeNil(state, typeInfo)
 			end
