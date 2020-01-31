@@ -617,7 +617,7 @@ function _G.getFriendlyTypeInfoName(typeInfo)
 				table.insert(typeTextsIn, ",")
 			end
 			table.insert(typeTextsIn, getFriendlyTypeInfoName(argTypeInfo))
-			if not funcSig.requiredArgumentsIn[i] then
+			if not (funcSig.requiredArgumentsIn[i] or argTypeInfo.tag == !(typeTags.TypeInfoVararg)) then
 				table.insert(typeTextsIn, "?")
 			end
 		end
@@ -1602,6 +1602,46 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 	return true, compatibilityScoreSum
 end
 
+local function getMatchingFunctions(state, call, realArguments, realArgumentTypes, declarations)
+	local matches = nil
+
+	for _, decl in ipairs(declarations) do
+		local funcSig = decl.name.inferredType
+
+		!ASSERT("funcSig.tag == "..typeTags.TypeInfoFunction)
+
+		local doesMatch, compatibilityScore = checkIfValuesMatchArgumentTypes(
+			state, call, realArguments, realArgumentTypes, funcSig.argumentTypesIn, true, decl
+		)
+		if doesMatch then
+			matches = matches or {}
+			table.insert(matches, {declaration=decl, score=compatibilityScore})
+		end
+	end
+
+	return matches
+end
+
+local function getBestMatchingFunctionOrTriggerError(state, call, matches, matchTerm, errorTextOnDraw)
+	table.sort(matches, function(a, b)
+		return a.score > b.score
+	end)
+
+	local highscore = matches[1].score
+
+	if not matches[2] or matches[2].score < highscore then
+		return matches[1].declaration
+	end
+
+	printerr()
+	typeMessage(io.stderr, state, call.callee, "Error", errorTextOnDraw)
+	for i, matchData in ipairs(matches) do
+		if matchData.score < highscore then  break  end
+		typeMessage(io.stderr, state, matchData.declaration.name, "Info", "...%s #%d.", matchTerm, i)
+	end
+	exitFailure()
+end
+
 local function getPathToNode(state, topNode, node)
 	!ASSERT `topNode`
 	local locations = {}
@@ -1630,18 +1670,35 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 	assert(lambda.nodeType == !(nodeTypes.AstLambda))
 
 	if lambda.body.queued.pipe <= !(PIPE_INFER) then
-		!DEPEND_AND_RETURN(`call`, DEPEND_NODE_INFERRED, `lambda.body`) -- Not sure if really needed. Maybe we just shouldn't infer most of polymorphic functions.
+		!DEPEND_AND_RETURN(`call`, DEPEND_NODE_INFERRED, `lambda.body`) -- Not sure if really needed. Maybe we just shouldn't infer most of raw polymorphic functions.
 	end
 
 	checkIfValuesMatchArgumentTypes(state, call, realArguments, realArgumentTypes, calleeTypeInfo.argumentTypesIn) -- Basically checks everything but placeholders.
 
-	local lambdaMorphedMatch = nil
-	for _, morphLambda in ipairs(lambda.polymorphs) do
-		-- @Incomplete: Find previous matching morph(s).
+	for _, morphDecl in ipairs(lambda.polymorphs) do
+		if not morphDecl.name.inferredType then
+			!DEPEND_AND_RETURN(`call`, DEPEND_NODE_INFERRED, `morphDecl.name`)
+		end
 	end
 
-	if lambdaMorphedMatch then
-		errorInternal("@Incomplete")
+	-- Check for previous matching polymorph(s).
+	local matchingMorphs = getMatchingFunctions(state, call, realArguments, realArgumentTypes, lambda.polymorphs)
+
+	if matchingMorphs then
+		local morphDecl = getBestMatchingFunctionOrTriggerError(
+			state, call, matchingMorphs, "polymorph",
+			"Internal compiler error: There are several matching polymorphs."
+		)
+
+		-- Update the callee to represent the correct polymorph.
+		ident.declaration  = morphDecl
+		ident.inferredType = nil
+
+		moveToPipe(state, ident, !(PIPE_INFER)) -- Re-infer callee.
+
+		-- !DEPEND_AND_RETURN(`call`, DEPEND_NODE_INFERRED, `ident`) -- This is an error as the same dependency already exists!
+		local dependency      = getExistingDependency(state, call, !(DEPEND_NODE_INFERRED), ident) or errorInternal()
+		call.queued.waitingOn = dependency
 		return
 	end
 
@@ -1678,7 +1735,7 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 
 	morphAssignment.targets[1] = astCopy(morphIdent, nil, morphAssignment)
 	morphAssignment.values[1]  = morphLambda
-	table.insert(lambda.polymorphs, morphLambda)
+	table.insert(lambda.polymorphs, morphDecl)
 
 	local placeholderType = getTypeInfoForBuiltinType(state, "placeholder")
 
@@ -1776,29 +1833,18 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 	-- !DEPEND_AND_RETURN(`call`, DEPEND_NODE_INFERRED, `ident`) -- This is an error as the same dependency already exists!
 	local dependency      = getExistingDependency(state, call, !(DEPEND_NODE_INFERRED), ident) or errorInternal()
 	call.queued.waitingOn = dependency
+	return
 end
 
 local function handleOverloadedCall(state, call, realArguments, realArgumentTypes)
-	local ident             = call.callee
-	local declBase          = ident.declaration
-	local matchingOverloads = {}
+	local ident    = call.callee
+	local declBase = ident.declaration
 
 	while declBase.overloadOf ~= declBase do  declBase = declBase.overloadOf  end
 
-	for _, declOverload in ipairs(declBase.overloads) do
-		local calleeTypeInfoOverload = declOverload.name.inferredType
+	local matchingOverloads = getMatchingFunctions(state, call, realArguments, realArgumentTypes, declBase.overloads)
 
-		!ASSERT("calleeTypeInfoOverload.tag == "..typeTags.TypeInfoFunction)
-
-		local doesMatch, compatibilityScore = checkIfValuesMatchArgumentTypes(
-			state, call, realArguments, realArgumentTypes, calleeTypeInfoOverload.argumentTypesIn, true, declOverload
-		)
-		if doesMatch then
-			table.insert(matchingOverloads, {declaration=declOverload, score=compatibilityScore})
-		end
-	end
-
-	if not matchingOverloads[1] then
+	if not matchingOverloads then
 		printerr()
 		typeMessage(io.stderr, state, ident, "Error", "Did not find any matching overload to call.")
 		for i, declOverload in ipairs(declBase.overloads) do
@@ -1807,23 +1853,10 @@ local function handleOverloadedCall(state, call, realArguments, realArgumentType
 		exitFailure()
 	end
 
-	table.sort(matchingOverloads, function(a, b)
-		return a.score > b.score
-	end)
-
-	local highscore = matchingOverloads[1].score
-
-	if matchingOverloads[2] and matchingOverloads[2].score == highscore then
-		printerr()
-		typeMessage(io.stderr, state, ident, "Error", "There are several matching overloads.")
-		for i, overloadData in ipairs(matchingOverloads) do
-			if overloadData.score < highscore then  break  end
-			typeMessage(io.stderr, state, overloadData.declaration.name, "Info", "...overload #%d.", i)
-		end
-		exitFailure()
-	end
-
-	local decl           = matchingOverloads[1].declaration
+	local decl = getBestMatchingFunctionOrTriggerError(
+		state, call, matchingOverloads, "overload",
+		"There are several matching overloads."
+	)
 	local calleeTypeInfo = decl.name.inferredType
 
 	-- Update the callee to represent the correct overload.
