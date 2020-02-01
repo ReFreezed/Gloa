@@ -868,6 +868,10 @@ local function checkRedeclaration(state, ident, decl, isMember, scope)
 	end
 end
 
+local function isPolymorphicLambda(node)
+	return node.nodeType == !(nodeTypes.AstLambda) and node.isPolymorphic
+end
+
 local function inferIdentifierOrVararg(state, identOrVararg)
 	local vararg = identOrVararg.nodeType == !(nodeTypes.AstVararg) and identOrVararg or nil
 	local ident  = not vararg                                       and identOrVararg or nil
@@ -887,10 +891,12 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 			identOrVararg.fromUsing   = using
 		end
 
+		if (not ident) or (ident.parent.nodeType == !(nodeTypes.AstCall) and ident == ident.parent.callee) then
+			-- void
+
 		-- Overloaded names refer to multiple things, so that's an error!
 		-- @Incomplete: Add a way to refer to a specific overload.
-		-- @Incomplete: Handle polymorphic functions similarly.
-		if decl.overloadOf and ident and ident.parent.nodeType ~= !(nodeTypes.AstCall) then
+		elseif decl.overloadOf then
 			local declBase = ident.declaration
 			while declBase.overloadOf and declBase.overloadOf ~= declBase do  declBase = declBase.overloadOf  end
 
@@ -905,6 +911,11 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 				typeMessage(io.stderr, state, declOverload.name, "Info", "...overload #%d.", i)
 			end
 			exitFailure()
+
+		-- Polymorphic functions also contain the polymorphed functions and are thus a collection of functions, so referring to them may be a bad idea!
+		-- (How does this work when calling a function from a module or a static struct member function? @Incomplete @Robustness)
+		elseif decl.assignment and isPolymorphicLambda(decl.assignment.values[decl.assignmentIndex] or decl) then
+			typeError(state, ident, "Cannot refer to polymorphic function '%s' outside calls.", ident.name)
 		end
 
 		local identInDecl = decl.name
@@ -1675,8 +1686,10 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 	local lambda = decl.assignment.values[decl.assignmentIndex] or errorInternal(state, decl)
 	assert(lambda.nodeType == !(nodeTypes.AstLambda))
 
-	if lambda.body.queued.pipe <= !(PIPE_INFER) then
-		!DEPEND_AND_RETURN(`call`, DEPEND_NODE_INFERRED, `lambda.body`) -- Not sure if really needed. Maybe we just shouldn't infer most of raw polymorphic functions.
+	for _, statement in ipairs(lambda.statements) do
+		if statement.queued and statement.queued.pipe <= !(PIPE_INFER) then
+			!DEPEND_AND_RETURN(`call`, DEPEND_NODE_INFERRED, `statement`)
+		end
 	end
 
 	checkIfValuesMatchArgumentTypes(state, call, realArguments, realArgumentTypes, calleeTypeInfo.argumentTypesIn) -- Basically checks everything but placeholders.
@@ -1714,7 +1727,7 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 	morphDecl.addedByPolymorph = true
 
 	local morphIdent       = astNewNode(AstIdentifier, morphDecl.token, morphDecl)
-	morphIdent.name        = "_POLY"..(#lambda.polymorphs+1) -- @UX: Include the existing name if there is one.
+	morphIdent.name        = ident.name.."_POLY"..(#lambda.polymorphs+1)
 	morphIdent.declaration = morphDecl
 	morphDecl.name         = morphIdent
 
@@ -1746,13 +1759,14 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 	local placeholderType = getTypeInfoForBuiltinType(state, "placeholder")
 
 	astVisitAllNodes(morphLambda, function(node, container, key)
+		if node == morphLambda.body then  return !(VISIT_IGNORE_CHILDREN)  end
+
 		-- @Robustness @Robustness @Robustness: So much @Hack!
 		node.inferredType    = nil
 		node.valueTypeInfo   = nil
 		node.representedType = nil
 
 		-- AstBake nodes are only used before baking.
-		-- @Incomplete: Handle polymorphic functions inside other polymorphic functions.
 		if node.nodeType == !(nodeTypes.AstBake) then
 			local bake       = node
 			container[key]   = bake.name
@@ -2624,13 +2638,13 @@ end
 		end
 	end
 
-	local typeInfoExpected = getExpectedTypeInfo(state, tableNode)
+	local typeInfoExpected = getExpectedTypeInfo(state, tableNode, false, "constructor")
 	if not typeInfoExpected then  return  end
 
 	-- If a table-like is expected as an argument to a call then we're fine without an
 	-- explicit cast. Otherwise, we don't want to get any expectation through a call.
 	if not isAny(typeInfoExpected.tag, !(typeTags.TypeInfoTable),!(typeTags.TypeInfoStruct),!(typeTags.TypeInfoArray)) then
-		typeInfoExpected = getExpectedTypeInfo(state, tableNode, true) or errorInternal()
+		typeInfoExpected = getExpectedTypeInfo(state, tableNode, true, "constructor") or errorInternal()
 	end
 
 	if typeInfoExpected.tag == !(typeTags.TypeInfoTable) then
@@ -2853,6 +2867,7 @@ end
 	local exprTypeInfo = adjustTypeToOne(state, cast.expression, cast.expression.inferredType, true)
 
 	if castTypeInfo == exprTypeInfo then
+		moveToPipe(state, cast, !(PIPE_DONE))
 		cutOutPartOfNodeTree(state, cast, cast.expression)
 		return
 
@@ -3058,7 +3073,7 @@ end
 
 !NODE_INFERRER `function nodeInferrers.AstForeign(state, foreign)`
 	-- @Robustness: Limit places the "expected" type can be inferred from.
-	local typeInfoExpected = getExpectedTypeInfo(state, foreign, true)
+	local typeInfoExpected = getExpectedTypeInfo(state, foreign, true, "foreign value")
 	if not typeInfoExpected then  return  end
 
 	foreign.inferredType = typeInfoExpected
@@ -3084,28 +3099,37 @@ end
 	moveToPipe(state, bake, !(PIPE_DONE))
 end
 
-!NODE_INFERRER `function nodeInferrers.AstAssert(state, assertNode)`
-	local expr     = assertNode.expression
+!NODE_INFERRER `function nodeInferrers.AstDebug(state, debugNode)`
+	local expr     = debugNode.expression
 	local typeInfo = expr.inferredType
 
 	if not typeInfo then
-		!DEPEND_AND_RETURN(`assertNode`, DEPEND_NODE_INFERRED, `expr`)
+		!DEPEND_AND_RETURN(`debugNode`, DEPEND_NODE_INFERRED, `expr`)
 	end
 
-	if typeInfo.tag ~= !(typeTags.TypeInfoBool) then
-		wrapInImplicitCast(state, expr, getTypeInfoForBuiltinType(state, "bool"), true)
-		return
+	if debugNode.action == "assert" then
+		if typeInfo.tag ~= !(typeTags.TypeInfoBool) then
+			wrapInImplicitCast(state, expr, getTypeInfoForBuiltinType(state, "bool"), true)
+			return
+		end
+
+		if not isExpressionConstant(state, expr) then
+			typeError(state, astGetExpressionVisuallyFurthestToTheLeft(expr), "Expression is not constant.")
+		elseif not (expr.nodeType == !(nodeTypes.AstLiteral) and expr.literalType == !(LITERAL_BOOLEAN)) then
+			errorInternal(state, astGetExpressionVisuallyFurthestToTheLeft(expr), "Constant expression did not result in a boolean literal.")
+		elseif not expr.value then
+			typeError(state, debugNode, "Assertion failed!")
+		end
+
+	elseif debugNode.action == "print" then
+		astPrintTree(expr)
+		typeMessage(state, expr, "!print", "The expression above is here.")
+
+	else
+		errorInternal(state, debugNode)
 	end
 
-	if not isExpressionConstant(state, expr) then
-		typeError(state, astGetExpressionVisuallyFurthestToTheLeft(expr), "Expression is not constant.")
-	elseif not (expr.nodeType == !(nodeTypes.AstLiteral) and expr.literalType == !(LITERAL_BOOLEAN)) then
-		errorInternal(state, astGetExpressionVisuallyFurthestToTheLeft(expr), "Constant expression did not result in a boolean literal.")
-	elseif not expr.value then
-		typeError(state, assertNode, "Assertion failed!")
-	end
-
-	moveToPipe(state, assertNode, !(PIPE_DONE))
+	moveToPipe(state, debugNode, !(PIPE_DONE))
 end
 
 local function inferIfOrWhile(state, ifOrWhile)
@@ -3929,20 +3953,39 @@ local function createTypeNodeFromInfo(state, typeRepresented, token, parent)
 	return typeNode
 end
 
+local function isTypeOrDoesTypeContainPlaceholder(typeInfo)
+	if typeInfo.tag == !(typeTags.TypeInfoPlaceholder) then
+		return true
+
+	elseif typeInfo.tag == !(typeTags.TypeInfoCompound) then
+		local compound = typeInfo
+		return itemWith1(compound, "tag", !(typeTags.TypeInfoPlaceholder)) ~= nil
+
+	elseif typeInfo.tag == !(typeTags.TypeInfoFunction) then
+		local funcSig = typeInfo
+		for _, argTypeInfo in ipairs(funcSig.argumentTypesIn) do
+			if isTypeOrDoesTypeContainPlaceholder(argTypeInfo) then  return true  end
+		end
+		for _, argTypeInfo in ipairs(funcSig.argumentTypesOut) do
+			if isTypeOrDoesTypeContainPlaceholder(argTypeInfo) then  return true  end
+		end
+		return false
+
+	else
+		return false
+	end
+end
+
 function _G.simplifyTypeExpression(state, expr, typeRepresented)
 	!ASSERT `typeRepresented`
-	if not (
-		typeRepresented.tag == !(typeTags.TypeInfoPlaceholder) or
-		typeRepresented.tag == !(typeTags.TypeInfoCompound) and itemWith1(typeRepresented, "tag", !(typeTags.TypeInfoPlaceholder))
-		-- @Incomplete: We need to check function types too for placeholders.
-	) then
-		local typeNode = createTypeNodeFromInfo(state, typeRepresented, expr.token, expr.parent)
+	if isTypeOrDoesTypeContainPlaceholder(typeRepresented) then  return  end
 
-		addUnqueuedChildrenToQueueRecursively(state, typeNode, !(PIPE_INFER))
-		moveChildrenToNextRelevantPipe(state, typeNode)
+	local typeNode = createTypeNodeFromInfo(state, typeRepresented, expr.token, expr.parent)
 
-		replaceQueuedNodeAndUnqueueOldTree(state, expr, typeNode)
-	end
+	addUnqueuedChildrenToQueueRecursively(state, typeNode, !(PIPE_INFER))
+	moveChildrenToNextRelevantPipe(state, typeNode)
+
+	replaceQueuedNodeAndUnqueueOldTree(state, expr, typeNode)
 end
 
 local function simplifyCast(state, cast)
@@ -4481,14 +4524,8 @@ end
 
 
 -- Returns nil if we're now waiting for something. Errors on failure.
--- typeInfo = getExpectedTypeInfo( state, node [, strict=false ] )
---
--- @Incomplete: Check for polymorphism at calling sites!
--- @Incomplete: Check for polymorphism at calling sites!
--- @Incomplete: Check for polymorphism at calling sites!
---
-function _G.getExpectedTypeInfo(state, node, strict)
-	!local NO_EXPECTATION = `typeError(state, node, "Could not determine what type is expected here.")`
+function _G.getExpectedTypeInfo(state, node, strict, expectantTerm)
+	!local NO_EXPECTATION = `typeError(state, node, "Could not determine the type of this %s.", expectantTerm)`
 	local nodeType        = node.parent.nodeType
 
 	if nodeType == !(nodeTypes.AstAssignment) then

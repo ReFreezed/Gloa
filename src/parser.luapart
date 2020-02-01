@@ -222,8 +222,9 @@ _G.!structAst"AstUsing:_AstNode"{
 	{`variableDeclaration`, nil, astRef="node"}, -- AstDeclaration
 }
 
-_G.!structAst"AstAssert:_AstNode"{
+_G.!structAst"AstDebug:_AstNode"{
 	{`expression`, nil, ast="node"}, -- AstExpression
+	{`action`,     ""},              -- "assert"|"print"
 }
 
 _G.!structAst"AstArgument:_AstNode"{
@@ -837,9 +838,9 @@ function _G.parseStruct(state, parentNode)
 		if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"}") then
 			eatNextToken(state)
 			break
-		elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"assert") then
-			!SET_OR_RETURN_FALSE `local assertNode = parseAssert(state, struct)`
-			table.insert(struct.statements, assertNode)
+		elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"assert","print") then
+			!SET_OR_RETURN_FALSE `local debugNode = parseDebugNode(state, struct)`
+			table.insert(struct.statements, debugNode)
 		else
 			local declType = !(DECLARATION_STRUCT)
 			!DO_OR_RETURN `parseDeclarationStatement(state, struct, declType)`
@@ -1225,16 +1226,18 @@ function _G.parseNameList(state, parentNode, names)
 	return true
 end
 
-function _G.parseAssert(state, parentNode)
+function _G.parseDebugNode(state, parentNode)
 	local tokType, tokValue, token = eatNextToken(state)
-	if not isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"assert") then
-		!ERROR_OR_RETURN `errorParsingLast(state, "Expected !assert.")`
+	if tokType ~= !(TOKEN_DIRECTIVE) then
+		!ERROR_OR_RETURN `errorParsingLast(state, "Expected a directive.")`
 	end
 
-	local assertNode                      = astNewNode(AstAssert, token, parentNode)
-	!SET_OR_RETURN `assertNode.expression = parseExpression(state, assertNode)`
+	local debugNode  = astNewNode(AstDebug, token, parentNode)
+	debugNode.action = tokValue
 
-	return assertNode
+	!SET_OR_RETURN `debugNode.expression = parseExpression(state, debugNode)`
+
+	return debugNode
 end
 
 local function parseIfBranch(state, ifOrStaticIf, isFileScope)
@@ -1565,8 +1568,8 @@ function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 			table.insert(block.imports, import)
 		end
 
-	elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"assert") then
-		!SET_OR_RETURN_FALSE `statement = parseAssert(state, block)`
+	elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"assert","print") then
+		!SET_OR_RETURN_FALSE `statement = parseDebugNode(state, block)`
 
 	else
 		state.soft     = true
@@ -1740,9 +1743,9 @@ function _G.parseFileScopeStatements(state, block, isTopLevel, singleStatement)
 			table.insert(block.statements, using)
 			table.insert(block.usings,     using)
 
-		elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"assert") then
-			!SET_OR_RETURN_FALSE `local assertNode = parseAssert(state, block)`
-			table.insert(block.statements, assertNode)
+		elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"assert","print") then
+			!SET_OR_RETURN_FALSE `local debugNode = parseDebugNode(state, block)`
+			table.insert(block.statements, debugNode)
 
 		elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"if") then
 			!ERROR_OR_RETURN_FALSE `local ifOrStaticIf = parseIfOrStaticIf(state, block, true)`
@@ -2056,6 +2059,10 @@ function _G.parseLambda(state, parentNode, allowBody)
 		end
 	else
 		lambda.bodyEndToken = state.nextToken-1 -- Dummy value that shouldn't be used since there's no body.
+	end
+
+	if lambda.isPolymorphic and not lambda.body then
+		!ERROR_OR_RETURN `errorParsing(state, lambda.token, "Types of functions cannot be polymorphic - only functions themselves can.")`
 	end
 
 	return lambda
@@ -2705,7 +2712,7 @@ do
 				local ident = node
 				write(" (", ident.name)
 				if ident.inferredType then  write(", type=", getFriendlyTypeInfoName(ident.inferredType))  end
-				if ident.inferredType and getTypeRepresentedByExpression(ident) then  write(", reprtype=", getFriendlyTypeInfoName(getTypeRepresentedByExpression(ident)))  end
+				if ident.inferredType and getTypeRepresentedByExpression(ident) then  write(", typeRepresented=", getFriendlyTypeInfoName(getTypeRepresentedByExpression(ident)))  end
 				write(")\n")
 
 			elseif node.nodeType == !(nodeTypes.AstUnary) then
@@ -2759,7 +2766,7 @@ do
 				elseif decl.isGlobalOrExported then
 					write(" (global/exported)")
 				end
-				if decl.valueTypeInfo then  write(" (value=", getFriendlyTypeInfoName(decl.valueTypeInfo), ")")  end
+				if decl.valueTypeInfo then  write(" (typeRepresented=", getFriendlyTypeInfoName(decl.valueTypeInfo), ")")  end
 
 				!!(CHILD_PRINT_START)
 				if decl.name then  printNode(decl.name, indent+1, printed, printChildren)  end
@@ -2802,7 +2809,11 @@ do
 			elseif node.nodeType == !(nodeTypes.AstType) then
 				local typeNode = node
 				write(" (", TYPE_KIND_TITLES[typeNode.kind])
-				if typeNode.typeName ~= "" then  write(", name=", typeNode.typeName)  end
+				if typeNode.representedType then
+					write(", typeRepresented=", getFriendlyTypeInfoName(typeNode.representedType))
+				elseif typeNode.typeName ~= "" then
+					write(", name=", typeNode.typeName)
+				end
 				write(")")
 				!!(CHILD_PRINT_START)
 				if typeNode.kind == !(TYPE_KIND_FUNCTION) then
@@ -2917,10 +2928,10 @@ do
 				printNodeList(globalScope.statements, indent+1, printed, printChildren)
 				!!(CHILD_PRINT_END)
 
-			elseif node.nodeType == !(nodeTypes.AstAssert) then
-				local assertNode = node
+			elseif node.nodeType == !(nodeTypes.AstDebug) then
+				local debugNode = node
 				!!(CHILD_PRINT_START)
-				printNode(assertNode.expression, indent+1, printed, printChildren)
+				printNode(debugNode.expression, indent+1, printed, printChildren)
 				!!(CHILD_PRINT_END)
 
 			elseif node.nodeType == !(nodeTypes.AstBake) then

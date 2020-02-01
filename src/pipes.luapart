@@ -151,13 +151,24 @@ local function addToQueue(state, node, container, key, pipe, pipeHighestExited)
 end
 
 -- addToQueueRecursively( state, topNode [, containerForTopNode, keyForTopNode, pipe=PIPE_INFER ] )
--- Note: Skips AstStaticIf branches.
+-- Note: Skips AstStaticIf branches and polymorph bodies.
 do
 	local function registerNodesToAddToQueue(state, topNode, nodesToAdd)
 		astVisitAllNodes(topNode, function(node)
 			nodesToAdd[node] = true
+
 			if node.nodeType == !(nodeTypes.AstStaticIf) then
-				registerNodesToAddToQueue(state, node.condition, nodesToAdd)
+				local staticIf = node
+				registerNodesToAddToQueue(state, staticIf.condition, nodesToAdd)
+				return !(VISIT_IGNORE_CHILDREN)
+
+			elseif node.nodeType == !(nodeTypes.AstLambda) and node.isPolymorphic then
+				local lambda = node
+				for _, statement in ipairs(lambda.statements) do
+					if statement ~= lambda.body then
+						registerNodesToAddToQueue(state, statement, nodesToAdd)
+					end
+				end
 				return !(VISIT_IGNORE_CHILDREN)
 			end
 		end)
@@ -179,7 +190,7 @@ end
 
 -- addUnqueuedChildrenToQueueRecursively( state, topNode [, pipe=PIPE_INFER ] )
 -- Note: Ignores children of already queued nodes.
--- Note: Skips AstStaticIf branches.
+-- Note: Skips AstStaticIf branches and polymorph bodies.
 do
 	local function registerNodesToAddToQueue(state, topNode, nodesToAdd)
 		astVisitAllNodes(topNode, function(node)
@@ -193,9 +204,20 @@ do
 				nodesToAdd[node] = true
 
 				if node.nodeType == !(nodeTypes.AstStaticIf) then
-					if not node.condition.queued then
-						nodesToAdd[node.condition] = true
-						registerNodesToAddToQueue(state, node.condition, nodesToAdd)
+					local staticIf = node
+					if not staticIf.condition.queued then
+						nodesToAdd[staticIf.condition] = true
+						registerNodesToAddToQueue(state, staticIf.condition, nodesToAdd)
+					end
+					return !(VISIT_IGNORE_CHILDREN)
+
+				elseif node.nodeType == !(nodeTypes.AstLambda) and node.isPolymorphic then
+					local lambda = node
+					for _, statement in ipairs(lambda.statements) do
+						if not statement.queued and statement ~= lambda.body then
+							nodesToAdd[statement] = true
+							registerNodesToAddToQueue(state, statement, nodesToAdd)
+						end
 					end
 					return !(VISIT_IGNORE_CHILDREN)
 				end
@@ -268,7 +290,6 @@ function _G.replaceQueuedNode(state, nodeOld, nodeNew)
 	!if DEBUG then
 		-- [[
 		if debug_onlyInferTypes then
-		-- if true then
 			io.stdout:write("replace: ") ; astPrint(nodeOld)
 			io.stdout:write("   with: ") ; astPrint(nodeNew)
 			-- where(state, nodeOld)

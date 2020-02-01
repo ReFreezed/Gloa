@@ -324,7 +324,6 @@ function _G.writeExpression(state, file, expr)
 		if call.surroundedByParentheses then  file:write("(")  end
 
 		if callee.nodeType == !(nodeTypes.AstIdentifier) then
-			assert(callee.declaration.valueConstant)
 			writeConstantValueOrReference(state, file, callee.declaration.valueConstant)
 		else
 			writeExpression(state, file, callee)
@@ -1006,7 +1005,7 @@ function _G.writeBlock(state, file, block, indent, nextLocalN, localsStack, isEl
 				file:write(indentStr, "break\n")
 			end
 
-		elseif isAny(nodeType, !(nodeTypes.AstImport),!(nodeTypes.AstUsing),!(nodeTypes.AstAssert)) then
+		elseif isAny(nodeType, !(nodeTypes.AstImport),!(nodeTypes.AstUsing),!(nodeTypes.AstDebug)) then
 			-- void  (Ignore these statements.)
 
 		else
@@ -1020,6 +1019,7 @@ end
 
 function _G.writeFunction(state, file, lambda)
 	!ASSERT `not lambda.body[1]`
+	!ASSERT `not lambda.isPolymorphic`
 
 	if lambda.bodyIsForeign then
 		file:write(state.foreignReferences[lambda.foreignSourceId])
@@ -1294,7 +1294,8 @@ function _G.writeProgram(state)
 	local functionConstants = {}
 
 	for _, const in ipairs(state.constants) do
-		if const.valueType.tag == !(typeTags.TypeInfoFunction) then
+		-- @Cleanup: Don't generate constants for polymorphic functions. (It's probably declarations doing this.)
+		if const.valueType.tag == !(typeTags.TypeInfoFunction) and not const.value.isPolymorphic then
 			table.insert(functionConstants, const)
 		end
 	end
@@ -1302,8 +1303,9 @@ function _G.writeProgram(state)
 	table.sort(functionConstants, function(a, b)
 		a = a.value
 		b = b.value
-		if a.bodyIsForeign ~= b.bodyIsForeign then  return a.bodyIsForeign  end
-		return a.token < b.token
+		if a.bodyIsForeign ~= b.bodyIsForeign then  return a.bodyIsForeign    end
+		if a.token         ~= b.token         then  return a.token < b.token  end
+		return a.s < b.s
 	end)
 
 	for _, const in ipairs(functionConstants) do
