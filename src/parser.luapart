@@ -661,14 +661,15 @@ function _G.parseArguments(state, parentNode, isInput)
 				decl.name          = vararg
 			end
 
-			tokType, tokValue = eatNextToken(state)
+			tokType, tokValue = peekNextToken(state)
 
-			if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),":") then
+			if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),":","=") then
 				break
 			elseif isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),",") then
+				eatNextToken(state)
 				-- Continue the loop.
 			else
-				!ERROR_OR_RETURN `errorParsingAfterPrevious(state, "Expected ':'.")`
+				!ERROR_OR_RETURN `errorParsingAfterLast(state, "Expected ':'.")`
 			end
 
 			if gotVararg then
@@ -677,11 +678,15 @@ function _G.parseArguments(state, parentNode, isInput)
 		end
 
 		-- Type(s).
-		token = state.nextToken
-		for _, arg in ipairs(argsInGroup) do
-			state.nextToken           = token
-			local decl                = arg.declaration
-			!SET_OR_RETURN `decl.type = parseExpression(state, decl)` -- @Speed: Parse once then just copy the first one.
+		if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),":") then
+			eatNextToken(state)
+
+			token = state.nextToken
+			for _, arg in ipairs(argsInGroup) do
+				state.nextToken           = token
+				local decl                = arg.declaration
+				!SET_OR_RETURN `decl.type = parseExpression(state, decl)` -- @Speed: Parse once then just copy the first one.
+			end
 		end
 
 		-- Default value.
@@ -2169,10 +2174,10 @@ function _G.parseExpression(state, parentNode, prevOpPrecedence, expectLeftValue
 			or isToken(tokType2,tokValue2, !(TOKEN_KEYWORD),"using")
 			or (
 				(
-					isToken(tokType2,tokValue2, !(TOKEN_IDENTIFIER))
-					or isToken(tokType2,tokValue2, !(TOKEN_PUNCTUATION),"...")
+					isToken(tokType2,tokValue2, !(TOKEN_IDENTIFIER)) or
+					isToken(tokType2,tokValue2, !(TOKEN_PUNCTUATION),"...")
 				)
-				and isToken(tokType3,tokValue3, !(TOKEN_PUNCTUATION),":",",")
+				and isToken(tokType3,tokValue3, !(TOKEN_PUNCTUATION),":",",","=")
 			)
 		)
 	then
