@@ -17,7 +17,7 @@
 	inferNode
 	isExpressionConstant
 	isPartOfAnyDeclaration
-	isTypeSimple, isTypeCompatibleWith, adjustTypeToOne
+	isTypeSimple, isTypeNumeric, isTypeTableLike, isTypeCompatibleWith, adjustTypeToOne
 	newTypeInfo, isTypeBuiltin, getTypeInfo*
 	simplifyExpressionIfConstant, simplifyTypeExpression
 	typeError, typeError2, typeMessage
@@ -2630,21 +2630,11 @@ end
 end
 
 !NODE_INFERRER `function nodeInferrers.AstTable(state, tableNode)`
-	for _, tableField in ipairs(tableNode.fields) do
-		if not tableField.value.inferredType then
-			!DEPEND_AND_RETURN(`tableNode`, DEPEND_NODE_INFERRED, `tableField.value`)
-		elseif not tableField.key.inferredType then
-			!DEPEND_AND_RETURN(`tableNode`, DEPEND_NODE_INFERRED, `tableField.key`)
-		end
-	end
-
 	local typeInfoExpected = getExpectedTypeInfo(state, tableNode, false, "constructor")
 	if not typeInfoExpected then  return  end
 
-	-- If a table-like is expected as an argument to a call then we're fine without an
-	-- explicit cast. Otherwise, we don't want to get any expectation through a call.
-	if not isAny(typeInfoExpected.tag, !(typeTags.TypeInfoTable),!(typeTags.TypeInfoStruct),!(typeTags.TypeInfoArray)) then
-		typeInfoExpected = getExpectedTypeInfo(state, tableNode, true, "constructor") or errorInternal()
+	if typeInfoExpected.tag == !(typeTags.TypeInfoAny) and tableNode.parent.nodeType == !(nodeTypes.AstTable) then
+		typeInfoExpected = getTypeInfoForBuiltinType(state, "table")
 	end
 
 	if typeInfoExpected.tag == !(typeTags.TypeInfoTable) then
@@ -2653,24 +2643,60 @@ end
 		tableNode.inferredType = typeInfoExpected
 
 	elseif typeInfoExpected.tag == !(typeTags.TypeInfoArray) then
-		local arraySig            = typeInfoExpected
+		local arraySig = typeInfoExpected
+
+		for _, tableField in ipairs(tableNode.fields) do
+			local indexLiteral = tableField.key
+
+			if not indexLiteral.inferredType then
+				!DEPEND_AND_RETURN(`tableNode`, DEPEND_NODE_INFERRED, `indexLiteral`)
+			elseif indexLiteral.inferredType.tag ~= !(typeTags.TypeInfoInt) then
+				typeError(
+					state, astGetExpressionVisuallyFurthestToTheLeft(indexLiteral),
+					"Array indices must be integers. (This is %s)",
+					getFriendlyTypeInfoName(indexLiteral.inferredType)
+				)
+			elseif indexLiteral.nodeType ~= !(nodeTypes.AstLiteral) then
+				typeError(
+					state, astGetExpressionVisuallyFurthestToTheLeft(indexLiteral),
+					"Indices must be constant in array constructors."
+				)
+			end
+
+			local itemExpr     = tableField.value
+			local itemTypeInfo = itemExpr.inferredType
+
+			if itemTypeInfo then
+				if not isTypeCompatibleWith(adjustTypeToOne(state, itemExpr, itemTypeInfo, true), arraySig.itemType) then
+					typeError(
+						state, astGetExpressionVisuallyFurthestToTheLeft(itemExpr),
+						"Array item type mismatch. (Wanted %s, got %s)",
+						getFriendlyTypeInfoName(arraySig.itemType),
+						getFriendlyTypeInfoName(adjustTypeToOne(state, itemExpr, itemTypeInfo, true))
+					)
+				end
+			elseif itemExpr.nodeType == !(nodeTypes.AstTable) then
+				if isTypeTableLike(arraySig.itemType) then
+					-- void  (Wait with validation.)
+				else
+					typeError(
+						state, astGetExpressionVisuallyFurthestToTheLeft(itemExpr),
+						"Expected array item to be %s.",
+						getFriendlyTypeInfoName(arraySig.itemType)
+					)
+				end
+			else
+				!DEPEND_AND_RETURN(`tableNode`, DEPEND_NODE_INFERRED, `itemExpr`)
+			end
+		end
+
+		tableNode.inferredType = arraySig
+
+		-- Validate indices and sequence.
 		local indexLiterals       = {}
 		local highestLiteralIndex = 0
 
 		for _, tableField in ipairs(tableNode.fields) do
-			if tableField.key.inferredType.tag ~= !(typeTags.TypeInfoInt) then
-				typeError(
-					state, astGetExpressionVisuallyFurthestToTheLeft(tableField.key),
-					"Array indices must be integers. (This is %s)",
-					getFriendlyTypeInfoName(tableField.key.inferredType)
-				)
-			elseif tableField.key.nodeType ~= !(nodeTypes.AstLiteral) then
-				typeError(
-					state, astGetExpressionVisuallyFurthestToTheLeft(tableField.key),
-					"Indices must be constant in array literals."
-				)
-			end
-
 			local literal    = tableField.key
 			local arrayIndex = literal.value
 
@@ -2683,15 +2709,6 @@ end
 
 			indexLiterals[arrayIndex] = literal
 			highestLiteralIndex       = math.max(highestLiteralIndex, arrayIndex)
-
-			if not isTypeCompatibleWith(adjustTypeToOne(state, tableField.value, tableField.value.inferredType, true), arraySig.itemType) then
-				typeError(
-					state, astGetExpressionVisuallyFurthestToTheLeft(tableField.value),
-					"Array item type mismatch. (Wanted %s, got %s)",
-					getFriendlyTypeInfoName(arraySig.itemType),
-					getFriendlyTypeInfoName(adjustTypeToOne(state, tableField.value, tableField.value.inferredType, true))
-				)
-			end
 		end
 
 		for arrayIndex = 1, highestLiteralIndex do
@@ -2699,8 +2716,6 @@ end
 				typeError(state, tableNode, "Array is not a sequence. Missing item at index %d.", arrayIndex)
 			end
 		end
-
-		tableNode.inferredType = arraySig
 
 	elseif typeInfoExpected.tag == !(typeTags.TypeInfoStruct) then
 		local structInfo = typeInfoExpected
@@ -2712,22 +2727,69 @@ end
 			!DEPEND_AND_RETURN(`tableNode`, DEPEND_STRUCT_MEMBERS_READY, `structInfo`)
 		end
 
-		local keyLiterals = {}
-
 		for _, tableField in ipairs(tableNode.fields) do
-			if tableField.key.inferredType.tag ~= !(typeTags.TypeInfoString) then
+			local memberLiteral = tableField.key
+
+			if not memberLiteral.inferredType then
+				!DEPEND_AND_RETURN(`tableNode`, DEPEND_NODE_INFERRED, `memberLiteral`)
+			elseif memberLiteral.inferredType.tag ~= !(typeTags.TypeInfoString) then
 				typeError(
-					state, astGetExpressionVisuallyFurthestToTheLeft(tableField.key),
-					"Struct initializer keys must be strings. (This is %s)",
-					getFriendlyTypeInfoName(tableField.key.inferredType)
+					state, astGetExpressionVisuallyFurthestToTheLeft(memberLiteral),
+					"Struct constructor keys must be strings. (This is %s)",
+					getFriendlyTypeInfoName(memberLiteral.inferredType)
 				)
-			elseif tableField.key.nodeType ~= !(nodeTypes.AstLiteral) then
+			elseif memberLiteral.nodeType ~= !(nodeTypes.AstLiteral) then
 				typeError(
-					state, astGetExpressionVisuallyFurthestToTheLeft(tableField.key),
-					"Keys must be constant in struct initializers."
+					state, astGetExpressionVisuallyFurthestToTheLeft(memberLiteral),
+					"Keys must be constant in struct constructors."
 				)
 			end
 
+			local memberName = memberLiteral.value
+			local member     = itemWith1(structInfo.members, "name", memberName)
+
+			if member then
+				-- void
+			elseif findDeclarationInScope(state, structInfo.astNode, memberName, false) then
+				typeError(state, memberLiteral, "'%s' is a static member in %s.", memberName, getFriendlyTypeInfoName(structInfo))
+			else
+				typeError(state, memberLiteral, "'%s' is not a member of %s.", memberName, getFriendlyTypeInfoName(structInfo))
+			end
+
+			local fieldValue    = tableField.value
+			local valueTypeInfo = fieldValue.inferredType
+
+			if valueTypeInfo then
+				if not isTypeCompatibleWith(adjustTypeToOne(state, fieldValue, valueTypeInfo, true), member.typeInfo) then
+					typeError(
+						state, astGetExpressionVisuallyFurthestToTheLeft(fieldValue),
+						"Type mismatch for struct field '%s'. (Wanted %s, got %s)",
+						memberName,
+						getFriendlyTypeInfoName(member.typeInfo),
+						getFriendlyTypeInfoName(valueTypeInfo)
+					)
+				end
+			elseif fieldValue.nodeType == !(nodeTypes.AstTable) then
+				if isTypeTableLike(member.typeInfo) then
+					-- void  (Wait with validation.)
+				else
+					typeError(
+						state, astGetExpressionVisuallyFurthestToTheLeft(itemExpr),
+						"Expected value for struct field '%s' to be %s.",
+						memberName, getFriendlyTypeInfoName(member.typeInfo)
+					)
+				end
+			else
+				!DEPEND_AND_RETURN(`tableNode`, DEPEND_NODE_INFERRED, `fieldValue`)
+			end
+		end
+
+		tableNode.inferredType = structInfo
+
+		-- Validate keys.
+		local keyLiterals = {}
+
+		for _, tableField in ipairs(tableNode.fields) do
 			local memberLiteral = tableField.key
 			local memberName    = memberLiteral.value
 
@@ -2739,39 +2801,30 @@ end
 			end
 
 			keyLiterals[memberName] = memberLiteral
-			local member            = itemWith1(structInfo.members, "name", memberName)
-
-			if member then
-				-- void
-			elseif findDeclarationInScope(state, structInfo.astNode, memberName, false) then
-				typeError(state, memberLiteral, "'%s' is a static member in %s.", memberName, getFriendlyTypeInfoName(structInfo))
-			else
-				typeError(state, memberLiteral, "'%s' is not a member of %s.", memberName, getFriendlyTypeInfoName(structInfo))
-			end
-
-			if not isTypeCompatibleWith(adjustTypeToOne(state, tableField.value, tableField.value.inferredType, true), member.typeInfo) then
-				typeError(
-					state, astGetExpressionVisuallyFurthestToTheLeft(tableField.value),
-					"Type mismatch for struct field '%s'. (Wanted %s, got %s)",
-					tableField.key.value,
-					getFriendlyTypeInfoName(member.typeInfo),
-					getFriendlyTypeInfoName(tableField.value.inferredType)
-				)
-			end
 		end
-
-		tableNode.inferredType = structInfo
 
 	else
 		typeError(
 			state, tableNode,
-			"Table literal is expecting to get inferred as %s (type group '%s'), which is illegal. (The inferred type must be array, struct or table.)",
+			"This constructor is trying to get inferred as %s (type group '%s') which is illegal. (The inferred type must be array, struct or table.)",
 			getFriendlyTypeInfoName(typeInfoExpected),
 			TYPE_TAG_NAMES[typeInfoExpected.tag]
 		)
 	end
 
-	moveToPipe(state, tableNode, !(PIPE_DONE)) -- Bytecode for table-likes is generated by declarations.
+	!ASSERT `tableNode.inferredType`
+
+	-- Make sure all children, including table-likes, are inferred before we advance to the next pipe.
+	for _, tableField in ipairs(tableNode.fields) do
+		if not tableField.value.inferredType then
+			!DEPEND_AND_RETURN(`tableNode`, DEPEND_NODE_INFERRED, `tableField.value`)
+		end
+		if not tableField.key.inferredType then
+			!DEPEND_AND_RETURN(`tableNode`, DEPEND_NODE_INFERRED, `tableField.key`)
+		end
+	end
+
+	moveToPipe(state, tableNode, !(PIPE_DONE)) -- Note: Bytecode for table-likes is generated by declarations.
 end
 
 !NODE_INFERRER `function nodeInferrers.AstArgument(state, arg)`
@@ -4066,7 +4119,7 @@ local function simplifyCast(state, cast)
 
 		local literal        = astNewNode(AstLiteral, cast.token, cast.parent)
 		literal.literalType  = !(LITERAL_BOOLEAN)
-		literal.value        = tableNode.fields[1] ~= nil -- (Assume the array literal is valid.)
+		literal.value        = tableNode.fields[1] ~= nil -- (Assume the array constructor is valid.)
 		literal.inferredType = castTypeInfo
 
 		replaceQueuedNodeAndUnqueueOldTree(state, cast, literal)
@@ -4419,6 +4472,10 @@ function _G.isTypeNumeric(typeInfo)
 	return isAny(typeInfo.tag, !(typeTags.TypeInfoInt),!(typeTags.TypeInfoFloat))
 end
 
+function _G.isTypeTableLike(typeInfo)
+	return isAny(typeInfo.tag, !(typeTags.TypeInfoTable),!(typeTags.TypeInfoStruct),!(typeTags.TypeInfoArray))
+end
+
 -- isCompatible, compatibilityScore = isTypeCompatibleWith( typeToCheck, otherType )
 function _G.isTypeCompatibleWith(typeToCheck, otherType)
 	!local SCORE = 0x10000
@@ -4524,8 +4581,8 @@ end
 
 
 -- Returns nil if we're now waiting for something. Errors on failure.
-function _G.getExpectedTypeInfo(state, node, strict, termForExpectation)
-	!local NO_EXPECTATION = `typeError(state, node, "Could not determine the type of this %s.", termForExpectation)`
+function _G.getExpectedTypeInfo(state, node, strict, expectantTerm)
+	!local NO_EXPECTATION = `typeError(state, node, "Could not determine the type of this %s.", expectantTerm)`
 	local nodeType        = node.parent.nodeType
 
 	if nodeType == !(nodeTypes.AstAssignment) then
@@ -4571,6 +4628,58 @@ function _G.getExpectedTypeInfo(state, node, strict, termForExpectation)
 		end
 
 		return other.inferredType
+
+	elseif nodeType == !(nodeTypes.AstTable) then
+		local tableNode = node.parent
+		if not tableNode.inferredType then
+			-- Note: Tables will always get inferred before child tables.
+			!DEPEND_AND_RETURN(`node`, DEPEND_NODE_INFERRED, `tableNode`, nil, `nil`)
+		end
+
+		local tableField = nil
+		local isKey      = false
+
+		for _, _tableField in ipairs(tableNode.fields) do
+			if node == _tableField.key then
+				isKey      = true
+				tableField = _tableField
+				break
+			elseif node == _tableField.value then
+				tableField = _tableField
+				break
+			end
+		end
+
+		!ASSERT `tableField`
+
+		if tableNode.inferredType.tag == !(typeTags.TypeInfoTable) then
+			return getTypeInfoForBuiltinType(state, "any")
+
+		elseif tableNode.inferredType.tag == !(typeTags.TypeInfoArray) then
+			if isKey then  return getTypeInfoForBuiltinType(state, "int")  end
+
+			local arraySig = tableNode.inferredType
+			return arraySig.itemType
+
+		elseif tableNode.inferredType.tag == !(typeTags.TypeInfoStruct) then
+			if isKey then  return getTypeInfoForBuiltinType(state, "string")  end
+
+			local structInfo = tableNode.inferredType
+			assert(structInfo.hasMembers) -- Not sure if we have to wait for this here.
+
+			local memberLiteral = tableField.key
+			if not memberLiteral.inferredType then
+				!DEPEND_AND_RETURN(`node`, DEPEND_NODE_INFERRED, `memberLiteral`)
+			end
+
+			local memberName = memberLiteral.value
+			local member     = itemWith1(structInfo.members, "name", memberName) or errorInternal(state, memberLiteral, memberName)
+
+			return member.typeInfo
+
+		else
+			errorInternal(getFriendlyTypeInfoName(tableNode.inferredType))
+		end
 
 	elseif nodeType == !(nodeTypes.AstReturn) then
 		local returnNode = node.parent
