@@ -20,7 +20,7 @@
 	isTypeSimple, isTypeNumeric, isTypeTableLike, isTypeCompatibleWith, adjustTypeToOne
 	newTypeInfo, isTypeBuiltin, getTypeInfo*
 	simplifyExpressionIfConstant, simplifyTypeExpression
-	typeError, typeError2, typeMessage
+	typeError, typeErrorAfter, typeError2, typeMessage
 	wrapInImplicitCast
 
 --============================================================]]
@@ -101,12 +101,13 @@ local !struct"TypeInfoStructMember"{
 	{`typeInfo`, nil},
 }
 local !structTypeInfo"TypeInfoStruct:_TypeInfo"{
-	{`astNode`,               nil}, -- AstStruct
-	{`name`,                  ""},  -- Filled in during definition.
-	{`arguments`,             {}},  -- []TypeInfo  @Incomplete: Polymorphic structs.  @Cleanup: Use TypeInfoList here?
-	{`members`,               {}},  -- []TypeInfoStructMember
-	{`hasMembers`,            false},
-	{`polymorphSourceStruct`, nil}, -- TypeInfoStruct
+	{`astNode`,       nil}, -- AstStruct
+	{`name`,          ""},  -- Filled in during definition.
+
+	{`members`,       {}},  -- []TypeInfoStructMember
+	{`hasMembers`,    false},
+
+	{`isPolymorphic`, false},
 }
 
 local !struct"TypeInfoEnumMember"{
@@ -585,11 +586,17 @@ end
 
 
 function _G.typeError(state, node, s, ...)
-	return nodeError(state, node, "Typer", s, ...)
+	nodeError(state, node, "Typer", s, ...)
 end
+function _G.typeErrorAfter(state, node, s, ...)
+	nodeErrorAfter(state, node, "Typer", s, ...)
+end
+
 function _G.typeError2(state, node1, s1, node2, s2)
 	printerr()
+	!ifDEBUG `astPrint(node1)`
 	typeMessage(io.stderr, state, node1, "Error", "%s", s1)
+	!ifDEBUG `astPrint(node2)`
 	typeMessage(io.stderr, state, node2, "Info",  "%s", s2)
 	exitFailure()
 end
@@ -607,7 +614,31 @@ function _G.getFriendlyTypeInfoName(typeInfo)
 
 	if typeInfo.tag == !(typeTags.TypeInfoStruct) then
 		local structInfo = typeInfo
-		name             = structInfo.name -- @Incomplete: Include parameters for parameterized structs.
+		name             = structInfo.name
+
+		if structInfo.astNode.polymorphSourceStruct then
+			local params = {}
+
+			for argIndex, declBaked in ipairs(structInfo.astNode.bakeDeclarations) do
+				local valueExpr = declBaked.assignment.values[1]
+
+				if valueExpr.nodeType == !(nodeTypes.AstLiteral) then
+					local literal    = valueExpr
+					params[argIndex] = literal.literalType == !(LITERAL_STRING) and F("%q", literal.value) or tostring(literal.value)
+
+				elseif valueExpr.nodeType == !(nodeTypes.AstType) then
+					local typeNode   = valueExpr
+					params[argIndex] = getFriendlyTypeInfoName(typeNode.representedType)
+
+				else
+					params[argIndex] = "~"
+				end
+			end
+
+			name
+				= structInfo.astNode.polymorphSourceStruct.representedType.name
+				.."("..table.concat(params, ",")..")"
+		end
 
 	elseif typeInfo.tag == !(typeTags.TypeInfoEnum) then
 		local enumInfo = typeInfo
@@ -871,6 +902,9 @@ end
 local function isPolymorphicLambda(node)
 	return node.nodeType == !(nodeTypes.AstLambda) and node.isPolymorphic
 end
+local function isPolymorphicStruct(node)
+	return node.nodeType == !(nodeTypes.AstStruct) and node.isPolymorphic
+end
 
 local function inferIdentifierOrVararg(state, identOrVararg)
 	local vararg = identOrVararg.nodeType == !(nodeTypes.AstVararg) and identOrVararg or nil
@@ -891,7 +925,11 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 			identOrVararg.fromUsing   = using
 		end
 
-		if (not ident) or (ident.parent.nodeType == !(nodeTypes.AstCall) and ident == ident.parent.callee) then
+		if
+			not ident
+			or (ident.parent.nodeType == !(nodeTypes.AstCall)  and ident == ident.parent.callee)
+			or (ident.parent.nodeType == !(nodeTypes.AstDebug) and ident.parent.action == "print")
+		then
 			-- void
 
 		-- Overloaded names refer to multiple things, so that's an error!
@@ -916,13 +954,21 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 		-- (How does this work when calling a function from a module or a static struct member function? @Incomplete @Robustness)
 		elseif decl.assignment and isPolymorphicLambda(decl.assignment.values[decl.assignmentIndex] or decl) then
 			typeError(state, ident, "Cannot refer to polymorphic function '%s' outside calls.", ident.name)
+
+		-- Polymorphic structs are similar to polymorphed functions as they are collections of structs, so referring to them may be a bad idea too!
+		-- (Also, like with the functions, think about modules. @Incomplete @Robustness)
+		elseif decl.assignment and isPolymorphicStruct(decl.assignment.values[decl.assignmentIndex] or decl) then
+			typeErrorAfter(state, ident, "Missing arguments for polymorphic struct '%s'.", ident.name)
 		end
 
 		local identInDecl = decl.name
-		if not identInDecl.inferredType then
+		local typeInfo    = identInDecl.inferredType
+
+		if not typeInfo then
 			!DEPEND_AND_RETURN(`identOrVararg`, DEPEND_NODE_INFERRED, `identInDecl`)
 		end
-		identOrVararg.inferredType = identInDecl.inferredType
+
+		identOrVararg.inferredType = typeInfo
 
 		if identOrVararg.fromUsing then
 			-- @Cleanup: Move this to simplifyExpressionIfConstant()?
@@ -949,7 +995,7 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 		return
 	end
 
-	!ASSERT `decl`
+	!ASSERT("decl")
 	!ASSERT("isAny(identOrVararg.parent.nodeType, "..nodeTypes.AstDeclaration..","..nodeTypes.AstAssignment..")")
 
 	-- 2. Assignment target in declaration (which is a copy of the identifier in the declaration).
@@ -997,7 +1043,7 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 	if isEnumMember then
 		local enum = scope
 		if not enum.representedType then
-			-- AstEnum is the only scope that gets inferred before it's declarations.
+			-- AstEnum is the only scope that gets inferred before its declarations.
 			!DEPEND_AND_RETURN(`identOrVararg`, DEPEND_NODE_INFERRED, `enum`)
 		end
 	end
@@ -1213,6 +1259,8 @@ end
 end
 
 !NODE_INFERRER `function nodeInferrers.AstType(state, typeNode)`
+	-- Note: typeNode.declaration may already be filled for generated type nodes.
+
 	local decl = nil
 	local typeInfo, typeInfoRepresented
 
@@ -1338,13 +1386,17 @@ end
 		typeInfo            = getTypeInfoForBuiltinType(state, "type")
 
 	else
-		assert(typeNode.typeName ~= "")
+		decl = typeNode.declaration
 
-		decl = findDeclaration(state, typeNode, typeNode.typeName)
 		if not decl then
-			!DEPEND_AND_RETURN(`typeNode`, DEPEND_DECLARATION, `typeNode.typeName`)
-		elseif not decl.name.inferredType then
-			!DEPEND_AND_RETURN(`typeNode`, DEPEND_NODE_INFERRED, `decl.name`)
+			assert(typeNode.typeName ~= "")
+
+			decl = findDeclaration(state, typeNode, typeNode.typeName)
+			if not decl then
+				!DEPEND_AND_RETURN(`typeNode`, DEPEND_DECLARATION, `typeNode.typeName`)
+			elseif not decl.name.inferredType then
+				!DEPEND_AND_RETURN(`typeNode`, DEPEND_NODE_INFERRED, `decl.name`)
+			end
 		end
 
 		typeInfoRepresented = decl.valueTypeInfo -- May be nil, in which case we'll get an error here below.
@@ -1393,7 +1445,7 @@ end
 			assert(not typeNode.arguments) -- This should not be possible I think. The node should have been parsed as an AstCall - not an AstType without functionHeader... right? I may be wrong.
 
 		else
-			errorInternal("Incomplete: Handle type tag '%s'.", TYPE_TAG_NAMES[typeInfo.tag])
+			errorInternal("Incomplete: Handle type group '%s'.", TYPE_TAG_NAMES[typeInfo.tag])
 		end
 	end
 
@@ -1639,7 +1691,7 @@ local function getMatchingFunctions(state, call, realArguments, realArgumentType
 	return matches
 end
 
-local function getBestMatchingFunctionOrTriggerError(state, call, matches, matchTerm, errorTextOnDraw)
+local function getBestMatchOrTriggerError(state, call, matches, matchTerm, errorTextOnDraw)
 	table.sort(matches, function(a, b)
 		return a.score > b.score
 	end)
@@ -1692,19 +1744,19 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 		end
 	end
 
-	checkIfValuesMatchArgumentTypes(state, call, realArguments, realArgumentTypes, calleeTypeInfo.argumentTypesIn) -- Basically checks everything but placeholders.
-
 	for _, morphDecl in ipairs(lambda.polymorphs) do
 		if not morphDecl.name.inferredType then
 			!DEPEND_AND_RETURN(`call`, DEPEND_NODE_INFERRED, `morphDecl.name`)
 		end
 	end
 
+	checkIfValuesMatchArgumentTypes(state, call, realArguments, realArgumentTypes, calleeTypeInfo.argumentTypesIn) -- Basically checks everything but placeholders.
+
 	-- Check for previous matching polymorph(s).
 	local matchingMorphs = getMatchingFunctions(state, call, realArguments, realArgumentTypes, lambda.polymorphs)
 
 	if matchingMorphs then
-		local morphDecl = getBestMatchingFunctionOrTriggerError(
+		local morphDecl = getBestMatchOrTriggerError(
 			state, call, matchingMorphs, "polymorph",
 			"Internal compiler error: There are several matching polymorphs."
 		)
@@ -1755,8 +1807,6 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 	morphAssignment.targets[1] = astCopy(morphIdent, nil, morphAssignment)
 	morphAssignment.values[1]  = morphLambda
 	table.insert(lambda.polymorphs, morphDecl)
-
-	local placeholderType = getTypeInfoForBuiltinType(state, "placeholder")
 
 	astVisitAllNodes(morphLambda, function(node, container, key)
 		if node == morphLambda.body then  return !(VISIT_IGNORE_CHILDREN)  end
@@ -1870,7 +1920,7 @@ local function handleOverloadedCall(state, call, realArguments, realArgumentType
 		exitFailure()
 	end
 
-	local decl = getBestMatchingFunctionOrTriggerError(
+	local decl = getBestMatchOrTriggerError(
 		state, call, matchingOverloads, "overload",
 		"There are several matching overloads."
 	)
@@ -1882,6 +1932,154 @@ local function handleOverloadedCall(state, call, realArguments, realArgumentType
 	ident.inferredType = calleeTypeInfo
 
 	return calleeTypeInfo
+end
+
+local function handlePolymorphicStruct(state, call)
+	local typeNode = call.callee
+	assert(typeNode.nodeType == !(nodeTypes.AstType))
+
+	local structInfo = typeNode.representedType
+	assert(structInfo.tag == !(typeTags.TypeInfoStruct))
+	assert(structInfo.isPolymorphic)
+
+	local struct = structInfo.astNode
+
+	for _, morphDecl in ipairs(struct.polymorphs) do
+		if not morphDecl.name.inferredType then
+			!DEPEND_AND_RETURN(`call`, DEPEND_NODE_INFERRED, `morphDecl.name`)
+		end
+	end
+
+	-- Check arguments.
+	for argIndex, argExpr in ipairs(call.arguments) do
+		if not isExpressionConstant(state, argExpr) then
+			typeError(state, astGetExpressionVisuallyFurthestToTheLeft(argExpr), "Struct argument #%d is not constant.", argIndex)
+		end
+	end
+
+	local requested   = #call.arguments
+	local acceptedMax = #struct.bakeDeclarations
+	local acceptedMin = acceptedMax
+
+	for argIndex = acceptedMax, 1, -1 do
+		if not struct.bakeDeclarations[argIndex].assignment then  break  end
+		acceptedMin = acceptedMin-1
+	end
+
+	if requested < acceptedMin then
+		typeError(state, call, "Too few struct arguments. (Expected %d, got %d)", acceptedMin, requested)
+	elseif requested > acceptedMax then
+		typeError(
+			state, astGetExpressionVisuallyFurthestToTheLeft(call.arguments[acceptedMax+1]),
+			"Too many struct arguments. (Expected %d, got %d)",
+			acceptedMax, requested
+		)
+	end
+
+	-- Check for previous matching polymorph(s).
+	local matchingMorphs = nil -- @Incomplete
+
+	if matchingMorphs then
+		local morphDecl = getBestMatchOrTriggerError(
+			state, call, matchingMorphs, "polymorph",
+			"Internal compiler error: There are several matching polymorphs."
+		)
+
+		-- Change the call into a type node.
+		errorInternal("@Incomplete")
+		return
+	end
+
+	-- Create declaration for the morphed struct.
+	local morphDecl            = astNewNode(AstDeclaration, struct.token, struct)
+	morphDecl.isConstant       = true
+	morphDecl.addedByPolymorph = true
+
+	local morphIdent       = astNewNode(AstIdentifier, morphDecl.token, morphDecl)
+	morphIdent.name        = typeNode.typeName.."_POLY"..(#struct.polymorphs+1)
+	morphIdent.declaration = morphDecl
+	morphDecl.name         = morphIdent
+
+	local morphAssignment            = astNewNode(AstAssignment, struct.token, struct)
+	morphAssignment.forDeclaration   = true
+	morphAssignment.declarations     = {morphDecl}
+	morphAssignment.addedByPolymorph = true
+	morphDecl.assignment             = morphAssignment
+
+	local morphStruct                 = astCopy(struct, nil, morphAssignment)
+	morphStruct.inferredType          = nil
+	morphStruct.representedType       = nil
+	morphStruct.polymorphSourceStruct = struct
+
+	-- Don't keep copies of previous polymorphs we've made - that would quickly create a mess!
+	-- (@Speed: Don't even copy them in the first place.)
+	do
+		morphStruct.isPolymorphic = false
+		morphStruct.polymorphs    = {}
+
+		for i, statement in ipairsr(morphStruct.statements) do
+			if isAny(statement.nodeType, !(nodeTypes.AstDeclaration),!(nodeTypes.AstAssignment)) and statement.addedByPolymorph then
+				table.remove(morphStruct.statements, i) -- This line should only trigger at most twice per polymorph.
+			end
+		end
+	end
+
+	morphAssignment.targets[1] = astCopy(morphIdent, nil, morphAssignment)
+	morphAssignment.values[1]  = morphStruct
+	table.insert(struct.polymorphs, morphDecl)
+
+	-- Bake values into morphed struct.
+	for argIndex, declBaked in ipairs(morphStruct.bakeDeclarations) do
+		local assignment = declBaked.assignment
+
+		if not assignment then
+			assignment                = astNewNode(AstAssignment, declBaked.name.token, morphStruct)
+			assignment.forDeclaration = true
+			assignment.declarations   = {declBaked}
+			assignment.targets[1]     = astCopy(declBaked.name, nil, assignment)
+			declBaked.assignment      = assignment
+
+			local i = indexOf(morphStruct.statements, declBaked) or errorInternal()
+			table.insert(morphStruct.statements, i+1, assignment)
+		end
+
+		local valueExpr = call.arguments[argIndex] -- Is nil for optional arguments.
+		if valueExpr then
+			assignment.values[1] = astCopy(valueExpr, nil, assignment) -- Overwrite any old value expression.
+		end
+
+		declBaked.checkedRedeclaration = true -- @Hack to prevent redeclaration errors between polymorphed struct and base struct.
+	end
+
+	-- Update the source struct, add queueds etc.
+	local i              = #struct.statements+1
+	struct.statements[i] = morphDecl
+	addToQueueRecursively(state, morphDecl, struct.statements, i, !(PIPE_INFER))
+
+	local i              = #struct.statements+1
+	struct.statements[i] = morphAssignment
+	addToQueueRecursively(state, morphAssignment, struct.statements, i, !(PIPE_INFER))
+
+	-- Change the call into a type node.
+	local morphTypeNode       = astNewNode(AstType, morphDecl.name.token, call.parent)
+	morphTypeNode.kind        = !(TYPE_KIND_SIMPLE_USER)
+	morphTypeNode.typeName    = morphDecl.name.name
+	morphTypeNode.declaration = morphDecl
+
+	replaceQueuedNodeAndUnqueueOldTree(state, call, morphTypeNode)
+
+	-- Stay in PIPE_INFER. Also, the next line is needed.
+	!DEPEND_AND_RETURN(`morphTypeNode`, DEPEND_NODE_INFERRED, `morphDecl`)
+end
+
+local function doesExpressionRepresentPolymorphicStructType(expr)
+	if expr.inferredType.tag ~= !(typeTags.TypeInfoType) then  return false  end
+
+	local typeInfoRepresented = getTypeRepresentedByExpression(expr)
+	return
+		typeInfoRepresented ~= nil
+		and typeInfoRepresented.tag == !(typeTags.TypeInfoStruct)
+		and typeInfoRepresented.isPolymorphic
 end
 
 !NODE_INFERRER `function nodeInferrers.AstCall(state, call)`
@@ -1911,7 +2109,7 @@ end
 		end
 	end
 
-	if calleeTypeInfo.tag == !(typeTags.TypeInfoFunction) then -- @Incomplete: Parameterized structs.
+	if calleeTypeInfo.tag == !(typeTags.TypeInfoFunction) then
 		-- void
 
 	elseif calleeTypeInfo.tag == !(typeTags.TypeInfoList) then
@@ -1926,6 +2124,10 @@ end
 			typeError(state, call, "The object being called is not a function. (It is %s)", getFriendlyTypeInfoName(calleeTypeInfo))
 		end
 
+	elseif doesExpressionRepresentPolymorphicStructType(callee) then -- @Cleanup: We can/should probably just check callee.declaration.valueTypeInfo here.
+		handlePolymorphicStruct(state, call)
+		return
+
 	else
 		if callee.nodeType == !(nodeTypes.AstIdentifier) then
 			local ident = callee
@@ -1935,7 +2137,7 @@ end
 		end
 	end
 
-	!ASSERT("calleeTypeInfo.tag == "..typeTags.TypeInfoFunction) -- @Incomplete: Handle parameterized structs.
+	!ASSERT("calleeTypeInfo.tag == "..typeTags.TypeInfoFunction)
 
 	!if DEBUG then
 		if call.isMethod and callee.nodeType ~= !(nodeTypes.AstAccess) then
@@ -3558,6 +3760,21 @@ local function checkForRecursiveStruct(state, declThatWeAreChecking, memberPath,
 end
 
 !NODE_INFERRER `function nodeInferrers.AstStruct(state, struct)`
+	if struct.isPolymorphic then
+		local structInfo         = newTypeInfo(TypeInfoStruct)
+		structInfo.astNode       = struct
+		structInfo.isPolymorphic = true
+		structInfo.hasMembers    = true -- Probably doesn't matter.
+
+		table.insert(state.allTypeInfos, structInfo)
+
+		struct.representedType = structInfo
+		struct.inferredType    = getTypeInfoForBuiltinType(state, "type")
+
+		moveToPipe(state, struct, !(PIPE_DONE))
+		return
+	end
+
 	local structInfo = struct.representedType
 
 	if not structInfo then
@@ -3577,8 +3794,6 @@ end
 			!DEPEND_AND_RETURN(`struct`, DEPEND_NODE_INFERRED, `statement`)
 		end
 	end
-
-	-- @Incomplete: struct.arguments
 
 	for i, decl in ipairs(struct.declarations) do
 		if not decl.isConstant then
@@ -3975,7 +4190,7 @@ local function createTypeNodeFromInfo(state, typeRepresented, token, parent)
 
 	elseif typeRepresented.tag == !(typeTags.TypeInfoStruct) then
 		local structInfo        = typeRepresented
-		typeNode.kind           = !(TYPE_KIND_SIMPLE_USER)
+		typeNode.kind           = structInfo.isPolymorphic and !(TYPE_KIND_POLY_STRUCT) or !(TYPE_KIND_SIMPLE_USER)
 		typeNode.typeName       = structInfo.name
 
 	elseif typeRepresented.tag == !(typeTags.TypeInfoEnum) then
@@ -3986,7 +4201,7 @@ local function createTypeNodeFromInfo(state, typeRepresented, token, parent)
 	elseif typeRepresented.tag == !(typeTags.TypeInfoFunction) then
 		local funcSig           = typeRepresented
 		typeNode.kind           = !(TYPE_KIND_FUNCTION)
-		typeNode.functionHeader = createLambdaFromSignature(state, funcSig, typeNode)
+		typeNode.functionHeader = createLambdaFromSignature(state, funcSig, typeNode) -- Is this really needed? I doubt it. @Cleanup
 
 	elseif typeRepresented.tag == !(typeTags.TypeInfoCompound) then
 		typeNode.kind           = !(TYPE_KIND_COMPOUND)
@@ -4000,7 +4215,7 @@ local function createTypeNodeFromInfo(state, typeRepresented, token, parent)
 		errorInternal() -- When do we get here?
 	else
 		!ifDEBUG `print(getFriendlyTypeInfoName(typeRepresented))`
-		errorInternal("Incomplete: Handle type tag '%s'.", TYPE_TAG_NAMES[typeRepresented.tag])
+		errorInternal("Incomplete: Handle type group '%s'.", TYPE_TAG_NAMES[typeRepresented.tag])
 	end
 
 	return typeNode
@@ -4030,10 +4245,17 @@ local function isTypeOrDoesTypeContainPlaceholder(typeInfo)
 end
 
 function _G.simplifyTypeExpression(state, expr, typeRepresented)
-	!ASSERT `typeRepresented`
+	!ASSERT("expr.nodeType ~= "..nodeTypes.AstType)
+	!ASSERT("typeRepresented")
+
 	if isTypeOrDoesTypeContainPlaceholder(typeRepresented) then  return  end
 
 	local typeNode = createTypeNodeFromInfo(state, typeRepresented, expr.token, expr.parent)
+
+	if expr.nodeType == !(nodeTypes.AstIdentifier) then
+		local ident          = expr
+		typeNode.declaration = ident.declaration
+	end
 
 	addUnqueuedChildrenToQueueRecursively(state, typeNode, !(PIPE_INFER))
 	moveChildrenToNextRelevantPipe(state, typeNode)

@@ -151,7 +151,7 @@ local function addToQueue(state, node, container, key, pipe, pipeHighestExited)
 end
 
 -- addToQueueRecursively( state, topNode [, containerForTopNode, keyForTopNode, pipe=PIPE_INFER ] )
--- Note: Skips AstStaticIf branches and polymorph bodies.
+-- Note: Skips AstStaticIf branches and most polymorphic nodes.
 do
 	local function registerNodesToAddToQueue(state, topNode, nodesToAdd)
 		astVisitAllNodes(topNode, function(node)
@@ -164,12 +164,16 @@ do
 
 			elseif node.nodeType == !(nodeTypes.AstLambda) and node.isPolymorphic then
 				local lambda = node
+				-- Do we really need to queue any children? 2020-02-02 @Speed @Cleanup
 				for _, statement in ipairs(lambda.statements) do
 					if statement ~= lambda.body then
 						registerNodesToAddToQueue(state, statement, nodesToAdd)
 					end
 				end
 				return !(VISIT_IGNORE_CHILDREN)
+
+			elseif node.nodeType == !(nodeTypes.AstStruct) and node.isPolymorphic then
+				return !(VISIT_IGNORE_CHILDREN) -- We don't need to queue anything inside polymorphic structs (I think).
 			end
 		end)
 	end
@@ -190,7 +194,7 @@ end
 
 -- addUnqueuedChildrenToQueueRecursively( state, topNode [, pipe=PIPE_INFER ] )
 -- Note: Ignores children of already queued nodes.
--- Note: Skips AstStaticIf branches and polymorph bodies.
+-- Note: Skips AstStaticIf branches and most polymorphic nodes.
 do
 	local function registerNodesToAddToQueue(state, topNode, nodesToAdd)
 		astVisitAllNodes(topNode, function(node)
@@ -213,6 +217,7 @@ do
 
 				elseif node.nodeType == !(nodeTypes.AstLambda) and node.isPolymorphic then
 					local lambda = node
+					-- Do we really need to add any children? 2020-02-02 @Cleanup @Speed
 					for _, statement in ipairs(lambda.statements) do
 						if not statement.queued and statement ~= lambda.body then
 							nodesToAdd[statement] = true
@@ -220,6 +225,9 @@ do
 						end
 					end
 					return !(VISIT_IGNORE_CHILDREN)
+
+				elseif node.nodeType == !(nodeTypes.AstStruct) and node.isPolymorphic then
+					return !(VISIT_IGNORE_CHILDREN) -- We don't need to queue anything inside polymorphic structs (I think).
 				end
 			end
 		end)

@@ -22,7 +22,7 @@
 	errorParsing*, parserMessage*
 	errorUnhandledNodeType, errorUnhandledType
 	isNodeAt
-	nodeError, nodeMessage, where
+	nodeError, nodeErrorAfter, nodeMessage, where
 	parse*
 
 --============================================================]]
@@ -149,7 +149,7 @@ _G.!structAst"AstType:_AstExpression"{
 	{`arrayItemType`,   nil, ast="node"},    -- AstType
 	{`arguments`,       nil, ast="array"},   -- []AstExpression  (Is set for parameterized structs.)
 	{`components`,      {},  ast="array"},   -- []AstExpression  (Used if kind is TYPE_KIND_COMPOUND.)
-	{`kind`,            TYPE_KIND_UNSET},    -- TYPE_KIND_SIMPLE_BUILTIN|TYPE_KIND_SIMPLE_USER|TYPE_KIND_FUNCTION|TYPE_KIND_ARRAY|TYPE_KIND_PARAMETERIZED_STRUCT|TYPE_KIND_COMPOUND
+	{`kind`,            TYPE_KIND_UNSET},    -- TYPE_KIND_SIMPLE_BUILTIN|TYPE_KIND_SIMPLE_USER|TYPE_KIND_FUNCTION|TYPE_KIND_ARRAY|TYPE_KIND_POLY_STRUCT|TYPE_KIND_COMPOUND
 	{`typeName`,        ""},
 	-- Type phase:
 	{`representedType`, nil},                -- TypeInfo
@@ -335,7 +335,11 @@ _G.!structAst"AstFor:_AstScope"{
 }
 _G.!structAst"AstStruct:_AstScopeExpression"{
 	_scopeType = "declarative",
-	{`arguments`, nil, ast="node"}, -- AstArguments
+
+	{`bakeDeclarations`,      {},  astRef="array"}, -- []AstDeclaration
+	{`isPolymorphic`,         false},
+	{`polymorphs`,            {},  astRef="array"}, -- []AstDeclaration
+	{`polymorphSourceStruct`, nil, astRef="node"},  -- AstStruct
 }
 _G.!structAst"AstEnum:_AstScopeExpression"{
 	_scopeType = "declarative",
@@ -815,7 +819,36 @@ function _G.parseStruct(state, parentNode)
 	local tokType, tokValue = eatNextToken(state)
 
 	if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"(") then
-		!SET_OR_RETURN `struct.arguments = parseArguments(state, struct, true)`
+		struct.isPolymorphic       = true
+		!SET_OR_RETURN `local args = parseArguments(state, struct, true)`
+
+		local gotError = false
+
+		astVisitAllNodes(args, function(node)
+			if node.nodeType == !(nodeTypes.AstVararg) then
+				gotError = true
+				!ERROR_OR_RETURN `errorParsing(state, node.token, "Struct arguments cannot be variable.", nil, VISIT_BREAK)`
+			end
+		end)
+
+		if gotError then  return nil  end
+
+		-- Move declarations from arguments into the struct for later baking.
+		for _, arg in ipairs(args.arguments) do
+			local decl      = arg.declaration
+			decl.parent     = struct
+			decl.isConstant = true
+
+			table.insert(struct.statements,       decl)
+			table.insert(struct.declarations,     decl)
+			table.insert(struct.bakeDeclarations, decl)
+
+			local assignment = arg.assignment
+			if assignment then
+				assignment.parent = struct
+				table.insert(struct.statements, assignment)
+			end
+		end
 
 		tokType, tokValue = eatNextToken(state)
 		if not isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),")") then
@@ -1878,6 +1911,7 @@ function _G.parseLambda(state, parentNode, allowBody)
 		lambda.argumentsIn         = args
 
 		local takenNames = {}
+		local gotError   = false
 
 		-- Add declarations for values that will be baked (only types so far).
 		astVisitAllNodes(args, function(node)
@@ -1885,25 +1919,26 @@ function _G.parseLambda(state, parentNode, allowBody)
 
 			lambda.isPolymorphic = true
 
-			local bake = node
-			local name = bake.name.name
+			local bake  = node
+			local ident = bake.name
+			local name  = ident.name
 
 			if takenNames[name] then
+				gotError = true
 				!ERROR_OR_RETURN `
 					printerr()
-					parserMessage(io.stderr, state, bake.name.token,  "Error", "Duplicate placeholder type name '%s'.", name)
+					parserMessage(io.stderr, state, ident.token,      "Error", "Duplicate placeholder type name '%s'.", name)
 					parserMessage(io.stderr, state, takenNames[name], "Info",  "...previous name is here.")
 					exitFailure()
 				`
 			end
-			takenNames[name] = bake.name.token
+			takenNames[name] = ident.token
 
 			-- Declaration.
-			-- @Incomplete: Check for duplicate baked names.
-			local decl            = astNewNode(AstDeclaration, bake.token, lambda)
-			bake.name.declaration = decl
-			decl.name             = astCopy(bake.name, nil, decl)
-			decl.isConstant       = true
+			local decl        = astNewNode(AstDeclaration, bake.token, lambda)
+			ident.declaration = decl
+			decl.name         = astCopy(ident, nil, decl)
+			decl.isConstant   = true
 
 			table.insert(lambda.statements,       decl)
 			table.insert(lambda.declarations,     decl)
@@ -1927,6 +1962,7 @@ function _G.parseLambda(state, parentNode, allowBody)
 			return !(VISIT_IGNORE_CHILDREN)
 		end)
 
+		if gotError then  return nil  end
 		table.insert(lambda.statements, args)
 
 		for _, arg in ipairs(args.arguments) do
@@ -2651,6 +2687,15 @@ function _G.nodeError(state, node, agent, s, ...)
 	errorInFile(buffer, path, tokens.position1[token], agent, s, ...)
 end
 
+-- nodeErrorAfter( compilationState, node, agent, formatString, ... )
+function _G.nodeErrorAfter(state, node, agent, s, ...)
+	local tokens = state.tokens
+	local token  = node.token
+	local path   = tokens.file[token]      or errorInternal("No tokens.")
+	local buffer = state.fileBuffers[path] or errorInternal("No file buffer for '%s'.", path)
+	errorInFile(buffer, path, tokens.position2[token]+1, agent, s, ...)
+end
+
 -- nodeMessage( [ outputFile=io.stdout, ] compilationState, node, label, agent, formatString, ... )
 function _G.nodeMessage(file, state, node, label, agent, s, ...)
 	if type(file) ~= "userdata" then  return nodeMessage(io.stdout, file, state, node, label, agent, s, ...)  end
@@ -2699,7 +2744,18 @@ do
 		write(AST_NODE_TYPE_NAMES[node.nodeType] or "?")
 		write(" @", node.s)
 		if node.parent then  write(" ^", node.parent.s)  end
-		if node.queued then  write(node.queued.waitingOn and " w" or " q")  end
+
+		local queued = node.queued
+		if queued then
+			write(" p:", PIPE_TITLES[queued.pipe])
+			local dependency = queued.waitingOn
+			if dependency then
+				write(" w:", DEPEND_TITLES[dependency.dependType])
+				if isAny(dependency.dependType, !(DEPEND_NODE_INFERRED),!(DEPEND_NODE_EMITTED)) then
+					write(":", dependency.dependOn.node.s)
+				end
+			end
+		end
 
 		if printed[node] then
 			write("  !!! ERROR: RECURSION DETECTED !!!\n")
@@ -2755,8 +2811,8 @@ do
 
 			elseif node.nodeType == !(nodeTypes.AstDeclaration) then
 				local decl = node
-				if decl.addedByPolymorph then  write(" (addedByPolymorph)")                         end
-				if decl.assignment       then  write(" (assignment i=", decl.assignmentIndex, ")")  end
+				if decl.addedByPolymorph then  write(" (addedByPolymorph)")  end
+				if decl.assignment       then  write(" (assignment ", decl.assignment.s, " i=", decl.assignmentIndex, ")")  end
 				if decl.isConstant and decl.isGlobalOrExported then
 					write(" (global/exported const)")
 				elseif decl.isConstant then
@@ -2818,7 +2874,7 @@ do
 					if typeNode.functionHeader then  printNode(typeNode.functionHeader, indent+1, printed, printChildren)  end
 				elseif typeNode.kind == !(TYPE_KIND_ARRAY) then
 					if typeNode.arrayItemType then  printNode(typeNode.arrayItemType, indent+1, printed, printChildren)  end
-				elseif typeNode.kind == !(TYPE_KIND_PARAMETERIZED_STRUCT) then
+				elseif typeNode.kind == !(TYPE_KIND_POLY_STRUCT) then
 					if typeNode.arguments then  printNodeList(typeNode.arguments, indent+1, printed, printChildren)  end
 				elseif typeNode.kind == !(TYPE_KIND_COMPOUND) then
 					if typeNode.components then  printNodeList(typeNode.components, indent+1, printed, printChildren)  end
@@ -2833,7 +2889,13 @@ do
 
 			elseif node.nodeType == !(nodeTypes.AstAssignment) then
 				local assignment = node
-				if assignment.forDeclaration   then  write(" (forDeclaration)")    end
+				if assignment.forDeclaration then
+					write(" (forDeclaration")
+					for _, decl in ipairs(assignment.declarations) do
+						write(" ", decl.s)
+					end
+					write(")")
+				end
 				if assignment.addedByPolymorph then  write(" (addedByPolymorph)")  end
 				write(" (", assignment.operation, ")")
 				!!(CHILD_PRINT_START)
@@ -2989,10 +3051,6 @@ do
 				end
 
 				!!(CHILD_PRINT_START)
-				if node.nodeType == !(nodeTypes.AstStruct) and node.arguments then
-					local struct = node
-					printNodeList(struct.arguments, indent+1, printed, printChildren)
-				end
 				printNodeList(node.statements, indent+1, printed, printChildren)
 				!!(CHILD_PRINT_END)
 
