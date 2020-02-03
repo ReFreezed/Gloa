@@ -679,10 +679,30 @@ function _G.parseArguments(state, parentNode, isInput)
 			eatNextToken(state)
 
 			token = state.nextToken
-			for _, arg in ipairs(argsInGroup) do
+			for i, arg in ipairs(argsInGroup) do
 				state.nextToken           = token
 				local decl                = arg.declaration
 				!SET_OR_RETURN `decl.type = parseExpression(state, decl)` -- @Speed: Parse once then just copy the first one.
+
+				if i > 1 then
+					-- Make sure (a,b:$T) works.
+					astVisitAllNodes(decl.type, function(node, container, key)
+						if node.nodeType ~= !(nodeTypes.AstBake) then  return  end
+
+						if not container then
+							container = decl
+							key       = "type"
+						end
+
+						local bake     = node
+						local ident    = bake.name
+
+						ident.parent   = node.parent
+						container[key] = ident
+
+						return !(VISIT_IGNORE_CHILDREN)
+					end)
+				end
 			end
 		end
 
