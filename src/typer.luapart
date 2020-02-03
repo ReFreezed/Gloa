@@ -383,7 +383,8 @@ function _G.requireTypeRepresentedByExpression(state, expr)
 	elseif not isExpressionConstant(state, expr) then
 		typeError(state, expr, "Expected a constant. (Got variable of type '%s')", getFriendlyTypeInfoName(typeInfo))
 	else
-		errorInternal(state, expr)
+		!ifDEBUG `print(getFriendlyTypeInfoName(typeInfo))`
+		errorInternal(state, expr, "The expression should represent a type but we somehow don't have any TypeInfo.")
 	end
 end
 
@@ -1291,7 +1292,7 @@ end
 		typeInfo            = getTypeInfoForBuiltinType(state, "type")
 
 	elseif typeNode.kind == !(TYPE_KIND_ARRAY) then
-		local itemTypeNode = typeNode.arrayItemType or errorInternal()
+		local itemTypeNode = typeNode.arrayItemType or errorInternal(state, typeNode)
 
 		if not itemTypeNode.inferredType then
 			!DEPEND_AND_RETURN(`typeNode`, DEPEND_NODE_INFERRED, `itemTypeNode`)
@@ -1300,6 +1301,8 @@ end
 		local itemTypeInfo = requireTypeRepresentedByExpression(state, itemTypeNode)
 		if itemTypeInfo.tag == !(typeTags.TypeInfoNone) then
 			typeError(state, itemTypeNode, "Arrays cannot contain nil.")
+		elseif itemTypeInfo.tag == !(typeTags.TypeInfoCompound) and indexWith1(itemTypeInfo, "tag", !(typeTags.TypeInfoNone)) then
+			typeError(state, itemTypeNode, "Arrays cannot contain nil. (Item type is %s)", getFriendlyTypeInfoName(itemTypeInfo))
 		end
 
 		local arraySig      = getTypeInfoForArray(state, itemTypeInfo)
@@ -1888,7 +1891,9 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 	addToQueueRecursively(state, morphAssignment, lambda.statements, i, !(PIPE_INFER))
 
 	for _, declBaked in ipairs(morphLambda.bakeDeclarations) do
-		moveToNextRelevantPipe(state, declBaked.assignment.values[1])
+		local valueExpr         = declBaked.assignment.values[1]
+		declBaked.valueTypeInfo = getTypeRepresentedByExpression(valueExpr)
+		moveToNextRelevantPipe(state, valueExpr)
 	end
 
 	-- Update the callee to represent the correct polymorph.
@@ -1976,18 +1981,42 @@ local function handlePolymorphicStruct(state, call)
 		)
 	end
 
-	-- Check for previous matching polymorph(s).
-	local matchingMorphs = nil -- @Incomplete
+	-- Check for previous matching polymorph.
+	for _, morphDecl in ipairs(struct.polymorphs) do
+		local morphStruct = morphDecl.assignment.values[1]
+		local isMatch     = true
 
-	if matchingMorphs then
-		local morphDecl = getBestMatchOrTriggerError(
-			state, call, matchingMorphs, "polymorph",
-			"Internal compiler error: There are several matching polymorphs."
-		)
+		for argIndex, declBaked in ipairs(morphStruct.bakeDeclarations) do
+			local valueBaked = declBaked.assignment.values[1]
+			local valueExpr  = call.arguments[argIndex] or struct.bakeDeclarations[argIndex].assignment.values[1]
 
-		-- Change the call into a type node.
-		errorInternal("@Incomplete")
-		return
+			if valueExpr.nodeType ~= valueBaked.nodeType then
+				isMatch = false ; break
+			elseif valueExpr.nodeType == !(nodeTypes.AstLiteral) then
+				if valueExpr.value ~= valueBaked.value then -- Note: We don't need to check the literalType.
+					isMatch = false ; break
+				end
+			elseif valueExpr.nodeType == !(nodeTypes.AstType) then
+				if valueExpr.representedType ~= valueBaked.representedType then
+					isMatch = false ; break
+				end
+			else
+				errorUnhandledNodeType(state, valueExpr)
+			end
+		end
+
+		if isMatch then
+			-- Change the call into a type node.
+			local morphTypeNode       = astNewNode(AstType, morphDecl.name.token, call.parent)
+			morphTypeNode.kind        = !(TYPE_KIND_SIMPLE_USER)
+			morphTypeNode.typeName    = morphDecl.name.name
+			morphTypeNode.declaration = morphDecl
+
+			replaceQueuedNodeAndUnqueueOldTree(state, call, morphTypeNode)
+
+			-- Stay in PIPE_INFER. Also, the next line is needed.
+			!DEPEND_AND_RETURN(`morphTypeNode`, DEPEND_NODE_INFERRED, `morphDecl`)
+		end
 	end
 
 	-- Create declaration for the morphed struct.
