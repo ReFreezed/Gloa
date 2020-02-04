@@ -4,8 +4,11 @@ exec lua "$0" "$@"
 ]] and nil
 --[[============================================================
 --=
---=  Glóa - a language that compiles into Lua
+--=  Glóa compiler
 --=  by Marcus 'ReFreezed' Thunström
+--=
+--=  Note: The compiler (this file) is preprocessed. The original
+--=  source can be found at https://github.com/ReFreezed/Gloa
 --=
 --=  Language points:
 --=  - Strong static type system.
@@ -13,6 +16,20 @@ exec lua "$0" "$@"
 --=  - The order of declarations doesn't matter in non-imperative scopes. (No forward declarations needed.)
 --=
 --============================================================]]
+!(
+local VERSION = "0.1.0"
+
+local HELP_TEXT = [[
+Synopsis:
+    lua gloa.lua [compilerOptions] myProgram.gloa [myOtherProgram.gloa ...] [-- metaprogramArgument1 ...]
+
+Options:
+    --debug   Output debug information into compiled program.
+    --help    Display this help.
+    --nogc    Disable garbage collection during compilation. This may decrease compilation time.
+    --silent  Disable output to stdout. (Errors and warnings are still printed to stderr.)
+    --        Start of arguments for metaprogram.]]
+)
 
 local args = {...}
 
@@ -46,6 +63,7 @@ xpcall(function()
 	local disableGc         = false
 	local silent            = false
 	local outputDebugInfo   = false
+	local metaprogramArgs   = {}
 
 	!if DEBUG then
 	_G.debug_onlyParse      = false
@@ -54,47 +72,39 @@ xpcall(function()
 
 	do
 		local function printHelpAndExit()
-			print("Gloa") -- No "Glóa" because we don't know the code page. :(
+			print(!("Gloa v"..VERSION..os.date" (built %Y-%m-%d)")) -- No "Glóa" because we don't know the code page. :(
 			print()
-			print("Synopsis:")
-			print("    lua gloa.lua [options] myProgram.gloa [myOtherProgram.gloa ...]")
-			print()
-			print("Options:")
-			print("    --help    Display this help.")
-			print("    --nogc    Disable garbage collection during compilation. This may decrease compilation time.")
-			print("    --silent  Disable output to stdout. (Errors and warnings are still printed to stderr.)")
-			print("    --        Stop parsing options.")
+			print(!(HELP_TEXT))
 			print()
 			exit(0)
 		end
 
 		if not args[1] then  printHelpAndExit()  end
 
-		local parseOptions   = true
-		local i              = 1
+		local forCompiler = true
+		local i           = 1
 
 		while args[i] do
 			local arg = args[i]
 
-			if not (parseOptions and arg:find"^%-") then
+			if not forCompiler then
+				table.insert(metaprogramArgs, arg)
+				i = i+1
+			elseif not arg:find"^%-" then
 				table.insert(pathsToCompile, (arg:gsub("\\", "/")))
 				i = i+1
-
 			elseif arg == "--" then
-				parseOptions = false
-				i            = i+1
+				forCompiler = false
+				i           = i+1
 
 			elseif arg == "--help" or arg == "-help" or arg == "-?" or arg == "/help" or arg == "/?" then
 				printHelpAndExit()
-
 			elseif arg == "--nogc" then
 				disableGc = true
 				i = i+1
-
 			elseif arg == "--silent" then
 				silent = true
 				i = i+1
-
 			elseif arg == "--debug" then
 				outputDebugInfo = true
 				i = i+1
@@ -103,7 +113,6 @@ xpcall(function()
 			elseif arg == "--debug:onlyparse" then
 				_G.debug_onlyParse = true
 				i = i+1
-
 			elseif arg == "--debug:onlyinfer" then
 				_G.debug_onlyInferTypes = true
 				i = i+1
@@ -182,7 +191,12 @@ xpcall(function()
 		-- Program writer:
 		{`foreignN`,          0},
 		{`foreignReferences`, {}},
+
 		{`loopStack`,         {}},    -- [](AstFor|AstWhile)  (Only used for loops with named breaks inside.)
+
+		{`currentOutputLine`, 1},
+		{`lineMappingFiles`,  {}},
+		{`lineMappingLines`,  {}},
 	}
 
 	local settings           = CompilationSettings()

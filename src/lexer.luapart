@@ -121,6 +121,8 @@ _G.!struct"Tokens"{ -- SOA
 }
 
 function _G.tokenize(s, path, tokens)
+	local getByte = string.byte
+
 	local tokTypes      = tokens.type
 	local tokValues     = tokens.value
 	local tokFiles      = tokens.file
@@ -129,13 +131,26 @@ function _G.tokenize(s, path, tokens)
 	local tokLines1     = tokens.line1
 	local tokLines2     = tokens.line2
 
-	local ptr = 1
-	local ln  = 0--1 -- @Incomplete: Count lines! :CountLines
+	local ptr   = 1
+	local ln    = 1
+	local lnPtr = 1
+
+	local function updateLineNumber()
+		while lnPtr < ptr do
+			if getByte(s, lnPtr) == !(getByte"\n") then
+				ln = ln+1
+			end
+			lnPtr = lnPtr+1
+		end
+	end
 
 	while true do
-		-- Ignore whitespace. :CountLines
+		-- Ignore whitespace.
 		local i1, i2 = s:find("^%s+", ptr)
-		if i1 then  ptr = i2+1  end
+		if i1 then
+			ptr = i2+1
+			updateLineNumber()
+		end
 
 		if ptr > #s then  break  end -- EOF
 
@@ -148,7 +163,7 @@ function _G.tokenize(s, path, tokens)
 			local i2, _
 
 			for i = 1, math.huge do
-				local byte = s:byte(ptr)
+				local byte = getByte(s, ptr)
 				if not byte then
 					break -- EOF
 				elseif byte <= 127 then
@@ -235,13 +250,13 @@ function _G.tokenize(s, path, tokens)
 		-- String (short-form).
 		elseif s:find("^[\"']", ptr) then
 			local reprStart = ptr
-			local quoteByte = s:byte(ptr)
+			local quoteByte = getByte(s, ptr)
 			local bytes     = {} -- @Speed: Reuse this table for all strings.
 
 			ptr = ptr+1
 
 			while true do
-				local byte = s:byte(ptr)
+				local byte = getByte(s, ptr)
 
 				if not byte then
 					errorInFile(s, path, reprStart, "Tokenizer", "Unfinished string.")
@@ -254,7 +269,7 @@ function _G.tokenize(s, path, tokens)
 				-- Escape sequence.
 				elseif byte == !(BYTE_BACKSLASH) then
 					ptr  = ptr+1
-					byte = s:byte(ptr)
+					byte = getByte(s, ptr)
 
 					if not byte then
 						errorInFile(s, path, reprStart, "Tokenizer", "Unfinished string after escape character.")
@@ -309,7 +324,7 @@ function _G.tokenize(s, path, tokens)
 
 						local cpStr = utf8Char(cp)
 						for i = 1, #cpStr do
-							table.insert(bytes, cpStr:byte(i))
+							table.insert(bytes, getByte(cpStr, i))
 						end
 
 					-- \z skips the following span of whitespace characters.
@@ -348,7 +363,7 @@ function _G.tokenize(s, path, tokens)
 			ptr = ptr + 2 + #longEqualSigns
 
 			local stringPos1 = ptr
-			if s:byte(stringPos1) == !(BYTE_NL) then
+			if getByte(s, stringPos1) == !(BYTE_NL) then
 				stringPos1 = stringPos1+1
 			end
 
@@ -416,7 +431,7 @@ function _G.tokenize(s, path, tokens)
 			ptr      = ptr+1
 
 		else
-			errorInFile(s, path, ptr, "Tokenizer", "Unknown character. (Byte: %.0f)", s:byte(ptr))
+			errorInFile(s, path, ptr, "Tokenizer", "Unknown character. (Byte: %d)", getByte(s, ptr))
 		end
 
 		if tokType then
@@ -430,7 +445,7 @@ function _G.tokenize(s, path, tokens)
 			tokLines1[tokens.count]     = ln
 		end
 
-		-- ln = ln+countString(tokRepr, "\n", true) -- :CountLines
+		updateLineNumber()
 
 		if tokType then
 			tokLines2[tokens.count] = ln

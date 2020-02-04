@@ -82,9 +82,30 @@ local LUA_KEYWORDS = !(Set{"and","break","do","else","elseif","end","false","for
 
 
 
+local function addLineMapping(state, token)
+	local ln = state.currentOutputLine
+	if (state.lineMappingLines[ln] or 0) > 0 then  return  end
+	state.lineMappingFiles[ln] = state.tokens.file [token] or errorInternal()
+	state.lineMappingLines[ln] = state.tokens.line1[token] or errorInternal()
+end
+-- addLineMappingDummy( state [, path ] )
+local function addLineMappingDummy(state, path)
+	local ln = state.currentOutputLine
+	if state.lineMappingLines[ln] then  return  end
+	state.lineMappingFiles[ln] = path or state.globalScope.fileScopes[1].path
+	state.lineMappingLines[ln] = 0
+end
+
+local function writeEol(state, file)
+	file:write("\n")
+	state.currentOutputLine = state.currentOutputLine+1
+end
+
 function _G.writeIdentifierName(state, file, ident)
 	local decl = ident.declaration
 	local name = decl.topScopeName
+
+	addLineMapping(state, ident.token)
 
 	if name == "" then  name = decl.localName  end
 
@@ -140,8 +161,8 @@ function _G.shouldOperationHaveSurroundingParentheses(node)
 	)
 end
 
--- writeBinaryOperation( state, file, left:AstNode|string, right:AstNode|string, binaryOperation [, binary ] )
-function _G.writeBinaryOperation(state, file, left, right, binOp, binary)
+-- writeBinaryOperation( state, file, left:AstNode|string, right:AstNode|string, binaryOperation, token [, binary ] )
+function _G.writeBinaryOperation(state, file, left, right, binOp, token, binary)
 	!(
 	local function WRITE_OPERAND(sideCode)
 		__LUA("if type(",sideCode,") == 'string' then  file:write(",sideCode,")  else  writeExpression(state, file, ",sideCode,")  end")
@@ -149,6 +170,8 @@ function _G.writeBinaryOperation(state, file, left, right, binOp, binary)
 	)
 
 	local addParens = (binary and shouldOperationHaveSurroundingParentheses(binary))
+
+	addLineMapping(state, token)
 
 	if binOp == ".." then
 		if addParens then  file:write("(")  end
@@ -219,6 +242,8 @@ function _G.writeCast(state, file, cast, nameToCast)
 
 	local typeInfoSource = adjustTypeToOne(state, cast.expression, cast.expression.inferredType, true)
 	local typeInfoTarget = cast.inferredType
+
+	addLineMapping(state, cast.token)
 
 	file:write("(") -- In case the written expression is a list of some kind.
 
@@ -321,6 +346,8 @@ function _G.writeExpression(state, file, expr)
 		local call   = expr
 		local callee = call.callee
 
+		addLineMapping(state, call.token)
+
 		if call.surroundedByParentheses then  file:write("(")  end
 
 		if callee.nodeType == !(nodeTypes.AstIdentifier) then
@@ -414,6 +441,8 @@ function _G.writeExpression(state, file, expr)
 		else
 			local addParens = shouldOperationHaveSurroundingParentheses(unary)
 
+			addLineMapping(state, unary.token)
+
 			if addParens then  file:write("(")  end
 			file:write(unary.operation)
 			if unary.operation:find"%w" then  file:write(" ")  end
@@ -423,7 +452,7 @@ function _G.writeExpression(state, file, expr)
 
 	elseif expr.nodeType == !(nodeTypes.AstBinary) then
 		local binary = expr
-		writeBinaryOperation(state, file, binary.left, binary.right, binary.operation, binary)
+		writeBinaryOperation(state, file, binary.left, binary.right, binary.operation, binary.token, binary)
 
 	elseif expr.nodeType == !(nodeTypes.AstLiteral) then
 		local literal = expr
@@ -693,24 +722,28 @@ local function writeLoopBodyAndFooter(state, file, loop, indent, nextLocalN, loc
 
 	if not (loop.hasNamedBreaks or state.loopStack[1]) then
 		writeBlock(state, file, loop.body, indent+1, nextLocalN, localsStack)
-		file:write(indentStr, "end\n")
+		file:write(indentStr, "end")
+		writeEol(state, file)
 		return
 	end
 
 	if not state.loopStack[1] then
-		file:write(indentStr, "\tlocal _BREAK = 0\n")
+		file:write(indentStr, "\tlocal _BREAK = 0")
+		writeEol(state, file)
 	end
 
 	table.insert(state.loopStack, loop)
 	writeBlock(state, file, loop.body, indent+1, nextLocalN, localsStack)
-	file:write(indentStr, "end\n")
+	file:write(indentStr, "end")
+	writeEol(state, file)
 	table.remove(state.loopStack)
 
 	if state.loopStack[2] then
-		file:write(indentStr, "if _BREAK > 0 then  _BREAK = _BREAK-1 ; break  end\n")
+		file:write(indentStr, "if _BREAK > 0 then  _BREAK = _BREAK-1 ; break  end")
 	elseif state.loopStack[1] then
-		file:write(indentStr, "if _BREAK > 0 then  break  end\n")
+		file:write(indentStr, "if _BREAK > 0 then  break  end")
 	end
+	writeEol(state, file)
 end
 
 -- writeBlock( state, file, block, indent, nextLocalN, localsStack [, isElseif=false ] )
@@ -722,7 +755,8 @@ function _G.writeBlock(state, file, block, indent, nextLocalN, localsStack, isEl
 
 	if not block.statements[1] then
 		if outputDebugInfo then
-			file:write(indentStr, "-- Empty block.\n")
+			file:write(indentStr, "-- Empty block.")
+			writeEol(state, file)
 		end
 		return
 	end
@@ -748,7 +782,8 @@ function _G.writeBlock(state, file, block, indent, nextLocalN, localsStack, isEl
 					local tag = decl.name.inferredType.tag
 					file:write(indentStr, "local ", decl.localName, " = ")
 					writeDefaultValueForType(state, file, decl.name.inferredType, decl.name)
-					file:write(";\n")
+					file:write(";")
+					writeEol(state, file)
 				end
 
 				-- The initial assignment, if there is one, should be written as the next statement (or after several declarations).
@@ -775,11 +810,14 @@ function _G.writeBlock(state, file, block, indent, nextLocalN, localsStack, isEl
 					writeExpression(state, file, valueExpr)
 				end
 
-				file:write(";\n") -- The ';' removes ambiguity is some cases.
+				file:write(";") -- This removes ambiguity is some cases.
+				writeEol(state, file)
 
 			else
 				!ASSERT `not inDecl`
-				file:write(indentStr, "do\n")
+
+				file:write(indentStr, "do")
+				writeEol(state, file)
 
 				-- Get target objects and values.
 				file:write(indentStr, "\tlocal ")
@@ -829,7 +867,7 @@ function _G.writeBlock(state, file, block, indent, nextLocalN, localsStack, isEl
 					writeExpression(state, file, valueExpr)
 				end
 
-				file:write("\n")
+				writeEol(state, file)
 
 				-- Assign to targets.
 				local targetsToWrite = {}
@@ -856,15 +894,16 @@ function _G.writeBlock(state, file, block, indent, nextLocalN, localsStack, isEl
 				first   = true
 				accessN = 0
 
-				for i, target in ipairs(targetsToWrite) do
+				for i, targetExpr in ipairs(assignment.targets) do
 					if not first then  file:write(", ")  end
 					first = false
 
-					writeBinaryOperation(state, file, target, "_VALUE"..i, assignment.binaryOperation)
+					writeBinaryOperation(state, file, targetsToWrite[i], "_VALUE"..i, assignment.binaryOperation, targetExpr.token)
 				end
 
-				file:write("\n")
-				file:write(indentStr, "end\n")
+				writeEol(state, file)
+				file:write(indentStr, "end")
+				writeEol(state, file)
 			end
 
 			inDecl             = false
@@ -875,7 +914,8 @@ function _G.writeBlock(state, file, block, indent, nextLocalN, localsStack, isEl
 
 			if block.parent.nodeType == !(nodeTypes.AstLambda) and not returnNode.values[1] then
 				if outputDebugInfo then
-					file:write(indentStr, "-- return\n")
+					file:write(indentStr, "-- return")
+					writeEol(state, file)
 				end
 
 			else
@@ -885,14 +925,19 @@ function _G.writeBlock(state, file, block, indent, nextLocalN, localsStack, isEl
 					file:write(" ")
 					writeExpression(state, file, expr)
 				end
-				file:write("\n")
+				writeEol(state, file)
 			end
 
 		elseif nodeType == !(nodeTypes.AstBlock) then
 			local block = statement
-			file:write(indentStr, "do\n")
+
+			file:write(indentStr, "do")
+			writeEol(state, file)
+
 			writeBlock(state, file, block, indent+1, nextLocalN, localsStack)
-			file:write(indentStr, "end\n")
+
+			file:write(indentStr, "end")
+			writeEol(state, file)
 
 		elseif nodeType == !(nodeTypes.AstIf) then
 			-- @Optimize: Don't output empty branches.
@@ -902,7 +947,8 @@ function _G.writeBlock(state, file, block, indent, nextLocalN, localsStack, isEl
 
 			file:write("if ")
 			writeExpression(state, file, ifBranch.condition)
-			file:write(" then\n")
+			file:write(" then")
+			writeEol(state, file)
 
 			writeBlock(state, file, ifBranch.branchTrue, indent+1, nextLocalN, localsStack)
 
@@ -914,11 +960,15 @@ function _G.writeBlock(state, file, block, indent, nextLocalN, localsStack, isEl
 				writeBlock(state, file, ifBranch.branchFalse, indent, nextLocalN, localsStack, true)
 
 			else
-				file:write(indentStr, "else\n")
+				file:write(indentStr, "else")
+				writeEol(state, file)
 				writeBlock(state, file, ifBranch.branchFalse, indent+1, nextLocalN, localsStack)
 			end
 
-			if not isElseif then  file:write(indentStr, "end\n")  end
+			if not isElseif then
+				file:write(indentStr, "end")
+				writeEol(state, file)
+			end
 
 		elseif nodeType == !(nodeTypes.AstWhile) then
 			-- @Optimize: Don't output an empty body.
@@ -926,7 +976,9 @@ function _G.writeBlock(state, file, block, indent, nextLocalN, localsStack, isEl
 
 			file:write(indentStr, "while ")
 			writeExpression(state, file, whileLoop.condition)
-			file:write(" do\n")
+			file:write(" do")
+			writeEol(state, file)
+
 			writeLoopBodyAndFooter(state, file, whileLoop, indent, nextLocalN, localsStack)
 
 		elseif nodeType == !(nodeTypes.AstFor) then
@@ -952,7 +1004,9 @@ function _G.writeBlock(state, file, block, indent, nextLocalN, localsStack, isEl
 					file:write(", ")
 					writeExpression(state, file, values[3])
 				end
-				file:write(" do\n")
+				file:write(" do")
+				writeEol(state, file)
+
 				writeLoopBodyAndFooter(state, file, forLoop, indent, nextLocalN, localsStack)
 
 			elseif forLoop.forType == !(FOR_SHORT) then
@@ -968,8 +1022,10 @@ function _G.writeBlock(state, file, block, indent, nextLocalN, localsStack, isEl
 				file:write(" in ")
 
 				if objExpr.inferredType.tag == !(typeTags.TypeInfoArray) then
+					addLineMapping(state, objExpr.token)
 					file:write("_IPAIRS")
 				elseif objExpr.inferredType.tag == !(typeTags.TypeInfoTable) then
+					addLineMapping(state, objExpr.token)
 					file:write("_PAIRS")
 				elseif objExpr.inferredType.tag == !(typeTags.TypeInfoStruct) then
 					errorUnhandledNodeType(state, objExpr)
@@ -980,7 +1036,9 @@ function _G.writeBlock(state, file, block, indent, nextLocalN, localsStack, isEl
 
 				file:write("(")
 				writeExpression(state, file, objExpr)
-				file:write(") do\n")
+				file:write(") do")
+				writeEol(state, file)
+
 				writeLoopBodyAndFooter(state, file, forLoop, indent, nextLocalN, localsStack)
 
 			else--if forLoop.forType == !(FOR_ITERATOR) then
@@ -995,7 +1053,9 @@ function _G.writeBlock(state, file, block, indent, nextLocalN, localsStack, isEl
 					if i > 1 then  file:write(", ")  end
 					writeExpression(state, file, valueExpr)
 				end
-				file:write(" do\n")
+				file:write(" do")
+				writeEol(state, file)
+
 				writeLoopBodyAndFooter(state, file, forLoop, indent, nextLocalN, localsStack)
 			end
 
@@ -1005,10 +1065,11 @@ function _G.writeBlock(state, file, block, indent, nextLocalN, localsStack, isEl
 			if breakNode.loop then
 				local i                 = indexOf(state.loopStack, breakNode.loop) or errorInternal(state, breakNode)
 				local outerLoopsToBreak = #state.loopStack-i
-				file:write(indentStr, "_BREAK = ",outerLoopsToBreak," ; break\n")
+				file:write(indentStr, "_BREAK = ",outerLoopsToBreak," ; break")
 			else
-				file:write(indentStr, "break\n")
+				file:write(indentStr, "break")
 			end
+			writeEol(state, file)
 
 		elseif isAny(nodeType, !(nodeTypes.AstImport),!(nodeTypes.AstUsing),!(nodeTypes.AstDebug)) then
 			-- void  (Ignore these statements.)
@@ -1017,7 +1078,8 @@ function _G.writeBlock(state, file, block, indent, nextLocalN, localsStack, isEl
 			-- Assume the statement is an expression at this point and let writeExpression() deal with any errors.
 			file:write(indentStr)
 			writeExpression(state, file, statement)
-			file:write(";\n") -- The ';' removes ambiguity is some cases.
+			file:write(";") -- This removes ambiguity is some cases.
+			writeEol(state, file)
 		end
 	end
 end
@@ -1025,6 +1087,8 @@ end
 function _G.writeFunction(state, file, lambda)
 	!ASSERT `not lambda.body[1]`
 	!ASSERT `not lambda.isPolymorphic`
+
+	addLineMapping(state, lambda.token)
 
 	if lambda.bodyIsForeign then
 		file:write(state.foreignReferences[lambda.foreignSourceId])
@@ -1051,45 +1115,58 @@ function _G.writeFunction(state, file, lambda)
 		end
 	end
 
-	file:write(")\n")
+	file:write(")")
+	writeEol(state, file)
 
 	if lambda.body.statements[1] then
-		writeBlock(state, file, lambda.body, 1, 1, localsStack)
+		writeBlock(state, file, lambda.body, 2, 1, localsStack)
 	elseif state.settings.outputDebugInfo then
-		file:write("\t-- Empty function.\n")
+		file:write("\t\t-- Empty function.")
+		writeEol(state, file)
 	end
 
-	file:write("end")
+	file:write("\tend") -- (This indent may be wrong.)
 end
 
-function _G.writeForeignImportIfNew(state, file, typeInfo, foreignSource, foreignSourceName, foreignSourceId)
+function _G.writeForeignImportIfNew(state, file, typeInfo, foreignSource, foreignSourceName, foreignSourceId, token)
 	assert(foreignSourceId ~= "")
 
 	if state.foreignReferences[foreignSourceId] then  return  end
 
 	-- @Incomplete: Compiler setting for runtime checks of anything originating from foreign sources.
-	-- (We can probably wrap foreign the code in something here using typeInfo.)
+	-- (We can probably wrap the importing code in something here using typeInfo.)
 
 	local foreignN = state.foreignN+1
 	state.foreignN = foreignN
 
 	if foreignN == 1 then
-		file:write("local _FOREIGN = {}\n")
+		file:write("\tlocal _FOREIGN = {}")
+		writeEol(state, file)
 	end
+
+	addLineMapping(state, token) -- Must happen after 'local _FOREIGN'.
 
 	if foreignSource == "lua" then
 		if outputDebugInfo then
 			state.foreignReferences[foreignSourceId] = F("_FOREIGN[%d--[[%s]]]", foreignN, (foreignSourceId:gsub("[%[%]]", "%0 ")))
-			file:write("_FOREIGN[", F("%d", foreignN), "]")
+			file:write("\t_FOREIGN[", F("%d", foreignN), "]")
 		else
 			local foreignRef                         = F("_FOREIGN[%d]", foreignN)
 			state.foreignReferences[foreignSourceId] = foreignRef
-			file:write(foreignRef)
+			file:write("\t", foreignRef)
 		end
 
-		file:write(" = (", foreignSourceName, ")\n") -- @Robustness: Is this too straightforward?
+		file:write(" = (", foreignSourceName, ")") -- @Robustness: Is this too straightforward?
+		writeEol(state, file)
+
+		if foreignSourceName:find"\n" then
+			local _, nlCount        = foreignSourceName:gsub("\n", "\0")
+			state.currentOutputLine = state.currentOutputLine + nlCount
+		end
 
 	elseif foreignSource == "compiler" then
+		local lua = FOREIGN_API_COMPILER_SYMBOLS[foreignSourceName]
+
 		if outputDebugInfo then
 			state.foreignReferences[foreignSourceId] = F("_FOREIGN[%d--[[%s]]]", foreignN, (foreignSourceId:gsub("[%[%]]", "%0 ")))
 			file:write("_FOREIGN[", F("%d", foreignN), "]")
@@ -1099,7 +1176,13 @@ function _G.writeForeignImportIfNew(state, file, typeInfo, foreignSource, foreig
 			file:write(foreignRef)
 		end
 
-		file:write(" = ", FOREIGN_API_COMPILER_SYMBOLS[foreignSourceName], "\n")
+		file:write(" = ", lua)
+		writeEol(state, file)
+
+		if lua:find"\n" then
+			local _, nlCount        = lua:gsub("\n", "\0")
+			state.currentOutputLine = state.currentOutputLine + nlCount
+		end
 
 	else
 		errorInternal("Incomplete: Handle foreignSource=%s", foreignSource)
@@ -1199,26 +1282,96 @@ function _G.writeProgram(state)
 
 	-- @Incomplete: Setting to specify the prefix for the written file (shebang and maybe a comment with copyright info, library documentation etc.).
 	file:write('#!/bin/sh\n_=[[\nexec lua "$0" "$@"\n]] and nil\n')
+	state.currentOutputLine = 5
 
 	--
 	-- Compiler symbols.
 	--
 
-	-- @Incomplete: Convert file paths and line numbers to the Glóa source files.
-	-- @Polish: Nicer traceback format.
+	file:write("local lineMappingPaths, lineMappingFiles, lineMappingLines = {}, {}, {}")
+	writeEol(state, file)
+
 	!(
+	-- info.what     = "Lua"|"C"|"main"|"tail"
+	-- info.namewhat = "global"|"local"|"method"|"field"|"upvalue"|""
+
 	local TEMPLATE_ERROR_HANDLER = `
 		local function gloaErrorHandler(err)
-			local errStr    = tostring(err)
-			local traceback = debug.traceback(errStr, 2)
-			$tracebackEdits
+			local mainSource = (debug.getinfo(1, "S") or {}).source or "<UNKNOWN_SOURCE>"
 
-			$outputFile:write(traceback, "\n")
+			if type(err) == "string" then
+				local pathHere = mainSource:match("^@(.+)")
+				local pathLen  = pathHere and #pathHere
+				local ln       = pathHere and err:sub(1, pathLen) == pathHere and tonumber(err:match("^:(%d+): ", pathLen+1))
+
+				if lineMappingLines[ln] then
+					err = (
+						lineMappingPaths[lineMappingFiles[ln]]..":"
+						..lineMappingLines[ln]..": "
+						..err:sub(pathLen+1):gsub("^:%d+: ", "")
+					)
+				end
+			end
+
+			$outputFile:write("\n")
+			if type(err) == "string" then
+				$outputFile:write("Error: ", err, "\n")
+			else
+				$outputFile:write("Error!\n")
+			end
+			$outputFile:write("stack traceback:\n")
+
+			for level = 2, math.huge do
+				local info = debug.getinfo(level, "nSl")
+				if not info then  break  end
+
+				$outputFile:write("\t")
+
+				if info.what == "C" then
+					$outputFile:write("[C]: ")
+					if (info.name or "") ~= "" then
+						$outputFile:write("'", info.name, "'")
+					else
+						$outputFile:write("?")
+					end
+
+				else
+					if info.source == mainSource and (lineMappingLines[info.currentline] or 0) > 0 then
+						$outputFile:write(lineMappingPaths[lineMappingFiles[info.currentline]], ":", lineMappingLines[info.currentline])
+					else
+						$outputFile:write("[Lua]")
+					end
+
+					$outputFile:write(":")
+
+					if info.what == "tail" then
+						$outputFile:write(" tail call")
+					elseif info.what == "main" then
+						$outputFile:write(" main chunk")
+					elseif (info.name or "") ~= "" then
+						$outputFile:write(" ")
+						if info.namewhat == "method" or info.namewhat == "field" then  $outputFile:write(info.namewhat, " ")  end
+						$outputFile:write("'", info.name, "'")
+					elseif (lineMappingLines[info.linedefined] or 0) > 0 then
+						$outputFile:write(" <", lineMappingPaths[lineMappingFiles[info.linedefined]], ":", lineMappingLines[info.linedefined], ">")
+					end
+
+					if info.source:find"^@" then
+						$outputFile:write(" (", info.source:sub(2), ":", info.currentline)
+						if info.linedefined > 0 and info.linedefined ~= info.currentline then
+							$outputFile:write(", defined at line ", info.linedefined)
+						end
+						$outputFile:write(")")
+					end
+				end
+
+				$outputFile:write("\n")
+			end
 
 			os.exit(1)
 		end
 	`
-	local TEMPLATE_TRACEBACK_EDITS = `
+	local TEMPLATE_TRACEBACK_EDITS = trimTemplate`
 		traceback = traceback:gsub("%w[-%w_/]*%.lua:%d+", $filePathPrefix.."%0")
 	`
 	local TRACEBACK_EDITS = templateToLua(TEMPLATE_TRACEBACK_EDITS, {
@@ -1227,17 +1380,22 @@ function _G.writeProgram(state)
 	local ERROR_HANDLER = templateToLua(TEMPLATE_ERROR_HANDLER, {
 		tracebackEdits = DEBUG and TRACEBACK_EDITS or ``,
 		outputFile     = DEBUG and `io.stdout` or `io.stderr`, -- :SublimeText2Desync
-	})
+	}, -2, -2)
 	)
 	file:write(!(ERROR_HANDLER))
 
-	file:write("local _MATH_MODF  = math.modf\n")  -- Used when casting float to int.
-	file:write("local _MATH_FLOOR = math.floor\n") -- Used for integer division.
-	file:write("local _IPAIRS     = ipairs\n")     -- Used for short-form array loops.
-	file:write("local _PAIRS      = pairs\n")      -- Used for short-form table loops.
+	!local _, nlCount       = ERROR_HANDLER:gsub("\n", "\0")
+	state.currentOutputLine = state.currentOutputLine + !(nlCount)
 
-	-- Start of protected call around all user code.
-	file:write("local ok = xpcall(function()\n")
+	file:write("local _MATH_MODF  = math.modf")  ; writeEol(state, file) -- Used when casting float to int.
+	file:write("local _MATH_FLOOR = math.floor") ; writeEol(state, file) -- Used for integer division.
+	file:write("local _IPAIRS     = ipairs")     ; writeEol(state, file) -- Used for short-form array loops.
+	file:write("local _PAIRS      = pairs")      ; writeEol(state, file) -- Used for short-form table loops.
+
+	-- Start of user code.
+	addLineMappingDummy(state)
+	file:write("local function runProgram()")
+	writeEol(state, file)
 
 	--
 	-- Foreign imports.
@@ -1246,10 +1404,11 @@ function _G.writeProgram(state)
 	for _, const in ipairs(state.constants) do
 		if const.valueType.tag == !(typeTags.TypeInfoFunction) and const.value.bodyIsForeign then
 			local lambda = const.value
-			writeForeignImportIfNew(state, file, const.valueType, lambda.foreignSource, lambda.foreignSourceName, lambda.foreignSourceId)
+			writeForeignImportIfNew(state, file, const.valueType, lambda.foreignSource, lambda.foreignSourceName, lambda.foreignSourceId, lambda.token)
+
 		elseif const.valueType.tag == !(typeTags.TypeInfoForeignDummy) then
 			local foreign = const.value
-			writeForeignImportIfNew(state, file, foreign.inferredType, foreign.source, foreign.sourceName, foreign.sourceId)
+			writeForeignImportIfNew(state, file, foreign.inferredType, foreign.source, foreign.sourceName, foreign.sourceId, foreign.token)
 		end
 	end
 
@@ -1262,15 +1421,15 @@ function _G.writeProgram(state)
 	-- Constants, non-functions.
 	for _, const in ipairs(state.constants) do
 		if const.isObject and const.valueType.tag ~= !(typeTags.TypeInfoFunction) then
-			file:write("local ", const.name, " = ")
+			file:write("\tlocal ", const.name, " = ")
 			writeConstantValue(state, file, const) -- Only functions need everything to be forward declared.
-			file:write("\n")
+			writeEol(state, file)
 		end
 	end
 
 	if state.constants[1] or state.topScopeNames[1] then
 		local first = true
-		file:write("local ")
+		file:write("\tlocal ")
 
 		-- Constants, functions.
 		for _, const in ipairs(state.constants) do
@@ -1288,7 +1447,7 @@ function _G.writeProgram(state)
 			file:write(topScopeName)
 		end
 
-		file:write("\n")
+		writeEol(state, file)
 	end
 
 	--
@@ -1315,9 +1474,9 @@ function _G.writeProgram(state)
 
 	for _, const in ipairs(functionConstants) do
 		local lambda = const.value
-		file:write(const.name, " = ")
+		file:write("\t", const.name, " = ")
 		writeFunction(state, file, lambda)
-		file:write("\n")
+		writeEol(state, file)
 	end
 
 	!local ENTRY_POINT_NAME = "main" -- @Incomplete: Configurable entry point name.
@@ -1326,14 +1485,14 @@ function _G.writeProgram(state)
 	-- Global & file-scope assignments.
 	local function handleTopScopeDeclaration(decl)
 		if decl.topScopeName ~= "" then
-			file:write(decl.topScopeName, " = ")
+			file:write("\t", decl.topScopeName, " = ")
 			if decl.valueConstant then
 				writeConstantValueOrReference(state, file, decl.valueConstant)
 			else
 				-- We should have a declared struct instance or something similar here (I think) that doesn't have a specified initial value.
 				writeDefaultValueForType(state, file, decl.name.inferredType, decl.name)
 			end
-			file:write("\n")
+			writeEol(state, file)
 		end
 		if decl.name.name == !(ENTRY_POINT_NAME) then  mainFuncDecl = decl  end
 	end
@@ -1383,12 +1542,98 @@ function _G.writeProgram(state)
 		nodeError(state, lambda.argumentsOut, "ProgramWriter", "Program entry point function must not return any values.")
 	end
 
+	addLineMappingDummy(state)
+	file:write("\t")
 	writeConstantValueOrReference(state, file, mainFuncDecl.valueConstant)
-	file:write("()\n")
+	file:write("()")
+	writeEol(state, file)
 
-	-- End of protected call.
-	file:write("end, gloaErrorHandler)\n")
-	file:write("if not ok then  os.exit(1)  end\n") -- In case there was an error in gloaErrorHandler() for some reason.
+	-- End of user code.
+	file:write("end")
+	writeEol(state, file)
+
+	if state.settings.outputDebugInfo then
+		!(
+		-- Size of line mapping information in bytes in a small test program:
+		--
+		--            pad   exact indices
+		--     files  1700  3500
+		--     lines  2400  4300
+		--
+		local USE_PADDING = true -- Enabling this seem better.
+		)
+
+		state.currentOutputLine = state.currentOutputLine+4
+		addLineMappingDummy(state) -- For the xpcall() here below.
+
+		local MODULE_DIR_PREFIX = COMPILER_DIRECTORY.."/modules/"
+
+		local pathIndices = {}
+		local pathIndex   = 0
+		local first       = true
+
+		file:write("local _ = nil\n") -- Takes up less space than 'nil'.
+
+		file:write("lineMappingPaths = {")
+		for ln = 1, state.currentOutputLine do
+			local path = state.lineMappingFiles[ln]
+
+			if state.lineMappingLines[ln] and not pathIndices[path] then
+				if not first then  file:write(",")  end
+				first = false
+
+				pathIndex         = pathIndex+1
+				pathIndices[path] = pathIndex
+
+				if path:sub(1, #MODULE_DIR_PREFIX) == MODULE_DIR_PREFIX then
+					path = "module:"..path:sub(#MODULE_DIR_PREFIX+1):gsub("%.gloa$", "")
+				end
+
+				file:write(F("%q", path))
+			end
+		end
+		file:write("}\n")
+
+		file:write("lineMappingFiles = {")
+		!if USE_PADDING then
+			for ln = 1, state.currentOutputLine do
+				if ln > 1 then  file:write(",")  end
+				file:write(pathIndices[state.lineMappingFiles[ln]] or "_")
+			end
+		!else
+			first = true
+			for ln = 1, state.currentOutputLine do
+				if state.lineMappingLines[ln] then
+					if not first then  file:write(",")  end
+					first = false
+					file:write(F("[%d]=%d", ln, pathIndices[state.lineMappingFiles[ln]]))
+				end
+			end
+		!end
+		file:write("}\n")
+
+		file:write("lineMappingLines = {")
+		!if USE_PADDING then
+			for ln = 1, state.currentOutputLine do
+				if ln > 1 then  file:write(",")  end
+				file:write(state.lineMappingLines[ln] or "_")
+			end
+		!else
+			first = true
+			for ln = 1, state.currentOutputLine do
+				if state.lineMappingLines[ln] then
+					if not first then  file:write(",")  end
+					first = false
+					file:write(F("[%d]=%d", ln, state.lineMappingLines[ln]))
+				end
+			end
+		!end
+		file:write("}\n")
+	end
+
+	file:write("if not xpcall(runProgram, gloaErrorHandler) then\n")
+	file:write("\tos.exit(1)\n") -- In case there was an error in gloaErrorHandler() for some reason.
+	file:write("end\n")
 
 	file:close()
 end
