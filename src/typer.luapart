@@ -711,18 +711,6 @@ end
 local nodeInferrers = {}
 
 !(
--- DEPEND_AND_RETURN( dependentCode, dependType, dependOnCode [, extraDataCode, valueToReturnCode ] )
-local function DEPEND_AND_RETURN(dependentCode, dependType, dependOnCode, extraDataCode, valueToReturnCode)
-	__LUA("addDependency(state, ",dependentCode,", ",toLua(dependType),", ",dependOnCode)
-	if extraDataCode then
-		__LUA(", ",extraDataCode)
-	end
-	__LUA(") ; return")
-	if valueToReturnCode then
-		__LUA(" ", valueToReturnCode)
-	end
-end
-
 local nodeNames = {}
 
 local function NODE_INFERRER(funcHeaderCode)
@@ -1269,8 +1257,7 @@ end
 		--[[
 		if typeNode.kind == !(TYPE_KIND_UNSET) then
 			astPrintTree(typeNode)
-			where(state, typeNode)
-			errorInternal()
+			errorInternal(state, typeNode)
 		end
 		--]]
 	!end
@@ -2171,8 +2158,7 @@ end
 	!if DEBUG then
 		if call.isMethod and callee.nodeType ~= !(nodeTypes.AstAccess) then
 			astPrint(callee)
-			where(state, call)
-			errorInternal()
+			errorInternal(state, call)
 		end
 	!end
 
@@ -3095,7 +3081,9 @@ end
 	lambda.inferredType = getTypeInfoForLambda(state, lambda) or errorInternal()
 
 	if lambda.bodyIsForeign then
-		assert((lambda.foreignSourceName ~= ""), "@Incomplete: Infer lambda.foreignSourceName")
+		if lambda.foreignSourceName == "" then
+			errorInternal(state, lambda, "@Incomplete: Infer lambda.foreignSourceName")
+		end
 		validateForeignSource(state, lambda.foreignSource, lambda.foreignSourceName, lambda)
 		lambda.foreignSourceId = lambda.foreignSource.." "..lambda.foreignSourceName
 	end

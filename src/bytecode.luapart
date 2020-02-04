@@ -172,12 +172,6 @@ local BC_CODES = {
 for bcode, bcodeName in ipairs(BC_CODES) do
 	_G[bcodeName] = bcode
 end
-
--- DEPEND_AND_RETURN( dependentCode, dependType, dependOnCode [, returnValueCode="" ] )
-local function DEPEND_AND_RETURN(dependentCode, dependType, dependOnCode, returnValueCode)
-	returnValueCode = (returnValueCode or "")
-	__LUA("addDependency(state, ",dependentCode,", ",toLua(dependType),", ",dependOnCode,") ; return ",returnValueCode)
-end
 )
 
 
@@ -199,7 +193,7 @@ function _G.bcAllocateConstantValueIfNew(state, typeInfo, v)
 	local tag      = typeInfo.tag
 	local isSimple = isTypeSimple(typeInfo)
 
-	if not isSimple and isAny(tag, !(typeTags.TypeInfoAny),!(typeTags.TypeInfoNamespace),!(typeTags.TypeInfoCompound),!(typeTags.TypeInfoList)) then
+	if not isSimple and isAny(tag, !(typeTags.TypeInfoAny),!(typeTags.TypeInfoNamespace),!(typeTags.TypeInfoCompound),!(typeTags.TypeInfoList),!(typeTags.TypeInfoPlaceholder)) then
 		errorInternal("Invalid type '%s' for constant.", (TYPE_TAG_NAMES[tag] or "?"))
 	end
 	local isObject = not isSimple
@@ -238,15 +232,13 @@ function _G.bcAllocateConstantValueIfNew(state, typeInfo, v)
 		end
 	end
 
-	local i = #state.constants+1
-
 	local const     = Constant()
 	const.valueType = typeInfo
 	const.value     = v
 	const.isObject  = isObject
 
+	-- Note: Simple constants (like ints) don't need a referencable name as we write those values directly everywhere.
 	if isObject then
-		-- Note: Simple constants (like ints) don't need a referencable name as we write those values directly everywhere.
 		if tag == !(typeTags.TypeInfoFunction) then
 			state.functionN = state.functionN+1
 			const.name      = "_F"..state.functionN
@@ -260,7 +252,7 @@ function _G.bcAllocateConstantValueIfNew(state, typeInfo, v)
 		state.topScopeNames[const.name] = true -- Note: The name may get tampered with later leaving the original name reserved but unused, but that's fine!
 	end
 
-	state.constants[i] = const
+	table.insert(state.constants, const)
 
 	return const, true
 end
@@ -275,7 +267,7 @@ function _G.bcAllocateConstantValueForExpressionIfNew(state, expr, dependent)
 		local const   = literal.valueConstant
 
 		if not const then
-			!DEPEND_AND_RETURN(`dependent`, DEPEND_NODE_EMITTED, `literal`, `nil`)
+			!DEPEND_AND_RETURN(`dependent`, DEPEND_NODE_EMITTED, `literal`, nil, `nil`)
 		end
 
 		return const, false
@@ -290,7 +282,10 @@ function _G.bcAllocateConstantValueForExpressionIfNew(state, expr, dependent)
 		local lambda = expr
 		assert(lambda.body) -- We should never get here for lambdas without bodies as those would have been AstTypes.
 
-		return bcAllocateConstantValueIfNew(state, typeInfo, lambda)
+		local isNew
+		lambda.valueConstant, isNew = bcAllocateConstantValueIfNew(state, typeInfo, lambda)
+
+		return lambda.valueConstant, isNew
 
 	elseif expr.nodeType == !(nodeTypes.AstStruct) then
 		local struct = expr
@@ -326,7 +321,7 @@ function _G.bcAllocateConstantValueForExpressionIfNew(state, expr, dependent)
 		local decl  = ident.declaration
 
 		if decl.queued.pipe <= !(PIPE_BYTECODE) then
-			!DEPEND_AND_RETURN(`dependent`, DEPEND_NODE_EMITTED, `decl`, `nil`)
+			!DEPEND_AND_RETURN(`dependent`, DEPEND_NODE_EMITTED, `decl`, nil, `nil`)
 		end
 
 		assert(decl.assignment) -- Should have given an error in the typer.
@@ -363,7 +358,7 @@ function _G.bcAllocateConstantValueForExpressionIfNew(state, expr, dependent)
 	else
 		errorUnhandledNodeType(state, expr)
 	end
-	errorInternal()
+	errorInternal(state, expr)
 end
 
 function _G.bcAllocateTopScopeName(state, name)
@@ -433,15 +428,20 @@ end
 --]]
 
 function _G.bcEmitForLambda(state, lambda)
-	bcAllocateConstantValueIfNew(state, lambda.inferredType, lambda)
+	lambda.valueConstant = bcAllocateConstantValueIfNew(state, lambda.inferredType, lambda)
 
-	local body = lambda.body
+	local body      = lambda.body
+	local isWaiting = false
 
-	-- @Incomplete: Wait for absolutely everything in the function to get inferred.
-	-- (There are some cases where parents infer before children it which case this isn't enough.)
-	if body and body.queued.pipe <= !(PIPE_BYTECODE) then
-		!DEPEND_AND_RETURN(`lambda`, DEPEND_NODE_EMITTED, `body`)
-	end
+	astVisitAllNodes(body, function(node)
+		if not node.queued                         then  return !(VISIT_IGNORE_CHILDREN)  end
+		if node.nodeType == !(nodeTypes.AstLambda) then  return !(VISIT_IGNORE_CHILDREN)  end
+		if node.queued.pipe >= !(PIPE_BYTECODE)    then  return                           end
+		isWaiting = true
+		!DEPEND_AND_RETURN(`lambda`, DEPEND_NODE_EMITTED, `node`, nil, toLua(VISIT_BREAK))
+	end)
+
+	if isWaiting then  return  end
 
 	if lambda.bodyIsForeign then
 		-- @Incomplete: Emit for foreign function.
