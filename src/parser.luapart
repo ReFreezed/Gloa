@@ -12,7 +12,7 @@
 	astCopy
 	astFindParent, astFindCommonParent, astHasParent, astFindInTree
 	astGetDepth
-	astGetExpressionVisuallyFurthestToTheLeft, astGetCalleeVisuallyFurthestToTheLeft
+	astGetExpressionVisuallyFurthestToThe*, astGetCalleeVisuallyFurthestToTheLeft
 	astIsOrIsInModule
 	astMoveGlobalDeclarationsToGlobalScope
 	astNewNode
@@ -3463,6 +3463,55 @@ function _G.astGetExpressionVisuallyFurthestToTheLeft(expr, onlyFollowCalls)
 	elseif expr.nodeType == !(nodeTypes.AstAccess) then
 		local access = expr
 		return astGetExpressionVisuallyFurthestToTheLeft(access.object, false)
+
+	else
+		return expr
+	end
+end
+
+-- expression = astGetExpressionVisuallyFurthestToTheRight( expression )
+function _G.astGetExpressionVisuallyFurthestToTheRight(expr)
+	if expr.nodeType == !(nodeTypes.AstCall) then
+		local call = expr
+		return call.arguments[1] and astGetExpressionVisuallyFurthestToTheRight(getLast(call.arguments)) or call
+
+	elseif expr.nodeType == !(nodeTypes.AstBinary) then
+		local binary = expr
+		return astGetExpressionVisuallyFurthestToTheRight(binary.right)
+
+	elseif expr.nodeType == !(nodeTypes.AstAccess) then
+		local access = expr
+		return astGetExpressionVisuallyFurthestToTheRight(access.member)
+
+	elseif expr.nodeType == !(nodeTypes.AstReturn) then
+		local returnNode = expr
+		return returnNode.values[1] and astGetExpressionVisuallyFurthestToTheRight(getLast(returnNode.values)) or returnNode
+
+	elseif expr.nodeType == !(nodeTypes.AstType) then
+		local typeNode = expr
+		return
+			typeNode.functionHeader and astGetExpressionVisuallyFurthestToTheRight(typeNode.functionHeader)      or
+			typeNode.arrayItemType  and astGetExpressionVisuallyFurthestToTheRight(typeNode.arrayItemType)       or
+			typeNode.arguments      and astGetExpressionVisuallyFurthestToTheRight(getLast(typeNode.arguments))  or
+			typeNode.components[1]  and astGetExpressionVisuallyFurthestToTheRight(getLast(typeNode.components)) or
+			typeNode
+
+	elseif expr.nodeType == !(nodeTypes.AstDeclaration) then
+		local decl = expr
+		return
+			decl.assignment and astGetExpressionVisuallyFurthestToTheRight(decl.assignment) or
+			decl.type       and astGetExpressionVisuallyFurthestToTheRight(decl.type)       or
+			decl.name
+
+	elseif expr.nodeType == !(nodeTypes.AstAssignment) then
+		local assignment = expr
+		return astGetExpressionVisuallyFurthestToTheRight(getLast(assignment.values))
+
+	-- @Incomplete: Handle many more nodes...
+
+	elseif expr.statements then
+		local scope = expr
+		return scope.statements[1] and astGetExpressionVisuallyFurthestToTheRight(getLast(scope.statements)) or scope
 
 	else
 		return expr

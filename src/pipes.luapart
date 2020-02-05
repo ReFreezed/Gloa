@@ -12,7 +12,7 @@
 	addDependency, getExistingDependency
 	addToQueueRecursively, pokeAndQueueUnqueuedNodeIntoTree, unqueue, unqueueChildrenRecursively, replaceQueuedNode, replaceQueuedNodeAndUnqueueOldTree, cutOutPartOfNodeTree
 	errorPipesAreStuck
-	moveToPipe, moveToNextPipe, moveTreeToNextPipe, moveToNextRelevantPipe, moveTreeToNextRelevantPipe, moveChildrenToNextRelevantPipe
+	moveToPipe, moveToNextRelevantPipe, moveTreeToNextRelevantPipe, moveChildrenToNextRelevantPipe
 
 --============================================================]]
 
@@ -22,6 +22,7 @@ local !struct"Dependency"{ -- @Cleanup: Rename to something with "wait"?
 	{`dependent`,  nil}, -- Queued
 	{`dependType`, 0},   -- DEPEND_DECLARATION|DEPEND_NODE_INFERRED|DEPEND_NODE_EMITTED|DEPEND_STRUCT_MEMBERS_READY
 	{`dependOn`,   nil}, -- string|Queued  (The value depends on what dependType is.)
+	{`extraData`,  nil}, -- AstScope|nil
 	{`next`,       nil}, -- Dependency  (This is for chaining multiple dependencies.)
 }
 
@@ -347,41 +348,28 @@ function _G.moveToPipe(state, node, targetPipe)
 	queued.pipe              = targetPipe
 end
 
-function _G.moveToNextPipe(state, node, targetPipe)
-	local queued = node.queued
+-- moveToNextRelevantPipe( state, node [, fromPipe=current ] )
+function _G.moveToNextRelevantPipe(state, node, fromPipe)
+	fromPipe = fromPipe or node.queued.pipe
 
-	if targetPipe ~= queued.pipe+1 then
-		errorInternal(
-			2, "Trying to move %s node from pipe %d (%s) to %d (%s).",
-			AST_NODE_TYPE_NAMES[node.nodeType],
-			queued.pipe, (PIPE_TITLES[queued.pipe] or "*INVALID*"),
-			targetPipe,  (PIPE_TITLES[targetPipe]  or "*INVALID*")
-		)
-	end
+	if fromPipe == !(PIPE_INFER) then
+		if isAny(node.nodeType, !(nodeTypes.AstLiteral),!(nodeTypes.AstForeign)) then
+			moveToPipe(state, node, !(PIPE_BYTECODE))
 
-	queued.pipeHighestExited = math.max(queued.pipeHighestExited, queued.pipe)
-	queued.pipe              = targetPipe
-end
-
-function _G.moveTreeToNextPipe(state, topNode, targetPipe)
-	astVisitAllNodes(topNode, function(node)
-		moveToNextPipe(state, node, targetPipe)
-	end)
-end
-
-function _G.moveToNextRelevantPipe(state, node)
-	local pipe = node.queued.pipe
-
-	if pipe == !(PIPE_INFER) then
-		if isAny(node.nodeType, !(nodeTypes.AstLiteral),!(nodeTypes.AstDeclaration),!(nodeTypes.AstAccess),!(nodeTypes.AstForeign)) then
-			moveToNextPipe(state, node, !(PIPE_BYTECODE))
+		elseif node.nodeType == !(nodeTypes.AstDeclaration) then
+			local decl = node
+			if decl.name.inferredType.tag == XXX_TYPE_TAG_NAMESPACE then
+				moveToPipe(state, decl, !(PIPE_DONE))
+			else
+				moveToPipe(state, decl, !(PIPE_BYTECODE))
+			end
 
 		elseif node.nodeType == !(nodeTypes.AstLambda) then
 			local lambda = node
 			if lambda.isPolymorphic then
 				moveToPipe(state, lambda, !(PIPE_DONE))
 			elseif lambda.body then
-				moveToNextPipe(state, lambda, !(PIPE_BYTECODE))
+				moveToPipe(state, lambda, !(PIPE_BYTECODE))
 			else
 				moveToPipe(state, lambda, !(PIPE_DONE))
 			end
@@ -390,14 +378,14 @@ function _G.moveToNextRelevantPipe(state, node)
 			moveToPipe(state, node, !(PIPE_DONE))
 		end
 
-	elseif pipe == !(PIPE_BYTECODE) then
-		moveToNextPipe(state, node, !(PIPE_DONE))
+	elseif fromPipe == !(PIPE_BYTECODE) then
+		moveToPipe(state, node, !(PIPE_DONE))
 
-	elseif pipe == !(PIPE_DONE) then
+	elseif fromPipe == !(PIPE_DONE) then
 		printerr("Warning: Trying to move nodes past PIPE_DONE!")
 
 	else
-		errorInternal()
+		errorInternal(state, node)
 	end
 end
 

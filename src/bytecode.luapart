@@ -11,7 +11,7 @@
 
 	bcAllocate*
 	bcEmit*
-	bcError, bcMessage
+	bcError, bcErrorAfter, bcMessage
 
 ----------------------------------------------------------------
 
@@ -456,7 +456,13 @@ function _G.bcEmitForLambda(state, lambda)
 
 	if not (lastStatement and lastStatement.nodeType == !(nodeTypes.AstReturn)) then
 		if lambda.inferredType.argumentTypesOut[1] then
-			bcError(state, body, "Expected a return statement at the end of the function body.") -- @Polish: Better error arrow position.
+			local errFunc, errNode
+			if lastStatement then
+				errFunc, errNode = bcErrorAfter, astGetExpressionVisuallyFurthestToTheRight(lastStatement)
+			else
+				errFunc, errNode = bcError, body
+			end
+			errFunc(state, errNode, "Expected a return statement at the end of the function body.")
 		end
 
 		local returnNode = astNewNode(AstReturn, lambda.bodyEndToken, body)
@@ -545,6 +551,10 @@ end
 
 function _G.bcError(state, node, s, ...)
 	return nodeError(state, node, "Bytecode", s, ...)
+end
+
+function _G.bcErrorAfter(state, node, s, ...)
+	return nodeErrorAfter(state, node, "Bytecode", s, ...)
 end
 
 -- bcMessage( [ outputFile=io.stdout, ] compilationState, node, label, formatString, ... )

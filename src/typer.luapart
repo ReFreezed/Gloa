@@ -132,7 +132,8 @@ local !structTypeInfo"TypeInfoList:_TypeInfo"{ -- Special type used for returns 
 	-- [1]=typeInfo1, ...
 }
 
-_G.TYPE_TAG_NAMES = !(typeTagNames)
+_G.TYPE_TAG_NAMES         = !(typeTagNames)
+_G.XXX_TYPE_TAG_NAMESPACE = !(typeTags.TypeInfoNamespace)
 
 
 
@@ -975,9 +976,9 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 			-- Stay in the current pipe.
 
 		else
-			moveToPipe(state, identOrVararg, !(PIPE_DONE))
+			moveToNextRelevantPipe(state, identOrVararg)
 			if ident then
-				simplifyExpressionIfConstant(state, ident) -- @Check: Are we in the right pipe after simplification?
+				simplifyExpressionIfConstant(state, ident)
 			end
 		end
 
@@ -995,7 +996,7 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 		end
 		identOrVararg.inferredType = identInDecl.inferredType
 
-		moveToPipe(state, identOrVararg, !(PIPE_DONE))
+		moveToNextRelevantPipe(state, identOrVararg)
 		return
 	end
 
@@ -1237,7 +1238,7 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 		end
 	!end
 
-	moveToPipe(state, identOrVararg, !(PIPE_DONE))
+	moveToNextRelevantPipe(state, identOrVararg)
 end
 
 !NODE_INFERRER `function nodeInferrers.AstIdentifier(state, ident)`
@@ -1443,7 +1444,7 @@ end
 	typeNode.inferredType    = typeInfo            or errorInternal()
 	typeNode.declaration     = decl
 
-	moveToPipe(state, typeNode, !(PIPE_DONE))
+	moveToNextRelevantPipe(state, typeNode)
 end
 
 local function getArgumentNodeForError(callOrReturnNode, valueIndex, valueExpr)
@@ -2194,7 +2195,7 @@ end
 	call.inferredType              = getTypeInfoForList(state, calleeTypeInfo.argumentTypesOut)
 	call.couldBeTypeWithParameters = false
 
-	moveToPipe(state, call, !(PIPE_DONE))
+	moveToNextRelevantPipe(state, call)
 end
 
 !NODE_INFERRER `function nodeInferrers.AstReturn(state, returnNode)`
@@ -2227,7 +2228,7 @@ end
 	end
 
 	checkIfValuesMatchArgumentTypes(state, returnNode, returnNode.values, typeInfos, lambda.inferredType.argumentTypesOut)
-	moveToPipe(state, returnNode, !(PIPE_DONE))
+	moveToNextRelevantPipe(state, returnNode)
 end
 
 !NODE_INFERRER `function nodeInferrers.AstDeclaration(state, decl)`
@@ -2318,11 +2319,7 @@ end
 		typeError(state, identOrVararg, "Variables in type group '%s' must have a specified initial value.", TYPE_TAG_NAMES[identOrVararg.inferredType.tag])
 	end
 
-	if decl.name.inferredType.tag == !(typeTags.TypeInfoNamespace) then
-		moveToPipe(state, decl, !(PIPE_DONE))
-	else
-		moveToPipe(state, decl, !(PIPE_BYTECODE))
-	end
+	moveToNextRelevantPipe(state, decl)
 end
 
 !!local LITERAL_TYPE_TO_BUILTIN_TYPE_NAME = {
@@ -2345,7 +2342,7 @@ _G.!(local )!!BUILTIN_TYPE_TAG_TO_LITERAL_TYPE = {
 
 	literal.inferredType = getTypeInfoForBuiltinType(state, typeName)
 
-	moveToNextPipe(state, literal, !(PIPE_BYTECODE))
+	moveToNextRelevantPipe(state, literal)
 end
 
 !NODE_INFERRER `function nodeInferrers.AstUnary(state, unary)`
@@ -2390,7 +2387,7 @@ end
 
 	unary.inferredType = typeInfo
 
-	moveToPipe(state, unary, !(PIPE_DONE))
+	moveToNextRelevantPipe(state, unary)
 	simplifyExpressionIfConstant(state, unary)
 end
 
@@ -2557,7 +2554,7 @@ end
 
 	binary.inferredType = typeInfo
 
-	moveToPipe(state, binary, !(PIPE_DONE))
+	moveToNextRelevantPipe(state, binary)
 	simplifyExpressionIfConstant(state, binary)
 end
 
@@ -2635,7 +2632,7 @@ end
 		end
 
 		access.inferredType = getTypeInfoForBuiltinType(state, "any")
-		moveToPipe(state, access, !(PIPE_DONE))
+		moveToNextRelevantPipe(state, access)
 		return
 
 	elseif typeInfoObject.tag == !(typeTags.TypeInfoArray) then
@@ -2652,7 +2649,7 @@ end
 			access.inferredType = arraySig.itemType
 
 			if not (isExpressionConstant(state, access.object) and isExpressionConstant(state, access.member)) then
-				moveToPipe(state, access, !(PIPE_DONE))
+				moveToNextRelevantPipe(state, access)
 				return
 			end
 
@@ -2677,7 +2674,7 @@ end
 				typeError(state, indexLiteral, "No item at index %d in constant array. (Length is %d)", i, #tableNode.fields)
 			end
 
-			moveToPipe(state, access, !(PIPE_DONE))
+			moveToNextRelevantPipe(state, access)
 
 		-- elseif not isLeftValue and typeInfoMember.tag == !(typeTags.TypeInfoString) then
 		-- 	local abstractMemberLiteral = access.member
@@ -2690,9 +2687,6 @@ end
 
 		return
 	end
-
-	-- @Cleanup @Robustness: The way we move things in pipes (after astCopy() and elsewhere)
-	-- is not very good. Use moveToNextRelevantPipe()!
 
 	if typeInfoObject.tag == !(typeTags.TypeInfoStruct) or (typeInfoRepresented and typeInfoRepresented.tag == !(typeTags.TypeInfoStruct)) then
 		local structInfo = typeInfoRepresented or typeInfoObject
@@ -2714,7 +2708,7 @@ end
 			access.inferredType    = decl.name.inferredType or errorInternal()
 			access.representedType = decl.valueTypeInfo -- May be nil.
 
-			moveToPipe(state, access, !(PIPE_DONE))
+			moveToNextRelevantPipe(state, access)
 			return
 		end
 
@@ -2797,7 +2791,7 @@ end
 		assert(replacement) -- Constants must be simplified!
 
 		replaceQueuedNodeAndUnqueueOldTree(state, access, replacement)
-		moveToPipe(state, replacement, !(PIPE_DONE))
+		moveToNextRelevantPipe(state, replacement, !(PIPE_INFER))
 
 	elseif typeInfoObject.tag == !(typeTags.TypeInfoEnum) or (typeInfoRepresented and typeInfoRepresented.tag == !(typeTags.TypeInfoEnum)) then
 		local memberLiteral = access.member
@@ -3041,14 +3035,14 @@ end
 		end
 	end
 
-	moveToPipe(state, tableNode, !(PIPE_DONE)) -- Note: Bytecode for table-likes is generated by declarations.
+	moveToNextRelevantPipe(state, tableNode)
 end
 
 !NODE_INFERRER `function nodeInferrers.AstArgument(state, arg)`
 	if arg.declaration.queued.pipe <= !(PIPE_INFER) then
 		!DEPEND_AND_RETURN(`arg`, DEPEND_NODE_INFERRED, `arg.declaration`)
 	end
-	moveToPipe(state, arg, !(PIPE_DONE))
+	moveToNextRelevantPipe(state, arg)
 end
 
 !NODE_INFERRER `function nodeInferrers.AstArguments(state, args)`
@@ -3057,7 +3051,7 @@ end
 			!DEPEND_AND_RETURN(`args`, DEPEND_NODE_INFERRED, `arg`)
 		end
 	end
-	moveToPipe(state, args, !(PIPE_DONE))
+	moveToNextRelevantPipe(state, args)
 end
 
 !NODE_INFERRER `function nodeInferrers.AstLambda(state, lambda)`
@@ -3112,8 +3106,8 @@ end
 		typeOf.representedType = varargSig.itemType
 	end
 
-	moveToPipe(state, typeOf, !(PIPE_DONE))
-	simplifyTypeExpression(state, typeOf, typeOf.representedType) -- @Check: Are we in the right pipe after simplification?
+	moveToNextRelevantPipe(state, typeOf)
+	simplifyTypeExpression(state, typeOf, typeOf.representedType)
 end
 
 !NODE_INFERRER `function nodeInferrers.AstCast(state, cast)`
@@ -3139,7 +3133,7 @@ end
 	local exprTypeInfo = adjustTypeToOne(state, cast.expression, cast.expression.inferredType, true)
 
 	if castTypeInfo == exprTypeInfo then
-		moveToPipe(state, cast, !(PIPE_DONE))
+		moveToPipe(state, cast, cast.expression.queued.pipe) -- @Cleanup: Maybe cutOutPartOfNodeTree()/replaceQueuedNode() should do this.
 		cutOutPartOfNodeTree(state, cast, cast.expression)
 		return
 
@@ -3179,7 +3173,7 @@ end
 
 	cast.inferredType = castTypeInfo
 
-	moveToPipe(state, cast, !(PIPE_DONE))
+	moveToNextRelevantPipe(state, cast)
 	simplifyExpressionIfConstant(state, cast)
 end
 
@@ -3216,14 +3210,14 @@ end
 
 	-- @Incomplete: Check that !must args from functions have an assignment target.
 
-	moveToPipe(state, assignment, !(PIPE_DONE))
+	moveToNextRelevantPipe(state, assignment)
 end
 
 !NODE_INFERRER `function nodeInferrers.AstBreak(state, breakNode)`
-	moveToPipe(state, breakNode, !(PIPE_DONE))
+	moveToNextRelevantPipe(state, breakNode)
 end
 !NODE_INFERRER `function nodeInferrers.AstContinue(state, continue)`
-	moveToPipe(state, continue, !(PIPE_DONE))
+	moveToNextRelevantPipe(state, continue)
 end
 
 -- !NODE_INFERRER `function nodeInferrers.AstDefer(state, defer)`
@@ -3266,7 +3260,7 @@ end
 	import.fileScope    = itemWith1(globalScope.fileScopes, "path", path) or errorInternal(path)
 	import.inferredType = getTypeInfoForNamespace(state, import.fileScope)
 
-	moveToPipe(state, import, !(PIPE_DONE))
+	moveToNextRelevantPipe(state, import)
 end
 
 !NODE_INFERRER `function nodeInferrers.AstUsing(state, using)`
@@ -3340,7 +3334,7 @@ end
 
 	using.scope = usingScope
 
-	moveToPipe(state, using, !(PIPE_DONE))
+	moveToNextRelevantPipe(state, using)
 end
 
 !NODE_INFERRER `function nodeInferrers.AstForeign(state, foreign)`
@@ -3354,7 +3348,7 @@ end
 	validateForeignSource(state, foreign.source, foreign.sourceName, foreign)
 	foreign.sourceId = foreign.source.." "..foreign.sourceName
 
-	moveToPipe(state, foreign, !(PIPE_BYTECODE))
+	moveToNextRelevantPipe(state, foreign)
 end
 
 !NODE_INFERRER `function nodeInferrers.AstBake(state, bake)`
@@ -3368,7 +3362,7 @@ end
 	end
 
 	bake.inferredType = bake.name.inferredType
-	moveToPipe(state, bake, !(PIPE_DONE))
+	moveToNextRelevantPipe(state, bake)
 end
 
 !NODE_INFERRER `function nodeInferrers.AstDebug(state, debugNode)`
@@ -3401,7 +3395,7 @@ end
 		errorInternal(state, debugNode)
 	end
 
-	moveToPipe(state, debugNode, !(PIPE_DONE))
+	moveToNextRelevantPipe(state, debugNode)
 end
 
 local function inferIfOrWhile(state, ifOrWhile)
@@ -3421,7 +3415,7 @@ local function inferIfOrWhile(state, ifOrWhile)
 
 	-- @Optimize: Remove/replace the branch if the condition is statically known.
 
-	moveToPipe(state, ifOrWhile, !(PIPE_DONE))
+	moveToNextRelevantPipe(state, ifOrWhile)
 end
 
 !NODE_INFERRER `function nodeInferrers.AstIf(state, ifBranch)`
@@ -3496,7 +3490,7 @@ end
 		statement.queued.key       = i
 	end
 
-	moveToPipe(state, staticIf, !(PIPE_DONE)) -- Not sure if needed.
+	moveToPipe(state, staticIf, !(PIPE_DONE)) -- Not sure if needed. @Cleanup
 	unqueue(staticIf) -- @Robustness: Check if the correct thing happens for things waiting on staticIf (i.e. the scope).
 end
 
@@ -3538,7 +3532,7 @@ end
 	end
 
 	conditional.inferredType = typeInfoTrue
-	moveToPipe(state, conditional, !(PIPE_DONE))
+	moveToNextRelevantPipe(state, conditional)
 
 	-- @Optimize: Remove/replace the branch if the condition is statically known.
 end
@@ -3557,7 +3551,7 @@ local function addDeclarationInForLoop(state, forLoop, name, typeInfo)
 	table.insert(forLoop.declarations, decl)
 
 	addToQueueRecursively(state, decl, forLoop, #forLoop, !(PIPE_DONE))
-	moveToPipe(state, decl, !(PIPE_BYTECODE))
+	moveToNextRelevantPipe(state, decl, !(PIPE_INFER))
 end
 
 !NODE_INFERRER `function nodeInferrers.AstFor(state, forLoop)`
@@ -3741,7 +3735,7 @@ end
 		end
 	end
 
-	moveToPipe(state, forLoop, !(PIPE_DONE))
+	moveToNextRelevantPipe(state, forLoop)
 end
 
 local function checkForRecursiveStruct(state, declThatWeAreChecking, memberPath, member, structInfo, parentStructInfo)
@@ -3788,7 +3782,7 @@ end
 		struct.representedType = structInfo
 		struct.inferredType    = getTypeInfoForBuiltinType(state, "type")
 
-		moveToPipe(state, struct, !(PIPE_DONE))
+		moveToNextRelevantPipe(state, struct)
 		return
 	end
 
@@ -3824,7 +3818,7 @@ end
 	end
 	structInfo.hasMembers = true
 
-	moveToPipe(state, struct, !(PIPE_DONE))
+	moveToNextRelevantPipe(state, struct)
 end
 
 !NODE_INFERRER `function nodeInferrers.AstEnum(state, enum)`
@@ -3890,7 +3884,7 @@ end
 	enum.representedType = enumInfo
 	enum.inferredType    = getTypeInfoForBuiltinType(state, "type")
 
-	moveToPipe(state, enum, !(PIPE_DONE))
+	moveToNextRelevantPipe(state, enum)
 end
 
 !NODE_INFERRER `function nodeInferrers.AstFileScope(state, fileScope)`
@@ -3900,7 +3894,7 @@ end
 		end
 	end
 
-	moveToPipe(state, fileScope, !(PIPE_DONE))
+	moveToNextRelevantPipe(state, fileScope)
 end
 
 !NODE_INFERRER `function nodeInferrers.AstGlobalScope(state, globalScope)`
@@ -3910,7 +3904,7 @@ end
 		end
 	end
 
-	moveToPipe(state, globalScope, !(PIPE_DONE))
+	moveToNextRelevantPipe(state, globalScope)
 end
 
 !NODE_INFERRER `function nodeInferrers.AstBlock(state, block)`
@@ -3919,7 +3913,7 @@ end
 			!DEPEND_AND_RETURN(`block`, DEPEND_NODE_INFERRED, `statement`)
 		end
 	end
-	moveToPipe(state, block, !(PIPE_DONE))
+	moveToNextRelevantPipe(state, block)
 end
 
 function _G.inferNode(state, node)
@@ -4310,7 +4304,7 @@ local function simplifyCast(state, cast)
 		literal.inferredType = castTypeInfo
 
 		replaceQueuedNodeAndUnqueueOldTree(state, cast, literal)
-		moveToPipe(state, literal, !(PIPE_BYTECODE))
+		moveToNextRelevantPipe(state, literal, !(PIPE_INFER))
 
 	-- float -> int
 	elseif exprTypeInfo.tag == !(typeTags.TypeInfoFloat) and castTypeInfo.tag == !(typeTags.TypeInfoInt) then
@@ -4323,7 +4317,7 @@ local function simplifyCast(state, cast)
 		literal.inferredType = castTypeInfo
 
 		replaceQueuedNodeAndUnqueueOldTree(state, cast, literal)
-		moveToPipe(state, literal, !(PIPE_BYTECODE))
+		moveToNextRelevantPipe(state, literal, !(PIPE_INFER))
 
 	-- (numeric) -> bool
 	elseif isTypeNumeric(exprTypeInfo) and castTypeInfo.tag == !(typeTags.TypeInfoBool) then
@@ -4336,7 +4330,7 @@ local function simplifyCast(state, cast)
 		literal.inferredType = castTypeInfo
 
 		replaceQueuedNodeAndUnqueueOldTree(state, cast, literal)
-		moveToPipe(state, literal, !(PIPE_BYTECODE))
+		moveToNextRelevantPipe(state, literal, !(PIPE_INFER))
 
 	-- string -> bool
 	elseif exprTypeInfo.tag == !(typeTags.TypeInfoString) and castTypeInfo.tag == !(typeTags.TypeInfoBool) then
@@ -4349,7 +4343,7 @@ local function simplifyCast(state, cast)
 		literal.inferredType = castTypeInfo
 
 		replaceQueuedNodeAndUnqueueOldTree(state, cast, literal)
-		moveToPipe(state, literal, !(PIPE_BYTECODE))
+		moveToNextRelevantPipe(state, literal, !(PIPE_INFER))
 
 	-- array -> bool
 	elseif exprTypeInfo.tag == !(typeTags.TypeInfoArray) and castTypeInfo.tag == !(typeTags.TypeInfoBool) then
@@ -4362,7 +4356,7 @@ local function simplifyCast(state, cast)
 		literal.inferredType = castTypeInfo
 
 		replaceQueuedNodeAndUnqueueOldTree(state, cast, literal)
-		moveToPipe(state, literal, !(PIPE_BYTECODE))
+		moveToNextRelevantPipe(state, literal, !(PIPE_INFER))
 
 	-- enum -> enumMemberType (int, float, string, bool or type)
 	elseif exprTypeInfo.tag == !(typeTags.TypeInfoEnum) and isTypeCompatibleWith(exprTypeInfo.memberTypeInfo, castTypeInfo) then
@@ -4399,7 +4393,7 @@ local function simplifyCast(state, cast)
 			end
 
 			replaceQueuedNodeAndUnqueueOldTree(state, cast, literalCopy)
-			moveToPipe(state, literalCopy, !(PIPE_BYTECODE))
+			moveToNextRelevantPipe(state, literalCopy, !(PIPE_INFER))
 
 		elseif castTypeInfo.tag == !(typeTags.TypeInfoType) then
 			assert(castIsDirect)
@@ -4411,7 +4405,7 @@ local function simplifyCast(state, cast)
 
 			addUnqueuedChildrenToQueueRecursively(state, typeNodeCopy, !(PIPE_DONE)) -- Only does something if the type has parameters.
 			replaceQueuedNodeAndUnqueueOldTree(state, cast, typeNodeCopy)
-			moveToPipe(state, typeNodeCopy, !(PIPE_DONE))
+			moveToNextRelevantPipe(state, typeNodeCopy, !(PIPE_INFER))
 
 		else
 			errorInternal(state, cast, "Incomplete: Handle casting enum to %s.", getFriendlyTypeInfoName(castTypeInfo))
@@ -4449,7 +4443,7 @@ local function simplifyUnary(state, unary)
 		literal.inferredType = typeInfo
 
 		replaceQueuedNodeAndUnqueueOldTree(state, unary, literal)
-		moveToPipe(state, literal, !(PIPE_BYTECODE))
+		moveToNextRelevantPipe(state, literal, !(PIPE_INFER))
 	!end
 
 	elseif unary.operation == "not" then
@@ -4462,7 +4456,7 @@ local function simplifyUnary(state, unary)
 		literal.inferredType = typeInfo
 
 		replaceQueuedNodeAndUnqueueOldTree(state, unary, literal)
-		moveToPipe(state, literal, !(PIPE_BYTECODE))
+		moveToNextRelevantPipe(state, literal, !(PIPE_INFER))
 
 	elseif unary.operation == "#" then
 		local tableNode = followIdentifiersToConstantValue(unary.expression)
@@ -4487,7 +4481,7 @@ local function simplifyUnary(state, unary)
 		literal.inferredType = typeInfo
 
 		replaceQueuedNodeAndUnqueueOldTree(state, unary, literal)
-		moveToPipe(state, literal, !(PIPE_BYTECODE))
+		moveToNextRelevantPipe(state, literal, !(PIPE_INFER))
 
 	else
 		errorUnhandledNodeType(state, unary)
@@ -4528,7 +4522,7 @@ local function simplifyBinary(state, binary)
 		literal.inferredType = typeInfo
 
 		replaceQueuedNodeAndUnqueueOldTree(state, binary, literal)
-		moveToPipe(state, literal, !(PIPE_BYTECODE))
+		moveToNextRelevantPipe(state, literal, !(PIPE_INFER))
 	!end
 
 	elseif binary.operation == "/" then
@@ -4540,7 +4534,7 @@ local function simplifyBinary(state, binary)
 		literal.inferredType = typeInfo
 
 		replaceQueuedNodeAndUnqueueOldTree(state, binary, literal)
-		moveToPipe(state, literal, !(PIPE_BYTECODE))
+		moveToNextRelevantPipe(state, literal, !(PIPE_INFER))
 
 	elseif binary.operation == "//" then
 		!!(ASSERT_BOTH_OPERANDS_NUMERIC_LITERALS)
@@ -4551,7 +4545,7 @@ local function simplifyBinary(state, binary)
 		literal.inferredType = typeInfo
 
 		replaceQueuedNodeAndUnqueueOldTree(state, binary, literal)
-		moveToPipe(state, literal, !(PIPE_BYTECODE))
+		moveToNextRelevantPipe(state, literal, !(PIPE_INFER))
 
 	!for _, opComparison in ipairs{"<",">","<=",">="} do
 	elseif binary.operation == !(opComparison) then
@@ -4566,7 +4560,7 @@ local function simplifyBinary(state, binary)
 		literal.inferredType = typeInfo
 
 		replaceQueuedNodeAndUnqueueOldTree(state, binary, literal)
-		moveToPipe(state, literal, !(PIPE_BYTECODE))
+		moveToNextRelevantPipe(state, literal, !(PIPE_INFER))
 	!end
 
 	!for _, opEquality in ipairs{"==","~="} do
@@ -4596,7 +4590,7 @@ local function simplifyBinary(state, binary)
 		literal.inferredType = typeInfo
 
 		replaceQueuedNodeAndUnqueueOldTree(state, binary, literal)
-		moveToPipe(state, literal, !(PIPE_BYTECODE))
+		moveToNextRelevantPipe(state, literal, !(PIPE_INFER))
 	!end
 
 	!for _, opLogical in ipairs{"and","or"} do
@@ -4612,7 +4606,7 @@ local function simplifyBinary(state, binary)
 		literal.inferredType = typeInfo
 
 		replaceQueuedNodeAndUnqueueOldTree(state, binary, literal)
-		moveToPipe(state, literal, !(PIPE_BYTECODE))
+		moveToNextRelevantPipe(state, literal, !(PIPE_INFER))
 	!end
 
 	elseif binary.operation == ".." then
@@ -4627,7 +4621,7 @@ local function simplifyBinary(state, binary)
 		literal.inferredType = typeInfo
 
 		replaceQueuedNodeAndUnqueueOldTree(state, binary, literal)
-		moveToPipe(state, literal, !(PIPE_BYTECODE))
+		moveToNextRelevantPipe(state, literal, !(PIPE_INFER))
 
 	else
 		errorUnhandledNodeType(state, binary)
@@ -4643,10 +4637,11 @@ function _G.simplifyExpressionIfConstant(state, expr)
 			and expr.declaration.assignment.values[expr.declaration.assignmentIndex].nodeType == !(nodeTypes.AstForeign)
 		then
 			local ident       = expr
-			local foreignCopy = astCopy(ident.declaration.assignment.values[ident.declaration.assignmentIndex], ident.token)
+			local foreign     = ident.declaration.assignment.values[ident.declaration.assignmentIndex]
+			local foreignCopy = astCopy(foreign, ident.token)
 
 			replaceQueuedNodeAndUnqueueOldTree(state, ident, foreignCopy)
-			moveToPipe(state, foreignCopy, !(PIPE_DONE))
+			moveToNextRelevantPipe(state, foreignCopy, !(PIPE_INFER))
 		end
 
 	elseif expr.nodeType == !(nodeTypes.AstIdentifier) then
@@ -4671,21 +4666,15 @@ function _G.simplifyExpressionIfConstant(state, expr)
 
 		-- At this point we should have a literal to copy. Hopefully the expression we copy
 		-- has been simplified into a literal if it wasn't a literal to begin with.
-		local valueExpr = getAssignmentValue(state, decl.name, decl.assignment.values, decl.assignmentIndex, nil, nil, nil)
-		if valueExpr.nodeType ~= !(nodeTypes.AstLiteral) then
-			errorInternal(state, valueExpr)
+		local literal = getAssignmentValue(state, decl.name, decl.assignment.values, decl.assignmentIndex, nil, nil, nil)
+		if literal.nodeType ~= !(nodeTypes.AstLiteral) then
+			errorInternal(state, literal)
 		end
 
-		local copy = astCopy(valueExpr, ident.token)
+		local copy = astCopy(literal, ident.token)
 
 		replaceQueuedNodeAndUnqueueOldTree(state, ident, copy)
-		moveToPipe(state, copy, !(PIPE_BYTECODE))
-		--[[ Not needed here:
-		addUnqueuedChildrenToQueueRecursively(state, copy, !(PIPE_INFER))
-		replaceQueuedNodeAndUnqueueOldTree(state, ident, copy)
-		moveToPipe(state, copy, !(PIPE_INFER)) -- Revert any previous move before we call moveTreeToNextRelevantPipe().
-		moveTreeToNextRelevantPipe(state, copy)
-		--]]
+		moveToNextRelevantPipe(state, copy, !(PIPE_INFER))
 
 	elseif expr.nodeType == !(nodeTypes.AstCast) then
 		simplifyCast(state, expr)
