@@ -135,6 +135,7 @@ local !structTypeInfo"TypeInfoList:_TypeInfo"{ -- Special type used for returns 
 }
 
 _G.TYPE_TAG_NAMES         = !(typeTagNames)
+_G.XXX_TYPE_TAG_FUNCTION  = !(typeTags.TypeInfoFunction)
 _G.XXX_TYPE_TAG_NAMESPACE = !(typeTags.TypeInfoNamespace)
 
 
@@ -2636,7 +2637,6 @@ end
 
 		access.inferredType = getTypeInfoForBuiltinType(state, "any")
 		moveToNextRelevantPipe(state, access)
-		return
 
 	elseif typeInfoObject.tag == !(typeTags.TypeInfoArray) then
 		local arraySig = typeInfoObject
@@ -2688,10 +2688,7 @@ end
 			typeError(state, access.member, "Expected an array index of type int. (Got %s)", getFriendlyTypeInfoName(typeInfoMember))
 		end
 
-		return
-	end
-
-	if typeInfoObject.tag == !(typeTags.TypeInfoStruct) or (typeInfoRepresented and typeInfoRepresented.tag == !(typeTags.TypeInfoStruct)) then
+	elseif typeInfoObject.tag == !(typeTags.TypeInfoStruct) or (typeInfoRepresented and typeInfoRepresented.tag == !(typeTags.TypeInfoStruct)) then
 		local structInfo = typeInfoRepresented or typeInfoObject
 		if not structInfo.hasMembers then
 			!DEPEND_AND_RETURN(`access`, DEPEND_STRUCT_MEMBERS_READY, `structInfo`)
@@ -2812,8 +2809,6 @@ end
 		assert(decl.isConstant)
 
 		local ident = astCopy(decl.name, access.token, access.parent)
-
-		-- addUnqueuedChildrenToQueueRecursively(state, ident, !(PIPE_BYTECODE)) -- Not needed for identifiers.
 		replaceQueuedNodeAndUnqueueOldTree(state, access, ident)
 		-- Stay in the current pipe so we get simplified. (Needed? Or maybe we can @Speed things up here?)
 
@@ -2833,8 +2828,6 @@ end
 		end
 
 		local ident = astCopy(decl.name, access.token, access.parent)
-
-		-- addUnqueuedChildrenToQueueRecursively(state, ident, !(PIPE_BYTECODE)) -- Not needed for identifiers.
 		replaceQueuedNodeAndUnqueueOldTree(state, access, ident)
 		-- Stay in the current pipe so we get simplified. (Needed? Or maybe we can @Speed things up here?)
 
@@ -2844,7 +2837,8 @@ end
 end
 
 !NODE_INFERRER `function nodeInferrers.AstTable(state, tableNode)`
-	local typeInfoExpected = getExpectedTypeInfo(state, tableNode, false, "constructor")
+	-- Note: tableNode.inferredType may get set before all child nodes are inferred.
+	local typeInfoExpected = tableNode.inferredType or getExpectedTypeInfo(state, tableNode, false, "constructor", tableNode)
 	if not typeInfoExpected then  return  end
 
 	if typeInfoExpected.tag == !(typeTags.TypeInfoAny) and tableNode.parent.nodeType == !(nodeTypes.AstTable) then
@@ -3342,7 +3336,7 @@ end
 
 !NODE_INFERRER `function nodeInferrers.AstForeign(state, foreign)`
 	-- @Robustness: Limit places the "expected" type can be inferred from.
-	local typeInfoExpected = getExpectedTypeInfo(state, foreign, true, "foreign value")
+	local typeInfoExpected = getExpectedTypeInfo(state, foreign, true, "foreign value", foreign)
 	if not typeInfoExpected then  return  end
 
 	foreign.inferredType = typeInfoExpected
@@ -3938,9 +3932,10 @@ local function prepareForRunning(state, runNode, unit, visited)
 				if runNode.queued.waitingOn then  return !(VISIT_BREAK)  end
 
 				local assignment = decl.assignment
+				local valueExpr  = assignment and assignment.values[decl.assignmentIndex]
 
-				if assignment then
-					prepareForRunning(state, runNode, assignment, visited)
+				if valueExpr then
+					prepareForRunning(state, runNode, valueExpr, visited)
 					if runNode.queued.waitingOn then  return !(VISIT_BREAK)  end
 				end
 			end
@@ -4001,15 +3996,14 @@ local function createRunReplacementFromTypeAndLuaValue(state, runNode, parent, t
 		local tableNode = astNewNode(AstTable, runNode.token, parent)
 		local anyType   = getTypeInfoForBuiltinType(state, "any")
 
-		-- @Robustness: Make sure the key sorting is consistent and doesn't crash if keys are of different Lua types.
-		for k, v in pairsSorted(t) do
+		for k, v in pairsSorted(t, naturalCompare) do
 			local tableField    = TableField()
 			tableField.key      = createRunReplacementFromTypeAndLuaValue(state, runNode, tableNode, anyType, k)
 			tableField.value    = createRunReplacementFromTypeAndLuaValue(state, runNode, tableNode, anyType, v)
 			table.insert(tableNode.fields, tableField)
 		end
 
-		tableNode.inferredType = arraySig
+		tableNode.inferredType = getTypeInfoForBuiltinType(state, "table")
 		return tableNode
 
 	elseif tag == !(typeTags.TypeInfoArray) then
@@ -4069,6 +4063,11 @@ end
 	if lambda.queued.pipe <= !(PIPE_BYTECODE) then
 		!DEPEND_AND_RETURN(`runNode`, DEPEND_NODE_EMITTED, `lambda`)
 	end
+	for _, const in ipairs(state.constants) do
+		if not const.isReady then
+			!DEPEND_AND_RETURN(`runNode`, DEPEND_CONSTANT_READY, `const`)
+		end
+	end
 
 	local visited = {}
 
@@ -4081,7 +4080,7 @@ end
 	local newTopScopeDeclarations = {}
 
 	for _, const in ipairs(state.constants) do
-		if const.isReady and not state.runnerWrittenObjects[const] then
+		if not state.runnerWrittenObjects[const] then
 			state.runnerWrittenObjects[const] = true
 			table.insert(newConstants, const)
 		end
@@ -4109,6 +4108,7 @@ end
 	writeFunctionObjects               (state, writer, newConstants)
 	writeTopScopeDeclarations          (state, writer, newTopScopeDeclarations)
 
+	-- !ifDEBUG `print(writer.file:getBuffer())`
 	runnerRunBufferAsChunk(state)
 
 	local constName = lambda.valueConstant.name
@@ -4646,6 +4646,11 @@ local function simplifyCast(state, cast)
 			errorInternal(state, cast, "Incomplete: Handle casting enum to %s.", getFriendlyTypeInfoName(castTypeInfo))
 		end
 
+	-- (whatever) -> any
+	-- any -> (whatever)
+	elseif exprTypeInfo.tag == !(typeTags.TypeInfoAny) or castTypeInfo.tag == !(typeTags.TypeInfoAny) then
+		-- void
+
 	else
 		errorInternal(
 			state, cast,
@@ -5048,13 +5053,19 @@ end
 
 
 -- Returns nil if we're now waiting for something. Errors on failure.
-function _G.getExpectedTypeInfo(state, node, strict, expectantTerm)
-	!local NO_EXPECTATION = `typeError(state, node, "Could not determine the type of this %s.", expectantTerm)`
+function _G.getExpectedTypeInfo(state, node, strict, expectantTerm, nodeForError)
+	!(
+	local NO_EXPECTATION = 'typeError(state, nodeForError, "Could not determine the type of this %s.", expectantTerm)'
+	if DEBUG then
+		NO_EXPECTATION = 'astPrintTree(node) ; '..NO_EXPECTATION
+	end
+	)
 	local parentNodeType  = node.parent.nodeType
 
 	if parentNodeType == !(nodeTypes.AstAssignment) then
 		local assignment = node.parent
-		local i          = indexOf(assignment.values, node) or !!(NO_EXPECTATION)
+		local i          = indexOf(assignment.values, node)
+		if not i then  !!(NO_EXPECTATION)  end
 
 		if assignment.forDeclaration then
 			local decl = assignment.declarations[i] or errorInternal()
@@ -5152,10 +5163,12 @@ function _G.getExpectedTypeInfo(state, node, strict, expectantTerm)
 		local returnNode = node.parent
 
 		if returnNode.runDirective then
-			return getExpectedTypeInfo(state, returnNode.runDirective, strict, expectantTerm)
+			return getExpectedTypeInfo(state, returnNode.runDirective, strict, expectantTerm, nodeForError)
 		end
 
-		local i       = indexOf(returnNode.values, node) or !!(NO_EXPECTATION)
+		local i = indexOf(returnNode.values, node)
+		if not i then  !!(NO_EXPECTATION)  end
+
 		local lambda  = astFindParent(returnNode, !(nodeTypes.AstLambda))
 		local funcSig = lambda.inferredType
 
@@ -5185,8 +5198,10 @@ function _G.getExpectedTypeInfo(state, node, strict, expectantTerm)
 		!!(NO_EXPECTATION)
 
 	elseif parentNodeType == !(nodeTypes.AstCall) then
-		local call           = node.parent
-		local i              = indexOf(call.arguments, node) or !!(NO_EXPECTATION)
+		local call = node.parent
+		local i    = indexOf(call.arguments, node)
+		if not i then  !!(NO_EXPECTATION)  end
+
 		local calleeTypeInfo = call.callee.inferredType
 
 		if not calleeTypeInfo then

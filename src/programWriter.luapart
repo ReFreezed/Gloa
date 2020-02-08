@@ -653,6 +653,8 @@ function _G.writeExpression(state, writer, expr)
 			file:write(")")
 		end
 
+	elseif expr.inferredType.tag == !(typeTags.TypeInfoNamespace) then
+		nodeError(state, expr, "ProgramWriter", "Invalid place for a namespace.")
 	else
 		errorUnhandledNodeType(state, expr)
 	end
@@ -1275,7 +1277,23 @@ function _G.writeConstantValue(state, writer, const)
 		file:write("}")
 
 	elseif tag == !(typeTags.TypeInfoTable) then
-		errorInternal("@Incomplete: Write table constant.")
+		local tableNode = const.value
+
+		file:write("{")
+		for i, tableField in ipairs(tableNode.fields) do
+			if i > 1 then  file:write(", ")  end
+			if isExpressionLiteralStringAndValidLuaIdentifier(tableField.key) then
+				local stringLiteral = tableField.key
+				file:write(stringLiteral.value)
+			else
+				file:write("[")
+				writeExpression(state, writer, tableField.key)
+				file:write("]")
+			end
+			file:write("=")
+			writeExpression(state, writer, tableField.value)
+		end
+		file:write("}")
 
 	elseif tag == !(typeTags.TypeInfoEnum) then
 		errorInternal("@Incomplete: Write enum constant.") -- Do we ever get here? I think not.

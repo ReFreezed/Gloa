@@ -242,6 +242,7 @@ function _G.bcAllocateConstantValueIfNew(state, typeInfo, v)
 	-- Note: Simple constants (like ints) don't need a referencable name as we write those values directly everywhere.
 	if isObject then
 		if tag == !(typeTags.TypeInfoFunction) then
+			assert(not v.isPolymorphic)
 			state.functionN = state.functionN+1
 			const.name      = "_F"..state.functionN
 		else
@@ -283,6 +284,7 @@ function _G.bcAllocateConstantValueForExpressionIfNew(state, expr, dependent)
 	elseif expr.nodeType == !(nodeTypes.AstLambda) then
 		local lambda = expr
 		assert(lambda.body) -- We should never get here for lambdas without bodies as those would have been AstTypes.
+		assert(not lambda.isPolymorphic)
 
 		local isNew
 		lambda.valueConstant, isNew = bcAllocateConstantValueIfNew(state, typeInfo, lambda)
@@ -502,7 +504,13 @@ end
 function _G.bcEmitForDeclaration(state, decl)
 	if decl.isConstant then
 		local valueExpr = decl.assignment.values[decl.assignmentIndex] or errorInternal()
-		local const     = bcAllocateConstantValueForExpressionIfNew(state, valueExpr, decl)
+		if valueExpr.nodeType == !(nodeTypes.AstLambda) and valueExpr.isPolymorphic then
+			-- @Cleanup: moveToNextRelevantPipe() should prevent us from getting here.
+			moveToPipe(state, decl, !(PIPE_DONE))
+			return
+		end
+
+		local const = bcAllocateConstantValueForExpressionIfNew(state, valueExpr, decl)
 		if not const then  return  end -- A dependency was added and we're now waiting.
 
 		decl.valueConstant = const
@@ -541,6 +549,7 @@ function _G.bcEmit(state, node)
 	elseif node.nodeType == !(nodeTypes.AstLambda) then
 		local lambda = node
 		assert(lambda.body)
+		assert(not lambda.isPolymorphic)
 		bcEmitForLambda(state, lambda)
 
 	elseif node.nodeType == !(nodeTypes.AstDeclaration) then
