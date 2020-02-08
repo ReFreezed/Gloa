@@ -170,7 +170,7 @@ _G.!structAst"AstAccess:_AstExpression"{
 	-- Type phase:
 	{`representedType`, nil},             -- TypeInfo  (Not used anywhere. 2020-01-02)
 }
-local !struct"TableField"{ {`key`,nil}, {`value`,nil} }
+_G.!struct"TableField"{ {`key`,nil}, {`value`,nil} }
 _G.!structAst"AstTable:_AstExpression"{
 	{`fields`, {}, ast="fields"}, -- []TableField
 }
@@ -214,6 +214,9 @@ _G.!structAst"AstConditional:_AstExpression"{
 _G.!structAst"AstBake:_AstExpression"{
 	{`name`, nil, ast="node"}, -- AstIdentifier
 }
+_G.!structAst"AstRun:_AstExpression"{
+	{`lambda`, nil, ast="node"}, -- AstLambda
+}
 
 _G.!structAst"AstUsing:_AstNode"{
 	{`expression`,          nil, ast="node"},    -- AstExpression
@@ -230,7 +233,7 @@ _G.!structAst"AstDebug:_AstNode"{
 _G.!structAst"AstArgument:_AstNode"{
 	{`declaration`, nil, ast="node"}, -- AstDeclaration
 	{`assignment`,  nil, ast="node"}, -- AstAssignment
-	{`group`,       0},     -- Arguments in the same group have the same type. This is a small optimization for the typer.
+	{`group`,       1},     -- Arguments in the same group have the same type. This is a small optimization for the typer.
 	{`autobake`,    0},     -- 0=disabled, 1=enabled, 2=required  @Incomplete
 	{`isUsing`,     false}, -- Is it better to store this on declarations?
 
@@ -283,7 +286,8 @@ _G.!structAst"AstAssignment:_AstNode"{
 
 !structAst"_AstJump:_AstNode"{}
 _G.!structAst"AstReturn:_AstJump"{
-	{`values`, {}, ast="array"}, -- []AstExpression
+	{`values`,       {},  ast="array"},   -- []AstExpression
+	{`runDirective`, nil, astRef="node"}, -- AstRun
 }
 _G.!structAst"AstBreak:_AstJump"{
 	{`loopName`, nil, ast=nil      }, -- AstIdentifier  (Never inferred.)
@@ -1760,6 +1764,74 @@ function _G.parseImportOrLoad(state, parentNode)
 	return import
 end
 
+function _G.parseRun(state, parentNode, mustBeExpression)
+	local tokType, tokValue, token = eatNextToken(state)
+	if not isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"run") then
+		!ERROR_OR_RETURN `errorParsingLast(state, "Expected '!run'.")`
+	end
+
+	local runNode  = astNewNode(AstRun,    token, parentNode)
+	local lambda   = astNewNode(AstLambda, token, parentNode) -- @Incomplete: Don't output this function in the final program.
+	runNode.lambda = lambda
+
+	local body
+
+	tokType, tokValue = peekNextToken(state)
+
+	if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"{") then
+		eatNextToken(state)
+
+		if mustBeExpression then
+			!ERROR_OR_RETURN `errorParsingLast(state, "Expected an expression.")`
+		end
+
+		!SET_OR_RETURN `local block = parseBlock(state, lambda)`
+		lambda.body                 = block
+		table.insert(lambda.statements, block)
+
+	else
+		local expectValue = not isScope(parentNode)
+
+		if expectValue then
+			local args          = astNewNode(AstArguments, token, lambda)
+			lambda.argumentsOut = args
+			table.insert(lambda.statements, args)
+
+			local arg         = astNewNode(AstArgument, token, args)
+			args.arguments[1] = arg
+
+			local decl        = astNewNode(AstDeclaration, token, arg)
+			arg.declaration   = decl
+
+			local ident       = astNewNode(AstIdentifier, token, decl)
+			ident.name        = "_UNNAMED1"
+			ident.declaration = decl
+			decl.name         = ident
+
+			local typeNode    = astNewNode(AstType, token, decl)
+			typeNode.kind     = !(TYPE_KIND_SIMPLE_BUILTIN)
+			typeNode.typeName = "any" -- Good for now?
+			decl.type         = typeNode
+		end
+
+		local block = astNewNode(AstBlock, token, lambda)
+		lambda.body = block
+		table.insert(lambda.statements, block)
+
+		if expectValue then
+			local returnNode        = astNewNode(AstReturn, token, block)
+			returnNode.runDirective = runNode
+			block.statements[1]     = returnNode
+			!SET_OR_RETURN `returnNode.values[1] = parseExpression(state, returnNode)`
+		else
+			!SET_OR_RETURN `block.statements[1]  = parseExpression(state, block)`
+		end
+	end
+
+	lambda.bodyEndToken = state.nextToken-1
+	return runNode
+end
+
 -- success = parseFileScopeStatements( state, parentBlock, isTopLevel, singleStatement )
 -- WARNING: parentBlock is currently modified even if success==false!
 function _G.parseFileScopeStatements(state, block, isTopLevel, singleStatement)
@@ -1802,6 +1874,10 @@ function _G.parseFileScopeStatements(state, block, isTopLevel, singleStatement)
 		elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"if") then
 			!ERROR_OR_RETURN_FALSE `local ifOrStaticIf = parseIfOrStaticIf(state, block, true)`
 			table.insert(block.statements, ifOrStaticIf)
+
+		elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"run") then
+			!ERROR_OR_RETURN_FALSE `local runNode = parseRun(state, block, false)`
+			table.insert(block.statements, runNode)
 
 		elseif isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),";") then
 			eatNextToken(state)
@@ -2382,6 +2458,11 @@ function _G.parseExpression(state, parentNode, prevOpPrecedence, expectLeftValue
 		!SET_OR_RETURN `bake.name = parseIdentifier(state, bake)`
 		expr                      = bake
 
+	-- Run directive.
+	elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"run") then
+		putBackLastToken(state)
+		!ERROR_OR_RETURN_FALSE `expr = parseRun(state, parentNode, true)` -- @Incomplete: Allow a block here.
+
 	else
 		!ERROR_OR_RETURN `errorParsingLast(state, "Expected an expression.")`
 	end
@@ -2681,6 +2762,7 @@ function _G.errorUnhandledNodeType(state, node)
 		printTraceback(io.stderr, 2)
 		printerr()
 		astPrintTree(io.stderr, node)
+		-- !ifDEBUG `astPrintTree(io.stderr, state.globalScope)`
 		printerr()
 	!end
 	nodeError(state, node, "Debug", "Internal compiler error: Incomplete: Unhandled node type '%s'.", (AST_NODE_TYPE_NAMES[node.nodeType] or node.nodeType))
@@ -3021,6 +3103,12 @@ do
 				printNode(bake.name, indent+1, printed, printChildren)
 				!!(CHILD_PRINT_END)
 
+			elseif node.nodeType == !(nodeTypes.AstRun) then
+				local runNode = node
+				!!(CHILD_PRINT_START)
+				printNode(runNode.lambda, indent+1, printed, printChildren)
+				!!(CHILD_PRINT_END)
+
 			elseif node.nodeType == !(nodeTypes.AstLiteral) then
 				local literal = node
 				write(" (")
@@ -3152,6 +3240,7 @@ end
 
 -- astVisitAllNodes           ( topNode, callback )
 -- astVisitAllNodesLeavesFirst( topNode, callback )
+-- astVisitAllNodesInUnit     ( topNode, visitLambdaNodes, callback )  -- Does not visit the contents of e.g. lambdas and types.
 -- [ controlValue = ] callback( node, container, key )  -- Not return anything is the same as returning VISIT_CONTINUE.
 -- controlValue = VISIT_CONTINUE|VISIT_BREAK|VISIT_IGNORE_CHILDREN
 -- Note: VISIT_IGNORE_CHILDREN triggers an error in astVisitAllNodesLeavesFirst().
@@ -3264,6 +3353,31 @@ do
 
 	function _G.astVisitAllNodesLeavesFirst(node, cb)
 		visit({}, cb, true,  nil, nil, node)
+	end
+
+	function _G.astVisitAllNodesInUnit(topNode, visitLambdas, cb)
+		astVisitAllNodes(topNode, function(node, container, key)
+			local visitNode     = true
+			local visitChildren = true
+
+			if node.nodeType == !(nodeTypes.AstType) then
+				visitChildren = false
+			elseif node.nodeType == !(nodeTypes.AstLambda) then
+				visitNode     = visitLambdas
+				visitChildren = node == topNode
+			end
+
+			local controlValue = !(VISIT_CONTINUE)
+			if visitNode then
+				controlValue = cb(node, container, key)
+			end
+
+			if visitChildren then
+				return controlValue
+			else
+				return controlValue == !(VISIT_BREAK) and !(VISIT_BREAK) or !(VISIT_IGNORE_CHILDREN)
+			end
+		end)
 	end
 end
 

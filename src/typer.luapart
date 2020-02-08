@@ -10,6 +10,7 @@
 --==============================================================
 
 	checkBinaryOperation
+	createTypeNodeFromInfo
 	findDeclaration, findDeclarationInScope, findMemberDeclaration, isDeclarationVisibleToNode, printDeclarationChain
 	followIdentifiersToConstantValue
 	getAssignmentValue
@@ -65,6 +66,7 @@ local !structTypeInfo"TypeInfoString:_TypeInfo"{}
 local !structTypeInfo"TypeInfoTable:_TypeInfo"{}
 local !structTypeInfo"TypeInfoType:_TypeInfo"{}
 
+local !structTypeInfo"TypeInfoVoid:_TypeInfo"{}
 local !structTypeInfo"TypeInfoPlaceholder:_TypeInfo"{}
 local !structTypeInfo"TypeInfoForeignDummy:_TypeInfo"{}
 
@@ -171,6 +173,7 @@ do
 		["string"]      = TypeInfoString,
 		["table"]       = TypeInfoTable,
 		["type"]        = TypeInfoType,         -- The result of e.g. type_of(int) or type_of(type_of(expression)).
+		["void"]        = TypeInfoVoid,         -- Used when no useful type is expected or available.
 		["placeholder"] = TypeInfoPlaceholder,  -- Used in polymorphic functions.
 		["foreign"]     = TypeInfoForeignDummy, -- Dummy type used for foreign constants in bytecode pipe and forward.
 	}
@@ -3916,6 +3919,230 @@ end
 	moveToNextRelevantPipe(state, block)
 end
 
+local function prepareForRunning(state, runNode, unit, visited)
+	astVisitAllNodes(unit, function(node)
+		visited[node] = true
+
+		if not node.queued then
+			return !(VISIT_IGNORE_CHILDREN)
+
+		elseif node.queued.pipe <= !(PIPE_BYTECODE) then
+			!DEPEND_AND_RETURN(`runNode`, DEPEND_NODE_EMITTED, `node`, nil, toLua(VISIT_BREAK))
+
+		elseif node.nodeType == !(nodeTypes.AstIdentifier) then
+			local ident = node
+			local decl  = ident.declaration or errorInternal()
+
+			if not visited[decl] then
+				prepareForRunning(state, runNode, decl, visited)
+				if runNode.queued.waitingOn then  return !(VISIT_BREAK)  end
+
+				local assignment = decl.assignment
+
+				if assignment then
+					prepareForRunning(state, runNode, assignment, visited)
+					if runNode.queued.waitingOn then  return !(VISIT_BREAK)  end
+				end
+			end
+		end
+	end)
+end
+
+local function createRunReplacementFromTypeAndLuaValue(state, runNode, parent, typeInfo, v)
+	local tag = typeInfo.tag
+
+	if tag == !(typeTags.TypeInfoInt) or (tag == !(typeTags.TypeInfoAny) and type(v) == "number" and v == math.floor(v)) then
+		local n = v
+		assert(type(n) == "number" and n == math.floor(n))
+		local literal        = astNewNode(AstLiteral, runNode.token, parent)
+		literal.literalType  = !(LITERAL_INTEGER)
+		literal.value        = n
+		literal.inferredType = getTypeInfoForBuiltinType(state, "int")
+		return literal
+
+	elseif tag == !(typeTags.TypeInfoFloat) or (tag == !(typeTags.TypeInfoAny) and type(v) == "number") then
+		local n = v
+		assert(type(n) == "number")
+		local literal        = astNewNode(AstLiteral, runNode.token, parent)
+		literal.literalType  = !(LITERAL_FLOAT)
+		literal.value        = n
+		literal.inferredType = getTypeInfoForBuiltinType(state, "float")
+		return literal
+
+	elseif tag == !(typeTags.TypeInfoString) or (tag == !(typeTags.TypeInfoAny) and type(v) == "string") then
+		local s = v
+		assert(type(s) == "string")
+		local literal        = astNewNode(AstLiteral, runNode.token, parent)
+		literal.literalType  = !(LITERAL_STRING)
+		literal.value        = s
+		literal.inferredType = getTypeInfoForBuiltinType(state, "string")
+		return literal
+
+	elseif tag == !(typeTags.TypeInfoBool) or (tag == !(typeTags.TypeInfoAny) and type(v) == "boolean") then
+		local flag = v
+		assert(type(flag) == "boolean")
+		local literal        = astNewNode(AstLiteral, runNode.token, parent)
+		literal.literalType  = !(LITERAL_BOOLEAN)
+		literal.value        = flag
+		literal.inferredType = getTypeInfoForBuiltinType(state, "bool")
+		return literal
+
+	elseif tag == !(typeTags.TypeInfoNone) or (tag == !(typeTags.TypeInfoAny) and v == nil) then
+		assert(v == nil)
+		local literal        = astNewNode(AstLiteral, runNode.token, parent)
+		literal.literalType  = !(LITERAL_NIL)
+		literal.value        = nil
+		literal.inferredType = getTypeInfoForBuiltinType(state, "none")
+		return literal
+
+	elseif tag == !(typeTags.TypeInfoTable) or (tag == !(typeTags.TypeInfoAny) and type(v) == "table") then
+		local t = v
+		assert(type(t) == "table")
+		local tableNode = astNewNode(AstTable, runNode.token, parent)
+		local anyType   = getTypeInfoForBuiltinType(state, "any")
+
+		-- @Robustness: Make sure the key sorting is consistent and doesn't crash if keys are of different Lua types.
+		for k, v in pairsSorted(t) do
+			local tableField    = TableField()
+			tableField.key      = createRunReplacementFromTypeAndLuaValue(state, runNode, tableNode, anyType, k)
+			tableField.value    = createRunReplacementFromTypeAndLuaValue(state, runNode, tableNode, anyType, v)
+			table.insert(tableNode.fields, tableField)
+		end
+
+		tableNode.inferredType = arraySig
+		return tableNode
+
+	elseif tag == !(typeTags.TypeInfoArray) then
+		local t = v
+		assert(type(t) == "table")
+		local arraySig  = typeInfo
+		local tableNode = astNewNode(AstTable, runNode.token, parent)
+		local intType   = getTypeInfoForBuiltinType(state, "int")
+
+		-- @Robustness: Check that all keys in 't' are valid.
+		for i, v in ipairs(t) do
+			local tableField          = TableField()
+
+			local indexLiteral        = astNewNode(AstLiteral, runNode.token, tableNode)
+			indexLiteral.literalType  = !(LITERAL_INTEGER)
+			indexLiteral.value        = i
+			indexLiteral.inferredType = intType
+			tableField.key            = indexLiteral
+
+			tableField.value          = createRunReplacementFromTypeAndLuaValue(state, runNode, tableNode, arraySig.itemType, v)
+
+			tableNode.fields[i]       = tableField
+		end
+
+		tableNode.inferredType = arraySig
+		return tableNode
+
+	-- @Incomplete: Handle these:
+	-- * TypeInfoFunction   Reference. (Look through the whole AST for the lambda? I think we have to. Also, there may be problems if the function isn't bound to a constant name.)
+	-- * TypeInfoStruct
+	-- * TypeInfoEnum
+
+	elseif tag == !(typeTags.TypeInfoType) then
+		local typeId = v
+		assert(type(typeId) == "number" and typeId == math.floor(typeId))
+
+		local typeRepresented = itemWith1(state.allTypeInfos, "id", typeId)
+		if not typeRepresented then
+			typeError(state, runNode, "Got the ID of a type that doesn't exist. (Type ID %d)", typeId)
+		end
+
+		local typeNode = createTypeNodeFromInfo(state, typeRepresented, runNode.token, parent)
+		return typeNode
+
+	elseif tag == !(typeTags.TypeInfoCompound) then
+		typeError(state, runNode, "!run expression is, or contains something, of a compound type which is illegal. (Type is %s)", getFriendlyTypeInfoName(typeInfo))
+	elseif tag == !(typeTags.TypeInfoNamespace) then
+		typeError(state, runNode, "!run expression is a namespace which is illegal here.")
+	else
+		errorUnhandledType(state, runNode, typeInfo)
+	end
+end
+
+!NODE_INFERRER `function nodeInferrers.AstRun(state, runNode)`
+	local lambda = runNode.lambda
+
+	if lambda.queued.pipe <= !(PIPE_BYTECODE) then
+		!DEPEND_AND_RETURN(`runNode`, DEPEND_NODE_EMITTED, `lambda`)
+	end
+
+	local visited = {}
+
+	prepareForRunning(state, runNode, lambda, visited)
+	if runNode.queued.waitingOn then  return  end
+
+	runnerSetup(state)
+
+	local newConstants            = {}
+	local newTopScopeDeclarations = {}
+
+	for _, const in ipairs(state.constants) do
+		if const.isReady and not state.runnerWrittenObjects[const] then
+			state.runnerWrittenObjects[const] = true
+			table.insert(newConstants, const)
+		end
+	end
+
+	for _, decl in ipairs(state.globalScope.declarations) do
+		if visited[decl] and not state.runnerWrittenObjects[decl] then
+			state.runnerWrittenObjects[decl] = true
+			table.insert(newTopScopeDeclarations, decl)
+		end
+	end
+	for _, fileScope in ipairs(state.globalScope.fileScopes) do
+		for __, decl in ipairs(fileScope.declarations) do
+			if visited[decl] and not state.runnerWrittenObjects[decl] then
+				state.runnerWrittenObjects[decl] = true
+				table.insert(newTopScopeDeclarations, decl)
+			end
+		end
+	end
+
+	local writer = state.runnerWriter
+
+	writeForeignImports                (state, writer, newConstants, true)
+	writeConstantObjectsExceptFunctions(state, writer, newConstants, true)
+	writeFunctionObjects               (state, writer, newConstants)
+	writeTopScopeDeclarations          (state, writer, newTopScopeDeclarations)
+
+	runnerRunBufferAsChunk(state)
+
+	local constName = lambda.valueConstant.name
+	local func      = state.runnerEnvironment[constName]
+
+	if type(func) ~= "function" then
+		errorInternal(state, runNode, "Missing the compiled object to run for some reason. (Constant '%s')", constName)
+	end
+
+	local v = func() -- @Incomplete: Better error messages using xpcall().
+
+	if not isAnExpressionExpected(state, runNode) then
+		runNode.inferredType = getTypeInfoForBuiltinType(state, "void")
+		moveToNextRelevantPipe(state, runNode)
+		return
+	end
+
+	-- Replace the directive with a constant value.
+
+	local returnNode = getLast(lambda.body.statements)
+	assert(returnNode.nodeType == !(nodeTypes.AstReturn))
+
+	local typeInfo = returnNode.values[1].inferredType
+	typeInfo       = adjustTypeToOne(state, runNode, typeInfo, true)
+
+	local replacement = createRunReplacementFromTypeAndLuaValue(state, runNode, runNode.parent, typeInfo, v)
+	addUnqueuedChildrenToQueueRecursively(state, replacement, !(PIPE_INFER))
+
+	replaceQueuedNodeAndUnqueueOldTree(state, runNode, replacement)
+
+	moveChildrenToNextRelevantPipe(state, replacement)
+	moveToNextRelevantPipe(state, replacement)
+end
+
 function _G.inferNode(state, node)
 	local nodeInferrer = nodeInferrers[node.nodeType] or errorUnhandledNodeType(state, node)
 	return nodeInferrer(state, node)
@@ -3959,6 +4186,14 @@ function _G.isExpressionConstant(state, expr)
 	elseif expr.nodeType == !(nodeTypes.AstBinary) then
 		local binary = expr
 		return (isExpressionConstant(state, binary.left) and isExpressionConstant(state, binary.right))
+
+	elseif expr.nodeType == !(nodeTypes.AstConditional) then
+		local conditional = expr
+		return (
+			isExpressionConstant(state, conditional.condition)
+			and (conditional.branchTrue == nil or isExpressionConstant(state, conditional.branchTrue))
+			and isExpressionConstant(state, conditional.branchFalse)
+		)
 
 	elseif expr.nodeType == !(nodeTypes.AstCall) then
 		return false -- Calls are always a runtime operation.
@@ -4188,7 +4423,7 @@ local function createLambdaFromSignature(state, funcSig, parent)
 	return lambda
 end
 
-local function createTypeNodeFromInfo(state, typeRepresented, token, parent)
+function _G.createTypeNodeFromInfo(state, typeRepresented, token, parent)
 	local typeNode            = astNewNode(AstType, token, parent)
 	local isBuiltin, typeName = isTypeBuiltin(typeRepresented)
 
@@ -4709,7 +4944,11 @@ function _G.isTypeCompatibleWith(typeToCheck, otherType)
 	!local SCORE = 0x10000
 	if typeToCheck == otherType then  return true, !(SCORE)  end
 
-	-- Placeholders cannot actually be checked - we just say they are compatible with everything until the situation is handled elsewhere.
+	-- Namespaces are never compatible with anything but themselves as they're not allowed in most places.
+	if typeToCheck.tag == !(typeTags.TypeInfoNamespace) or otherType.tag == !(typeTags.TypeInfoNamespace) then  return false, 0  end
+
+	-- Placeholders cannot actually be checked - we just say they are compatible with
+	-- everything (except namespaces) until the situation is handled elsewhere.
 	!local SCORE = .1
 	if typeToCheck.tag == !(typeTags.TypeInfoPlaceholder) or otherType.tag == !(typeTags.TypeInfoPlaceholder) then  return true, !(SCORE)  end
 
@@ -4811,9 +5050,9 @@ end
 -- Returns nil if we're now waiting for something. Errors on failure.
 function _G.getExpectedTypeInfo(state, node, strict, expectantTerm)
 	!local NO_EXPECTATION = `typeError(state, node, "Could not determine the type of this %s.", expectantTerm)`
-	local nodeType        = node.parent.nodeType
+	local parentNodeType  = node.parent.nodeType
 
-	if nodeType == !(nodeTypes.AstAssignment) then
+	if parentNodeType == !(nodeTypes.AstAssignment) then
 		local assignment = node.parent
 		local i          = indexOf(assignment.values, node) or !!(NO_EXPECTATION)
 
@@ -4837,7 +5076,7 @@ function _G.getExpectedTypeInfo(state, node, strict, expectantTerm)
 			return assignment.targets[i].inferredType
 		end
 
-	elseif nodeType == !(nodeTypes.AstCast) then
+	elseif parentNodeType == !(nodeTypes.AstCast) then
 		local cast = node.parent
 		if node ~= cast.expression then  !!(NO_EXPECTATION)  end
 
@@ -4847,7 +5086,7 @@ function _G.getExpectedTypeInfo(state, node, strict, expectantTerm)
 
 		return getTypeRepresentedByExpression(cast.targetType) or errorInternal()
 
-	elseif nodeType == !(nodeTypes.AstBinary) then
+	elseif parentNodeType == !(nodeTypes.AstBinary) then
 		local binary = node.parent
 		local other  = node == binary.left and binary.right or binary.left
 
@@ -4857,7 +5096,7 @@ function _G.getExpectedTypeInfo(state, node, strict, expectantTerm)
 
 		return other.inferredType
 
-	elseif nodeType == !(nodeTypes.AstTable) then
+	elseif parentNodeType == !(nodeTypes.AstTable) then
 		local tableNode = node.parent
 		if not tableNode.inferredType then
 			-- Note: Tables will always get inferred before child tables.
@@ -4909,11 +5148,16 @@ function _G.getExpectedTypeInfo(state, node, strict, expectantTerm)
 			errorInternal(getFriendlyTypeInfoName(tableNode.inferredType))
 		end
 
-	elseif nodeType == !(nodeTypes.AstReturn) then
+	elseif parentNodeType == !(nodeTypes.AstReturn) then
 		local returnNode = node.parent
-		local i          = indexOf(returnNode.values, node) or !!(NO_EXPECTATION)
-		local lambda     = astFindParent(returnNode, !(nodeTypes.AstLambda))
-		local funcSig    = lambda.inferredType
+
+		if returnNode.runDirective then
+			return getExpectedTypeInfo(state, returnNode.runDirective, strict, expectantTerm)
+		end
+
+		local i       = indexOf(returnNode.values, node) or !!(NO_EXPECTATION)
+		local lambda  = astFindParent(returnNode, !(nodeTypes.AstLambda))
+		local funcSig = lambda.inferredType
 
 		if not funcSig then
 			!DEPEND_AND_RETURN(`node`, DEPEND_NODE_INFERRED, `lambda`, nil, `nil`)
@@ -4940,7 +5184,7 @@ function _G.getExpectedTypeInfo(state, node, strict, expectantTerm)
 	elseif strict then
 		!!(NO_EXPECTATION)
 
-	elseif nodeType == !(nodeTypes.AstCall) then
+	elseif parentNodeType == !(nodeTypes.AstCall) then
 		local call           = node.parent
 		local i              = indexOf(call.arguments, node) or !!(NO_EXPECTATION)
 		local calleeTypeInfo = call.callee.inferredType
@@ -5008,6 +5252,56 @@ function _G.wrapInImplicitCast(state, nodeToWrap, resultingTypeInfo, addToInferP
 	cast.isImplicit   = true
 	cast.inferredType = resultingTypeInfo
 	pokeAndQueueUnqueuedNodeIntoTree(state, nodeToWrap, cast, cast,"expression", (addToInferPipe and !(PIPE_INFER) or !(PIPE_DONE)))
+end
+
+
+
+local EXPRESSION_EXPECTED = !(Set{
+	nodeTypes.AstType,
+	nodeTypes.AstUnary,
+	nodeTypes.AstBinary,
+	nodeTypes.AstAccess,
+	nodeTypes.AstTable,
+	nodeTypes.AstCall,
+	nodeTypes.AstTypeOf,
+	nodeTypes.AstCast,
+	nodeTypes.AstConditional,
+	nodeTypes.AstBake,
+	nodeTypes.AstRun, -- Good?
+	nodeTypes.AstUsing,
+	nodeTypes.AstDebug,
+	nodeTypes.AstAssignment,
+	nodeTypes.AstReturn,
+})
+local EXPRESSION_NOT_EXPECTED = !(Set{
+	nodeTypes.AstArgument,
+	nodeTypes.AstArguments,
+	nodeTypes.AstDefer,
+	nodeTypes.AstBlock,
+	nodeTypes.AstFileScope,
+	nodeTypes.AstGlobalScope,
+	nodeTypes.AstStruct,
+	nodeTypes.AstEnum,
+	nodeTypes.AstLambda,
+})
+
+function _G.isAnExpressionExpected(state, node)
+	local parent         = node.parent
+	local parentNodeType = parent.nodeType
+
+	if EXPRESSION_EXPECTED[parentNodeType] then
+		return true
+	elseif EXPRESSION_NOT_EXPECTED[parentNodeType] then
+		return false
+	elseif parentNodeType == !(nodeTypes.AstDeclaration) then
+		return node == parent.name or node == parent.type
+	elseif parentNodeType == !(nodeTypes.AstFor) then
+		return node ~= parent.body
+	elseif isAny(parentNodeType, !(nodeTypes.AstIf),!(nodeTypes.AstStaticIf),!(nodeTypes.AstWhile)) then
+		return node == parent.condition
+	else
+		errorUnhandledNodeType(state, node.parent)
+	end
 end
 
 

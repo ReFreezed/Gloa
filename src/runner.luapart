@@ -9,6 +9,48 @@
 --=
 --==============================================================
 
-	...
+	runnerConvertBufferToChunk, runnerRunBufferAsChunk
+	runnerSetup
 
 --============================================================]]
+
+
+
+-- Note: runnerRunBufferAsChunk() needs to be called at some point after this!
+function _G.runnerSetup(state)
+	local writer = state.runnerWriter
+	if writer then  return  end
+
+	for k, v in pairs(DEFAULT_GLOBALS) do
+		state.runnerEnvironment[k] = v
+	end
+
+	writer             = WriterState()
+	writer.file        = newVirtualFile()
+	state.runnerWriter = writer
+
+	writeCompilerSymbols(state, writer, true)
+end
+
+
+
+function _G.runnerConvertBufferToChunk(state)
+	local file  = state.runnerWriter.file
+	local lua   = file:getBuffer()
+	local chunk = assert(loadstring(lua, "@(metaprogram)"))
+
+	file:clearBuffer()
+	setfenv(chunk, state.runnerEnvironment)
+
+	-- print(lua) -- DEBUG
+	return chunk
+end
+
+function _G.runnerRunBufferAsChunk(state)
+	if state.runnerWriter.file:isBufferEmpty() then  return  end
+
+	local chunk = runnerConvertBufferToChunk(state)
+	chunk() -- @Incomplete: Better error messages using xpcall().
+end
+
+

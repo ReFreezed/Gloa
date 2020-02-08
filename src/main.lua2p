@@ -33,6 +33,12 @@ Options:
 
 local args = {...}
 
+local defaultGlobals = {}
+for k, v in pairs(_G) do
+	defaultGlobals[k] = v
+end
+_G.DEFAULT_GLOBALS = defaultGlobals
+
 xpcall(function()
 	local timeStartCompiling = os.clock()
 
@@ -163,6 +169,7 @@ xpcall(function()
 		{`doOutputFile`,    true},
 		{`outputFilePath`,  ""},
 		{`outputDebugInfo`, false},
+		{`entryPointName`,  "main"},
 	}
 
 	local !struct"CompilationState"{
@@ -189,15 +196,10 @@ xpcall(function()
 		{`topScopeNames`,     Set{"_FOREIGN","_MATH_MODF","_MATH_FLOOR","_IPAIRS","_PAIRS","_CONDITION","_BREAK"}},
 		{`bytecodes`,         {}},    -- Code for the interpreter to run.
 
-		-- Program writer:
-		{`foreignN`,          0},
-		{`foreignReferences`, {}},
-
-		{`loopStack`,         {}},    -- [](AstFor|AstWhile)  (Only used for loops with named breaks inside.)
-
-		{`currentOutputLine`, 1},
-		{`lineMappingFiles`,  {}},
-		{`lineMappingLines`,  {}},
+		-- Runner:
+		{`runnerEnvironment`,    {}},
+		{`runnerWriter`,         nil}, -- WriterState
+		{`runnerWrittenObjects`, {}},
 	}
 
 	local settings           = CompilationSettings()
@@ -481,7 +483,11 @@ xpcall(function()
 	local timeStartOutput = os.clock()
 
 	!ifDEBUG`if not (debug_onlyParse or debug_onlyInferTypes) then`
-		writeProgram(state)
+		if state.settings.doOutputFile then
+			local writer = WriterState()
+			writer.file  = assert(io.open(state.settings.outputFilePath, "w"))
+			writeProgram(state, writer)
+		end
 	!ifDEBUG`end`
 
 	local timeEndOutput = os.clock()
