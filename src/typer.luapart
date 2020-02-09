@@ -3313,7 +3313,7 @@ end
 	end
 
 	local scopeOfUsing  = getClosestScope(using)
-	local usingExisting = itemWith(scopeOfUsing.usings, "scope", usingScope)
+	local usingExisting = itemWith1(scopeOfUsing.usings, "scope", usingScope)
 
 	if usingExisting then
 		local usingEarly = usingExisting
@@ -4031,8 +4031,36 @@ local function createRunReplacementFromTypeAndLuaValue(state, runNode, parent, t
 		tableNode.inferredType = arraySig
 		return tableNode
 
+	elseif tag == !(typeTags.TypeInfoFunction) then
+		local func = v
+		assert(type(func) == "function")
+
+		local const = nil
+
+		for _, _const in ipairs(state.constants) do
+			if _const.valueType.tag == !(typeTags.TypeInfoFunction) and state.runnerEnvironment[_const.name] == func then
+				const = _const
+				break
+			end
+		end
+
+		if not const then
+			errorInternal(state, runNode, "The resulting function is no an existing constant for some reason.")
+		end
+
+		local lambda = const.value
+
+		if lambda.parent.nodeType == !(nodeTypes.AstAssignment) and lambda.parent.forDeclaration then
+			local assignment = lambda.parent
+			local i          = indexOf(assignment.values, lambda) or errorInternal()
+			local decl       = assignment.declarations[i]
+			local ident      = astCopy(decl.name, runNode.token, parent)
+			return ident
+		else
+			return astCopy(lambda, runNode.token, parent) -- @UX: Can we keep the tokens and not risk getting garbage error messages?
+		end
+
 	-- @Incomplete: Handle these:
-	-- * TypeInfoFunction   Reference. (Look through the whole AST for the lambda? I think we have to. Also, there may be problems if the function isn't bound to a constant name.)
 	-- * TypeInfoStruct
 	-- * TypeInfoEnum
 
@@ -4138,6 +4166,9 @@ end
 	addUnqueuedChildrenToQueueRecursively(state, replacement, !(PIPE_INFER))
 
 	replaceQueuedNodeAndUnqueueOldTree(state, runNode, replacement)
+	if typeInfo.tag == !(typeTags.TypeInfoAny) and replacement.inferredType.tag ~= !(typeTags.TypeInfoAny) then
+		replacement = wrapInImplicitCast(state, replacement, typeInfo, true)
+	end
 
 	moveChildrenToNextRelevantPipe(state, replacement)
 	moveToNextRelevantPipe(state, replacement)
@@ -5267,6 +5298,7 @@ function _G.wrapInImplicitCast(state, nodeToWrap, resultingTypeInfo, addToInferP
 	cast.isImplicit   = true
 	cast.inferredType = resultingTypeInfo
 	pokeAndQueueUnqueuedNodeIntoTree(state, nodeToWrap, cast, cast,"expression", (addToInferPipe and !(PIPE_INFER) or !(PIPE_DONE)))
+	return cast
 end
 
 

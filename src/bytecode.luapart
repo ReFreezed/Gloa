@@ -185,17 +185,17 @@ local !struct"Constant"{
 	{`isReady`,      false},
 }
 
--- constant, isNew = bcAllocateConstantValueIfNew( state, simpleTypeInfo,    literalValue   )
--- constant, isNew = bcAllocateConstantValueIfNew( state, functionSignature, lambdaWithBody )
--- constant, isNew = bcAllocateConstantValueIfNew( state, foreignTypeDummy,  foreign        )
--- constant, isNew = bcAllocateConstantValueIfNew( state, tableLikeTypeInfo, tableNode      )
--- constant, isNew = bcAllocateConstantValueIfNew( state, typeInfo,          value          )
-function _G.bcAllocateConstantValueIfNew(state, typeInfo, v)
+-- constant, isNew = bcAllocateConstantValueIfNew( state, simpleTypeInfo,    literalValue,   nodeForError )
+-- constant, isNew = bcAllocateConstantValueIfNew( state, functionSignature, lambdaWithBody, nodeForError )
+-- constant, isNew = bcAllocateConstantValueIfNew( state, foreignTypeDummy,  foreign,        nodeForError )
+-- constant, isNew = bcAllocateConstantValueIfNew( state, tableLikeTypeInfo, tableNode,      nodeForError )
+-- constant, isNew = bcAllocateConstantValueIfNew( state, typeInfo,          value,          nodeForError )
+function _G.bcAllocateConstantValueIfNew(state, typeInfo, v, nodeForError)
 	local tag      = typeInfo.tag
 	local isSimple = isTypeSimple(typeInfo)
 
 	if not isSimple and isAny(tag, !(typeTags.TypeInfoAny),!(typeTags.TypeInfoNamespace),!(typeTags.TypeInfoCompound),!(typeTags.TypeInfoList),!(typeTags.TypeInfoPlaceholder)) then
-		errorInternal("Invalid type '%s' for constant.", (TYPE_TAG_NAMES[tag] or "?"))
+		errorInternal(state, nodeForError, "Invalid type '%s' for constant.", (TYPE_TAG_NAMES[tag] or "?"))
 	end
 	local isObject = not isSimple
 
@@ -223,13 +223,13 @@ function _G.bcAllocateConstantValueIfNew(state, typeInfo, v)
 			if const.value == v then  return const, false  end
 
 		elseif tag == !(typeTags.TypeInfoEnum) then
-			errorInternal("Incomplete: Handle TypeInfoEnum.") -- Not sure we ever get here.
+			errorInternal(state, nodeForError, "Incomplete: Handle TypeInfoEnum.") -- Not sure we ever get here.
 
 		elseif tag == !(typeTags.TypeInfoForeignDummy) then
 			if v.sourceId == const.value.sourceId then  return const, false  end
 
 		else
-			errorInternal("Incomplete: Unhandled constant value type '%s'.", (TYPE_TAG_NAMES[tag] or "?"))
+			errorInternal(state, nodeForError, "Incomplete: Unhandled constant value type '%s'.", (TYPE_TAG_NAMES[tag] or "?"))
 		end
 	end
 
@@ -279,7 +279,7 @@ function _G.bcAllocateConstantValueForExpressionIfNew(state, expr, dependent)
 		local typeNode = expr
 		local typeId   = typeNode.representedType.id
 		typeInfo       = getTypeInfoForBuiltinType(state, "int")
-		return bcAllocateConstantValueIfNew(state, typeInfo, typeId) -- Glóa types are represented as ints in Lua.
+		return bcAllocateConstantValueIfNew(state, typeInfo, typeId, dependent) -- Glóa types are represented as ints in Lua.
 
 	elseif expr.nodeType == !(nodeTypes.AstLambda) then
 		local lambda = expr
@@ -287,7 +287,7 @@ function _G.bcAllocateConstantValueForExpressionIfNew(state, expr, dependent)
 		assert(not lambda.isPolymorphic)
 
 		local isNew
-		lambda.valueConstant, isNew = bcAllocateConstantValueIfNew(state, typeInfo, lambda)
+		lambda.valueConstant, isNew = bcAllocateConstantValueIfNew(state, typeInfo, lambda, dependent)
 
 		return lambda.valueConstant, isNew
 
@@ -296,7 +296,7 @@ function _G.bcAllocateConstantValueForExpressionIfNew(state, expr, dependent)
 
 		-- @Incomplete: Wait for statements to get inferred (when we got struct self-referencing working).
 
-		local const, isNew = bcAllocateConstantValueIfNew(state, typeInfo, struct)
+		local const, isNew = bcAllocateConstantValueIfNew(state, typeInfo, struct, dependent)
 
 		if isNew and state.settings.outputDebugInfo then
 			local structInfo = struct.representedType
@@ -309,7 +309,7 @@ function _G.bcAllocateConstantValueForExpressionIfNew(state, expr, dependent)
 
 	elseif expr.nodeType == !(nodeTypes.AstEnum) then
 		local enum         = expr
-		local const, isNew = bcAllocateConstantValueIfNew(state, typeInfo, enum)
+		local const, isNew = bcAllocateConstantValueIfNew(state, typeInfo, enum, dependent)
 
 		if isNew and state.settings.outputDebugInfo then
 			local enumInfo = enum.representedType
@@ -334,16 +334,18 @@ function _G.bcAllocateConstantValueForExpressionIfNew(state, expr, dependent)
 		return bcAllocateConstantValueForExpressionIfNew(state, valueExpr, dependent)
 
 	elseif expr.nodeType == !(nodeTypes.AstCast) then
-		errorInternal() -- Casts of constants should have simplified to something else in the typer.
+		-- The cast is probably from/to 'any'.
+		local cast = expr
+		return bcAllocateConstantValueForExpressionIfNew(state, cast.expression, dependent)
 
 	elseif expr.nodeType == !(nodeTypes.AstForeign) then
 		local foreign = expr
 		typeInfo      = getTypeInfoForBuiltinType(state, "foreign")
-		return bcAllocateConstantValueIfNew(state, typeInfo, foreign)
+		return bcAllocateConstantValueIfNew(state, typeInfo, foreign, dependent)
 
 	elseif expr.nodeType == !(nodeTypes.AstTable) then
 		local tableNode    = expr
-		local const, isNew = bcAllocateConstantValueIfNew(state, typeInfo, tableNode)
+		local const, isNew = bcAllocateConstantValueIfNew(state, typeInfo, tableNode, dependent)
 
 		if
 			isNew
@@ -432,7 +434,7 @@ end
 --]]
 
 function _G.bcEmitForLambda(state, lambda)
-	lambda.valueConstant = bcAllocateConstantValueIfNew(state, lambda.inferredType, lambda)
+	lambda.valueConstant = bcAllocateConstantValueIfNew(state, lambda.inferredType, lambda, lambda)
 
 	if lambda.bodyIsForeign then
 		-- @Incomplete: Emit for foreign function.
@@ -543,7 +545,7 @@ end
 function _G.bcEmit(state, node)
 	if node.nodeType == !(nodeTypes.AstLiteral) then
 		local literal         = node
-		literal.valueConstant = bcAllocateConstantValueIfNew(state, literal.inferredType, literal.value)
+		literal.valueConstant = bcAllocateConstantValueIfNew(state, literal.inferredType, literal.value, literal)
 		moveToPipe(state, literal, !(PIPE_DONE))
 
 	elseif node.nodeType == !(nodeTypes.AstLambda) then
@@ -559,7 +561,7 @@ function _G.bcEmit(state, node)
 	elseif node.nodeType == !(nodeTypes.AstForeign) then
 		local foreign         = node
 		local typeInfo        = getTypeInfoForBuiltinType(state, "foreign")
-		foreign.valueConstant = bcAllocateConstantValueIfNew(state, typeInfo, foreign)
+		foreign.valueConstant = bcAllocateConstantValueIfNew(state, typeInfo, foreign, foreign)
 		moveToPipe(state, foreign, !(PIPE_DONE))
 
 	else
