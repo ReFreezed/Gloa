@@ -955,11 +955,9 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 			typeErrorAfter(state, ident, "Missing arguments for polymorphic struct '%s'.", ident.name)
 		end
 
-		local identInDecl = decl.name
-		local typeInfo    = identInDecl.inferredType
-
+		local typeInfo = decl.name.inferredType
 		if not typeInfo then
-			!DEPEND_AND_RETURN(`identOrVararg`, DEPEND_NODE_INFERRED, `identInDecl`)
+			!DEPEND_AND_RETURN(`identOrVararg`, DEPEND_NODE_INFERRED, `decl`)
 		end
 
 		identOrVararg.inferredType = typeInfo
@@ -4056,8 +4054,11 @@ local function createRunReplacementFromTypeAndLuaValue(state, runNode, parent, t
 			local decl       = assignment.declarations[i]
 			local ident      = astCopy(decl.name, runNode.token, parent)
 			return ident
+
 		else
-			return astCopy(lambda, runNode.token, parent) -- @UX: Can we keep the tokens and not risk getting garbage error messages?
+			local copy = astCopy(lambda, nil, parent)
+			copy.token = runNode.token
+			return copy
 		end
 
 	-- @Incomplete: Handle these:
@@ -4091,16 +4092,22 @@ end
 	if lambda.queued.pipe <= !(PIPE_BYTECODE) then
 		!DEPEND_AND_RETURN(`runNode`, DEPEND_NODE_EMITTED, `lambda`)
 	end
-	for _, const in ipairs(state.constants) do
-		if not const.isReady then
-			!DEPEND_AND_RETURN(`runNode`, DEPEND_CONSTANT_READY, `const`)
-		end
-	end
+	-- for _, const in ipairs(state.constants) do
+	-- 	if not const.isReady and const.valueType.tag ~= !(typeTags.TypeInfoFunction) then
+	-- 		!DEPEND_AND_RETURN(`runNode`, DEPEND_CONSTANT_READY, `const`)
+	-- 	end
+	-- end
 
 	local visited = {}
 
 	prepareForRunning(state, runNode, lambda, visited)
 	if runNode.queued.waitingOn then  return  end
+
+	for _, const in ipairs(state.constants) do
+		if not const.isReady and const.valueType.tag == !(typeTags.TypeInfoFunction) and visited[const.value] then
+			!DEPEND_AND_RETURN(`runNode`, DEPEND_CONSTANT_READY, `const`)
+		end
+	end
 
 	runnerSetup(state)
 
@@ -4108,9 +4115,10 @@ end
 	local newTopScopeDeclarations = {}
 
 	for _, const in ipairs(state.constants) do
-		if not state.runnerWrittenObjects[const] then
+		if not state.runnerWrittenObjects[const] and const.isReady then
 			state.runnerWrittenObjects[const] = true
 			table.insert(newConstants, const)
+			const.nameLocked = true -- @UX: Update constant names as they are allocated (and not when declarations pass PIPE_BYTECODE).
 		end
 	end
 

@@ -42,6 +42,7 @@ local debugger           = false
 local dirGloa            = "" -- Empty means automatic value at runtime.
 
 local pathPp             = DIR_HERE.."/../lib/preprocess.lua"
+local pathPlantuml       = ""
 local runtimeErrorPrefix = ""
 
 local i                  = 1
@@ -69,6 +70,10 @@ while args[i] do
 	elseif arg == "--pp" then
 		pathPp             = (args[i+1] or error("[GloaBuildArgs] Expected value after "..arg..".")):gsub("\\", "/")
 		i                  = i+2
+	elseif arg == "--plantuml" then
+		pathPlantuml       = (args[i+1] or error("[GloaBuildArgs] Expected value after "..arg..".")):gsub("\\", "/")
+		pathGraphviz       = (args[i+2] or error("[GloaBuildArgs] Expected 2 values after "..arg..".")):gsub("\\", "/")
+		i                  = i+3
 	elseif arg == "--runtimeerrorprefix" then
 		runtimeErrorPrefix = args[i+1] or error("[GloaBuildArgs] Expected value after "..arg..".")
 		i                  = i+2
@@ -87,9 +92,12 @@ if not chunk then  error("Could not load LuaPreprocess from '"..pathPp.."'. ("..
 
 local pp = chunk()
 
-pp.metaEnvironment.DEBUG    = debugMode
-pp.metaEnvironment.DEBUGGER = debugMode and debugger
-pp.metaEnvironment.GLOA_DIR = debugMode and dirGloa or ""
+pp.metaEnvironment.DEBUG                = debugMode
+pp.metaEnvironment.DEBUGGER             = debugMode and debugger
+
+pp.metaEnvironment.GLOA_DIR             = debugMode and dirGloa or ""
+pp.metaEnvironment.PLANTUML_PATH        = pathPlantuml
+pp.metaEnvironment.GRAPHVIZ_PATH        = pathGraphviz
 
 pp.metaEnvironment.RUNTIME_ERROR_PREFIX = debugMode and runtimeErrorPrefix or ""
 
