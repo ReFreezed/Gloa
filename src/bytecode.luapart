@@ -185,11 +185,11 @@ local !struct"Constant"{
 	{`isReady`,    false},
 }
 
--- constant, isNew = bcAllocateConstantValueIfNew( state, simpleTypeInfo,    literalValue,   nodeForError )
--- constant, isNew = bcAllocateConstantValueIfNew( state, functionSignature, lambdaWithBody, nodeForError )
--- constant, isNew = bcAllocateConstantValueIfNew( state, foreignTypeDummy,  foreign,        nodeForError )
--- constant, isNew = bcAllocateConstantValueIfNew( state, tableLikeTypeInfo, tableNode,      nodeForError )
--- constant, isNew = bcAllocateConstantValueIfNew( state, typeInfo,          value,          nodeForError )
+-- constant, isNew = bcAllocateConstantValueIfNew( state, simpleTypeInfo,    literalValue,    nodeForError )
+-- constant, isNew = bcAllocateConstantValueIfNew( state, functionSignature, lambdaWithBody,  nodeForError )
+-- constant, isNew = bcAllocateConstantValueIfNew( state, foreignTypeDummy,  foreign,         nodeForError )
+-- constant, isNew = bcAllocateConstantValueIfNew( state, tableLikeTypeInfo, tableNode,       nodeForError )
+-- constant, isNew = bcAllocateConstantValueIfNew( state, typeTypeInfo,      representedType, nodeForError )
 function _G.bcAllocateConstantValueIfNew(state, typeInfo, v, nodeForError)
 	local tag      = typeInfo.tag
 	local isSimple = isTypeSimple(typeInfo)
@@ -275,12 +275,6 @@ function _G.bcAllocateConstantValueForExpressionIfNew(state, expr, dependent)
 
 		return const, false
 
-	elseif expr.nodeType == !(nodeTypes.AstType) then
-		local typeNode = expr
-		local typeId   = typeNode.representedType.id
-		typeInfo       = getTypeInfoForBuiltinType(state, "int")
-		return bcAllocateConstantValueIfNew(state, typeInfo, typeId, dependent) -- Glóa types are represented as ints in Lua.
-
 	elseif expr.nodeType == !(nodeTypes.AstLambda) then
 		local lambda = expr
 		assert(lambda.body) -- We should never get here for lambdas without bodies as those would have been AstTypes.
@@ -291,31 +285,32 @@ function _G.bcAllocateConstantValueForExpressionIfNew(state, expr, dependent)
 
 		return lambda.valueConstant, isNew
 
+	elseif expr.nodeType == !(nodeTypes.AstType) then
+		local typeNode = expr
+		typeInfo       = getTypeInfoForBuiltinType(state, "type")
+		return bcAllocateConstantValueIfNew(state, typeInfo, typeNode.representedType, dependent)
+
 	elseif expr.nodeType == !(nodeTypes.AstStruct) then
-		local struct = expr
+		local struct     = expr
+		local structInfo = struct.representedType
 
 		-- @Incomplete: Wait for statements to get inferred (when we got struct self-referencing working).
 
-		local const, isNew = bcAllocateConstantValueIfNew(state, typeInfo, struct, dependent)
+		local const, isNew = bcAllocateConstantValueIfNew(state, typeInfo, structInfo, dependent)
 
-		if isNew and state.settings.outputDebugInfo then
-			local structInfo = struct.representedType
-			if structInfo.name ~= "" then
-				bcMaybeSetConstantName(state, const, structInfo.name)
-			end
+		if isNew and state.settings.outputDebugInfo and structInfo.name ~= "" then
+			bcMaybeSetConstantName(state, const, structInfo.name)
 		end
 
 		return const, isNew
 
 	elseif expr.nodeType == !(nodeTypes.AstEnum) then
 		local enum         = expr
-		local const, isNew = bcAllocateConstantValueIfNew(state, typeInfo, enum, dependent)
+		local enumInfo     = enum.representedType
+		local const, isNew = bcAllocateConstantValueIfNew(state, typeInfo, enumInfo, dependent)
 
-		if isNew and state.settings.outputDebugInfo then
-			local enumInfo = enum.representedType
-			if enumInfo.name ~= "" then
-				bcMaybeSetConstantName(state, const, enumInfo.name)
-			end
+		if isNew and state.settings.outputDebugInfo and enumInfo.name ~= "" then
+			bcMaybeSetConstantName(state, const, enumInfo.name)
 		end
 
 		return const, isNew

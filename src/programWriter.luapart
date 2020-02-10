@@ -1257,31 +1257,12 @@ function _G.writeConstantValue(state, writer, const)
 		local typeInfo = const.value
 		file:write(F("%d", typeInfo.id))
 		if state.settings.outputDebugInfo then
-			file:write("--[[", getFriendlyTypeInfoName(typeInfo):gsub("%]", "%0 "), "]]")
+			file:write("--[[", getFriendlyTypeInfoName(typeInfo):gsub("%]", "] "), "]]")
 		end
 
 	elseif tag == !(typeTags.TypeInfoFunction) then
 		local lambda = const.value
 		writeFunction(state, writer, lambda)
-
-	elseif tag == !(typeTags.TypeInfoStruct) then
-		errorInternal("@Incomplete: Write struct instance constant.")
-
-	elseif tag == !(typeTags.TypeInfoArray) then
-		local arraySig      = const.valueType
-		local tableNode     = const.value
-		local indexedValues = {}
-
-		for _, tableField in ipairs(tableNode.fields) do
-			indexedValues[tableField.key.value] = tableField.value
-		end
-
-		file:write("{")
-		for i, valueExpr in ipairs(indexedValues) do
-			if i > 1 then  file:write(", ")  end
-			writeExpression(state, writer, valueExpr)
-		end
-		file:write("}")
 
 	elseif tag == !(typeTags.TypeInfoTable) then
 		local tableNode = const.value
@@ -1300,6 +1281,46 @@ function _G.writeConstantValue(state, writer, const)
 			file:write("=")
 			writeExpression(state, writer, tableField.value)
 		end
+		file:write("}")
+
+	elseif tag == !(typeTags.TypeInfoArray) then
+		local arraySig      = const.valueType
+		local tableNode     = const.value
+		local indexedValues = {}
+
+		for _, tableField in ipairs(tableNode.fields) do
+			indexedValues[tableField.key.value] = tableField.value
+		end
+
+		file:write("{")
+		for i, valueExpr in ipairs(indexedValues) do
+			if i > 1 then  file:write(", ")  end
+			writeExpression(state, writer, valueExpr)
+		end
+		file:write("}")
+
+	elseif tag == !(typeTags.TypeInfoStruct) then
+		local structInfo = const.valueType
+		local tableNode  = const.value
+		!ASSERT `not structInfo.isPolymorphic`
+
+		file:write("{")
+
+		for i, member in ipairs(structInfo.members) do
+			if i > 1 then  file:write(", ")  end
+
+			local tableField = findTableFieldInStructConstructor(tableNode, member.name)
+
+			writeTableConstructorKeyName(writer, member.name)
+			file:write("=")
+
+			if tableField then
+				writeExpression(state, writer, tableField.value)
+			else
+				writeDefaultValueForStructMember(state, writer, structInfo, member, tableNode) -- @UX: Maybe use a better nodeForError.
+			end
+		end
+
 		file:write("}")
 
 	elseif tag == !(typeTags.TypeInfoEnum) then

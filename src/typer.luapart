@@ -1193,9 +1193,7 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 
 		if typeInfo.tag == !(typeTags.TypeInfoType) then
 			if not typeInfoForDecl then
-				astPrint(valueExpr)
-				printTraceback(io.stderr)
-				typeError(state, valueExpr, "Internal compiler error: Missing what type this constant expression represents.")
+				errorInternal(state, valueExpr, "Missing what type this constant expression represents.")
 			end
 
 		elseif typeInfo.tag == !(typeTags.TypeInfoEnum) then -- @Robustness: Actually detect whether we have a type enum and include it here above.
@@ -4029,6 +4027,35 @@ local function createRunReplacementFromTypeAndLuaValue(state, runNode, parent, t
 		tableNode.inferredType = arraySig
 		return tableNode
 
+	elseif tag == !(typeTags.TypeInfoStruct) then
+		local t = v
+		assert(type(t) == "table")
+		local structInfo = typeInfo
+		local tableNode  = astNewNode(AstTable, runNode.token, parent)
+		local stringType = getTypeInfoForBuiltinType(state, "string")
+		assert(structInfo.hasMembers)
+
+		-- @Robustness: Check that all keys in 't' are valid.
+		for _, member in ipairs(structInfo.members) do
+			local tableField           = TableField()
+
+			local memberLiteral        = astNewNode(AstLiteral, runNode.token, tableNode)
+			memberLiteral.literalType  = !(LITERAL_STRING)
+			memberLiteral.value        = member.name
+			memberLiteral.inferredType = stringType
+			tableField.key             = memberLiteral
+
+			tableField.value           = createRunReplacementFromTypeAndLuaValue(state, runNode, tableNode, member.typeInfo, t[member.name])
+
+			table.insert(tableNode.fields, tableField)
+		end
+
+		tableNode.inferredType = structInfo
+		return tableNode
+
+	elseif tag == !(typeTags.TypeInfoEnum) then
+		errorUnhandledType(state, runNode, typeInfo) -- @Incomplete
+
 	elseif tag == !(typeTags.TypeInfoFunction) then
 		local func = v
 		assert(type(func) == "function")
@@ -4060,10 +4087,6 @@ local function createRunReplacementFromTypeAndLuaValue(state, runNode, parent, t
 			copy.token = runNode.token
 			return copy
 		end
-
-	-- @Incomplete: Handle these:
-	-- * TypeInfoStruct
-	-- * TypeInfoEnum
 
 	elseif tag == !(typeTags.TypeInfoType) then
 		local typeId = v
@@ -4844,19 +4867,18 @@ local function simplifyBinary(state, binary)
 
 	!for _, opEquality in ipairs{"==","~="} do
 	elseif binary.operation == !(opEquality) then
-		assert(type(binary.left.value) == type(binary.right.value))
-
 		local valueL, valueR
 
 		if binary.left.nodeType == !(nodeTypes.AstLiteral) then
 			assert(binary.right.nodeType == !(nodeTypes.AstLiteral))
+			assert(type(binary.left.value) == type(binary.right.value))
 			valueL = binary.left.value
 			valueR = binary.right.value
 
-		elseif binary.left.nodeType == !(nodeTypes.AstType) then
-			assert(binary.right.nodeType == !(nodeTypes.AstType))
-			valueL = binary.left.representedType.id
-			valueR = binary.right.representedType.id
+		elseif binary.left.inferredType.tag == !(typeTags.TypeInfoType) then
+			assert(binary.right.inferredType.tag == !(typeTags.TypeInfoType))
+			valueL = getTypeRepresentedByExpression(binary.left).id
+			valueR = getTypeRepresentedByExpression(binary.right).id
 
 		else
 			!ifDEBUG `astPrintTree(binary)`
