@@ -186,6 +186,7 @@ local !struct"Constant"{
 }
 
 -- constant, isNew = bcAllocateConstantValueIfNew( state, simpleTypeInfo,    literalValue,    nodeForError )
+-- constant, isNew = bcAllocateConstantValueIfNew( state, enumTypeInfo,      memberName,      nodeForError ) -- Note: Enums are actually simple types but have special handling in some places.
 -- constant, isNew = bcAllocateConstantValueIfNew( state, functionSignature, lambdaWithBody,  nodeForError )
 -- constant, isNew = bcAllocateConstantValueIfNew( state, foreignTypeDummy,  foreign,         nodeForError )
 -- constant, isNew = bcAllocateConstantValueIfNew( state, tableLikeTypeInfo, tableNode,       nodeForError )
@@ -222,11 +223,8 @@ function _G.bcAllocateConstantValueIfNew(state, typeInfo, v, nodeForError)
 		elseif isAny(tag, !(typeTags.TypeInfoStruct),!(typeTags.TypeInfoArray),!(typeTags.TypeInfoTable)) then
 			if const.value == v then  return const, false  end
 
-		elseif tag == !(typeTags.TypeInfoEnum) then
-			errorInternal(state, nodeForError, "Incomplete: Handle TypeInfoEnum.") -- Not sure we ever get here.
-
 		elseif tag == !(typeTags.TypeInfoForeignDummy) then
-			if v.sourceId == const.value.sourceId then  return const, false  end
+			if const.value.sourceId == v.sourceId then  return const, false  end
 
 		else
 			errorInternal(state, nodeForError, "Incomplete: Unhandled constant value type '%s'.", (TYPE_TAG_NAMES[tag] or "?"))
@@ -317,16 +315,22 @@ function _G.bcAllocateConstantValueForExpressionIfNew(state, expr, dependent)
 
 	elseif expr.nodeType == !(nodeTypes.AstIdentifier) then
 		local ident = expr
-		local decl  = ident.declaration
 
-		if decl.queued.pipe <= !(PIPE_BYTECODE) then
-			!DEPEND_AND_RETURN(`dependent`, DEPEND_NODE_EMITTED, `decl`, nil, `nil`)
+		if typeInfo.tag == !(typeTags.TypeInfoEnum) then
+			local enumInfo = typeInfo
+			return bcAllocateConstantValueIfNew(state, enumInfo, ident.name, dependent)
+
+		else
+			local decl = ident.declaration
+			if decl.queued.pipe <= !(PIPE_BYTECODE) then
+				!DEPEND_AND_RETURN(`dependent`, DEPEND_NODE_EMITTED, `decl`, nil, `nil`)
+			end
+
+			assert(decl.assignment) -- Should have given an error in the typer.
+
+			local valueExpr = getAssignmentValue(state, decl.name, decl.assignment.values, decl.assignmentIndex, nil, nil, nil)
+			return bcAllocateConstantValueForExpressionIfNew(state, valueExpr, dependent)
 		end
-
-		assert(decl.assignment) -- Should have given an error in the typer.
-
-		local valueExpr = getAssignmentValue(state, decl.name, decl.assignment.values, decl.assignmentIndex, nil, nil, nil)
-		return bcAllocateConstantValueForExpressionIfNew(state, valueExpr, dependent)
 
 	elseif expr.nodeType == !(nodeTypes.AstCast) then
 		-- The cast is probably from/to 'any'.
@@ -507,7 +511,13 @@ function _G.bcEmitForDeclaration(state, decl)
 			return
 		end
 
-		local const = bcAllocateConstantValueForExpressionIfNew(state, valueExpr, decl)
+		local const
+		if decl.name.inferredType.tag == !(typeTags.TypeInfoEnum) then
+			local enumInfo = decl.name.inferredType
+			const          = bcAllocateConstantValueIfNew(state, enumInfo, decl.name.name, decl)
+		else
+			const          = bcAllocateConstantValueForExpressionIfNew(state, valueExpr, decl)
+		end
 		if not const then  return  end -- A dependency was added and we're now waiting.
 
 		decl.valueConstant = const

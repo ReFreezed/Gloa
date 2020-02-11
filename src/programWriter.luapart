@@ -236,7 +236,7 @@ function _G.writeAccess(state, writer, access)
 		end
 
 	elseif access.object.inferredType.tag == !(typeTags.TypeInfoEnum) then
-		errorInternal() -- Enum accesses should have been simplified away.
+		errorInternal(state, access) -- Enum accesses should have been simplified away.
 
 	else
 		errorUnhandledNodeType(state, access.object)
@@ -322,7 +322,7 @@ function _G.writeTableConstructorKeyName(writer, name)
 end
 
 function _G.writeDefaultValueForStructMember(state, writer, structInfo, member, nodeForError)
-	local decl = findMemberDeclaration(state, structInfo.astNode, member.name) or errorInternal("Did not find member '%s'", member.name)
+	local decl = findDynamicMemberDeclaration(state, structInfo.astNode, member.name) or errorInternal(state, structInfo.astNode, "Did not find member '%s'.", member.name)
 	if decl.assignment then
 		local valueExpr = decl.assignment.values[1] or errorInternal()
 		writeExpression(state, writer, valueExpr)
@@ -489,18 +489,6 @@ function _G.writeExpression(state, writer, expr)
 
 		if not decl.isConstant then
 			writeIdentifierName(state, writer, ident)
-
-		-- @Cleanup: This detection seem misplaced. I think we have to make enum constants into their
-		-- own type instead of (essentially) using the memberTypeInfo when creating the constants.
-		elseif ident.inferredType.tag == !(typeTags.TypeInfoEnum) and not isPartOfAnyDeclaration(ident) then
-			local enumInfo  = ident.inferredType
-			local valueExpr = decl.assignment.values[1] or errorInternal()
-			writeExpression(state, writer, valueExpr)
-
-			if state.settings.outputDebugInfo then
-				file:write("--[[", enumInfo.name, ".", decl.name.name, "]]")
-			end
-
 		else
 			writeConstantValueOrReference(state, writer, decl.valueConstant)
 		end
@@ -1231,21 +1219,21 @@ function _G.writeForeignImportIfNew(state, writer, typeInfo, foreignSource, fore
 	end
 end
 
-function _G.writeConstantValue(state, writer, const)
+local function writeSimpleConstant(state, writer, typeInfo, v, isEnum)
 	local file = writer.file
-	local tag  = const.valueType.tag
+	local tag  = typeInfo.tag
 
 	if tag == !(typeTags.TypeInfoBool) then
-		file:write(const.value and "true" or "false")
+		file:write(v and "true" or "false")
 
 	elseif tag == !(typeTags.TypeInfoInt) then
 		-- %.0f handles larger values than %d and with no wrapping. (I think the former is 64-bit
 		-- float and the latter 32-bit int.) %d would not work if trying to write the size of a
 		-- large file, for example.
-		local nStr = F("%.0f", const.value)
+		local nStr = F("%.0f", v)
 
 		if not nStr:find"^%-?%d+$" then
-			errorLine("ProgramWriter", "Cannot write value as integer: %s", tostring(const.value))
+			errorLine("ProgramWriter", "Cannot write value as integer: %s", tostring(v))
 		end
 		file:write(nStr)
 
@@ -1253,18 +1241,53 @@ function _G.writeConstantValue(state, writer, const)
 		file:write("nil")
 
 	elseif tag == !(typeTags.TypeInfoFloat) then
-		local floatStr = tostring(const.value) -- @Robustness: Preserve precision as well as possible.
+		local floatStr = tostring(v) -- @Robustness: Preserve precision as well as possible.
 		if not floatStr:find(".", 1, true) then  floatStr = floatStr..".0"  end
 		file:write(floatStr)
 
 	elseif tag == !(typeTags.TypeInfoString) then
-		writeStringLiteral(writer, const.value)
+		writeStringLiteral(writer, v)
 
 	elseif tag == !(typeTags.TypeInfoType) then
-		local typeInfo = const.value
+		local typeInfo = v
 		file:write(F("%d", typeInfo.id))
-		if state.settings.outputDebugInfo then
+
+		if state.settings.outputDebugInfo and not isEnum then
 			file:write("--[[", getFriendlyTypeInfoName(typeInfo):gsub("%]", "] "), "]]")
+		end
+
+	else
+		errorInternal("Incomplete: Handle constant value of type '%s'.", (TYPE_TAG_NAMES[tag] or "?"))
+	end
+end
+
+function _G.writeConstantValue(state, writer, const)
+	local file = writer.file
+	local tag  = const.valueType.tag
+
+	if not const.isObject then
+		if tag == !(typeTags.TypeInfoEnum) then
+			local enumInfo   = const.valueType
+			local memberName = const.value
+			local decl       = findMemberDeclaration(state, enumInfo.astNode, memberName) or errorInternal(state, enumInfo.astNode, "Did not find member '%s'.", memberName)
+			local valueExpr  = decl.assignment.values[1]
+
+			if enumInfo.memberTypeInfo.tag == !(typeTags.TypeInfoType) then
+				local typeNode = valueExpr
+				!ASSERT("typeNode.nodeType == "..nodeTypes.AstType)
+				writeSimpleConstant(state, writer, enumInfo.memberTypeInfo, typeNode.representedType, true)
+			else
+				local literal = valueExpr
+				!ASSERT("literal.nodeType == "..nodeTypes.AstLiteral)
+				writeSimpleConstant(state, writer, enumInfo.memberTypeInfo, literal.value, true)
+			end
+
+			if state.settings.outputDebugInfo then
+				file:write("--[[", enumInfo.name, ".", memberName, "]]")
+			end
+
+		else
+			writeSimpleConstant(state, writer, const.valueType, const.value, false)
 		end
 
 	elseif tag == !(typeTags.TypeInfoFunction) then
@@ -1329,9 +1352,6 @@ function _G.writeConstantValue(state, writer, const)
 		end
 
 		file:write("}")
-
-	elseif tag == !(typeTags.TypeInfoEnum) then
-		errorInternal("@Incomplete: Write enum constant.") -- Do we ever get here? I think not.
 
 	elseif tag == !(typeTags.TypeInfoForeignDummy) then
 		local foreign = const.value

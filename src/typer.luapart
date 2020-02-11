@@ -11,7 +11,7 @@
 
 	checkBinaryOperation
 	createTypeNodeFromInfo
-	findDeclaration, findDeclarationInScope, findMemberDeclaration, isDeclarationVisibleToNode, printDeclarationChain
+	findDeclaration, findDeclarationInScope, findMemberDeclaration, findDynamicMemberDeclaration, isDeclarationVisibleToNode, printDeclarationChain
 	followIdentifiersToConstantValue
 	getAssignmentValue
 	getClosestScope, getClosestScopeForDeclaration, isScope, isScopeDeclarative, isScopeImperative
@@ -497,6 +497,12 @@ function _G.findDeclarationInScope(state, scope, name, onlyLookInExportsIfScopeI
 end
 
 function _G.findMemberDeclaration(state, scope, name)
+	for _, decl in ipairs(scope.declarations) do
+		if decl.name.name == name then  return decl  end
+	end
+	return nil
+end
+function _G.findDynamicMemberDeclaration(state, scope, name)
 	for _, decl in ipairs(scope.declarations) do
 		if not decl.isConstant and decl.name.name == name then  return decl  end
 	end
@@ -4588,7 +4594,7 @@ function _G.simplifyTypeExpression(state, expr, typeRepresented)
 	!ASSERT("expr.nodeType ~= "..nodeTypes.AstType)
 	!ASSERT("typeRepresented")
 
-	if isTypeOrDoesTypeContainPlaceholder(typeRepresented) then  return  end
+	if isTypeOrDoesTypeContainPlaceholder(typeRepresented) then  return nil  end
 
 	local typeNode = createTypeNodeFromInfo(state, typeRepresented, expr.token, expr.parent)
 
@@ -4601,6 +4607,8 @@ function _G.simplifyTypeExpression(state, expr, typeRepresented)
 	moveChildrenToNextRelevantPipe(state, typeNode)
 
 	replaceQueuedNodeAndUnqueueOldTree(state, expr, typeNode)
+
+	return typeNode
 end
 
 local function simplifyCast(state, cast)
@@ -4693,11 +4701,10 @@ local function simplifyCast(state, cast)
 
 		local enumInfo = exprTypeInfo
 		local ident    = cast.expression
-		assert(ident.nodeType == !(nodeTypes.AstIdentifier)) -- All constant enum member references should have been simplified to an identifier.
 
-		local memberName = ident.name
-		local decl       = findDeclarationInScope(state, enumInfo.astNode, memberName, false)
-		local valueExpr  = decl.assignment.values[1]
+		assert(ident.nodeType == !(nodeTypes.AstIdentifier)) -- All enums should have been simplified to identifiers.
+
+		local valueExpr = ident.declaration.assignment.values[1]
 
 		if BUILTIN_TYPE_TAG_TO_LITERAL_TYPE[castTypeInfo.tag] then
 			local literal = valueExpr
@@ -4996,13 +5003,20 @@ function _G.simplifyExpressionIfConstant(state, expr)
 
 		local typeInfo = ident.inferredType
 
-		if typeInfo.tag ~= !(typeTags.TypeInfoEnum) then
-			local typeInfoRepresented = decl.valueTypeInfo
-
-			if typeInfoRepresented then
-				simplifyTypeExpression(state, ident, typeInfoRepresented)
-				return
+		if typeInfo.tag == !(typeTags.TypeInfoEnum) then
+			if ident.name ~= decl.name.name then
+				local copy = astCopy(decl.name, ident.token)
+				replaceQueuedNodeAndUnqueueOldTree(state, ident, copy)
+				moveToNextRelevantPipe(state, copy, !(PIPE_INFER))
 			end
+			return
+		end
+
+		local typeInfoRepresented = decl.valueTypeInfo
+
+		if typeInfoRepresented then
+			simplifyTypeExpression(state, ident, typeInfoRepresented)
+			return
 		end
 
 		!ASSERT("typeInfo.tag ~= "..typeTags.TypeInfoType)
@@ -5016,7 +5030,6 @@ function _G.simplifyExpressionIfConstant(state, expr)
 		end
 
 		local copy = astCopy(literal, ident.token)
-
 		replaceQueuedNodeAndUnqueueOldTree(state, ident, copy)
 		moveToNextRelevantPipe(state, copy, !(PIPE_INFER))
 
@@ -5037,7 +5050,15 @@ end
 -- Values of simple types are non-objects (e.g. ints) in the outputted Lua code.
 -- Note: Glóa types are represented as ints in Lua and thus are 'simple'.
 function _G.isTypeSimple(typeInfo)
-	return isAny(typeInfo.tag, !(typeTags.TypeInfoBool),!(typeTags.TypeInfoInt),!(typeTags.TypeInfoNone),!(typeTags.TypeInfoFloat),!(typeTags.TypeInfoString),!(typeTags.TypeInfoType))
+	return isAny(typeInfo.tag,
+		!(typeTags.TypeInfoBool),
+		!(typeTags.TypeInfoInt),
+		!(typeTags.TypeInfoNone),
+		!(typeTags.TypeInfoFloat),
+		!(typeTags.TypeInfoString),
+		!(typeTags.TypeInfoType),
+		!(typeTags.TypeInfoEnum) -- The true enum member types are simple.
+	)
 end
 
 function _G.isTypeNumeric(typeInfo)
