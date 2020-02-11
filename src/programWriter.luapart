@@ -483,19 +483,26 @@ function _G.writeExpression(state, writer, expr)
 
 	elseif expr.nodeType == !(nodeTypes.AstIdentifier) then
 		local ident = expr
+		local decl  = ident.declaration
 		!ASSERT `ident.inferredType`
-		!ASSERT `ident.declaration`
+		!ASSERT `decl`
 
-		if ident.declaration.isConstant then
-			if ident.inferredType.tag == !(typeTags.TypeInfoEnum) and not isPartOfAnyDeclaration(ident) then -- @Cleanup: This detection seem bit misplaced.
-				local valueExpr = ident.declaration.assignment.values[1] or errorInternal()
-				writeExpression(state, writer, valueExpr)
-			else
-				writeConstantValueOrReference(state, writer, ident.declaration.valueConstant)
+		if not decl.isConstant then
+			writeIdentifierName(state, writer, ident)
+
+		-- @Cleanup: This detection seem misplaced. I think we have to make enum constants into their
+		-- own type instead of (essentially) using the memberTypeInfo when creating the constants.
+		elseif ident.inferredType.tag == !(typeTags.TypeInfoEnum) and not isPartOfAnyDeclaration(ident) then
+			local enumInfo  = ident.inferredType
+			local valueExpr = decl.assignment.values[1] or errorInternal()
+			writeExpression(state, writer, valueExpr)
+
+			if state.settings.outputDebugInfo then
+				file:write("--[[", enumInfo.name, ".", decl.name.name, "]]")
 			end
 
 		else
-			writeIdentifierName(state, writer, ident)
+			writeConstantValueOrReference(state, writer, decl.valueConstant)
 		end
 
 	elseif expr.nodeType == !(nodeTypes.AstType) then

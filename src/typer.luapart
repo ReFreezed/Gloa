@@ -4054,7 +4054,39 @@ local function createRunReplacementFromTypeAndLuaValue(state, runNode, parent, t
 		return tableNode
 
 	elseif tag == !(typeTags.TypeInfoEnum) then
-		errorUnhandledType(state, runNode, typeInfo) -- @Incomplete
+		local enumInfo     = typeInfo
+		local ident        = astNewNode(AstIdentifier, runNode.token, parent)
+		ident.inferredType = enumInfo
+
+		if isAny(enumInfo.memberTypeInfo.tag, !(typeTags.TypeInfoInt),!(typeTags.TypeInfoString),!(typeTags.TypeInfoBool),!(typeTags.TypeInfoFloat)) then
+			for _, decl in ipairs(enumInfo.astNode.declarations) do
+				local literal = decl.assignment.values[1]
+				assert(literal.nodeType == !(nodeTypes.AstLiteral))
+				if literal.value == v then
+					ident.name        = decl.name.name
+					ident.declaration = decl
+					break
+				end
+			end
+
+		elseif enumInfo.memberTypeInfo.tag == !(typeTags.TypeInfoType) then
+			for _, decl in ipairs(enumInfo.astNode.declarations) do
+				if requireTypeRepresentedByExpression(state, decl.assignment.values[1]).id == v then
+					ident.name        = decl.name.name
+					ident.declaration = decl
+					break
+				end
+			end
+
+		else
+			errorUnhandledType(state, runNode, enumInfo.memberTypeInfo)
+		end
+
+		if not ident.declaration then
+			typeError(state, runNode, "Got an invalid enum value. (Enum '%s', value: %s)", getFriendlyTypeInfoName(enumInfo), tostring(v))
+		end
+
+		return ident
 
 	elseif tag == !(typeTags.TypeInfoFunction) then
 		local func = v
@@ -4791,12 +4823,16 @@ local function simplifyUnary(state, unary)
 end
 
 local function simplifyBinary(state, binary)
+	local l  = binary.left
+	local r  = binary.right
+	local op = binary.operation
+
 	!local ASSERT_BOTH_OPERANDS_NUMERIC_LITERALS = templateToLua(
 		`
-			assert(binary.left.nodeType  == $nodeTypeLiteral)
-			assert(binary.right.nodeType == $nodeTypeLiteral)
-			assert(type(binary.left.value)  == "number")
-			assert(type(binary.right.value) == "number")
+			assert(l.nodeType == $nodeTypeLiteral)
+			assert(r.nodeType == $nodeTypeLiteral)
+			assert(type(l.value) == "number")
+			assert(type(r.value) == "number")
 		`, {
 			nodeTypeLiteral = toLua(nodeTypes.AstLiteral),
 		}
@@ -4810,7 +4846,7 @@ local function simplifyBinary(state, binary)
 		-- void
 
 	!for _, opArithmeticKeepType in ipairs{"+","-","*","^","%"} do
-	elseif binary.operation == !(opArithmeticKeepType) then
+	elseif op == !(opArithmeticKeepType) then
 		!!(ASSERT_BOTH_OPERANDS_NUMERIC_LITERALS)
 
 		local literal = astNewNode(AstLiteral, binary.token, binary.parent)
@@ -4820,45 +4856,45 @@ local function simplifyBinary(state, binary)
 			or typeInfo.tag == !(typeTags.TypeInfoFloat) and !(LITERAL_FLOAT)
 			or errorInternal(getFriendlyTypeInfoName(typeInfo))
 
-		literal.value        = binary.left.value !!(opArithmeticKeepType) binary.right.value -- This should produce the correct result for any combination of int and float.
+		literal.value        = l.value !!(opArithmeticKeepType) r.value -- This should produce the correct result for any combination of int and float.
 		literal.inferredType = typeInfo
 
 		replaceQueuedNodeAndUnqueueOldTree(state, binary, literal)
 		moveToNextRelevantPipe(state, literal, !(PIPE_INFER))
 	!end
 
-	elseif binary.operation == "/" then
+	elseif op == "/" then
 		!!(ASSERT_BOTH_OPERANDS_NUMERIC_LITERALS)
 
 		local literal        = astNewNode(AstLiteral, binary.token, binary.parent)
 		literal.literalType  = !(LITERAL_FLOAT)
-		literal.value        = binary.left.value / binary.right.value
+		literal.value        = l.value / r.value
 		literal.inferredType = typeInfo
 
 		replaceQueuedNodeAndUnqueueOldTree(state, binary, literal)
 		moveToNextRelevantPipe(state, literal, !(PIPE_INFER))
 
-	elseif binary.operation == "//" then
+	elseif op == "//" then
 		!!(ASSERT_BOTH_OPERANDS_NUMERIC_LITERALS)
 
 		local literal        = astNewNode(AstLiteral, binary.token, binary.parent)
 		literal.literalType  = !(LITERAL_INTEGER)
-		literal.value        = math.floor(binary.left.value / binary.right.value)
+		literal.value        = math.floor(l.value / r.value)
 		literal.inferredType = typeInfo
 
 		replaceQueuedNodeAndUnqueueOldTree(state, binary, literal)
 		moveToNextRelevantPipe(state, literal, !(PIPE_INFER))
 
 	!for _, opComparison in ipairs{"<",">","<=",">="} do
-	elseif binary.operation == !(opComparison) then
-		assert(binary.left.nodeType  == !(nodeTypes.AstLiteral))
-		assert(binary.right.nodeType == !(nodeTypes.AstLiteral))
-		assert(type(binary.left.value) == type(binary.right.value))
-		assert(isAny(type(binary.left.value), "number","string"))
+	elseif op == !(opComparison) then
+		assert(l.nodeType == !(nodeTypes.AstLiteral))
+		assert(r.nodeType == !(nodeTypes.AstLiteral))
+		assert(type(l.value) == type(r.value))
+		assert(isAny(type(l.value), "number","string"))
 
 		local literal        = astNewNode(AstLiteral, binary.token, binary.parent)
 		literal.literalType  = !(LITERAL_BOOLEAN)
-		literal.value        = binary.left.value !!(opComparison) binary.right.value
+		literal.value        = l.value !!(opComparison) r.value
 		literal.inferredType = typeInfo
 
 		replaceQueuedNodeAndUnqueueOldTree(state, binary, literal)
@@ -4866,19 +4902,26 @@ local function simplifyBinary(state, binary)
 	!end
 
 	!for _, opEquality in ipairs{"==","~="} do
-	elseif binary.operation == !(opEquality) then
+	elseif op == !(opEquality) then
 		local valueL, valueR
 
-		if binary.left.nodeType == !(nodeTypes.AstLiteral) then
-			assert(binary.right.nodeType == !(nodeTypes.AstLiteral))
-			assert(type(binary.left.value) == type(binary.right.value))
-			valueL = binary.left.value
-			valueR = binary.right.value
+		if l.inferredType.tag == !(typeTags.TypeInfoType) then
+			assert(r.inferredType.tag == !(typeTags.TypeInfoType))
+			valueL = getTypeRepresentedByExpression(l).id
+			valueR = getTypeRepresentedByExpression(r).id
 
-		elseif binary.left.inferredType.tag == !(typeTags.TypeInfoType) then
-			assert(binary.right.inferredType.tag == !(typeTags.TypeInfoType))
-			valueL = getTypeRepresentedByExpression(binary.left).id
-			valueR = getTypeRepresentedByExpression(binary.right).id
+		elseif l.inferredType.tag == !(typeTags.TypeInfoEnum) then
+			assert(r.inferredType.tag == !(typeTags.TypeInfoEnum))
+			assert(l.nodeType == !(nodeTypes.AstIdentifier))
+			assert(r.nodeType == !(nodeTypes.AstIdentifier))
+			valueL = l.name
+			valueR = r.name
+
+		elseif l.nodeType == !(nodeTypes.AstLiteral) then
+			assert(r.nodeType == !(nodeTypes.AstLiteral))
+			assert(type(l.value) == type(r.value))
+			valueL = l.value
+			valueR = r.value
 
 		else
 			!ifDEBUG `astPrintTree(binary)`
@@ -4895,30 +4938,30 @@ local function simplifyBinary(state, binary)
 	!end
 
 	!for _, opLogical in ipairs{"and","or"} do
-	elseif binary.operation == !(opLogical) then
-		assert(binary.left.nodeType  == !(nodeTypes.AstLiteral))
-		assert(binary.right.nodeType == !(nodeTypes.AstLiteral))
-		assert(type(binary.left.value)  == "boolean")
-		assert(type(binary.right.value) == "boolean")
+	elseif op == !(opLogical) then
+		assert(l.nodeType == !(nodeTypes.AstLiteral))
+		assert(r.nodeType == !(nodeTypes.AstLiteral))
+		assert(type(l.value) == "boolean")
+		assert(type(r.value) == "boolean")
 
 		local literal        = astNewNode(AstLiteral, binary.token, binary.parent)
 		literal.literalType  = !(LITERAL_BOOLEAN)
-		literal.value        = binary.left.value !!(opLogical) binary.right.value
+		literal.value        = l.value !!(opLogical) r.value
 		literal.inferredType = typeInfo
 
 		replaceQueuedNodeAndUnqueueOldTree(state, binary, literal)
 		moveToNextRelevantPipe(state, literal, !(PIPE_INFER))
 	!end
 
-	elseif binary.operation == ".." then
-		assert(binary.left.nodeType  == !(nodeTypes.AstLiteral))
-		assert(binary.right.nodeType == !(nodeTypes.AstLiteral))
-		assert(type(binary.left.value)  == "string")
-		assert(type(binary.right.value) == "string")
+	elseif op == ".." then
+		assert(l.nodeType == !(nodeTypes.AstLiteral))
+		assert(r.nodeType == !(nodeTypes.AstLiteral))
+		assert(type(l.value)  == "string")
+		assert(type(r.value) == "string")
 
 		local literal        = astNewNode(AstLiteral, binary.token, binary.parent)
 		literal.literalType  = !(LITERAL_STRING)
-		literal.value        = binary.left.value .. binary.right.value -- @Speed: Concatinate more than two values at a time. (Probably need to update parsing stage.)
+		literal.value        = l.value .. r.value -- @Speed: Concatinate more than two values at a time. (Should maybe update parsing stage.)
 		literal.inferredType = typeInfo
 
 		replaceQueuedNodeAndUnqueueOldTree(state, binary, literal)
