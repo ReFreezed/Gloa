@@ -1223,23 +1223,44 @@ local function writeSimpleConstant(state, writer, typeInfo, v, isEnum)
 		file:write(v and "true" or "false")
 
 	elseif tag == !(typeTags.TypeInfoInt) then
-		-- %.0f handles larger values than %d and with no wrapping. (I think the former is 64-bit
-		-- float and the latter 32-bit int.) %d would not work if trying to write the size of a
-		-- large file, for example.
-		local nStr = F("%.0f", v)
-
-		if not nStr:find"^%-?%d+$" then
-			errorLine("ProgramWriter", "Cannot write value as integer: %s", tostring(v))
+		if v == 0 then
+			file:write("0") -- Avoid writing '-0'.
+		else
+			local nStr = tostring(v)
+			if not nStr:find"^%-?%d+$" then
+				errorLine("ProgramWriter", "Cannot write value as integer: %s", tostring(v))
+			end
+			if nStr:byte(1) == !(getByte"-") then
+				file:write("(", nStr, ")") -- @Incomplete: Use shouldOperationHaveSurroundingParentheses().
+			else
+				file:write(nStr)
+			end
 		end
-		file:write(nStr)
 
 	elseif tag == !(typeTags.TypeInfoNone) then
 		file:write("nil")
 
 	elseif tag == !(typeTags.TypeInfoFloat) then
-		local floatStr = tostring(v) -- @Robustness: Preserve precision as well as possible.
-		if not floatStr:find(".", 1, true) then  floatStr = floatStr..".0"  end
-		file:write(floatStr)
+		-- @Incomplete: Use shouldOperationHaveSurroundingParentheses().
+		if v == 0 then
+			file:write("0.0") -- Avoid writing '-0.0'.
+		elseif v == math.huge then
+			file:write("_MATH_HUGE")
+		elseif v == -math.huge then
+			file:write("(-_MATH_HUGE)")
+		elseif v ~= v then
+			file:write("(0/0)")
+		else
+			local floatStr = tostring(v)
+			if not floatStr:find(".", 1, true) then
+				floatStr = floatStr..".0"
+			end
+			if floatStr:byte(1) == !(getByte"-") then
+				file:write("(", floatStr, ")")
+			else
+				file:write(floatStr)
+			end
+		end
 
 	elseif tag == !(typeTags.TypeInfoString) then
 		writeStringLiteral(writer, v)
@@ -1473,6 +1494,7 @@ function _G.writeCompilerSymbols(state, writer, asGlobals)
 	!local _, nlCount        = ERROR_HANDLER:gsub("\n", "\0")
 	writer.currentOutputLine = writer.currentOutputLine + !(nlCount)
 
+	file:write(maybeLocal, "_MATH_HUGE  = math.huge")  ; writeEol(state, writer)
 	file:write(maybeLocal, "_MATH_MODF  = math.modf")  ; writeEol(state, writer) -- Used when casting float to int.
 	file:write(maybeLocal, "_MATH_FLOOR = math.floor") ; writeEol(state, writer) -- Used for integer division.
 	file:write(maybeLocal, "_IPAIRS     = ipairs")     ; writeEol(state, writer) -- Used for short-form array loops.

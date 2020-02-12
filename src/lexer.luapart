@@ -15,15 +15,6 @@
 --============================================================]]
 
 !(
-local NUM_HEX_FRAC_EXP = ("^( 0[Xx] ([%dA-Fa-f]*) %.([%dA-Fa-f]+) [Pp]([-+]?[%dA-Fa-f]+) )"):gsub(" +", "") -- float
-local NUM_HEX_FRAC     = ("^( 0[Xx] ([%dA-Fa-f]*) %.([%dA-Fa-f]+)                        )"):gsub(" +", "") -- float
-local NUM_HEX_EXP      = ("^( 0[Xx] ([%dA-Fa-f]+)                 [Pp]([-+]?[%dA-Fa-f]+) )"):gsub(" +", "") -- float
-local NUM_HEX          = ("^( 0[Xx]  [%dA-Fa-f]+                                         )"):gsub(" +", "") -- int
-local NUM_DEC_FRAC_EXP = ("^(        %d*          %.%d+           [Ee][-+]?%d+           )"):gsub(" +", "") -- float
-local NUM_DEC_FRAC     = ("^(        %d*          %.%d+                                  )"):gsub(" +", "") -- float
-local NUM_DEC_EXP      = ("^(        %d+                          [Ee][-+]?%d+           )"):gsub(" +", "") -- float
-local NUM_DEC          = ("^(        %d+                                                 )"):gsub(" +", "") -- int
-
 local BYTE_NL        = ("\n"):byte()
 local BYTE_CR        = ("\r"):byte()
 local BYTE_TAB       = ("\t"):byte()
@@ -200,7 +191,7 @@ function _G.tokenize(s, path, tokens)
 				tokValue = word
 			end
 
-		-- Directives.
+		-- Directive.
 		elseif s:find("^!%a", ptr) then
 			ptr = ptr+1
 
@@ -213,31 +204,40 @@ function _G.tokenize(s, path, tokens)
 			tokType  = !(TOKEN_DIRECTIVE)
 			tokValue = word
 
-		-- Number (int/float).
-		elseif s:find("^%.?%d", ptr) then
-			local           lua52Hex, isInt, i1, i2, numStr = true,  false, s:find(!(NUM_HEX_FRAC_EXP), ptr)
-			if not i1 then  lua52Hex, isInt, i1, i2, numStr = true,  false, s:find(!(NUM_HEX_FRAC),     ptr)  end
-			if not i1 then  lua52Hex, isInt, i1, i2, numStr = true,  false, s:find(!(NUM_HEX_EXP),      ptr)  end
-			if not i1 then  lua52Hex, isInt, i1, i2, numStr = false, true,  s:find(!(NUM_HEX),          ptr)  end
-			if not i1 then  lua52Hex, isInt, i1, i2, numStr = false, false, s:find(!(NUM_DEC_FRAC_EXP), ptr)  end
-			if not i1 then  lua52Hex, isInt, i1, i2, numStr = false, false, s:find(!(NUM_DEC_FRAC),     ptr)  end
-			if not i1 then  lua52Hex, isInt, i1, i2, numStr = false, false, s:find(!(NUM_DEC_EXP),      ptr)  end
-			if not i1 then  lua52Hex, isInt, i1, i2, numStr = false, true,  s:find(!(NUM_DEC),          ptr)  end
+		-- Number (hexadecimal, int/float).
+		elseif s:find("^0[Xx]", ptr) then
+			!(
+			local NUM_HEX_FRAC_EXP_1 = ("^( .. _* ([%dA-Fa-f][%dA-Fa-f_]*) %. ([%dA-Fa-f]+) [Pp]([-+]?[%dA-Fa-f][%dA-Fa-f_]*) )"):gsub(" +", "") -- float
+			local NUM_HEX_FRAC_EXP_2 = ("^( .. _*                          %. ([%dA-Fa-f]+) [Pp]([-+]?[%dA-Fa-f][%dA-Fa-f_]*) )"):gsub(" +", "") -- float
+			local NUM_HEX_FRAC_1     = ("^( .. _* ([%dA-Fa-f][%dA-Fa-f_]*) %. ([%dA-Fa-f]+)                                   )"):gsub(" +", "") -- float
+			local NUM_HEX_FRAC_2     = ("^( .. _*                          %. ([%dA-Fa-f]+)                                   )"):gsub(" +", "") -- float
+			local NUM_HEX_EXP        = ("^( .. _* ([%dA-Fa-f][%dA-Fa-f_]*)                  [Pp]([-+]?[%dA-Fa-f][%dA-Fa-f_]*) )"):gsub(" +", "") -- float
+			local NUM_HEX            = ("^( .. _*  [%dA-Fa-f][%dA-Fa-f_]*                                                     )"):gsub(" +", "") -- int
+			)
+			local           lua52Hex, isInt, i1, i2, numStr = true,  false, s:find(!(NUM_HEX_FRAC_EXP_1), ptr)
+			if not i1 then  lua52Hex, isInt, i1, i2, numStr = true,  false, s:find(!(NUM_HEX_FRAC_EXP_2), ptr)  end
+			if not i1 then  lua52Hex, isInt, i1, i2, numStr = true,  false, s:find(!(NUM_HEX_FRAC_1),     ptr)  end
+			if not i1 then  lua52Hex, isInt, i1, i2, numStr = true,  false, s:find(!(NUM_HEX_FRAC_2),     ptr)  end
+			if not i1 then  lua52Hex, isInt, i1, i2, numStr = true,  false, s:find(!(NUM_HEX_EXP),        ptr)  end
+			if not i1 then  lua52Hex, isInt, i1, i2, numStr = false, true,  s:find(!(NUM_HEX),            ptr)  end
 
 			if not numStr then
-				errorInFile(s, path, ptr, "Tokenizer", "Malformed number.")
+				errorInFile(s, path, ptr, "Tokenizer", "Malformed hexadecimal number.")
 			end
 
+			numStr  = numStr:gsub("_+", "")
 			local n = tonumber(numStr)
 
 			-- Support hexadecimal floats in Lua 5.1.
 			if not n and lua52Hex then
-				local               _, intStr, fracStr, expStr = numStr:match(!(NUM_HEX_FRAC_EXP))
-				if not intStr then  _, intStr, fracStr         = numStr:match(!(NUM_HEX_FRAC)) ; expStr  = "0"  end
-				if not intStr then  _, intStr,          expStr = numStr:match(!(NUM_HEX_EXP))  ; fracStr = ""   end
+				local               _, intStr, fracStr, expStr = numStr:match(!(NUM_HEX_FRAC_EXP_1))
+				if not intStr then  _,         fracStr, expStr = numStr:match(!(NUM_HEX_FRAC_EXP_2)) ; intStr                  = ""           end
+				if not intStr then  _, intStr, fracStr         = numStr:match(!(NUM_HEX_FRAC_1))     ;                  expStr =         "0"  end
+				if not intStr then  _,         fracStr         = numStr:match(!(NUM_HEX_FRAC_2))     ; intStr,          expStr = "",     "0"  end
+				if not intStr then  _, intStr,          expStr = numStr:match(!(NUM_HEX_EXP))        ;         fracStr         =     ""       end
 				assert(intStr, numStr)
 
-				n = tonumber(intStr, 16) or 0 -- intStr may be "".
+				n = tonumber(intStr, 16) or 0 -- Note: intStr may be "".
 
 				local fracValue = 1
 				for i = 1, #fracStr do
@@ -249,7 +249,39 @@ function _G.tokenize(s, path, tokens)
 			end
 
 			if not n then
-				errorInFile(s, path, ptr, "Tokenizer", "Invalid number.")
+				errorInFile(s, path, ptr, "Tokenizer", "Internal compiler error: Invalid hexadecimal number.")
+			end
+
+			ptr      = i2+1
+			tokType  = isInt and !(TOKEN_INTEGER) or !(TOKEN_FLOAT)
+			tokValue = n
+
+		-- Number (decimal, int/float).
+		elseif s:find("^%.?%d", ptr) then
+			!(
+			local NUM_DEC_FRAC_EXP_1 = ("^( %d[%d_]* %. %d[%d_]* [Ee][-+]?%d[%d_]* )"):gsub(" +", "") -- float
+			local NUM_DEC_FRAC_EXP_2 = ("^(          %. %d[%d_]* [Ee][-+]?%d[%d_]* )"):gsub(" +", "") -- float
+			local NUM_DEC_FRAC_1     = ("^( %d[%d_]* %. %d[%d_]*                   )"):gsub(" +", "") -- float
+			local NUM_DEC_FRAC_2     = ("^(          %. %d[%d_]*                   )"):gsub(" +", "") -- float
+			local NUM_DEC_EXP        = ("^( %d[%d_]*             [Ee][-+]?%d[%d_]* )"):gsub(" +", "") -- float
+			local NUM_DEC            = ("^( %d[%d_]*                               )"):gsub(" +", "") -- int
+			)
+			local           isInt, i1, i2, numStr = false, s:find(!(NUM_DEC_FRAC_EXP_1), ptr)
+			if not i1 then  isInt, i1, i2, numStr = false, s:find(!(NUM_DEC_FRAC_EXP_2), ptr)  end
+			if not i1 then  isInt, i1, i2, numStr = false, s:find(!(NUM_DEC_FRAC_1),     ptr)  end
+			if not i1 then  isInt, i1, i2, numStr = false, s:find(!(NUM_DEC_FRAC_2),     ptr)  end
+			if not i1 then  isInt, i1, i2, numStr = false, s:find(!(NUM_DEC_EXP),        ptr)  end
+			if not i1 then  isInt, i1, i2, numStr = true,  s:find(!(NUM_DEC),            ptr)  end
+
+			if not numStr then
+				errorInFile(s, path, ptr, "Tokenizer", "Malformed decimal number.")
+			end
+
+			numStr  = numStr:gsub("_+", "")
+			local n = tonumber(numStr)
+
+			if not n then
+				errorInFile(s, path, ptr, "Tokenizer", "Internal compiler error: Invalid decimal number.")
 			end
 
 			ptr      = i2+1
