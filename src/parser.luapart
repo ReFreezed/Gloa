@@ -248,6 +248,7 @@ _G.!structAst"AstArguments:_AstNode"{
 _G.!structAst"AstDeclaration:_AstNode"{
 	{`name`,                 nil, ast="node"},  -- AstIdentifier|AstVararg
 	{`type`,                 nil, ast="node"},  -- AstType  (If this is nil then the type is inferred from the value.)
+	{`value`,                nil, ast="node"},  -- AstExpression  (Either this or assignment should be set, or neither for getting the default value for the type.)
 	{`notes`,                {},  ast="array"}, -- []AstNote  @Incomplete: Notes.
 
 	{`isGlobalOrExported`,   false},
@@ -255,7 +256,7 @@ _G.!structAst"AstDeclaration:_AstNode"{
 	{`canShadow`,            false},
 	{`addedByPolymorph`,     false},
 
-	{`assignment`,           nil, astRef="node"}, -- AstAssignment  (If this is nil then the name gets it's default value (which depends on the type, of which there must be only one.))
+	{`assignment`,           nil, astRef="node"}, -- AstAssignment
 	{`assignmentIndex`,      1},
 
 	-- Type phase:
@@ -734,17 +735,7 @@ function _G.parseArguments(state, parentNode, isInput)
 					assert(decl.name.nodeType == !(nodeTypes.AstIdentifier))
 				end
 
-				local assignment           = astNewNode(AstAssignment, token, arg)
-				assignment.forDeclaration  = true
-				assignment.declarations    = {decl}
-				arg.assignment             = assignment
-				decl.assignment            = assignment -- Note: decl.assignmentIndex is always 1 for arguments.
-
-				local identCopy            = astCopy(decl.name, nil, assignment)
-				assignment.targets[1]      = identCopy
-
-				!SET_OR_RETURN `local expr = parseExpression(state, assignment)` -- @Speed: Parse once then just copy the first one.
-				assignment.values[1]       = expr
+				!SET_OR_RETURN `decl.value = parseExpression(state, decl)` -- @Speed: Parse once then just copy the first one.
 
 				--[[
 				-- If the value is nil then we make sure 'nil' is one of the types.
@@ -755,11 +746,11 @@ function _G.parseArguments(state, parentNode, isInput)
 				--
 				if
 					i == 1
-					and expr.nodeType    == !(nodeTypes.AstLiteral)
-					and expr.literalType == !(LITERAL_NIL)
+					and decl.value.nodeType    == !(nodeTypes.AstLiteral)
+					and decl.value.literalType == !(LITERAL_NIL)
 					and not itemWith1(decl.types, "typeName", "nil")
 				then
-					local typeNode    = astNewNode(AstType, expr.token, decl)
+					local typeNode    = astNewNode(AstType, decl.value.token, decl)
 					typeNode.kind     = !(TYPE_KIND_SIMPLE_BUILTIN)
 					typeNode.typeName = "none"
 					table.insert(decl.types, typeNode)
@@ -801,7 +792,7 @@ function _G.parseArguments(state, parentNode, isInput)
 
 	if isInput then
 		for _, arg in ipairs(args.arguments) do
-			arg.isRequired = (arg.assignment == nil and arg.declaration.name.nodeType ~= !(nodeTypes.AstVararg))
+			arg.isRequired = (arg.declaration.value == nil and arg.declaration.name.nodeType ~= !(nodeTypes.AstVararg))
 		end
 	else
 		-- @Incomplete: If a !must was specified, set arg.isRequired from first argument to the last !must.
@@ -867,12 +858,6 @@ function _G.parseStruct(state, parentNode)
 			table.insert(struct.statements,       decl)
 			table.insert(struct.declarations,     decl)
 			table.insert(struct.bakeDeclarations, decl)
-
-			local assignment = arg.assignment
-			if assignment then
-				assignment.parent = struct
-				table.insert(struct.statements, assignment)
-			end
 		end
 
 		tokType, tokValue = eatNextToken(state)
@@ -899,7 +884,7 @@ function _G.parseStruct(state, parentNode)
 			table.insert(struct.statements, debugNode)
 		else
 			local declType = !(DECLARATION_STRUCT)
-			!DO_OR_RETURN `parseDeclarationStatement(state, struct, declType)`
+			!DO_OR_RETURN `parseDeclarationStatement(state, struct, false, declType)`
 		end
 
 		tokType, tokValue = eatNextToken(state)
@@ -943,7 +928,7 @@ function _G.parseEnum(state, parentNode)
 	-- Note: We allow a trailing comma/semicolon after the members.
 	while true do
 		local declType = !(DECLARATION_ENUM)
-		!DO_OR_RETURN `parseDeclarationStatement(state, enum, declType)`
+		!DO_OR_RETURN `parseDeclarationStatement(state, enum, false, declType)`
 
 		tokType, tokValue = eatNextToken(state)
 
@@ -966,9 +951,9 @@ function _G.parseEnum(state, parentNode)
 	return enum
 end
 
--- success = parseDeclarationStatement( compilationState, parentBlock [, declarationType=DECLARATION_NORMAL ] )
+-- success = parseDeclarationStatement( compilationState, parentBlock, inImperativeScope [, declarationType=DECLARATION_NORMAL ] )
 -- declarationType = DECLARATION_NORMAL|DECLARATION_STRUCT|DECLARATION_ENUM
-function _G.parseDeclarationStatement(state, block, declType)
+function _G.parseDeclarationStatement(state, block, imperative, declType)
 	--[[
 	local a := 0        -- Variable, inferred type.
 	local a  = 0        -- Variable, inferred type (same as the above).
@@ -1095,62 +1080,52 @@ function _G.parseDeclarationStatement(state, block, declType)
 	local assignment  = nil
 	local isConst     = false
 
-	!local CREATE_ASSIGNMENT = `
-		assignment                = astNewNode(AstAssignment, declStartToken, block)
-		assignment.forDeclaration = true
-		assignment.declarations   = {}
-
-		for i, decl in ipairs(declarations) do
-			local identCopy       = astCopy(declNames[i], nil, assignment)
-			assignment.targets[i] = identCopy
-
-			decl.assignment       = assignment
-			decl.assignmentIndex  = i
-
-			table.insert(assignment.declarations, decl)
-		end
-	`
-
-	-- Variable.
-	if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"=") then
+	if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"=",":") then
 		eatNextToken(state)
+		isConst = (tokValue == ":")
 
-		!!(CREATE_ASSIGNMENT)
-
-		if declType == !(DECLARATION_ENUM) then
-			!ERROR_OR_RETURN `errorParsingLast(state, "Enum members must be constant.")`
-		-- elseif declType == !(DECLARATION_STRUCT) then
-		-- 	!SET_OR_RETURN `local expr = parseExpression(state, assignment)`
-		-- 	table.insert(assignment.values, expr)
-		elseif declType == !(DECLARATION_NORMAL) then
-			!DO_OR_RETURN `parseExpressionList(state, assignment, assignment.values)`
-		else
-			!SET_OR_RETURN `local expr = parseExpression(state, assignment)`
-			table.insert(assignment.values, expr)
-		end
-
-		for _, expr in ipairs(assignment.values) do
-			if expr.nodeType == !(nodeTypes.AstImport) then
-				!ERROR_OR_RETURN `errorParsing(state, expr.token, "References to imported namespaces must be constant.")`
+		if isConst then
+			imperative = false
+			for _, decl in ipairs(declarations) do
+				decl.isConstant = true
 			end
+		elseif declType == !(DECLARATION_ENUM) then
+			!ERROR_OR_RETURN `errorParsingLast(state, "Enum members must be constant.")`
 		end
 
-	-- Constant.
-	elseif isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),":") then
-		eatNextToken(state)
+		if imperative then
+			assignment                = astNewNode(AstAssignment, declStartToken, block)
+			assignment.forDeclaration = true
+			assignment.declarations   = {}
 
-		isConst = true
-		for _, decl in ipairs(declarations) do
-			decl.isConstant = true
-		end
+			for i, decl in ipairs(declarations) do
+				local identCopy       = astCopy(declNames[i], nil, assignment)
+				assignment.targets[i] = identCopy
 
-		!!(CREATE_ASSIGNMENT)
+				decl.assignment       = assignment
+				decl.assignmentIndex  = i
 
-		if declType == !(DECLARATION_NORMAL) then
-			!DO_OR_RETURN `parseExpressionList(state, assignment, assignment.values)`
+				table.insert(assignment.declarations, decl)
+			end
+
+			if declType == !(DECLARATION_NORMAL) then
+				!DO_OR_RETURN `parseExpressionList(state, assignment, assignment.values)`
+			else
+				!SET_OR_RETURN `local expr = parseExpression(state, assignment)`
+				table.insert(assignment.values, expr)
+			end
+
 		else
-			!SET_OR_RETURN `local expr = parseExpression(state, assignment)`
-			table.insert(assignment.values, expr)
+			for i, decl in ipairs(declarations) do
+				if i > 1 then
+					tokType, tokValue = eatNextToken(state)
+					if not isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),",") then
+						!ERROR_OR_RETURN `errorParsingAfterPrevious(state, "Missing a value for '%s'.", decl.name.name)`
+					end
+				end
+
+				decl.value = parseExpression(state, decl)
+			end
 		end
 	end
 
@@ -1385,7 +1360,7 @@ function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 			isToken(tokType2,tokValue2, !(TOKEN_KEYWORD),"local")
 		)
 	then
-		!DO_OR_RETURN_FALSE `parseDeclarationStatement(state, block)`
+		!DO_OR_RETURN_FALSE `parseDeclarationStatement(state, block, true)`
 		return true
 	end
 
@@ -1848,7 +1823,7 @@ function _G.parseFileScopeStatements(state, block, isTopLevel, singleStatement)
 				isToken(tokType2,tokValue2, !(TOKEN_KEYWORD),"local","global","export")
 			)
 		then
-			!DO_OR_RETURN_FALSE `parseDeclarationStatement(state, block)`
+			!DO_OR_RETURN_FALSE `parseDeclarationStatement(state, block, false)`
 
 		elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"import","load") then
 			-- @Incomplete: Warn about duplicate imports? Maybe not necessay as things will only ever be imported once anyway.
@@ -2036,30 +2011,19 @@ function _G.parseLambda(state, parentNode, allowBody)
 			end
 			takenNames[name] = ident.token
 
-			-- Declaration.
 			local decl        = astNewNode(AstDeclaration, bake.token, lambda)
 			ident.declaration = decl
 			decl.name         = astCopy(ident, nil, decl)
 			decl.isConstant   = true
 
+			local typeNode    = astNewNode(AstType, bake.token, decl)
+			typeNode.kind     = !(TYPE_KIND_SIMPLE_BUILTIN)
+			typeNode.typeName = "placeholder"
+			decl.value        = typeNode
+
 			table.insert(lambda.statements,       decl)
 			table.insert(lambda.declarations,     decl)
 			table.insert(lambda.bakeDeclarations, decl)
-
-			-- Placeholder assignment.
-			local assignment          = astNewNode(AstAssignment, bake.token, lambda)
-			assignment.forDeclaration = true
-			assignment.declarations   = {decl}
-			assignment.targets[1]     = astCopy(decl.name, nil, assignment)
-
-			decl.assignment           = assignment -- assignmentIndex remains the default 1.
-
-			local typeNode            = astNewNode(AstType, bake.token, assignment)
-			typeNode.kind             = !(TYPE_KIND_SIMPLE_BUILTIN)
-			typeNode.typeName         = "placeholder"
-			assignment.values[1]      = typeNode
-
-			table.insert(lambda.statements, assignment)
 
 			return !(VISIT_IGNORE_CHILDREN)
 		end)
@@ -2931,8 +2895,9 @@ do
 				if decl.valueTypeInfo then  write(" (typeRepresented=", getFriendlyTypeInfoName(decl.valueTypeInfo), ")")  end
 
 				!!(CHILD_PRINT_START)
-				if decl.name then  printNode(decl.name, indent+1, printed, printChildren)  end
-				if decl.type then  printNode(decl.type, indent+1, printed, printChildren)  end
+				if decl.name  then  printNode(decl.name,  indent+1, printed, printChildren)           end
+				if decl.type  then  printNode(decl.type,  indent+1, printed, printChildren, "TYPE")   end
+				if decl.value then  printNode(decl.value, indent+1, printed, printChildren, "VALUE")  end
 				!!(CHILD_PRINT_END)
 
 			elseif node.nodeType == !(nodeTypes.AstTable) then
@@ -2965,7 +2930,6 @@ do
 				local arg = node
 				!!(CHILD_PRINT_START)
 				if arg.declaration then  printNode(arg.declaration, indent+1, printed, printChildren)  end
-				if arg.assignment  then  printNode(arg.assignment,  indent+1, printed, printChildren)  end
 				!!(CHILD_PRINT_END)
 
 			elseif node.nodeType == !(nodeTypes.AstType) then

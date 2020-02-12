@@ -15,6 +15,7 @@
 	followIdentifiersToConstantValue
 	getAssignmentValue
 	getClosestScope, getClosestScopeForDeclaration, isScope, isScopeDeclarative, isScopeImperative
+	getDeclarationValue
 	inferNode
 	isExpressionConstant
 	isPartOfAnyDeclaration
@@ -577,12 +578,10 @@ function _G.printDeclarationChain(file, state, decl, typeName)
 		if not declCurrent then  break  end
 
 		decl            = nil
-		local valueExpr = declCurrent.assignment and declCurrent.assignment.values[declCurrent.assignmentIndex]
+		local valueExpr = getDeclarationValue(declCurrent)
 
 		if valueExpr then
-			while valueExpr.replacing do
-				valueExpr = valueExpr.replacing -- Caused by simplifications of constants.
-			end
+			while valueExpr.replacing do  valueExpr = valueExpr.replacing  end
 
 			if valueExpr.nodeType == !(nodeTypes.AstIdentifier) then
 				local ident = valueExpr
@@ -632,7 +631,7 @@ function _G.getFriendlyTypeInfoName(typeInfo)
 			local params = {}
 
 			for argIndex, declBaked in ipairs(structInfo.astNode.bakeDeclarations) do
-				local valueExpr = declBaked.assignment.values[1]
+				local valueExpr = declBaked.value
 
 				if valueExpr.nodeType == !(nodeTypes.AstLiteral) then
 					local literal    = valueExpr
@@ -816,8 +815,8 @@ local function checkRedeclaration(state, ident, decl, isMember, scope)
 	elseif
 		decl            .isConstant
 		and declExisting.isConstant
-		and decl        .assignment.values[decl        .assignmentIndex].nodeType == !(nodeTypes.AstLambda)
-		and declExisting.assignment.values[declExisting.assignmentIndex].nodeType == !(nodeTypes.AstLambda)
+		and decl        .value.nodeType == !(nodeTypes.AstLambda)
+		and declExisting.value.nodeType == !(nodeTypes.AstLambda)
 	then
 		while declExisting.overloadOf and declExisting.overloadOf ~= declExisting do  declExisting = declExisting.overloadOf  end
 
@@ -843,8 +842,8 @@ local function checkRedeclaration(state, ident, decl, isMember, scope)
 			decl.overloadOf = declExisting
 			table.insert(declExisting.overloads, decl)
 
-			local lambda         = decl        .assignment.values[decl        .assignmentIndex]
-			local lambdaExisting = declExisting.assignment.values[declExisting.assignmentIndex]
+			local lambda         = decl.value
+			local lambdaExisting = declExisting.value
 
 			assert(not lambdaExisting.inferredType)
 
@@ -906,6 +905,14 @@ local function isPolymorphicStruct(node)
 	return node.nodeType == !(nodeTypes.AstStruct) and node.isPolymorphic
 end
 
+-- valueExpression = getDeclarationValue( declaration [, fallBackToLastAssignmentValue=false ] )
+function _G.getDeclarationValue(decl, fallBackToLastAssignmentValue)
+	return decl.value or decl.assignment and (
+		decl.assignment.values[decl.assignmentIndex]
+		or (fallBackToLastAssignmentValue and getLast(decl.assignment.values) or nil)
+	)
+end
+
 local function inferIdentifierOrVararg(state, identOrVararg)
 	local vararg = identOrVararg.nodeType == !(nodeTypes.AstVararg) and identOrVararg or nil
 	local ident  = not vararg                                       and identOrVararg or nil
@@ -952,12 +959,12 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 
 		-- Polymorphic functions also contain the polymorphed functions and are thus a collection of functions, so referring to them may be a bad idea!
 		-- (How does this work when calling a function from a module or a static struct member function? @Incomplete @Robustness)
-		elseif decl.assignment and isPolymorphicLambda(decl.assignment.values[decl.assignmentIndex] or decl) then
+		elseif isPolymorphicLambda(getDeclarationValue(decl) or decl) then
 			typeError(state, ident, "Cannot refer to polymorphic function '%s' outside calls.", ident.name)
 
 		-- Polymorphic structs are similar to polymorphed functions as they are collections of structs, so referring to them may be a bad idea too!
 		-- (Also, like with the functions, think about modules. @Incomplete @Robustness)
-		elseif decl.assignment and isPolymorphicStruct(decl.assignment.values[decl.assignmentIndex] or decl) then
+		elseif isPolymorphicStruct(getDeclarationValue(decl) or decl) then
 			typeErrorAfter(state, ident, "Missing arguments for polymorphic struct '%s'.", ident.name)
 		end
 
@@ -1046,15 +1053,9 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 		end
 	end
 
-	local assignment = decl.assignment
-
-	if not typeExpr or decl.isConstant then
-		!ASSERT `assignment`
-		for _, valueExpr in ipairs(assignment.values) do
-			if not valueExpr.inferredType then
-				!DEPEND_AND_RETURN(`identOrVararg`, DEPEND_NODE_INFERRED, `valueExpr`)
-			end
-		end
+	local valueExpr = getDeclarationValue(decl, true)
+	if (not typeExpr or decl.isConstant) and not valueExpr.inferredType then
+		!DEPEND_AND_RETURN(`identOrVararg`, DEPEND_NODE_INFERRED, `valueExpr`)
 	end
 
 	--
@@ -1070,13 +1071,13 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 	if decl.overloadOf == decl then
 		for i = 1, #decl.overloads-1 do
 			local decl1         = decl.overloads[i]
-			local funcSig1      = decl1.assignment.values[decl1.assignmentIndex].inferredType
+			local funcSig1      = decl1.value.inferredType
 			local argTypes1     = funcSig1.argumentTypesIn
 			local argRequireds1 = funcSig1.requiredArgumentsIn
 
 			for i = i+1, #decl.overloads do
 				local decl2         = decl.overloads[i]
-				local funcSig2      = decl2.assignment.values[decl2.assignmentIndex].inferredType
+				local funcSig2      = decl2.value.inferredType
 				local argTypes2     = funcSig2.argumentTypesIn
 				local argRequireds2 = funcSig2.requiredArgumentsIn
 
@@ -1170,11 +1171,15 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 
 	-- Infer type from value.
 	else
-		!ASSERT `assignment, "Missing both assignment and types from declaration."`
+		!ASSERT `valueExpr, "Missing both type and value from declaration."`
 		!ASSERT `not vararg`
 
-		local valueExpr, valueTypeInfo = getAssignmentValue(state, ident, assignment.values, decl.assignmentIndex, nil, nil, nil)
-		typeInfo                       = adjustTypeToOne(state, valueExpr, valueTypeInfo, true)
+		if decl.value then
+			typeInfo = valueExpr.inferredType
+		else
+			valueExpr, typeInfo = getAssignmentValue(state, ident, decl.assignment.values, decl.assignmentIndex, nil, nil, nil)
+		end
+		typeInfo = adjustTypeToOne(state, valueExpr, typeInfo, true)
 	end
 
 	assert(typeInfo)
@@ -1182,11 +1187,11 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 
 	-- Check if the value is constant.
 	if decl.isConstant then
-		local valueExpr, valueTypeInfo = getAssignmentValue(state, ident, assignment.values, decl.assignmentIndex, nil, nil, nil)
+		valueExpr       = valueExpr or getAssignmentValue(state, ident, decl.assignment.values, decl.assignmentIndex, nil, nil, nil)
 		typeInfoForDecl = getTypeRepresentedByExpression(valueExpr)
 
 		if isEnumMember then
-			-- Note: AstEnum already validated that valueTypeInfo is compatible with the enum.
+			-- Note: AstEnum already validated that valueExpr's type is compatible with the enum.
 			local enum     = scope
 			local enumInfo = enum.representedType
 			typeInfo       = enumInfo -- Kind of a @Hack, but maybe it's fine for enum members!
@@ -1543,9 +1548,7 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 		calleeDecl = (calleeDecl or callOrReturnNode.callee.declaration)
 
 		if calleeDecl.isConstant then
-			local assignment = calleeDecl.assignment
-			local lambda     = assignment.values[calleeDecl.assignmentIndex] or errorInternal()
-
+			local lambda = getDeclarationValue(calleeDecl) or errorInternal()
 			assert(lambda.nodeType == !(nodeTypes.AstLambda))
 			assert(lambda.inferredType)
 
@@ -1732,7 +1735,7 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 		errorInternal(state, ident, "Identifier is not a constant.")
 	end
 
-	local lambda = decl.assignment.values[decl.assignmentIndex] or errorInternal(state, decl)
+	local lambda = decl.value or errorInternal(state, decl)
 	assert(lambda.nodeType == !(nodeTypes.AstLambda))
 
 	for _, statement in ipairs(lambda.statements) do
@@ -1780,13 +1783,8 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 	morphIdent.declaration = morphDecl
 	morphDecl.name         = morphIdent
 
-	local morphAssignment            = astNewNode(AstAssignment, lambda.token, lambda)
-	morphAssignment.forDeclaration   = true
-	morphAssignment.declarations     = {morphDecl}
-	morphAssignment.addedByPolymorph = true
-	morphDecl.assignment             = morphAssignment
-
-	local morphLambda = astCopy(lambda, nil, morphAssignment)
+	local morphLambda = astCopy(lambda, nil, morphDecl)
+	morphDecl.value   = morphLambda
 
 	-- Don't keep copies of previous polymorphs we've made - that would quickly create a mess!
 	-- (@Speed: Don't even copy them in the first place.)
@@ -1801,8 +1799,6 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 		end
 	end
 
-	morphAssignment.targets[1] = astCopy(morphIdent, nil, morphAssignment)
-	morphAssignment.values[1]  = morphLambda
 	table.insert(lambda.polymorphs, morphDecl)
 
 	astVisitAllNodes(morphLambda, function(node, container, key)
@@ -1863,7 +1859,7 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 			end
 
 			local declBaked = morphLambda.bakeDeclarations[bakeIndex] or errorInternal(state, bake)
-			local typeNode  = declBaked.assignment.values[1]          or errorInternal(state, bake)
+			local typeNode  = declBaked.value                         or errorInternal(state, bake)
 
 			typeNode.inferredType    = getTypeInfoForBuiltinType(state, "type")
 			typeNode.representedType = valueTypeInfo or errorInternal(state, valueExpr)
@@ -1880,12 +1876,8 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 	lambda.statements[i] = morphDecl
 	addToQueueRecursively(state, morphDecl, lambda.statements, i, !(PIPE_INFER))
 
-	local i              = #lambda.statements+1
-	lambda.statements[i] = morphAssignment
-	addToQueueRecursively(state, morphAssignment, lambda.statements, i, !(PIPE_INFER))
-
 	for _, declBaked in ipairs(morphLambda.bakeDeclarations) do
-		local valueExpr         = declBaked.assignment.values[1]
+		local valueExpr         = declBaked.value
 		declBaked.valueTypeInfo = getTypeRepresentedByExpression(valueExpr)
 		moveToNextRelevantPipe(state, valueExpr)
 	end
@@ -1961,7 +1953,7 @@ local function handlePolymorphicStruct(state, call)
 	local acceptedMin = acceptedMax
 
 	for argIndex = acceptedMax, 1, -1 do
-		if not struct.bakeDeclarations[argIndex].assignment then  break  end
+		if not struct.bakeDeclarations[argIndex].value then  break  end
 		acceptedMin = acceptedMin-1
 	end
 
@@ -1977,12 +1969,12 @@ local function handlePolymorphicStruct(state, call)
 
 	-- Check for previous matching polymorph.
 	for _, morphDecl in ipairs(struct.polymorphs) do
-		local morphStruct = morphDecl.assignment.values[1]
+		local morphStruct = morphDecl.value
 		local isMatch     = true
 
 		for argIndex, declBaked in ipairs(morphStruct.bakeDeclarations) do
-			local valueBaked = declBaked.assignment.values[1]
-			local valueExpr  = call.arguments[argIndex] or struct.bakeDeclarations[argIndex].assignment.values[1]
+			local valueBaked = declBaked.value
+			local valueExpr  = call.arguments[argIndex] or struct.bakeDeclarations[argIndex].value
 
 			if valueExpr.nodeType ~= valueBaked.nodeType then
 				isMatch = false ; break
@@ -2023,16 +2015,11 @@ local function handlePolymorphicStruct(state, call)
 	morphIdent.declaration = morphDecl
 	morphDecl.name         = morphIdent
 
-	local morphAssignment            = astNewNode(AstAssignment, struct.token, struct)
-	morphAssignment.forDeclaration   = true
-	morphAssignment.declarations     = {morphDecl}
-	morphAssignment.addedByPolymorph = true
-	morphDecl.assignment             = morphAssignment
-
-	local morphStruct                 = astCopy(struct, nil, morphAssignment)
+	local morphStruct                 = astCopy(struct, nil, morphDecl)
 	morphStruct.inferredType          = nil
 	morphStruct.representedType       = nil
 	morphStruct.polymorphSourceStruct = struct
+	morphDecl.value                   = morphStruct
 
 	-- Don't keep copies of previous polymorphs we've made - that would quickly create a mess!
 	-- (@Speed: Don't even copy them in the first place.)
@@ -2047,30 +2034,14 @@ local function handlePolymorphicStruct(state, call)
 		end
 	end
 
-	morphAssignment.targets[1] = astCopy(morphIdent, nil, morphAssignment)
-	morphAssignment.values[1]  = morphStruct
 	table.insert(struct.polymorphs, morphDecl)
 
 	-- Bake values into morphed struct.
 	for argIndex, declBaked in ipairs(morphStruct.bakeDeclarations) do
-		local assignment = declBaked.assignment
-
-		if not assignment then
-			assignment                = astNewNode(AstAssignment, declBaked.name.token, morphStruct)
-			assignment.forDeclaration = true
-			assignment.declarations   = {declBaked}
-			assignment.targets[1]     = astCopy(declBaked.name, nil, assignment)
-			declBaked.assignment      = assignment
-
-			local i = indexOf(morphStruct.statements, declBaked) or errorInternal()
-			table.insert(morphStruct.statements, i+1, assignment)
-		end
-
 		local valueExpr = call.arguments[argIndex] -- Is nil for optional arguments.
 		if valueExpr then
-			assignment.values[1] = astCopy(valueExpr, nil, assignment) -- Overwrite any old value expression.
+			declBaked.value = astCopy(valueExpr, nil, declBaked) -- Overwrite any old value expression.
 		end
-
 		declBaked.checkedRedeclaration = true -- @Hack to prevent redeclaration errors between polymorphed struct and base struct.
 	end
 
@@ -2078,10 +2049,6 @@ local function handlePolymorphicStruct(state, call)
 	local i              = #struct.statements+1
 	struct.statements[i] = morphDecl
 	addToQueueRecursively(state, morphDecl, struct.statements, i, !(PIPE_INFER))
-
-	local i              = #struct.statements+1
-	struct.statements[i] = morphAssignment
-	addToQueueRecursively(state, morphAssignment, struct.statements, i, !(PIPE_INFER))
 
 	-- Change the call into a type node.
 	local morphTypeNode       = astNewNode(AstType, morphDecl.name.token, call.parent)
@@ -2238,8 +2205,9 @@ end
 end
 
 !NODE_INFERRER `function nodeInferrers.AstDeclaration(state, decl)`
-	if decl.assignment and decl.assignment.queued.pipe <= !(PIPE_INFER) then
-		!DEPEND_AND_RETURN(`decl`, DEPEND_NODE_INFERRED, `decl.assignment`)
+	local valueExpr = getDeclarationValue(decl, true)
+	if valueExpr and not valueExpr.inferredType then
+		!DEPEND_AND_RETURN(`decl`, DEPEND_NODE_INFERRED, `valueExpr`)
 	end
 
 	local identOrVararg = decl.name
@@ -2266,7 +2234,7 @@ end
 				"Constants cannot be compound types. (Type is %s)",
 				getFriendlyTypeInfoName(typeInfoRepresented)
 			)
-		elseif not decl.assignment then
+		elseif not valueExpr then
 			typeError(
 				state, decl.name,
 				"An initial value is required for compound types. (Type is %s)",
@@ -2277,10 +2245,13 @@ end
 
 	-- @Incomplete: decl.notes (if we make them structured, which we should!)
 
-	if decl.assignment then
+	if valueExpr then
+		if valueExpr.inferredType.tag == !(typeTags.TypeInfoNamespace) and not decl.isConstant then
+			typeError(state, valueExpr, "References to namespaces must be constant.")
+		end
+
 		local scope              = getClosestScope(decl) or errorInternal()
 		local scopeIsDeclarative = isScopeDeclarative(scope)
-		local valueExpr
 
 		-- Validate that the assigned value is the same type as the declared name.
 		--
@@ -2289,12 +2260,22 @@ end
 		--
 		if typeExpr and identOrVararg.nodeType ~= !(nodeTypes.AstVararg) then
 			local ident = identOrVararg
-			valueExpr = getAssignmentValue(state, ident, decl.assignment.values, decl.assignmentIndex, ident.inferredType, nil, nil)
+
+			if decl.assignment then
+				getAssignmentValue(state, ident, decl.assignment.values, decl.assignmentIndex, ident.inferredType, nil, nil)
+
+			elseif not isTypeCompatibleWith(decl.value.inferredType, ident.inferredType) then -- Note: No need to call adjustTypeToOne() for decl.value.
+				-- @UX: Use the same error message as getAssignmentValue().
+				typeError(
+					state, valueExpr, "Value type mismatch for assignment target #%d. (Wanted %s, got %s)",
+					decl.assignmentIndex,
+					getFriendlyTypeInfoName(ident.inferredType),
+					getFriendlyTypeInfoName(decl.value.inferredType)
+				)
+			end
 		end
 
 		if scopeIsDeclarative or decl.isConstant then
-			valueExpr = valueExpr or getAssignmentValue(state, identOrVararg, decl.assignment.values, decl.assignmentIndex, nil, nil, nil)
-
 			if isExpressionConstant(state, valueExpr) then
 				-- void
 
@@ -2718,7 +2699,7 @@ end
 			checkForStaticAccessThatUsesWhatLooksLikeRuntimeCode(state, access.object, access.member)
 		end
 
-		local valueExpr = getAssignmentValue(state, decl.name, decl.assignment.values, decl.assignmentIndex, nil, nil, nil)
+		local valueExpr = decl.value
 		local replacement
 
 		if valueExpr.nodeType == !(nodeTypes.AstLiteral) then
@@ -3065,8 +3046,8 @@ end
 
 	if lambda.argumentsIn then
 		for _, arg in ipairs(lambda.argumentsIn.arguments) do
-			if arg.assignment and not isExpressionConstant(state, arg.assignment.values[1]) then
-				typeError(state, astGetExpressionVisuallyFurthestToTheLeft(arg.assignment.values[1]), "Non-constant default values for arguments are not supported yet.")
+			if arg.declaration.value and not isExpressionConstant(state, arg.declaration.value) then
+				typeError(state, astGetExpressionVisuallyFurthestToTheLeft(arg.declaration.value), "Non-constant default values for arguments are not supported yet.")
 			end
 		end
 	end
@@ -3823,15 +3804,10 @@ end
 !NODE_INFERRER `function nodeInferrers.AstEnum(state, enum)`
 	for _, statement in ipairs(enum.statements) do
 		if statement.nodeType == !(nodeTypes.AstDeclaration) then
-			-- Ignore declarations. We only need the assigned values to be inferred.
-
-		elseif statement.nodeType == !(nodeTypes.AstAssignment) and statement.forDeclaration then
-			-- We only need the assigned values to be inferred.
-			local assignment = statement
-			local valueExpr  = assignment.values[1] -- Note: Struct member declarations only have one name per assignment.
-
-			if not valueExpr.inferredType then
-				!DEPEND_AND_RETURN(`enum`, DEPEND_NODE_INFERRED, `valueExpr`)
+			local decl = statement
+			!ASSERT `decl.value`
+			if not decl.value.inferredType then
+				!DEPEND_AND_RETURN(`enum`, DEPEND_NODE_INFERRED, `decl.value`)
 			end
 
 		elseif statement.queued.pipe <= !(PIPE_INFER) then
@@ -3839,7 +3815,7 @@ end
 		end
 	end
 
-	assert(enum.declarations[1], "Enums must have members.") -- This should have been caught during parsing.
+	assert(enum.declarations[1]) -- This should have been caught during parsing.
 
 	local enumMemberInfo
 
@@ -3848,7 +3824,7 @@ end
 		enumMemberInfo = getTypeInfoForBuiltinType(state, enum.memberType.typeName)
 	else
 		-- Just use the type of the first member as the wanted type for the enum.
-		enumMemberInfo = enum.declarations[1].assignment.values[1].inferredType
+		enumMemberInfo = enum.declarations[1].value.inferredType
 		if not isAny(enumMemberInfo.tag, !(typeTags.TypeInfoInt),!(typeTags.TypeInfoString),!(typeTags.TypeInfoType),!(typeTags.TypeInfoBool),!(typeTags.TypeInfoFloat)) then
 			typeError(state, enum, "Supported enum member types are: int, string, type, bool, float")
 		end
@@ -3859,7 +3835,7 @@ end
 	enumInfo.memberTypeInfo = enumMemberInfo or errorInternal()
 
 	for i, decl in ipairs(enum.declarations) do
-		local valueExpr = decl.assignment.values[1]
+		local valueExpr = decl.value
 
 		if not isTypeCompatibleWith(valueExpr.inferredType, enumMemberInfo) then
 			typeError(state, valueExpr,
@@ -3933,8 +3909,7 @@ local function prepareForRunning(state, runNode, unit, visited)
 				prepareForRunning(state, runNode, decl, visited)
 				if runNode.queued.waitingOn then  return !(VISIT_BREAK)  end
 
-				local assignment = decl.assignment
-				local valueExpr  = assignment and assignment.values[decl.assignmentIndex]
+				local valueExpr = getDeclarationValue(decl)
 
 				if valueExpr then
 					prepareForRunning(state, runNode, valueExpr, visited)
@@ -4066,7 +4041,7 @@ local function createRunReplacementFromTypeAndLuaValue(state, runNode, parent, t
 
 		if isAny(enumInfo.memberTypeInfo.tag, !(typeTags.TypeInfoInt),!(typeTags.TypeInfoString),!(typeTags.TypeInfoBool),!(typeTags.TypeInfoFloat)) then
 			for _, decl in ipairs(enumInfo.astNode.declarations) do
-				local literal = decl.assignment.values[1]
+				local literal = decl.value
 				assert(literal.nodeType == !(nodeTypes.AstLiteral))
 				if literal.value == v then
 					ident.name        = decl.name.name
@@ -4077,7 +4052,7 @@ local function createRunReplacementFromTypeAndLuaValue(state, runNode, parent, t
 
 		elseif enumInfo.memberTypeInfo.tag == !(typeTags.TypeInfoType) then
 			for _, decl in ipairs(enumInfo.astNode.declarations) do
-				if requireTypeRepresentedByExpression(state, decl.assignment.values[1]).id == v then
+				if requireTypeRepresentedByExpression(state, decl.value).id == v then
 					ident.name        = decl.name.name
 					ident.declaration = decl
 					break
@@ -4113,13 +4088,10 @@ local function createRunReplacementFromTypeAndLuaValue(state, runNode, parent, t
 
 		local lambda = const.value
 
-		if lambda.parent.nodeType == !(nodeTypes.AstAssignment) and lambda.parent.forDeclaration then
-			local assignment = lambda.parent
-			local i          = indexOf(assignment.values, lambda) or errorInternal()
-			local decl       = assignment.declarations[i]
-			local ident      = astCopy(decl.name, runNode.token, parent)
+		if lambda.parent.nodeType == !(nodeTypes.AstDeclaration) then
+			local decl  = lambda.parent
+			local ident = astCopy(decl.name, runNode.token, parent)
 			return ident
-
 		else
 			local copy = astCopy(lambda, nil, parent)
 			copy.token = runNode.token
@@ -4258,13 +4230,7 @@ function _G.isExpressionConstant(state, expr)
 	elseif expr.nodeType == !(nodeTypes.AstIdentifier) then
 		local ident = expr
 		local decl  = ident.declaration or errorInternal()
-
-		if not decl.isConstant then  return false  end
-
-		!ASSERT `decl.assignment` -- Constant declarations must have a value.
-
-		local valueExpr = getAssignmentValue(state, ident, decl.assignment.values, decl.assignmentIndex, nil, nil, nil)
-		return isExpressionConstant(state, valueExpr)
+		return decl.isConstant and isExpressionConstant(state, decl.value)
 
 	elseif isAny(expr.nodeType, !(nodeTypes.AstType),!(nodeTypes.AstTypeOf)) then
 		return true--, expr.representedType.id -- All types are constant, just like literals.
@@ -4704,7 +4670,8 @@ local function simplifyCast(state, cast)
 
 		assert(ident.nodeType == !(nodeTypes.AstIdentifier)) -- All enums should have been simplified to identifiers.
 
-		local valueExpr = ident.declaration.assignment.values[1]
+		!ASSERT `ident.declaration.isConstant`
+		local valueExpr = ident.declaration.value
 
 		if BUILTIN_TYPE_TAG_TO_LITERAL_TYPE[castTypeInfo.tag] then
 			local literal = valueExpr
@@ -4985,10 +4952,10 @@ function _G.simplifyExpressionIfConstant(state, expr)
 			-- :SpecialForeignValueRules
 			expr.nodeType == !(nodeTypes.AstIdentifier)
 			and expr.declaration.isConstant
-			and expr.declaration.assignment.values[expr.declaration.assignmentIndex].nodeType == !(nodeTypes.AstForeign)
+			and expr.declaration.value.nodeType == !(nodeTypes.AstForeign)
 		then
 			local ident       = expr
-			local foreign     = ident.declaration.assignment.values[ident.declaration.assignmentIndex]
+			local foreign     = ident.declaration.value
 			local foreignCopy = astCopy(foreign, ident.token)
 
 			replaceQueuedNodeAndUnqueueOldTree(state, ident, foreignCopy)
@@ -5024,7 +4991,7 @@ function _G.simplifyExpressionIfConstant(state, expr)
 
 		-- At this point we should have a literal to copy. Hopefully the expression we copy
 		-- has been simplified into a literal if it wasn't a literal to begin with.
-		local literal = getAssignmentValue(state, decl.name, decl.assignment.values, decl.assignmentIndex, nil, nil, nil)
+		local literal = decl.value
 		if literal.nodeType ~= !(nodeTypes.AstLiteral) then
 			errorInternal(state, literal)
 		end
@@ -5212,6 +5179,20 @@ function _G.getExpectedTypeInfo(state, node, strict, expectantTerm, nodeForError
 			return assignment.targets[i].inferredType
 		end
 
+	elseif parentNodeType == !(nodeTypes.AstDeclaration) then
+		local decl = node.parent
+		if node ~= decl.value then  !!(NO_EXPECTATION)  end
+
+		if decl.name.inferredType then
+			return decl.name.inferredType
+		elseif not decl.type then
+			!!(NO_EXPECTATION)
+		elseif not decl.type.inferredType then
+			!DEPEND_AND_RETURN(`node`, DEPEND_NODE_INFERRED, `decl.type`, nil, `nil`)
+		else
+			return getTypeRepresentedByExpression(decl.type) or errorInternal()
+		end
+
 	elseif parentNodeType == !(nodeTypes.AstCast) then
 		local cast = node.parent
 		if node ~= cast.expression then  !!(NO_EXPECTATION)  end
@@ -5359,28 +5340,11 @@ end
 
 
 
---[[
-function _G.getDeclarationThatExpressionIsConstantValueFor(expr)
-	local scope, statement = getClosestScope(expr)
-
-	if not (statement.nodeType == !(nodeTypes.AstAssignment) and statement.forDeclaration) then  return  end
-
-	local assignment = statement
-	local i          = indexOf(assignment.values, expr)
-	local decl       = assignment.declarations[i]
-
-	if not (decl and decl.isConstant) then  return nil  end
-
-	return decl
-end
-]]
-
-
-
+-- Note: The expression must be constant!
 function _G.followIdentifiersToConstantValue(constExpr)
 	while constExpr.nodeType == !(nodeTypes.AstIdentifier) do
 		local decl = constExpr.declaration
-		constExpr  = decl.assignment.values[decl.assignmentIndex]
+		constExpr  = decl.value
 	end
 	return constExpr
 end
@@ -5435,7 +5399,7 @@ function _G.isAnExpressionExpected(state, node)
 	elseif EXPRESSION_NOT_EXPECTED[parentNodeType] then
 		return false
 	elseif parentNodeType == !(nodeTypes.AstDeclaration) then
-		return node == parent.name or node == parent.type
+		return node == parent.name or node == parent.type or node == parent.value
 	elseif parentNodeType == !(nodeTypes.AstFor) then
 		return node ~= parent.body
 	elseif isAny(parentNodeType, !(nodeTypes.AstIf),!(nodeTypes.AstStaticIf),!(nodeTypes.AstWhile)) then

@@ -325,11 +325,7 @@ function _G.bcAllocateConstantValueForExpressionIfNew(state, expr, dependent)
 			if decl.queued.pipe <= !(PIPE_BYTECODE) then
 				!DEPEND_AND_RETURN(`dependent`, DEPEND_NODE_EMITTED, `decl`, nil, `nil`)
 			end
-
-			assert(decl.assignment) -- Should have given an error in the typer.
-
-			local valueExpr = getAssignmentValue(state, decl.name, decl.assignment.values, decl.assignmentIndex, nil, nil, nil)
-			return bcAllocateConstantValueForExpressionIfNew(state, valueExpr, dependent)
+			return bcAllocateConstantValueForExpressionIfNew(state, decl.value, dependent)
 		end
 
 	elseif expr.nodeType == !(nodeTypes.AstCast) then
@@ -504,7 +500,7 @@ end
 
 function _G.bcEmitForDeclaration(state, decl)
 	if decl.isConstant then
-		local valueExpr = decl.assignment.values[decl.assignmentIndex] or errorInternal()
+		local valueExpr = decl.value or errorInternal(state, decl)
 		if valueExpr.nodeType == !(nodeTypes.AstLambda) and valueExpr.isPolymorphic then
 			-- @Cleanup: moveToNextRelevantPipe() should prevent us from getting here.
 			moveToPipe(state, decl, !(PIPE_DONE))
@@ -530,9 +526,10 @@ function _G.bcEmitForDeclaration(state, decl)
 		local scope = getClosestScope(decl)
 
 		if isScopeDeclarative(scope) then
-			if decl.assignment then
-				local valueExpr = decl.assignment.values[decl.assignmentIndex] or errorInternal()
-				local const     = bcAllocateConstantValueForExpressionIfNew(state, valueExpr, decl)
+			local valueExpr = getDeclarationValue(decl)
+
+			if valueExpr then
+				local const = bcAllocateConstantValueForExpressionIfNew(state, valueExpr, decl)
 				if not const then  return  end -- A dependency was added and we're now waiting.
 
 				decl.valueConstant = const

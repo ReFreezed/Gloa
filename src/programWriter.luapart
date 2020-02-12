@@ -323,9 +323,8 @@ end
 
 function _G.writeDefaultValueForStructMember(state, writer, structInfo, member, nodeForError)
 	local decl = findDynamicMemberDeclaration(state, structInfo.astNode, member.name) or errorInternal(state, structInfo.astNode, "Did not find member '%s'.", member.name)
-	if decl.assignment then
-		local valueExpr = decl.assignment.values[1] or errorInternal()
-		writeExpression(state, writer, valueExpr)
+	if decl.value then
+		writeExpression(state, writer, decl.value)
 	else
 		writeDefaultValueForType(state, writer, member.typeInfo, nodeForError)
 	end
@@ -370,7 +369,7 @@ function _G.writeExpression(state, writer, expr)
 			local ident = callee
 			!if DEBUG then
 				if not ident.declaration.valueConstant then
-					if ident.declaration.assignment then  astPrintTree(ident.declaration.assignment)  end
+					if ident.declaration.value then  astPrintTree(ident.declaration.value)  end
 					errorInternal(state, ident.declaration)
 				end
 			!end
@@ -408,8 +407,7 @@ function _G.writeExpression(state, writer, expr)
 			local calleeDecl = callee.declaration
 
 			if calleeDecl.isConstant then
-				local assignment = calleeDecl.assignment
-				local lambda     = assignment.values[calleeDecl.assignmentIndex] or errorInternal()
+				local lambda = calleeDecl.value or errorInternal()
 				!ASSERT("lambda.nodeType == "..nodeTypes.AstLambda)
 
 				-- Only write a value if the last non-vararg argument is optional.
@@ -443,8 +441,8 @@ function _G.writeExpression(state, writer, expr)
 
 						local arg = lambda.argumentsIn.arguments[i]
 
-						if arg.assignment then -- Varargs are optional but have no default value (or zero default values, since it's a list).
-							writeExpression(state, writer, arg.assignment.values[1])
+						if arg.declaration.value then -- Varargs are optional but have no default value (or zero default values, since it's a list).
+							writeExpression(state, writer, arg.declaration.value)
 						end
 					end
 				end
@@ -794,31 +792,30 @@ function _G.writeBlock(state, writer, block, indent, nextLocalN, localsStack, is
 		if nodeType == !(nodeTypes.AstDeclaration) then
 			local decl = statement
 
-			if decl.isConstant then
-				skipNextAssignment = true
-
-			else
+			if not decl.isConstant then
 				decl.localName, nextLocalN = allocateLocalName(state, writer, localsStack, decl.name.name, nextLocalN)
 
 				if decl.assignment then
+					-- The (initial) assignment should be written as the next statement (or after several declarations).
 					inDecl = true
+
 				else
 					local tag = decl.name.inferredType.tag
 					file:write(indentStr, "local ", decl.localName, " = ")
-					writeDefaultValueForType(state, writer, decl.name.inferredType, decl.name)
+					if decl.value then
+						writeExpression(state, writer, decl.value)
+					else
+						writeDefaultValueForType(state, writer, decl.name.inferredType, decl.name)
+					end
 					file:write(";")
 					writeEol(state, writer)
 				end
-
-				-- The initial assignment, if there is one, should be written as the next statement (or after several declarations).
 			end
 
 		elseif nodeType == !(nodeTypes.AstAssignment) then
 			local assignment = statement
-			if skipNextAssignment then
-				-- void
 
-			elseif assignment.operation == "=" then
+			if assignment.operation == "=" then
 				file:write(indentStr)
 				if inDecl then  file:write("local ")  end
 
@@ -930,8 +927,7 @@ function _G.writeBlock(state, writer, block, indent, nextLocalN, localsStack, is
 				writeEol(state, writer)
 			end
 
-			inDecl             = false
-			skipNextAssignment = false
+			inDecl = false
 
 		elseif nodeType == !(nodeTypes.AstReturn) then
 			local returnNode = statement
@@ -1270,7 +1266,7 @@ function _G.writeConstantValue(state, writer, const)
 			local enumInfo   = const.valueType
 			local memberName = const.value
 			local decl       = findMemberDeclaration(state, enumInfo.astNode, memberName) or errorInternal(state, enumInfo.astNode, "Did not find member '%s'.", memberName)
-			local valueExpr  = decl.assignment.values[1]
+			local valueExpr  = decl.value
 
 			if enumInfo.memberTypeInfo.tag == !(typeTags.TypeInfoType) then
 				local typeNode = valueExpr
@@ -1635,17 +1631,17 @@ function _G.writeProgram(state, writer)
 
 	elseif mainFuncDecl.name.inferredType.tag ~= !(typeTags.TypeInfoFunction) then
 		nodeError(
-			state, mainFuncDecl.assignment.values[mainFuncDecl.assignmentIndex], "ProgramWriter",
+			state, mainFuncDecl.value, "ProgramWriter",
 			"Declared name '%s' must be a function to represent the entry point of the program.",
 			entryPointName
 		)
 
 	elseif mainFuncDecl.name.inferredType.argumentTypesIn[1] then
-		local lambda = mainFuncDecl.assignment.values[mainFuncDecl.assignmentIndex] or errorInternal()
+		local lambda = mainFuncDecl.value or errorInternal()
 		nodeError(state, lambda.argumentsIn, "ProgramWriter", "Program entry point function must not take any arguments.")
 
 	elseif mainFuncDecl.name.inferredType.argumentTypesOut[1] then
-		local lambda = mainFuncDecl.assignment.values[mainFuncDecl.assignmentIndex] or errorInternal()
+		local lambda = mainFuncDecl.value or errorInternal()
 		nodeError(state, lambda.argumentsOut, "ProgramWriter", "Program entry point function must not return any values.")
 	end
 
