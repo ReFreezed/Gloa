@@ -3432,12 +3432,13 @@ end
 	local statements     = scope.statements
 	local statementIndex = indexOf(statements, staticIf) or errorInternal(state, staticIf)
 	local statementsNew  = {}
+	local newlyDeclared  = {}
 
 	local branchToUse = (cond.value and staticIf.branchTrue or staticIf.branchFalse)
 
 	if branchToUse then
 		!ASSERT("branchToUse.nodeType == "..nodeTypes.AstBlock)
-		addUnqueuedChildrenToQueueRecursively(state, branchToUse)
+		addUnqueuedChildrenToQueueRecursively(state, branchToUse) -- Note: We update the queueds in a moment.
 
 		for iNew, statement in ipairs(branchToUse.statements) do
 			statement.parent    = scope
@@ -3445,6 +3446,8 @@ end
 		end
 		for _, decl in ipairs(branchToUse.declarations) do
 			table.insert(scope.declarations, decl)
+			newlyDeclared[decl]           = true
+			newlyDeclared[decl.name.name] = true
 		end
 		for _, import in ipairs(branchToUse.imports) do
 			table.insert(scope.imports, import)
@@ -3472,6 +3475,15 @@ end
 
 	moveToPipe(state, staticIf, !(PIPE_DONE)) -- Not sure if needed. @Cleanup
 	unqueue(staticIf) -- @Robustness: Check if the correct thing happens for things waiting on staticIf (i.e. the scope).
+
+	-- Re-check redeclarations for already-inferred things later in the scope.
+	if branchToUse and branchToUse.declarations[1] then
+		for _, decl in ipairs(scope.declarations) do
+			if not newlyDeclared[decl] and newlyDeclared[decl.name.name] and decl.token > staticIf.token and decl.queued.pipe > !(PIPE_INFER) then
+				checkRedeclaration(state, decl.name, decl, false, scope)
+			end
+		end
+	end
 end
 
 !NODE_INFERRER `function nodeInferrers.AstConditional(state, conditional)`
