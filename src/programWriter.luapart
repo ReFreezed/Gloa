@@ -491,6 +491,13 @@ function _G.writeExpression(state, writer, expr)
 			writeConstantValueOrReference(state, writer, decl.valueConstant)
 		end
 
+	elseif expr.nodeType == !(nodeTypes.AstVararg) then
+		local vararg = expr
+		file:write(vararg.surroundedByParentheses and "(...)" or "...")
+
+	elseif expr.nodeType == !(nodeTypes.AstBlank) then
+		file:write("_")
+
 	elseif expr.nodeType == !(nodeTypes.AstType) then
 		local typeNode = expr
 		file:write(F("%d", typeNode.representedType.id)) -- @Cleanup: We probably have a constant for the type ID to use with writeConstantValue(state,) here who cares...
@@ -502,10 +509,6 @@ function _G.writeExpression(state, writer, expr)
 		local lambda = expr
 		local const  = lambda.valueConstant or errorInternal(state, lambda)
 		writeConstantValueOrReference(state, writer, const)
-
-	elseif expr.nodeType == !(nodeTypes.AstVararg) then
-		local vararg = expr
-		file:write(vararg.surroundedByParentheses and "(...)" or "...")
 
 	elseif expr.nodeType == !(nodeTypes.AstAccess) then
 		local access = expr
@@ -712,11 +715,11 @@ local function isNameAllocated(state, writer, localsStack, localName)
 end
 
 local function allocateName(state, writer, localsStack, name, n, shortPrefix, longInfix)
-	if name == "_" then  return name  end -- @Incomplete: Make "_" a write-only name.
-
 	local localName
 
-	if state.settings.outputDebugInfo then
+	if name == "_" then
+		localName = "_"
+	elseif state.settings.outputDebugInfo then
 		localName = unicodeToLuaIdentifier(name)
 		if isNameAllocated(state, writer, localsStack, localName) then
 			localName = localName..longInfix..n
@@ -816,12 +819,17 @@ function _G.writeBlock(state, writer, block, indent, nextLocalN, localsStack, is
 			local assignment = statement
 
 			if assignment.operation == "=" then
+				-- @Optimize: Output '_ = func()' as 'func()'.
+				-- @Optimize: Output 'x, _ = func()' as 'x = func()'.
+				local hasBlank = false
+
 				file:write(indentStr)
 				if inDecl then  file:write("local ")  end
 
 				for i, targetExpr in ipairs(assignment.targets) do
 					if i > 1 then  file:write(", ")  end
 					writeExpression(state, writer, targetExpr)
+					hasBlank = (hasBlank or targetExpr.nodeType == !(nodeTypes.AstBlank))
 				end
 
 				file:write(" ", assignment.operation, " ")
@@ -832,6 +840,9 @@ function _G.writeBlock(state, writer, block, indent, nextLocalN, localsStack, is
 				end
 
 				file:write(";") -- This removes ambiguity is some cases.
+				if hasBlank and not isNameAllocated(state, writer, localsStack, "_") then
+					file:write(" _=nil") -- We don't want to accidentally store an object that is subject to garbage collection as a global.
+				end
 				writeEol(state, writer)
 
 			else

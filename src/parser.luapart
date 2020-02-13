@@ -138,6 +138,9 @@ _G.!structAst"AstVararg:AstIdentifier"{
 	_overrides = {{`name`,"..."}},
 	{`surroundedByParentheses`, false},
 }
+_G.!structAst"AstBlank:AstIdentifier"{
+	_overrides = {{`name`,"_"}},
+}
 _G.!structAst"AstLiteral:_AstExpression"{
 	{`literalType`,   0},
 	{`value`,         nil}, -- The value depends on what literalType is. Could be a number, string or whatever.
@@ -572,10 +575,18 @@ end
 -- success = parseExpressionList( compilationState, parentNode, expressions [, expectLeftValues=false ] )
 function _G.parseExpressionList(state, parentNode, expressions, expectLeftValues)
 	while true do
-		!SET_OR_RETURN_FALSE `local expr = parseExpression(state, parentNode, nil, expectLeftValues)`
+		local tokType, tokValue = peekNextToken(state)
+		local expr
+
+		if expectLeftValues and isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"_") then
+			expr = astNewNode(AstBlank, state.nextToken, parentNode)
+			eatNextToken(state)
+		else
+			!SET_OR_RETURN_FALSE `expr = parseExpression(state, parentNode, nil, expectLeftValues)`
+		end
 		table.insert(expressions, expr)
 
-		local tokType, tokValue = peekNextToken(state)
+		tokType, tokValue = peekNextToken(state)
 
 		if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),",") then
 			eatNextToken(state)
@@ -1014,7 +1025,7 @@ function _G.parseDeclarationStatement(state, block, imperative, declType)
 	local takenNames = {}
 
 	if declType == !(DECLARATION_NORMAL) then
-		!DO_OR_RETURN `parseNameList(state, block, declNames)` -- Note: We update parent here below.
+		!DO_OR_RETURN `parseNameList(state, block, declNames, true)` -- Note: We update parent here below.
 
 		for i, ident in ipairs(declNames) do
 			local decl              = astNewNode(AstDeclaration, declStartToken, block)
@@ -1208,7 +1219,7 @@ function _G.parseAssignment(state, parentNode)
 	!DO_OR_RETURN `parseExpressionList(state, assignment, assignment.targets, true)`
 
 	for i, expr in ipairs(assignment.targets) do
-		if not isAny(expr.nodeType, !(nodeTypes.AstIdentifier),!(nodeTypes.AstAccess)) then
+		if not isAny(expr.nodeType, !(nodeTypes.AstIdentifier),!(nodeTypes.AstAccess),!(nodeTypes.AstBlank)) then
 			!ERROR_OR_RETURN `errorParsing(state, expr.token, "Expected assignment target expression to resolve into a variable or namespace access.")`
 		end
 	end
@@ -1231,20 +1242,27 @@ function _G.parseAssignment(state, parentNode)
 end
 
 -- Add the names to the 'names' array.
--- success = parseNameList( compilationState, parentNode, names )
-function _G.parseNameList(state, parentNode, names)
+-- success = parseNameList( compilationState, parentNode, names, allowBlanks )
+function _G.parseNameList(state, parentNode, names, allowBlanks)
 	local takenNames = {}
 
 	while true do
-		!SET_OR_RETURN_FALSE `local ident = parseIdentifier(state, parentNode)`
+		local tokType, tokValue, token = peekNextToken(state)
+		local identOrBlank
 
-		if takenNames[ident.name] then
-			!ERROR_OR_RETURN_FALSE `errorParsingLast(state, "Duplicate name '%s'.", ident.name)`
+		if allowBlanks and isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"_") then
+			eatNextToken(state)
+			identOrBlank = astNewNode(AstBlank, token, parentNode)
+		else
+			!SET_OR_RETURN_FALSE `identOrBlank = parseIdentifier(state, parentNode)`
+			if takenNames[identOrBlank.name] then
+				!ERROR_OR_RETURN_FALSE `errorParsingLast(state, "Duplicate name '%s'.", identOrBlank.name)`
+			end
+			takenNames[identOrBlank.name] = true
 		end
-		takenNames[ident.name] = true
 
-		table.insert(names, ident)
-		local tokType, tokValue = peekNextToken(state)
+		table.insert(names, identOrBlank)
+		tokType, tokValue = peekNextToken(state)
 
 		if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),",") then
 			eatNextToken(state)
@@ -1521,7 +1539,7 @@ function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 			-- for i = start, end [, step ]
 			if twoParter then
 				state.nextToken = forStartIndex
-				!DO_OR_RETURN_FALSE `parseNameList(state, forLoop, forLoop.names)`
+				!DO_OR_RETURN_FALSE `parseNameList(state, forLoop, forLoop.names, false)`
 
 				if forLoop.names[2] then
 					!ERROR_OR_RETURN_FALSE `errorParsing(state, forLoop.names[2].token, "Expected only one name in numeric 'for' loop.")`
@@ -1548,7 +1566,7 @@ function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 			-- for v1, ... : obj
 			if twoParter then
 				state.nextToken = forStartIndex
-				!DO_OR_RETURN_FALSE `parseNameList(state, forLoop, forLoop.names)`
+				!DO_OR_RETURN_FALSE `parseNameList(state, forLoop, forLoop.names, false)`
 
 				tokType, tokValue = eatNextToken(state) -- Should eat the ':'.
 				assert(isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),":"))
@@ -1572,7 +1590,7 @@ function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 		-- for v1, ... in iter [, state [, init ] ]
 		else
 			state.nextToken = forStartIndex
-			!DO_OR_RETURN_FALSE `parseNameList(state, forLoop, forLoop.names)`
+			!DO_OR_RETURN_FALSE `parseNameList(state, forLoop, forLoop.names, false)`
 
 			tokType, tokValue = eatNextToken(state) -- Should eat the 'in'.
 			assert(isToken(tokType,tokValue, !(TOKEN_KEYWORD),"in"))
@@ -1601,6 +1619,9 @@ function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 
 	elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"assert","print") then
 		!SET_OR_RETURN_FALSE `statement = parseDebugNode(state, block)`
+
+	elseif isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"_") then
+		!SET_OR_RETURN_FALSE `statement = parseAssignment(state, block)`
 
 	else
 		state.soft     = true
@@ -2432,6 +2453,8 @@ function _G.parseExpression(state, parentNode, prevOpPrecedence, expectLeftValue
 		putBackLastToken(state)
 		!ERROR_OR_RETURN_FALSE `expr = parseRun(state, parentNode, true)` -- @Incomplete: Allow a block here.
 
+	elseif isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"_") then
+		!ERROR_OR_RETURN `errorParsingLast(state, "Invalid place for a blank name.")`
 	else
 		!ERROR_OR_RETURN `errorParsingLast(state, "Expected an expression.")`
 	end

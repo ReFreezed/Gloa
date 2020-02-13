@@ -1259,6 +1259,30 @@ end
 	inferIdentifierOrVararg(state, vararg)
 end
 
+!NODE_INFERRER `function nodeInferrers.AstBlank(state, blank)`
+	if blank.parent.nodeType == !(nodeTypes.AstDeclaration) then
+		local decl = blank.parent
+
+		if decl.isConstant then
+			typeError(state, blank, "Blank names cannot be constant.")
+		elseif not isScopeImperative(getClosestScope(decl)) then
+			typeError(state, blank, "Blank names are only allowed in imperative context.")
+		end
+
+	elseif blank.parent.nodeType == !(nodeTypes.AstAssignment) then
+		local assignment = blank.parent
+		if assignment.binaryOperation ~= "" then
+			typeError(state, blank, "Blank names cannot be used in assignments with binary operations.")
+		end
+
+	else
+		errorUnhandledNodeType(state, blank)
+	end
+
+	blank.inferredType = getTypeInfoForBuiltinType(state, "any")
+	moveToNextRelevantPipe(state, blank)
+end
+
 !NODE_INFERRER `function nodeInferrers.AstType(state, typeNode)`
 	-- Note: typeNode.declaration may already be filled for generated type nodes.
 
@@ -3171,7 +3195,7 @@ end
 
 	-- Validate targets.
 	for _, targetExpr in ipairs(assignment.targets) do
-		if not isAny(targetExpr.nodeType, !(nodeTypes.AstIdentifier),!(nodeTypes.AstAccess)) then
+		if not isAny(targetExpr.nodeType, !(nodeTypes.AstIdentifier),!(nodeTypes.AstAccess),!(nodeTypes.AstBlank)) then
 			!ifDEBUG`astPrint(targetExpr)`
 			typeError(state, astGetExpressionVisuallyFurthestToTheLeft(targetExpr), "Invalid assignment target. Expected a variable name or object field.")
 		end
