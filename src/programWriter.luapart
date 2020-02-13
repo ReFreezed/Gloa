@@ -86,7 +86,10 @@ _G.!struct"WriterState"{
 	{`foreignN`,          0},
 	{`foreignReferences`, {}},
 
+	{`loopDepth`,         0},
 	{`loopStack`,         {}},  -- [](AstFor|AstWhile)  (Only used for loops with named breaks inside.)
+	{`deferStack`,        {}},  -- []AstDefer
+	{`loopDeferIndices`,  {}},
 
 	{`currentOutputLine`, 1},
 	{`lineMappingFiles`,  {}},
@@ -739,35 +742,66 @@ local function allocateArgumentName(state, writer, localsStack, name, n)
 	return allocateName(state, writer, localsStack, name, n, "A", "_A")
 end
 
-local function writeLoopBodyAndFooter(state, writer, loop, indent, nextLocalN, localsStack)
+local function writeDefers(state, writer, indent, nextLocalN, localsStack, indentStr, defers)
+	for i = #defers, 1, -1 do
+		local block = defers[i].body
+
+		if itemWith1(block.declarations, `isConstant`, false) then
+			writer.file:write(indentStr, "do")
+			writeEol(state, writer)
+			writeBlock(state, writer, block, indent+1, nextLocalN, localsStack)
+			writer.file:write(indentStr, "end")
+			writeEol(state, writer)
+		else
+			writeBlock(state, writer, block, indent, nextLocalN, localsStack)
+		end
+	end
+end
+
+local function writeLoopBodyAndFooter(state, writer, loop, indent, nextLocalN, localsStack, deferStartIndex)
 	local file      = writer.file
 	local loopStack = writer.loopStack
 	local indentStr = ("\t"):rep(indent)
 
+	writer.loopDepth                          = writer.loopDepth+1
+	writer.loopDeferIndices[writer.loopDepth] = #writer.deferStack+1
+
 	if not (loop.hasNamedBreaks or loopStack[1]) then
 		writeBlock(state, writer, loop.body, indent+1, nextLocalN, localsStack)
-		file:write(indentStr, "end")
-		writeEol(state, writer)
+		file:write(indentStr, "end") ; writeEol(state, writer)
+
+		writer.loopDeferIndices[writer.loopDepth] = nil
+		writer.loopDepth                          = writer.loopDepth-1
 		return
 	end
 
 	if not loopStack[1] then
-		file:write(indentStr, "\tlocal _BREAK = 0")
-		writeEol(state, writer)
+		file:write(indentStr, "\tlocal _BREAK = 0") ; writeEol(state, writer)
 	end
 
-	table.insert(loopStack, loop)
+	table.insert(loopStack,               loop)
 	writeBlock(state, writer, loop.body, indent+1, nextLocalN, localsStack)
-	file:write(indentStr, "end")
-	writeEol(state, writer)
+	file:write(indentStr, "end") ; writeEol(state, writer)
 	table.remove(loopStack)
 
-	if loopStack[2] then
-		file:write(indentStr, "if _BREAK > 0 then  _BREAK = _BREAK-1 ; break  end")
-	elseif loopStack[1] then
-		file:write(indentStr, "if _BREAK > 0 then  break  end")
+	if loopStack[1] then
+		file:write(indentStr, "if _BREAK > 0 then") ; writeEol(state, writer)
+
+		local deferStartIndexBreak = writer.loopDeferIndices[writer.loopDepth-1] or deferStartIndex
+		local defers               = writer.deferStack[deferStartIndexBreak] and {unpack(writer.deferStack, deferStartIndexBreak)} or EMPTY_TABLE
+		writeDefers(state, writer, indent+1, nextLocalN, localsStack, indentStr.."\t", defers)
+
+		file:write(indentStr, "\t")
+		if loopStack[2] then
+			file:write("_BREAK = _BREAK-1 ; ")
+		end
+		file:write("break") ; writeEol(state, writer)
+
+		file:write(indentStr, "end") ; writeEol(state, writer)
 	end
-	writeEol(state, writer)
+
+	writer.loopDeferIndices[writer.loopDepth] = nil
+	writer.loopDepth                          = writer.loopDepth-1
 end
 
 -- writeBlock( state, writer, block, indent, nextLocalN, localsStack [, isElseif=false ] )
@@ -786,7 +820,9 @@ function _G.writeBlock(state, writer, block, indent, nextLocalN, localsStack, is
 		return
 	end
 
-	localsStack  = {{}, unpack(localsStack)}
+	local deferStartIndex = #writer.deferStack+1
+
+	localsStack  = {{}, unpack(localsStack)} -- @Speed: We can probably handle locals like defers.
 	local inDecl = false
 
 	for _, statement in ipairs(block.statements) do
@@ -943,6 +979,9 @@ function _G.writeBlock(state, writer, block, indent, nextLocalN, localsStack, is
 		elseif nodeType == !(nodeTypes.AstReturn) then
 			local returnNode = statement
 
+			-- @Incomplete: Evaluate return values before running defers (right?).
+			writeDefers(state, writer, indent, nextLocalN, localsStack, indentStr, writer.deferStack)
+
 			if block.parent.nodeType == !(nodeTypes.AstLambda) and not returnNode.values[1] then
 				if outputDebugInfo then
 					file:write(indentStr, "-- return")
@@ -1010,7 +1049,7 @@ function _G.writeBlock(state, writer, block, indent, nextLocalN, localsStack, is
 			file:write(" do")
 			writeEol(state, writer)
 
-			writeLoopBodyAndFooter(state, writer, whileLoop, indent, nextLocalN, localsStack)
+			writeLoopBodyAndFooter(state, writer, whileLoop, indent, nextLocalN, localsStack, deferStartIndex)
 
 		elseif nodeType == !(nodeTypes.AstFor) then
 			-- @Optimize: Don't output an empty body.
@@ -1038,7 +1077,7 @@ function _G.writeBlock(state, writer, block, indent, nextLocalN, localsStack, is
 				file:write(" do")
 				writeEol(state, writer)
 
-				writeLoopBodyAndFooter(state, writer, forLoop, indent, nextLocalN, localsStack)
+				writeLoopBodyAndFooter(state, writer, forLoop, indent, nextLocalN, localsStack, deferStartIndex)
 
 			elseif forLoop.forType == !(FOR_SHORT) then
 				local objExpr = forLoop.expressions[1]
@@ -1070,7 +1109,7 @@ function _G.writeBlock(state, writer, block, indent, nextLocalN, localsStack, is
 				file:write(") do")
 				writeEol(state, writer)
 
-				writeLoopBodyAndFooter(state, writer, forLoop, indent, nextLocalN, localsStack)
+				writeLoopBodyAndFooter(state, writer, forLoop, indent, nextLocalN, localsStack, deferStartIndex)
 
 			else--if forLoop.forType == !(FOR_ITERATOR) then
 				file:write(indentStr, "for ")
@@ -1087,11 +1126,15 @@ function _G.writeBlock(state, writer, block, indent, nextLocalN, localsStack, is
 				file:write(" do")
 				writeEol(state, writer)
 
-				writeLoopBodyAndFooter(state, writer, forLoop, indent, nextLocalN, localsStack)
+				writeLoopBodyAndFooter(state, writer, forLoop, indent, nextLocalN, localsStack, deferStartIndex)
 			end
 
 		elseif nodeType == !(nodeTypes.AstBreak) then
 			local breakNode = statement
+
+			local deferStartIndexBreak = writer.loopDeferIndices[writer.loopDepth] or errorInternal()
+			local defers               = writer.deferStack[deferStartIndexBreak] and {unpack(writer.deferStack, deferStartIndexBreak)} or EMPTY_TABLE
+			writeDefers(state, writer, indent, nextLocalN, localsStack, indentStr, defers)
 
 			if breakNode.loop then
 				local i                 = indexOf(writer.loopStack, breakNode.loop) or errorInternal(state, breakNode)
@@ -1100,7 +1143,12 @@ function _G.writeBlock(state, writer, block, indent, nextLocalN, localsStack, is
 			else
 				file:write(indentStr, "break")
 			end
+
 			writeEol(state, writer)
+
+		elseif nodeType == !(nodeTypes.AstDefer) then
+			local defer = statement
+			table.insert(writer.deferStack, defer)
 
 		elseif isAny(nodeType, !(nodeTypes.AstImport),!(nodeTypes.AstUsing),!(nodeTypes.AstDebug),!(nodeTypes.AstRun)) then
 			-- void  (Ignore these statements.)
@@ -1113,6 +1161,14 @@ function _G.writeBlock(state, writer, block, indent, nextLocalN, localsStack, is
 			writeEol(state, writer)
 		end
 	end
+
+	local doWriteDefers = writer.deferStack[deferStartIndex] and not (block.statements[1] ~= nil and getLast(block.statements).nodeType == !(nodeTypes.AstReturn))
+	local defers        = doWriteDefers and {unpack(writer.deferStack, deferStartIndex)} or EMPTY_TABLE
+
+	for i = deferStartIndex, #writer.deferStack do
+		writer.deferStack[i] = nil
+	end
+	writeDefers(state, writer, indent, nextLocalN, localsStack, indentStr, defers)
 end
 
 function _G.writeFunction(state, writer, lambda)
