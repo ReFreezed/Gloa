@@ -16,6 +16,7 @@
 	getAssignmentValue
 	getClosestScope, getClosestScopeForDeclaration, isScope, isScopeDeclarative, isScopeImperative
 	getDeclarationValue
+	getLambda
 	inferNode
 	isExpressionConstant
 	isPartOfAnyDeclaration
@@ -421,6 +422,12 @@ end
 function _G.isScope           (node)   return SCOPE_SET            [node .nodeType] or false  end
 function _G.isScopeDeclarative(scope)  return SCOPE_SET_DECLARATIVE[scope.nodeType] or false  end
 function _G.isScopeImperative (scope)  return SCOPE_SET_IMPERATIVE [scope.nodeType] or false  end
+
+
+
+function _G.getLambda(node)
+	return astFindParent(node, !(nodeTypes.AstLambda))
+end
 
 
 
@@ -2856,9 +2863,14 @@ end
 		-- @Incomplete: Check for duplicate fields (among constant keys).
 		-- @Incomplete: Check for nil keys.
 		tableNode.inferredType = typeInfoExpected
+		-- Note: We don't need to validate tableNode.vararg as we accept anything.
 
 	elseif typeInfoExpected.tag == !(typeTags.TypeInfoArray) then
 		local arraySig = typeInfoExpected
+
+		if tableNode.vararg and not tableNode.vararg.inferredType then
+			!DEPEND_AND_RETURN(`tableNode`, DEPEND_NODE_INFERRED, `tableNode.vararg`)
+		end
 
 		for _, tableField in ipairs(tableNode.fields) do
 			local indexLiteral = tableField.key
@@ -2930,6 +2942,16 @@ end
 			if not indexLiterals[arrayIndex] then
 				typeError(state, tableNode, "Array is not a sequence. Missing item at index %d.", arrayIndex)
 			end
+		end
+
+		-- Validate vararg.
+		if tableNode.vararg and not isTypeCompatibleWith(tableNode.vararg.inferredType.itemType, arraySig.itemType) then
+			typeError(
+				state, tableNode.vararg,
+				"Type mismatch between vararg and array. (Wanted %s, got %s)",
+				getFriendlyTypeInfoName(arraySig.itemType),
+				getFriendlyTypeInfoName(tableNode.vararg.inferredType.itemType)
+			)
 		end
 
 	elseif typeInfoExpected.tag == !(typeTags.TypeInfoStruct) then
@@ -3141,7 +3163,7 @@ end
 		cutOutPartOfNodeTree(state, cast, cast.expression)
 		return
 
-	elseif isTypeCompatibleWith(exprTypeInfo, castTypeInfo) then
+	elseif isTypeCompatibleWith(exprTypeInfo, castTypeInfo) or exprTypeInfo.tag == !(typeTags.TypeInfoAny) then
 		-- void  (Valid cast.)
 
 	elseif isTypeNumeric(castTypeInfo) and isTypeNumeric(exprTypeInfo) then
@@ -5090,7 +5112,7 @@ function _G.isTypeCompatibleWith(typeToCheck, otherType)
 
 	-- Everything is compatible with the 'any' type. The user better know what they're doing!
 	!local SCORE = 0x1
-	if typeToCheck.tag == !(typeTags.TypeInfoAny) or otherType.tag == !(typeTags.TypeInfoAny) then  return true, !(SCORE)  end
+	if otherType.tag == !(typeTags.TypeInfoAny) then  return true, !(SCORE)  end
 
 	-- Ints are always compatible with floats (but the opposite is false).
 	-- This should be safe as all numbers are 64-bit floats in Lua 5.1 (I think).
@@ -5314,7 +5336,7 @@ function _G.getExpectedTypeInfo(state, node, strict, expectantTerm, nodeForError
 		local i = indexOf(returnNode.values, node)
 		if not i then  !!(NO_EXPECTATION)  end
 
-		local lambda  = astFindParent(returnNode, !(nodeTypes.AstLambda))
+		local lambda  = getLambda(returnNode)
 		local funcSig = lambda.inferredType
 
 		if not funcSig then

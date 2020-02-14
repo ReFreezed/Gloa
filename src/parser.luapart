@@ -173,9 +173,14 @@ _G.!structAst"AstAccess:_AstExpression"{
 	-- Type phase:
 	{`representedType`, nil},             -- TypeInfo  (Not used anywhere. 2020-01-02)
 }
-_G.!struct"TableField"{ {`key`,nil}, {`value`,nil} }
+_G.!struct"TableField"{
+	{`key`,            nil},
+	{`value`,          nil},
+	{`keyIsGenerated`, false},
+}
 _G.!structAst"AstTable:_AstExpression"{
-	{`fields`, {}, ast="fields"}, -- []TableField
+	{`fields`, {},  ast="fields"}, -- []TableField
+	{`vararg`, nil, ast="node"},   -- AstVararg
 }
 _G.!structAst"AstCall:_AstExpression"{
 	{`callee`,                    nil, ast="node"},  -- AstExpression
@@ -358,6 +363,7 @@ _G.!structAst"AstLambda:_AstScopeExpression"{
 
 	{`argumentsIn`,       nil, astRef="node"}, -- AstArguments
 	{`argumentsOut`,      nil, astRef="node"}, -- AstArguments
+	{`takingVararg`,      false},
 
 	{`body`,              nil, astRef="node"},   -- AstBlock  (If this is nil then the lambda is a function signature. If bodyIsForeign is set then this is a dummy block.)
 	{`bodyIsForeign`,     false}, -- @Cleanup: Use AstForeign instead of all this stuff.
@@ -498,6 +504,7 @@ function _G.parseTable(state, parentNode)
 
 	local tableStartToken = state.nextToken-1
 	local tableNode       = astNewNode(AstTable, tableStartToken, parentNode)
+	local fields          = tableNode.fields
 	local listIndex       = 0
 
 	while true do
@@ -549,6 +556,8 @@ function _G.parseTable(state, parentNode)
 			literal.literalType = !(LITERAL_INTEGER)
 			literal.value       = listIndex
 			tableKey            = literal
+
+			tableField.keyIsGenerated = true
 		end
 
 		assert(tableKey)
@@ -556,7 +565,7 @@ function _G.parseTable(state, parentNode)
 		tableField.key                   = tableKey
 		!SET_OR_RETURN `tableField.value = parseExpression(state, tableNode)`
 
-		table.insert(tableNode.fields, tableField)
+		table.insert(fields, tableField)
 
 		tokType, tokValue = eatNextToken(state)
 		if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"}") then
@@ -566,6 +575,15 @@ function _G.parseTable(state, parentNode)
 		else
 			!ERROR_OR_RETURN `errorParsingAfterPrevious(state, "Expected ','.")`
 		end
+	end
+
+	local lastField = fields[#fields]
+
+	if lastField and lastField.keyIsGenerated and lastField.value.nodeType == !(nodeTypes.AstVararg) then
+		local vararg     = lastField.value
+		vararg.parent    = tableNode
+		tableNode.vararg = vararg
+		fields[#fields]  = nil
 	end
 
 	return tableNode
@@ -1405,7 +1423,7 @@ function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 			--   if x return
 			--   func() -- Returned expression, or separate statement after 'if'?
 			--
-			local lambda = astFindParent(returnNode, !(nodeTypes.AstLambda))
+			local lambda = getLambda(returnNode)
 			if not lambda then
 				-- This shouldn't happen as this function shouldn't be called by anything that does not parse return statements.
 				!ERROR_OR_RETURN_FALSE `errorParsingNext(state, "Internal compiler error: Not inside a function.")`
@@ -2069,6 +2087,10 @@ function _G.parseLambda(state, parentNode, allowBody)
 			end
 		end
 
+		if args.arguments[1] and getLast(args.arguments).declaration.name.nodeType == !(nodeTypes.AstVararg) then
+			lambda.takingVararg = true
+		end
+
 		tokType, tokValue = eatNextToken(state)
 		if not isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),")") then
 			!ERROR_OR_RETURN `errorParsingAfterPrevious(state, "Expected ')'.")`
@@ -2255,7 +2277,11 @@ function _G.parseExpression(state, parentNode, prevOpPrecedence, expectLeftValue
 
 	-- Vararg.
 	elseif isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"...") then
-		expr = astNewNode(AstVararg, exprStartToken, parentNode)
+		expr         = astNewNode(AstVararg, exprStartToken, parentNode)
+		local lambda = getLambda(expr)
+		if not (lambda and lambda.takingVararg) then
+			errorParsing(state, exprStartToken, "This is not inside a vararg function.")
+		end
 
 	-- Table constructor.
 	elseif isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"{") then
