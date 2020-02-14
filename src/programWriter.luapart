@@ -1272,11 +1272,11 @@ function _G.writeForeignImportIfNew(state, writer, typeInfo, foreignSource, fore
 
 		if outputDebugInfo then
 			writer.foreignReferences[foreignSourceId] = F("_FOREIGN[%d--[[%s]]]", foreignN, (foreignSourceId:gsub("[%[%]]", "%0 ")))
-			file:write("_FOREIGN[", F("%d", foreignN), "]")
+			file:write("\t_FOREIGN[", F("%d", foreignN), "]")
 		else
-			local foreignRef                         = F("_FOREIGN[%d]", foreignN)
+			local foreignRef                          = F("_FOREIGN[%d]", foreignN)
 			writer.foreignReferences[foreignSourceId] = foreignRef
-			file:write(foreignRef)
+			file:write("\t", foreignRef)
 		end
 
 		file:write(" = ", lua)
@@ -1484,7 +1484,7 @@ function _G.writeCompilerSymbols(state, writer, asGlobals)
 			local mainSource = (debug.getinfo(1, "S") or {}).source or "<UNKNOWN_SOURCE>"
 
 			if type(err) == "string" then
-				local pathHere = mainSource:match("^@(.+)")
+				local pathHere = mainSource:match"^@(.+)"
 				local pathLen  = pathHere and #pathHere
 				local ln       = pathHere and err:sub(1, pathLen) == pathHere and tonumber(err:match("^:(%d+): ", pathLen+1))
 
@@ -1578,9 +1578,13 @@ function _G.writeCompilerSymbols(state, writer, asGlobals)
 	file:write(maybeLocal, "_PAIRS      = pairs")      ; writeEol(state, writer) -- Used for short-form table loops.
 end
 
-function _G.writeForeignImports(state, writer, constants, asGlobals)
+-- writeForeignImports(state, writer, constants, asGlobals [, relevantObjects=all ] )
+function _G.writeForeignImports(state, writer, constants, asGlobals, relevantObjects)
 	for _, const in ipairs(constants) do
-		if const.valueType.tag == !(typeTags.TypeInfoFunction) and const.value.bodyIsForeign then
+		if relevantObjects and not relevantObjects[const] then
+			-- void
+
+		elseif const.valueType.tag == !(typeTags.TypeInfoFunction) and const.value.bodyIsForeign then
 			-- @Polish: Treat function constants pointing to the same foreign function as the same constant.
 			local lambda = const.value
 			writeForeignImportIfNew(state, writer, const.valueType, lambda.foreignSource, lambda.foreignSourceName, lambda.foreignSourceId, lambda.token, asGlobals)
@@ -1592,11 +1596,15 @@ function _G.writeForeignImports(state, writer, constants, asGlobals)
 	end
 end
 
-function _G.writeConstantObjectsExceptFunctions(state, writer, constants, asGlobals)
+-- writeConstantObjectsExceptFunctions( state, writer, constants, asGlobals [, relevantObjects=all ] )
+function _G.writeConstantObjectsExceptFunctions(state, writer, constants, asGlobals, relevantObjects)
 	local file = writer.file
 
 	for _, const in ipairs(constants) do
-		if const.isObject and const.valueType.tag ~= !(typeTags.TypeInfoFunction) then
+		if relevantObjects and not relevantObjects[const] then
+			-- void
+
+		elseif const.isObject and const.valueType.tag ~= !(typeTags.TypeInfoFunction) then
 			file:write("\t")
 			if not asGlobals then  file:write("local ")  end
 			file:write(const.name, " = ")
@@ -1606,12 +1614,15 @@ function _G.writeConstantObjectsExceptFunctions(state, writer, constants, asGlob
 	end
 end
 
-function _G.writeFunctionObjects(state, writer, constants)
+-- writeFunctionObjects( state, writer, constants [, relevantObjects=all ] )
+function _G.writeFunctionObjects(state, writer, constants, relevantObjects)
 	local functionConstants = {}
 
 	for _, const in ipairs(constants) do
+		if relevantObjects and not relevantObjects[const] then
+			--void
 		-- @Cleanup: Don't generate constants for polymorphic functions. (It's probably declarations doing this.)
-		if const.valueType.tag == !(typeTags.TypeInfoFunction) and not const.value.isPolymorphic then
+		elseif const.valueType.tag == !(typeTags.TypeInfoFunction) and not const.value.isPolymorphic then
 			table.insert(functionConstants, const)
 		end
 	end
@@ -1634,11 +1645,15 @@ function _G.writeFunctionObjects(state, writer, constants)
 	end
 end
 
-function _G.writeTopScopeDeclarations(state, writer, declarations)
+-- writeTopScopeDeclarations( state, writer, declarations [, relevantObjects=all ] )
+function _G.writeTopScopeDeclarations(state, writer, declarations, relevantObjects)
 	local file = writer.file
 
 	for _, decl in ipairs(declarations) do
-		if decl.topScopeName ~= "" then -- Constant declarations of non-objects (e.g. ints) should have an empty topScopeName.
+		if relevantObjects and not relevantObjects[decl] then
+			-- void
+
+		elseif decl.topScopeName ~= "" then -- Constant declarations of non-objects (e.g. ints) should have an empty topScopeName.
 			file:write("\t", decl.topScopeName, " = ")
 			if decl.valueConstant then
 				writeConstantValueOrReference(state, writer, decl.valueConstant)
@@ -1652,48 +1667,8 @@ function _G.writeTopScopeDeclarations(state, writer, declarations)
 end
 
 function _G.writeProgram(state, writer)
-	local file = writer.file
 
-	-- @Incomplete: Setting to specify the prefix for the written file (shebang and maybe a comment with copyright info, library documentation etc.).
-	file:write('#!/bin/sh\n_=[[\nexec lua "$0" "$@"\n]] and nil\n')
-	writer.currentOutputLine = 5
-
-	writeCompilerSymbols(state, writer, false)
-
-	-- Start of user code.
-	addLineMappingDummy(state, writer)
-	file:write("local function runProgram()")
-	writeEol(state, writer)
-
-	writeForeignImports(state, writer, state.constants, false)
-	writeConstantObjectsExceptFunctions(state, writer, state.constants, false)
-
-	if state.constants[1] or state.topScopeNames[1] then
-		-- Forward declarations.
-		local first = true
-		file:write("\tlocal ")
-
-		-- Constants, functions.
-		for _, const in ipairs(state.constants) do
-			if const.valueType.tag == !(typeTags.TypeInfoFunction) then
-				if not first then  file:write(", ")  end
-				first = false
-				file:write(const.name)
-			end
-		end
-
-		-- Top-level declarations. (Note: Glóa globals are not Lua globals.)
-		for _, topScopeName in ipairs(state.topScopeNames) do
-			if not first then  file:write(", ")  end
-			first = false
-			file:write(topScopeName)
-		end
-
-		writeEol(state, writer)
-	end
-
-	writeFunctionObjects(state, writer, state.constants) -- Must be after forward declarations!
-
+	-- Gather info.
 	local globalScope          = state.globalScope
 	local topScopeDeclarations = copyArray(globalScope.declarations)
 
@@ -1701,9 +1676,6 @@ function _G.writeProgram(state, writer)
 		insertArrayItems(topScopeDeclarations, fileScope.declarations)
 	end
 
-	writeTopScopeDeclarations(state, writer, topScopeDeclarations)
-
-	-- Program entry point.
 	local entryPointName = state.settings.entryPointName
 	local mainFuncDecl   = nil
 
@@ -1727,30 +1699,116 @@ function _G.writeProgram(state, writer)
 
 	elseif not mainFuncDecl.isConstant then
 		nodeError(state, mainFuncDecl.name, "ProgramWriter", "Declared name '%s' must be a constant.", entryPointName)
+	end
 
-	elseif mainFuncDecl.name.inferredType.tag ~= !(typeTags.TypeInfoFunction) then
+	local mainLambda = mainFuncDecl.valueConstant.value
+
+	if mainLambda.inferredType.tag ~= !(typeTags.TypeInfoFunction) then
 		nodeError(
 			state, mainFuncDecl.value, "ProgramWriter",
 			"Declared name '%s' must be a function to represent the entry point of the program.",
 			entryPointName
 		)
+	end
+	!ASSERT("mainLambda.nodeType == "..nodeTypes.AstLambda)
 
-	elseif mainFuncDecl.name.inferredType.argumentTypesIn[1] then
-		local lambda = mainFuncDecl.value or errorInternal()
-		nodeError(state, lambda.argumentsIn, "ProgramWriter", "Program entry point function must not take any arguments.")
-
-	elseif mainFuncDecl.name.inferredType.argumentTypesOut[1] then
-		local lambda = mainFuncDecl.value or errorInternal()
-		nodeError(state, lambda.argumentsOut, "ProgramWriter", "Program entry point function must not return any values.")
+	if mainFuncDecl.overloadOf then
+		nodeError(state, mainFuncDecl.name, "ProgramWriter", "Program entry point name must not be overloaded.")
+	elseif mainLambda.inferredType.argumentTypesIn[1] then
+		nodeError(state, mainLambda.argumentsIn, "ProgramWriter", "Program entry point function must not take any arguments.")
+	elseif mainLambda.inferredType.argumentTypesOut[1] then
+		nodeError(state, mainLambda.argumentsOut, "ProgramWriter", "Program entry point function must not return any values.")
 	end
 
+	local relevantObjects = nil
+
+	if not state.settings.keepDeadCode then
+		relevantObjects = {}
+
+		local function crawl(unit)
+			astVisitAllNodes(unit, function(node)
+				relevantObjects[node] = true
+
+				if not node.queued then
+					return !(VISIT_IGNORE_CHILDREN)
+
+				elseif node.nodeType == !(nodeTypes.AstIdentifier) then
+					local ident = node
+					local decl  = ident.declaration or errorInternal()
+
+					if not relevantObjects[decl] then
+						crawl(decl)
+
+						local valueExpr = getDeclarationValue(decl)
+						if valueExpr then
+							crawl(valueExpr)
+						end
+					end
+
+				elseif isAny(node.nodeType, !(nodeTypes.AstDeclaration),!(nodeTypes.AstLiteral),!(nodeTypes.AstLambda),!(nodeTypes.AstForeign)) then
+					if node.valueConstant then
+						relevantObjects[node.valueConstant] = true
+					end
+				end
+			end)
+		end
+
+		crawl(mainLambda)
+	end
+
+	--
+	-- Write program.
+	--
+	local file = writer.file
+
+	-- @Incomplete: Setting to specify the prefix for the written file (shebang and maybe a comment with copyright info, library documentation etc.).
+	file:write('#!/bin/sh\n_=[[\nexec lua "$0" "$@"\n]] and nil\n')
+	writer.currentOutputLine = 5
+
+	writeCompilerSymbols(state, writer, false)
+
+	-- Start of user code.
 	addLineMappingDummy(state, writer)
-	file:write("\t", mainFuncDecl.valueConstant.name, "()")
-	writeEol(state, writer)
+	file:write("local function runProgram()") ; writeEol(state, writer)
+
+	writeForeignImports(state, writer, state.constants, false, relevantObjects)
+	writeConstantObjectsExceptFunctions(state, writer, state.constants, false, relevantObjects)
+
+	if state.constants[1] or state.topScopeNames[1] then
+		-- Forward declarations.
+		local first = true
+		file:write("\tlocal ")
+
+		-- Constants, functions.
+		for _, const in ipairs(state.constants) do
+			if relevantObjects and not relevantObjects[const] then
+				-- void
+			elseif const.valueType.tag == !(typeTags.TypeInfoFunction) then
+				if not first then  file:write(", ")  end
+				first = false
+				file:write(const.name)
+			end
+		end
+
+		-- Top-level declarations. (Note: Glóa globals are not Lua globals.)
+		for _, topScopeName in ipairs(state.topScopeNames) do
+			if not first then  file:write(", ")  end
+			first = false
+			file:write(topScopeName)
+		end
+
+		writeEol(state, writer)
+	end
+
+	writeFunctionObjects(state, writer, state.constants, relevantObjects) -- Must be after forward declarations!
+	writeTopScopeDeclarations(state, writer, topScopeDeclarations, relevantObjects)
+
+	-- Write program entry point.
+	addLineMappingDummy(state, writer)
+	file:write("\t", mainFuncDecl.valueConstant.name, "()") ; writeEol(state, writer)
 
 	-- End of user code.
-	file:write("end")
-	writeEol(state, writer)
+	file:write("end") ; writeEol(state, writer)
 
 	if state.settings.outputDebugInfo then
 		!(
