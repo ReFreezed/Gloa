@@ -1524,45 +1524,46 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 	local requestedMax  = valueCount
 	local slotsToCheck  = valueCount -- Assuming the requested count is accepted.
 
-	if valueExprLast then
-		if valueExprLast.nodeType == !(nodeTypes.AstCall) then
-			local valueCall = valueExprLast
+	if not valueExprLast then
+		--void
 
-			if not valueCall.surroundedByParentheses then
-				local calleeTypeInfo = valueCall.callee.inferredType
+	elseif valueExprLast.nodeType == !(nodeTypes.AstCall) then
+		local valueCall = valueExprLast
 
-				if calleeTypeInfo.tag == !(typeTags.TypeInfoList) then
-					local listSig  = calleeTypeInfo
-					calleeTypeInfo = listSig[1] or errorInternal() -- The error should have happened when inferring AstCall.
-				end
+		if not valueCall.surroundedByParentheses then
+			local calleeTypeInfo = valueCall.callee.inferredType
 
-				assert(calleeTypeInfo.tag == !(typeTags.TypeInfoFunction))
-
-				local argTypesOut = calleeTypeInfo.argumentTypesOut
-				local argCount    = #argTypesOut
-
-				if argCount == 0 then
-					if softCheck then  return false, 0  end
-					typeError(state, valueCall, "Function call returns nothing. (Expected at least one value.)")
-				end
-
-				local returnsVararg = argCount > 0 and argTypesOut[argCount].tag == !(typeTags.TypeInfoVararg)
-				local returnsMin    = returnsVararg and argCount-1 or argCount
-				local returnsMax    = returnsVararg and math.huge  or argCount
-
-				requestedMin = valueCount-1+returnsMin
-				requestedMax = valueCount-1+returnsMax
-				slotsToCheck = valueCount-1+argCount
+			if calleeTypeInfo.tag == !(typeTags.TypeInfoList) then
+				local listSig  = calleeTypeInfo
+				calleeTypeInfo = listSig[1] or errorInternal() -- The error should have happened when inferring AstCall.
 			end
 
-		elseif valueExprLast.nodeType == !(nodeTypes.AstVararg) then
-			local valueVararg = valueExprLast
+			assert(calleeTypeInfo.tag == !(typeTags.TypeInfoFunction))
 
-			if not valueVararg.surroundedByParentheses then
-				requestedMin = valueCount - 1
-				requestedMax = math.huge
-				slotsToCheck = valueCount
+			local argTypesOut = calleeTypeInfo.argumentTypesOut
+			local argCount    = #argTypesOut
+
+			if argCount == 0 then
+				if softCheck then  return false, 0  end
+				typeError(state, valueCall, "Function call returns nothing. (Expected at least one value.)")
 			end
+
+			local returnsVararg = argCount > 0 and argTypesOut[argCount].tag == !(typeTags.TypeInfoVararg)
+			local returnsMin    = returnsVararg and argCount-1 or argCount
+			local returnsMax    = returnsVararg and math.huge  or argCount
+
+			requestedMin = valueCount-1+returnsMin
+			requestedMax = valueCount-1+returnsMax
+			slotsToCheck = valueCount-1+argCount
+		end
+
+	elseif valueExprLast.nodeType == !(nodeTypes.AstVararg) then
+		local valueVararg = valueExprLast
+
+		if not valueVararg.surroundedByParentheses then
+			requestedMin = valueCount - 1
+			requestedMax = math.huge
+			slotsToCheck = valueCount
 		end
 	end
 
@@ -2167,7 +2168,7 @@ end
 		end
 	!end
 
-	local realArguments     = (call.isMethod and {call, unpack(call.arguments)} or call.arguments)
+	local realArguments     = (call.isMethod and {callee, unpack(call.arguments)} or call.arguments)
 	local realArgumentTypes = {}
 
 	if call.isMethod then
@@ -5017,7 +5018,7 @@ function _G.simplifyExpressionIfConstant(state, expr)
 		then
 			local ident       = expr
 			local foreign     = ident.declaration.value
-			local foreignCopy = astCopy(foreign, ident.token)
+			local foreignCopy = astCopy(foreign, ident.token, ident.parent)
 
 			replaceQueuedNodeAndUnqueueOldTree(state, ident, foreignCopy)
 			moveToNextRelevantPipe(state, foreignCopy, !(PIPE_INFER))
@@ -5033,7 +5034,7 @@ function _G.simplifyExpressionIfConstant(state, expr)
 
 		if typeInfo.tag == !(typeTags.TypeInfoEnum) then
 			if ident.name ~= decl.name.name then
-				local copy = astCopy(decl.name, ident.token)
+				local copy = astCopy(decl.name, ident.token, ident.parent)
 				replaceQueuedNodeAndUnqueueOldTree(state, ident, copy)
 				moveToNextRelevantPipe(state, copy, !(PIPE_INFER))
 			end
@@ -5057,7 +5058,7 @@ function _G.simplifyExpressionIfConstant(state, expr)
 			errorInternal(state, literal)
 		end
 
-		local copy = astCopy(literal, ident.token)
+		local copy = astCopy(literal, ident.token, ident.parent)
 		replaceQueuedNodeAndUnqueueOldTree(state, ident, copy)
 		moveToNextRelevantPipe(state, copy, !(PIPE_INFER))
 
@@ -5375,12 +5376,18 @@ function _G.getExpectedTypeInfo(state, node, strict, expectantTerm, nodeForError
 			!DEPEND_AND_RETURN(`node`, DEPEND_NODE_INFERRED, `call.callee`, nil, `nil`)
 		end
 
+		if not call.inferredType and call.callee.nodeType == !(nodeTypes.AstIdentifier) and call.callee.declaration.overloadOf then
+			-- We have a circular dependency here. Overloaded calls must have all args inferred
+			-- before being valid and constructors etc. must know the correct overload.
+			!!(NO_EXPECTATION)
+		end
+
 		local argTypesIn  = calleeTypeInfo.argumentTypesIn
 		local argTypeInfo = argTypesIn[i]
 
 		if
-			(not argTypeInfo and argTypesIn[1] and argTypesIn[#argTypesIn].tag == !(typeTags.TypeInfoVararg))
-			or (argTypeInfo.tag == !(typeTags.TypeInfoVararg))
+			(argTypeInfo and argTypeInfo.tag == !(typeTags.TypeInfoVararg))
+			or (not argTypeInfo and argTypesIn[1] and argTypesIn[#argTypesIn].tag == !(typeTags.TypeInfoVararg))
 		then
 			local varargSig = argTypeInfo or argTypesIn[#argTypesIn]
 			argTypeInfo     = varargSig.itemType
@@ -5388,6 +5395,7 @@ function _G.getExpectedTypeInfo(state, node, strict, expectantTerm, nodeForError
 
 		-- Note: We don't need to get too fancy with validation here as the call is validated later.
 		if not argTypeInfo then
+			!ifDEBUG `astPrintTree(call)`
 			typeError(state, call, "Too many arguments specified for call.")
 		end
 

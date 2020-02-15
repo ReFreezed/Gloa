@@ -78,10 +78,21 @@ local FOREIGN_API_COMPILER_SYMBOLS = {
 	end`,
 }
 
+local FOREIGN_API_COMPILER_SYMBOLS_DURING_COMPILATION = {}
+
+do !(do) @insert "compilerApi.luapart" !(end) end
+
+for k in pairsSorted(compilerApi) do
+	FOREIGN_API_COMPILER_SYMBOLS[k]                    = `function() error("Function not available during runtime.") end`
+	FOREIGN_API_COMPILER_SYMBOLS_DURING_COMPILATION[k] = "_COMPILER."..k
+end
+
 local LUA_KEYWORDS = !(Set{"and","break","do","else","elseif","end","false","for","function","goto","if","in","local","nil","not","or","repeat","return","then","true","until","while"})
 
 _G.!struct"WriterState"{
 	{`c`,                 nil}, -- CompilationState
+	{`file`,              nil},
+	{`outputRuntime`,     false},
 
 	{`foreignN`,          0},
 	{`foreignReferences`, {}},
@@ -1268,7 +1279,8 @@ function _G.writeForeignImportIfNew(state, writer, typeInfo, foreignSource, fore
 		end
 
 	elseif foreignSource == "compiler" then
-		local lua = FOREIGN_API_COMPILER_SYMBOLS[foreignSourceName]
+		local symbols = writer.outputRuntime and FOREIGN_API_COMPILER_SYMBOLS or FOREIGN_API_COMPILER_SYMBOLS_DURING_COMPILATION
+		local lua     = symbols[foreignSourceName] or FOREIGN_API_COMPILER_SYMBOLS[foreignSourceName] or errorInternal("%s", foreignSourceName)
 
 		if outputDebugInfo then
 			writer.foreignReferences[foreignSourceId] = F("_FOREIGN[%d--[[%s]]]", foreignN, (foreignSourceId:gsub("[%[%]]", "%0 ")))
@@ -1543,7 +1555,7 @@ function _G.writeCompilerSymbols(state, writer, asGlobals)
 					if info.source:find"^@" then
 						$outputFile:write(" (", info.source:sub(2), ":", info.currentline)
 						if info.linedefined > 0 and info.linedefined ~= info.currentline then
-							$outputFile:write(", defined at line ", info.linedefined)
+							$outputFile:write(", defined:", info.linedefined)
 						end
 						$outputFile:write(")")
 					end

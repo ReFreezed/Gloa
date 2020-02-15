@@ -171,11 +171,13 @@ xpcall(function()
 
 
 	local !struct"CompilationSettings"{
-		{`doOutputFile`,    true},
+		-- BuildOptions:
+		{`outputFile`,      true},
 		{`outputFilePath`,  ""},
+		{`entryPointName`,  "main"},
+		-- Other:
 		{`outputDebugInfo`, false},
 		{`keepDeadCode`,    false},
-		{`entryPointName`,  "main"},
 	}
 
 	local !struct"CompilationState"{
@@ -183,7 +185,7 @@ xpcall(function()
 		{`tokens`,            nil},   -- Tokens (struct)
 		{`settings`,          nil},   -- CompilationSettings
 
-		{`projectDirectory`,  ""},    -- (Won't work when we support compiling multiple files at a time.)
+		{`projectDirectory`,  ""},
 
 		-- Parser:
 		{`globalScope`,       nil},   -- AstGlobalScope
@@ -199,7 +201,7 @@ xpcall(function()
 		{`constants`,         {}},
 		{`constantN`,         0},
 		{`functionN`,         0},     -- Same as constantN, but for function constants.
-		{`topScopeNames`,     Set{"_FOREIGN","_MATH_MODF","_MATH_FLOOR","_MATH_HUGE","_IPAIRS","_PAIRS","_CONDITION","_BREAK"}},
+		{`topScopeNames`,     Set{"_FOREIGN","_MATH_MODF","_MATH_FLOOR","_MATH_HUGE","_IPAIRS","_PAIRS","_CONDITION","_BREAK","_STATE","_COMPILER"}},
 		{`bytecodes`,         {}},    -- Code for the interpreter to run.
 
 		-- Runner:
@@ -208,325 +210,267 @@ xpcall(function()
 		{`runnerWrittenObjects`, {}},
 	}
 
-	local settings           = CompilationSettings()
-	settings.outputDebugInfo = outputDebugInfo
-	settings.keepDeadCode    = keepDeadCode
+	function _G.compileProgram(pathToFirstFile)
+		local state  = CompilationState()
+		state.tokens = Tokens()
 
-	local state       = CompilationState()
-	state.tokens      = Tokens()
-	state.settings    = settings
+		-- Project directory result examples:
+		--   C:/app/main.gloa > C:/app
+		--   ../main.gloa     > ..
+		--   main.gloa        > .
+		state.projectDirectory = pathToFirstFile:gsub("/?[^/]+$", ""):gsub("^$", ".")
+
+		local settings           = CompilationSettings()
+		settings.outputDebugInfo = outputDebugInfo
+		settings.keepDeadCode    = keepDeadCode
+		settings.outputFilePath  = pathToFirstFile:gsub("%.gloa$", "")..".lua"
+		state.settings           = settings
 
 
 
-	-- Tokenize file.
-	function _G.readAndTokenizeFile(state, path)
-		assert(not state.fileBuffers[path], path)
+		-- Start compiling.
+		if not silent then  print("Compiling "..pathToFirstFile:gsub("^.*/", ""))  end
 
-		local s, err = getFileContents(path, true)
-		if not s then
-			errorLine(nil, "Could not read file '%s'. (%s)", path, err)
-		end
-		s = s:gsub("\r\n?", "\n") -- Normalize line endings.  @Robustness: Handle the uncommon occurrence of \n\r.
+		local timeStartLexing, timeEndLexing = readAndTokenizeFile(state, pathToFirstFile)
 
-		state.fileBuffers[path] = s
+		local timeStartParsing = os.clock()
+		local globalScope      = parseGlobalScope(state, pathToFirstFile)
+		local timeEndParsing   = os.clock()
 
-		local tokens     = state.tokens
-		local startToken = tokens.count+1
-
-		local startTime = os.clock()
-		tokenize(s, path, tokens)
-		local endTime = os.clock()
-
-		-- Quickly check for stray/unmatched brackets.
-
-		-- Note: Sometimes an error message here isn't very helpful, so we
-		-- sometimes continue with parsing despite getting an error here.
-
-		local BRACKETS            = {["("]=")", ["{"]="}", ["["]="]"}
-		local bracketTokenIndices = {}
-
-		for i = startToken, tokens.count do
-			if isToken(tokens.type[i],tokens.value[i], !(TOKEN_PUNCTUATION),"(","{","[") then
-				table.insert(bracketTokenIndices, i)
-
-			elseif isToken(tokens.type[i],tokens.value[i], !(TOKEN_PUNCTUATION),")","}","]") then
-				local iStart   = table.remove(bracketTokenIndices)
-				local expected = BRACKETS[tokens.value[iStart]]
-
-				if not iStart then
-					reportMessageInFile(io.stderr, s, path, tokens.position1[i], "Error", "BracketChecker", "Stray bracket.")
-					bracketTokenIndices[1] = nil
-					break
-
-				elseif tokens.value[i] ~= expected then
-					printerr()
-					reportMessageInFile(io.stderr, s, path, tokens.position1[i],      "Error", "BracketChecker", "Expected '%s'.", expected)
-					reportMessageInFile(io.stderr, s, path, tokens.position1[iStart], "Info",  "BracketChecker", "...here is the unmatched bracket.")
-					exitFailure()
-				end
-			end
+		if peekNextToken(state) then
+			errorParsingNext(state, "Expected the end of the file.")
 		end
 
-		if bracketTokenIndices[1] then
-			local i = bracketTokenIndices[1]
-			errorInFile(s, path, tokens.position1[i], "BracketChecker", "Missing end bracket.", BRACKETS[tokens.value[i]])
-		end
-
-		return startTime, endTime
-	end
-
-	-- @Incomplete: Handle multiple files to compile.
-	if pathsToCompile[2] then
-		errorLine(nil, "Can only compile one file at a time right now. (%d files were given.)", #pathsToCompile)
-	end
-
-	local thePath                 = pathsToCompile[1]
-	state.settings.outputFilePath = thePath:gsub("%.gloa", "")..".lua"
-
-	-- Project directory result examples:
-	--   C:/app/main.gloa > C:/app
-	--   ../main.gloa     > ..
-	--   main.gloa        > .
-	state.projectDirectory = thePath:gsub("/?[^/]+$", ""):gsub("^$", ".")
-
-	if not silent then  print("Compiling "..thePath:gsub("^.*/", ""))  end
-
-	local timeStartLexing, timeEndLexing = readAndTokenizeFile(state, thePath)
 
 
-
-	-- Parse first file.
-	local timeStartParsing = os.clock()
-	local globalScope      = parseGlobalScope(state, thePath)
-	local timeEndParsing   = os.clock()
-
-	if peekNextToken(state) then
-		errorParsingNext(state, "Expected the end of the file.")
-	end
-
-
-
-	-- Run pipes.
-	local timeStartPipes = os.clock()
-
-	!if DEBUG then
-	local pipeCycles   = 0
-	local maxQueueSize = 0
-	!end
-
-	!ifDEBUG`if not debug_onlyParse then`
-		local queue     = state.queue
-		local finalPipe = !(PIPE_DONE-1)
+		-- Run pipes.
+		local timeStartPipes = os.clock()
 
 		!if DEBUG then
-			if debug_onlyInferTypes then  finalPipe = !(PIPE_INFER)  end
+		local pipeCycles   = 0
+		local maxQueueSize = 0
 		!end
 
-		addToQueueRecursively(state, globalScope)
+		!ifDEBUG`if not debug_onlyParse then`
+			local queue     = state.queue
+			local finalPipe = !(PIPE_DONE-1)
 
-		for cycle = 1, math.huge do
 			!if DEBUG then
-				-- print("cycle", cycle)
-				pipeCycles   = pipeCycles+1
-				maxQueueSize = math.max(maxQueueSize, #queue)
+				if debug_onlyInferTypes then  finalPipe = !(PIPE_INFER)  end
 			!end
 
-			local waitCount    = 0
-			local didSomething = false
-			local i            = 1
+			addToQueueRecursively(state, globalScope)
 
-			while true do
-				local queued
-
-				while true do
-					queued = queue[i]
-					if not (queued and queued.unqueued) then  break  end
-					removeUnordered(queue, i)
-				end
-				if not queued then  break  end
-
-				if queued.waitingOn then
-					waitCount = waitCount+1
-
+			for cycle = 1, math.huge do
 				!if DEBUG then
-				elseif queued.pipe > finalPipe then
-					-- void
+					-- print("cycle", cycle)
+					pipeCycles   = pipeCycles+1
+					maxQueueSize = math.max(maxQueueSize, #queue)
 				!end
 
-				else
-					if queued.pipe == !(PIPE_INFER) then
-						didSomething = true
-						inferNode(state, queued.node)
-					elseif queued.pipe == !(PIPE_BYTECODE) then
-						didSomething = true
-						bcEmit(state, queued.node)
+				local waitCount    = 0
+				local didSomething = false
+				local i            = 1
+
+				while true do
+					local queued
+
+					while true do
+						queued = queue[i]
+						if not (queued and queued.unqueued) then  break  end
+						removeUnordered(queue, i)
 					end
+					if not queued then  break  end
 
 					if queued.waitingOn then
 						waitCount = waitCount+1
-					end
-				end
 
-				i = i+1
-			end
-
-			if waitCount == 0 then
-				-- Pipes may have completed.
-				local allDone = true
-
-				for _, queued in ipairs(queue) do
-					if queued.unqueued then
+					!if DEBUG then
+					elseif queued.pipe > finalPipe then
 						-- void
-					elseif queued.pipe <= finalPipe then
-						allDone = false
-						break
-					end
-				end
-
-				if allDone then  break  end
-
-			elseif not didSomething then
-				errorPipesAreStuck(state)
-			end
-
-			for _, queued in ipairs(queue) do
-				local dependencyCurrent = not queued.unqueued and queued.waitingOn
-
-				while dependencyCurrent do
-					local dependency  = dependencyCurrent
-					dependencyCurrent = nil
-
-					!local DEPENDENCY_FULFILLED = `
-						dependencyCurrent = dependency.next
-						queued.waitingOn  = dependencyCurrent
-					`
-
-					if dependency.dependType == !(DEPEND_DECLARATION) then
-						local name = dependency.dependOn
-						-- @Speed: Only call findDeclaration*() if it's reported that a declaration with the awaited name has been added to the tree.
-						if dependency.extraData then
-							if findDeclarationInScope(state, dependency.extraData, name, true) then
-								!!(DEPENDENCY_FULFILLED)
-							end
-						else
-							if findDeclaration(state, queued.node, name) then
-								!!(DEPENDENCY_FULFILLED)
-							end
-						end
-
-					elseif dependency.dependType == !(DEPEND_NODE_INFERRED) then
-						-- Note: dependOn.node is not necessarily an expression which is why we also check the pipe.
-						if dependency.dependOn.node.inferredType or dependency.dependOn.pipe > !(PIPE_INFER) then
-							!!(DEPENDENCY_FULFILLED)
-						end
-
-					elseif dependency.dependType == !(DEPEND_STRUCT_MEMBERS_READY) then
-						if dependency.dependOn.hasMembers then
-							!!(DEPENDENCY_FULFILLED)
-						end
-
-					elseif dependency.dependType == !(DEPEND_NODE_EMITTED) then
-						if dependency.dependOn.pipe > !(PIPE_BYTECODE) then
-							!!(DEPENDENCY_FULFILLED)
-						end
-
-					elseif dependency.dependType == !(DEPEND_CONSTANT_READY) then
-						if dependency.dependOn.isReady then
-							!!(DEPENDENCY_FULFILLED)
-						end
+					!end
 
 					else
-						errorInternal("%d", dependency.dependType)
-					end
-				end
-			end
+						if queued.pipe == !(PIPE_INFER) then
+							didSomething = true
+							inferNode(state, queued.node)
+						elseif queued.pipe == !(PIPE_BYTECODE) then
+							didSomething = true
+							bcEmit(state, queued.node)
+						end
 
-			!if DEBUG then
-				-- Guard against an infinite loop.
-				if cycle == 100 then
-					local printCount = 0
-					printerr()
-
-					for _, queued in ipairs(queue) do
-						if not queued.unqueued and queued.pipe <= finalPipe then
-							printCount = printCount+1
-
-							if printCount > 10 then
-								printerr("(...)")
-								break
-							end
-
-							local dependency = queued.waitingOn
-
-							astPrint(queued.node)
-							nodeMessage(
-								io.stderr, state, queued.node, "Debug", nil,
-								"pipe=%s, exited=%s%s",
-								PIPE_TITLES[queued.pipe],
-								PIPE_TITLES[queued.pipeHighestExited],
-								dependency and ", waiting" or ""
-							)
-
-							if dependency and isAny(dependency.dependType, !(DEPEND_NODE_INFERRED),!(DEPEND_NODE_EMITTED)) then
-								astPrint(dependency.dependOn.node)
-								nodeMessage(
-									io.stderr, state, dependency.dependOn.node, "Debug", nil,
-									"...waiting on this."
-								)
-							end
+						if queued.waitingOn then
+							waitCount = waitCount+1
 						end
 					end
 
-					errorInternal("[DEBUG] Pipes ran for too long. (waiting:%d)", waitCount)
+					i = i+1
 				end
-			!end
-		end--for cycle
-	!ifDEBUG`end`
 
-	local timeEndPipes = os.clock()
+				if waitCount == 0 then
+					-- Pipes may have completed.
+					local allDone = true
+
+					for _, queued in ipairs(queue) do
+						if queued.unqueued then
+							-- void
+						elseif queued.pipe <= finalPipe then
+							allDone = false
+							break
+						end
+					end
+
+					if allDone then  break  end
+
+				elseif not didSomething then
+					errorPipesAreStuck(state)
+				end
+
+				for _, queued in ipairs(queue) do
+					local dependencyCurrent = not queued.unqueued and queued.waitingOn
+
+					while dependencyCurrent do
+						local dependency  = dependencyCurrent
+						dependencyCurrent = nil
+
+						!local DEPENDENCY_FULFILLED = `
+							dependencyCurrent = dependency.next
+							queued.waitingOn  = dependencyCurrent
+						`
+
+						if dependency.dependType == !(DEPEND_DECLARATION) then
+							local name = dependency.dependOn
+							-- @Speed: Only call findDeclaration*() if it's reported that a declaration with the awaited name has been added to the tree.
+							if dependency.extraData then
+								if findDeclarationInScope(state, dependency.extraData, name, true) then
+									!!(DEPENDENCY_FULFILLED)
+								end
+							else
+								if findDeclaration(state, queued.node, name) then
+									!!(DEPENDENCY_FULFILLED)
+								end
+							end
+
+						elseif dependency.dependType == !(DEPEND_NODE_INFERRED) then
+							-- Note: dependOn.node is not necessarily an expression which is why we also check the pipe.
+							if dependency.dependOn.node.inferredType or dependency.dependOn.pipe > !(PIPE_INFER) then
+								!!(DEPENDENCY_FULFILLED)
+							end
+
+						elseif dependency.dependType == !(DEPEND_STRUCT_MEMBERS_READY) then
+							if dependency.dependOn.hasMembers then
+								!!(DEPENDENCY_FULFILLED)
+							end
+
+						elseif dependency.dependType == !(DEPEND_NODE_EMITTED) then
+							if dependency.dependOn.pipe > !(PIPE_BYTECODE) then
+								!!(DEPENDENCY_FULFILLED)
+							end
+
+						elseif dependency.dependType == !(DEPEND_CONSTANT_READY) then
+							if dependency.dependOn.isReady then
+								!!(DEPENDENCY_FULFILLED)
+							end
+
+						else
+							errorInternal("%d", dependency.dependType)
+						end
+					end
+				end
+
+				!if DEBUG then
+					-- Guard against an infinite loop.
+					if cycle == 100 then
+						local printCount = 0
+						printerr()
+
+						for _, queued in ipairs(queue) do
+							if not queued.unqueued and queued.pipe <= finalPipe then
+								printCount = printCount+1
+
+								if printCount > 10 then
+									printerr("(...)")
+									break
+								end
+
+								local dependency = queued.waitingOn
+
+								astPrint(queued.node)
+								nodeMessage(
+									io.stderr, state, queued.node, "Debug", nil,
+									"pipe=%s, exited=%s%s",
+									PIPE_TITLES[queued.pipe],
+									PIPE_TITLES[queued.pipeHighestExited],
+									dependency and ", waiting" or ""
+								)
+
+								if dependency and isAny(dependency.dependType, !(DEPEND_NODE_INFERRED),!(DEPEND_NODE_EMITTED)) then
+									astPrint(dependency.dependOn.node)
+									nodeMessage(
+										io.stderr, state, dependency.dependOn.node, "Debug", nil,
+										"...waiting on this."
+									)
+								end
+							end
+						end
+
+						errorInternal("[DEBUG] Pipes ran for too long. (waiting:%d)", waitCount)
+					end
+				!end
+			end--for cycle
+		!ifDEBUG`end`
+
+		local timeEndPipes = os.clock()
 
 
 
-	-- Write program.
-	if state.settings.outputFilePath == thePath then
-		errorLine(nil, "The input path is the same as the output path. (%s)", thePath)
+		-- Write program.
+		if settings.outputFilePath == pathToFirstFile then
+			errorLine(nil, "The input path is the same as the output path. (%s)", pathToFirstFile)
+		end
+
+		local timeStartOutput = os.clock()
+
+		!ifDEBUG`if not (debug_onlyParse or debug_onlyInferTypes) then`
+			if settings.outputFile then
+				local writer         = WriterState()
+				writer.file          = assert(io.open(settings.outputFilePath, "w"))
+				writer.outputRuntime = true
+				writeProgram(state, writer)
+			end
+		!ifDEBUG`end`
+
+		local timeEndOutput = os.clock()
+
+
+
+		-- All done!
+		local timeEndCompilation = os.clock()
+
+		!if DEBUG then
+			if debug_onlyParse then  astPrintTree(globalScope)  end
+			printf("██████████████████████ %s", pathToFirstFile)
+			printf("████    ████  ████  ██ Total:   %.3f sec", timeEndCompilation - timeStartCompiling)
+			printf("██  ████  ██  ██  ████ Lexing:  %.3f sec", timeEndLexing      - timeStartLexing)
+			printf("██  ████  ██    ██████ Parsing: %.3f sec", timeEndParsing     - timeStartParsing)
+			printf("██  ████  ██  ██  ████ Pipes:   %.3f sec", timeEndPipes       - timeStartPipes)
+			printf("████    ████  ████  ██ Output:  %.3f sec", timeEndOutput      - timeStartOutput)
+			printf("██████████████████████ Cycles:%d Queue:%d Deps:%d", pipeCycles, maxQueueSize, #state.dependencies)
+		!else
+			if not silent then
+				printf("Successfully compiled %s", pathToFirstFile)
+				printf("Completed in %.3f seconds", timeEndCompilation-timeStartCompiling)
+				if disableGc then
+					printf("Memory usage: %.0f bytes", collectgarbage"count"*1024)
+				end
+				print()
+			end
+		!end
 	end
 
-	local timeStartOutput = os.clock()
-
-	!ifDEBUG`if not (debug_onlyParse or debug_onlyInferTypes) then`
-		if state.settings.doOutputFile then
-			local writer = WriterState()
-			writer.file  = assert(io.open(state.settings.outputFilePath, "w"))
-			writeProgram(state, writer)
-		end
-	!ifDEBUG`end`
-
-	local timeEndOutput = os.clock()
-
-
-
-	-- All done!
-	local timeEndCompilation = os.clock()
-
-	!if DEBUG then
-		if debug_onlyParse then  astPrintTree(globalScope)  end
-		printf("██████████████████████ Total:   %.3f sec", timeEndCompilation - timeStartCompiling)
-		printf("████    ████  ████  ██ Lexing:  %.3f sec", timeEndLexing      - timeStartLexing)
-		printf("██  ████  ██  ██  ████ Parsing: %.3f sec", timeEndParsing     - timeStartParsing)
-		printf("██  ████  ██    ██████ Pipes:   %.3f sec", timeEndPipes       - timeStartPipes)
-		printf("██  ████  ██  ██  ████ Output:  %.3f sec", timeEndOutput      - timeStartOutput)
-		printf("████    ████  ████  ██ Queue:   %d",       maxQueueSize)
-		printf("██████████████████████ Cycles:  %d",       pipeCycles)
-	!else
-		if not silent then
-			printf("Compilation completed in %.3f seconds", timeEndCompilation-timeStartCompiling)
-			if disableGc then
-				printf("Memory usage: %.0f bytes", collectgarbage"count"*1024)
-			end
-			print()
-		end
-	!end
+	for _, path in ipairs(pathsToCompile) do
+		compileProgram(path)
+	end
 
 	exit()
 
