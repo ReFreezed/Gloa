@@ -3971,7 +3971,59 @@ end
 		end
 	end
 
-	for i, decl in ipairs(struct.declarations) do
+	if struct.inherits[1] then
+		for _, typeExpr in ipairs(struct.inherits) do
+			while typeExpr.replacedBy do  typeExpr = typeExpr.replacedBy  end
+
+			local structInfoToInherit = requireTypeRepresentedByExpression(state, typeExpr)
+			if structInfoToInherit.tag ~= !(typeTags.TypeInfoStruct) then
+				typeError(state, typeExpr, "Expected the type of a struct to inherit members from.")
+			end
+
+			if not structInfoToInherit.hasMembers then
+				!DEPEND_AND_RETURN(`struct`, DEPEND_STRUCT_MEMBERS_READY, `structInfoToInherit`)
+			end
+
+			local insertIndexStatement = indexOf(struct.statements, typeExpr) or errorInternal(state, typeExpr)
+			table.remove(struct.statements, insertIndexStatement)
+
+			local insertIndexDecl = 1
+
+			for i, decl in ipairs(struct.declarations) do
+				if decl.token > typeExpr.token then  break  end
+				insertIndexDecl = i+1
+			end
+
+			for _, declToCopy in ipairs(structInfoToInherit.astNode.declarations) do
+				local decl = findMemberDeclaration(state, struct, declToCopy.name.name)
+				if decl then
+					typeError2(state,
+						typeExpr, F("Trying to inherit a member called '%s' but the struct already has a member with that name.", decl.name.name),
+						decl,     F("Previous member was added here.") -- This may be an inherited member too.
+					)
+				end
+
+				-- @Check @Robustness: What happens with static functions (and maybe more things)? Is too much copied? Need to test! Maybe we shouldn't skip PIPE_INFER here below.
+				decl = astCopy(declToCopy, typeExpr.token, struct)
+
+				table.insert(struct.statements,   insertIndexStatement, decl)
+				table.insert(struct.declarations, insertIndexDecl,      decl)
+				insertIndexStatement = insertIndexStatement+1
+				insertIndexDecl      = insertIndexDecl+1
+
+				addToQueueRecursively(state, decl, struct.statements, 0, !(PIPE_INFER)) -- Note: We'll update all keys in a moment.
+
+				moveChildrenToNextRelevantPipe(state, decl)
+				moveToNextRelevantPipe(state, decl)
+			end
+		end
+
+		for i, expr in ipairs(struct.statements) do
+			expr.queued.key = i
+		end
+	end
+
+	for _, decl in ipairs(struct.declarations) do
 		if not decl.isConstant then
 			local member          = TypeInfoStructMember()
 			member.name           = decl.name.name

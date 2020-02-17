@@ -349,6 +349,8 @@ _G.!structAst"AstFor:_AstScope"{
 _G.!structAst"AstStruct:_AstScopeExpression"{
 	_scopeType = "declarative",
 
+	{`inherits`,              {},  astRef="array"}, -- []AstExpression
+
 	{`isPolymorphic`,         false},
 	{`polymorphs`,            {},  astRef="array"}, -- []AstDeclaration
 	{`polymorphSourceStruct`, nil, astRef="node"},  -- AstStruct
@@ -938,14 +940,27 @@ function _G.parseStruct(state, parentNode)
 
 	-- Note: We allow a trailing comma/semicolon after the last member.
 	while true do
-		tokType, tokValue = peekNextToken(state)
+		tokType, tokValue         = peekNextToken(state, 1)
+		local tokType2, tokValue2 = peekNextToken(state, 2)
+		local tokType3, tokValue3 = peekNextToken(state, 3)
 
 		if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"}") then
 			eatNextToken(state)
 			break
+
 		elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"assert","print") then
 			!SET_OR_RETURN_FALSE `local debugNode = parseDebugNode(state, struct)`
 			table.insert(struct.statements, debugNode)
+
+		elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"using") and not (
+			tokType2 == !(TOKEN_IDENTIFIER)
+			and isToken(tokType3,tokValue3, !(TOKEN_PUNCTUATION),"=",":")
+		) then
+			eatNextToken(state)
+			!SET_OR_RETURN `local expr = parseExpression(state, struct)`
+			table.insert(struct.statements, expr)
+			table.insert(struct.inherits,   expr)
+
 		else
 			local declType = !(DECLARATION_STRUCT)
 			!DO_OR_RETURN `parseDeclarationStatement(state, struct, false, declType)`
@@ -1245,9 +1260,11 @@ function _G.parseDeclarationStatement(state, block, imperative, declType)
 		table.insert(block.statements,   declarations[i])
 		table.insert(block.declarations, declarations[i])
 	end
+
 	if assignment then
 		table.insert(block.statements, assignment)
 	end
+
 	if isUsing then
 		for _, decl in ipairs(declarations) do
 			local using       = astNewNode(AstUsing, decl.token, block)
