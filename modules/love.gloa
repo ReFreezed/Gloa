@@ -2,9 +2,13 @@
 --=
 --=  LÖVE bindings (love2d.org)
 --=
+--=  Supported versions: 11.3
+--=
 --==============================================================
 
+	LoveConfig
 	LoveEvent
+	LoveFullscreenType
 
 	loveClear
 	loveCoordinateSystemReset
@@ -22,9 +26,78 @@
 	loveQuit, loveRestart
 	loveReadFile, loveWriteFile
 	loveSetAppDataFolderName
-	loveSetEventHandler
+	loveSetEventHandler, loveSetConfigHandler
 
 --============================================================]]
+
+----------------------------------------------------------------
+-- love.config
+----------------------------------------------------------------
+
+export LoveFullscreenType :: enum {
+	DESKTOP    :: "desktop",    -- Windowed mode.
+	FULLSCREEN :: "fullscreen", -- Borderless fullscreen.
+	EXCLUSIVE  :: "exclusive",  -- Exclusive fullscreen.
+}
+
+export LoveConfig :: struct {
+	identity:string|none  = nil,    -- The name of the save directory.
+	appendidentity        = false,  -- Search files in source directory before save directory.
+	version               = "11.3", -- The LÖVE version this game was made for.
+	console               = false,  -- Attach a console. (Windows only.)
+	accelerometerjoystick = true,   -- Enable the accelerometer on iOS and Android by exposing it as a Joystick.
+	externalstorage       = false,  -- True to save files (and read from the save directory) in external storage on Android.
+	gammacorrect          = false,  -- Enable gamma-correct rendering, when supported by the system.
+
+	audio: struct {
+		mic           = false, -- Request and use microphone capabilities in Android.
+		mixwithsystem = true,  -- Keep background music playing when opening LÖVE. (iOS and Android only.)
+	},
+
+	window: struct {
+		title            = "Untitled", -- The window title.
+		icon:string|none = nil,        -- Filepath to an image to use as the window's icon.
+		width            = 800,        -- The window width.
+		height           = 600,        -- The window height.
+		borderless       = false,      -- Remove all border visuals from the window.
+		resizable        = false,      -- Let the window be user-resizable.
+		minwidth         = 1,          -- Minimum window width if the window is resizable.
+		minheight        = 1,          -- Minimum window height if the window is resizable.
+		fullscreen       = false,      -- Enable fullscreen.
+		fullscreentype   = LoveFullscreenType.DESKTOP,
+		usedpiscale      = true,       -- Enable automatic DPI scaling.
+		vsync            = 1,          -- Vertical sync mode.
+		msaa             = 0,          -- The number of samples to use with multi-sampled antialiasing.
+		depth:int|none   = nil,        -- The number of bits per sample in the depth buffer.
+		stencil:int|none = nil,        -- The number of bits per sample in the stencil buffer.
+		display          = 1,          -- Index of the monitor to show the window in.
+		highdpi          = false,      -- Enable high-dpi mode for the window on a Retina display.
+		x:int|none       = nil,        -- The x-coordinate of the window's position in the specified display.
+		y:int|none       = nil,        -- The y-coordinate of the window's position in the specified display.
+	},
+
+	modules: struct {
+		-- Enable/disable modules.
+		audio    = true,
+		data     = true,
+		event    = true,
+		font     = true,
+		graphics = true,
+		image    = true,
+		joystick = true,
+		keyboard = true,
+		math     = true,
+		mouse    = true,
+		physics  = true,
+		sound    = true,
+		system   = true,
+		thread   = true,
+		timer    = true,
+		touch    = true,
+		video    = true,
+		window   = true,
+	},
+}
 
 ----------------------------------------------------------------
 -- love.event.*
@@ -72,6 +145,8 @@ using export LoveEvent :: enum {
 	TOUCH_MOVED       :: "touchmoved",
 	TOUCH_PRESSED     :: "touchpressed",
 	TOUCH_RELEASED    :: "touchreleased",
+	-- Other.
+	CONFIG            :: "conf",
 }
 
 local love:table : !foreign lua "love"
@@ -92,30 +167,34 @@ export loveSetEventHandler :: (event:LoveEvent, handler:any, catchErrorsInGloa:b
 	if event == ERROR_HANDLER  love.errhand = handler
 }
 
+export loveSetConfigHandler :: (handler:(conf:LoveConfig)) {
+	loveSetEventHandler(CONFIG, handler, false)
+}
+
 export loveRemoveEventHandler :: (event:LoveEvent) {
 	love[event] = nil
 	if event == ERROR_HANDLER  love.errhand = nil
 }
 
-export loveQuit :: (exitStatus:int=0) !foreign lua "love.event.quit"
+export loveQuit :: (exitStatus:int=0) !foreign lua "love and love.event and love.event.quit"
 
-local _loveRestart :: (restart:string) !foreign lua "love.event.quit"
+local _loveRestart :: (restart:string) !foreign lua "love and love.event and love.event.quit"
 export loveRestart :: () { _loveRestart("restart") }
 
 ----------------------------------------------------------------
 -- love.filesystem.*
 ----------------------------------------------------------------
 
-export loveSetAppDataFolderName :: (name:string) !foreign lua "love.filesystem.setIdentity"
+export loveSetAppDataFolderName :: (name:string) !foreign lua "love and love.filesystem and love.filesystem.setIdentity"
 
-local _loveReadFile :: (path:string) -> string|none, int|string !foreign lua "love.filesystem.read"
+local _loveReadFile :: (path:string) -> string|none, int|string !foreign lua "love and love.filesystem and love.filesystem.read"
 export loveReadFile :: (path:string) -> (success:bool, data:string, error:string) {
 	local data, sizeOrErr = _loveReadFile(path)
 	if data == nil  return false, "", cast(string) sizeOrErr
 	return true, cast(string) data, ""
 }
 
-local _loveWriteFile :: (path:string, data:string) -> bool, none|string !foreign lua "love.filesystem.write"
+local _loveWriteFile :: (path:string, data:string) -> bool, none|string !foreign lua "love and love.filesystem and love.filesystem.write"
 export loveWriteFile :: (path:string, data:string) -> (success:bool, error:string) {
 	local ok, err = _loveWriteFile(path, data)
 	if not ok  return false, cast(string) err
@@ -128,15 +207,15 @@ export loveWriteFile :: (path:string, data:string) -> (success:bool, error:strin
 
 -- Drawing.
 
-export loveDrawText :: (text:string, x,y:float=0, r:float=0                                         ) !foreign lua "love.graphics.print"
+export loveDrawText :: (text:string, x,y:float=0, r:float=0                                         ) !foreign lua "love and love.graphics and love.graphics.print"
 export loveDrawText :: (text:string, x,y:float,   r:float, sx:float                                 ) { loveDrawText(text, x,y, r, sx,sx) }
-export loveDrawText :: (text:string, x,y:float,   r:float, sx,sy:float, ox,oy:float=0, kx,ky:float=0) !foreign lua "love.graphics.print"
+export loveDrawText :: (text:string, x,y:float,   r:float, sx,sy:float, ox,oy:float=0, kx,ky:float=0) !foreign lua "love and love.graphics and love.graphics.print"
 -- @Compiler @Incomplete: Make sy:float=sx work somehow here below and remove the overloads here above.
--- export loveDrawText :: (text:string, x,y:float=0, r:float=0, sx:float=1,sy:float=sx, ox,oy:float=0, kx,ky:float=0) !foreign lua "love.graphics.print"
+-- export loveDrawText :: (text:string, x,y:float=0, r:float=0, sx:float=1,sy:float=sx, ox,oy:float=0, kx,ky:float=0) !foreign lua "love and love.graphics and love.graphics.print"
 
-local _loveDrawRectangle :: (mode:string, x,y:float, w,h:float)                                      !foreign lua "love.graphics.rectangle"
-local _loveDrawRectangle :: (mode:string, x,y:float, w,h:float, radiusX,radiusY:float)               !foreign lua "love.graphics.rectangle"
-local _loveDrawRectangle :: (mode:string, x,y:float, w,h:float, radiusX,radiusY:float, segments:int) !foreign lua "love.graphics.rectangle"
+local _loveDrawRectangle :: (mode:string, x,y:float, w,h:float)                                      !foreign lua "love and love.graphics and love.graphics.rectangle"
+local _loveDrawRectangle :: (mode:string, x,y:float, w,h:float, radiusX,radiusY:float)               !foreign lua "love and love.graphics and love.graphics.rectangle"
+local _loveDrawRectangle :: (mode:string, x,y:float, w,h:float, radiusX,radiusY:float, segments:int) !foreign lua "love and love.graphics and love.graphics.rectangle"
 export loveDrawRectangleFill :: (x,y:float, w,h:float)                                      { _loveDrawRectangle("fill", x,y, w,h) }
 export loveDrawRectangleLine :: (x,y:float, w,h:float)                                      { _loveDrawRectangle("line", x,y, w,h) }
 export loveDrawRectangleFill :: (x,y:float, w,h:float, radiusX,radiusY:float)               { _loveDrawRectangle("fill", x,y, w,h, radiusX,radiusY) }
@@ -144,48 +223,48 @@ export loveDrawRectangleLine :: (x,y:float, w,h:float, radiusX,radiusY:float)   
 export loveDrawRectangleFill :: (x,y:float, w,h:float, radiusX,radiusY:float, segments:int) { _loveDrawRectangle("fill", x,y, w,h, radiusX,radiusY, segments) }
 export loveDrawRectangleLine :: (x,y:float, w,h:float, radiusX,radiusY:float, segments:int) { _loveDrawRectangle("line", x,y, w,h, radiusX,radiusY, segments) }
 
-local _loveDrawCircle :: (mode:string, x,y:float, radius:float)               !foreign lua "love.graphics.circle"
-local _loveDrawCircle :: (mode:string, x,y:float, radius:float, segments:int) !foreign lua "love.graphics.circle"
+local _loveDrawCircle :: (mode:string, x,y:float, radius:float)               !foreign lua "love and love.graphics and love.graphics.circle"
+local _loveDrawCircle :: (mode:string, x,y:float, radius:float, segments:int) !foreign lua "love and love.graphics and love.graphics.circle"
 export loveDrawCircleFill :: (x,y:float, radius:float)               { _loveDrawCircle("fill", x,y, radius) }
 export loveDrawCircleLine :: (x,y:float, radius:float)               { _loveDrawCircle("line", x,y, radius) }
 export loveDrawCircleFill :: (x,y:float, radius:float, segments:int) { _loveDrawCircle("fill", x,y, radius, segments) }
 export loveDrawCircleLine :: (x,y:float, radius:float, segments:int) { _loveDrawCircle("line", x,y, radius, segments) }
 
-export loveDrawLine :: (x1,y1,x2,y2,...:float) !foreign lua "love.graphics.line"
+export loveDrawLine :: (x1,y1,x2,y2,...:float) !foreign lua "love and love.graphics and love.graphics.line"
 
 -- Graphics state.
 
-export loveGetColor :: () -> (r,g,b,a:float)    !foreign lua "love.graphics.getColor"
-export loveSetColor :: (r,g,b:float, a:float=1) !foreign lua "love.graphics.setColor"
+export loveGetColor :: () -> (r,g,b,a:float)    !foreign lua "love and love.graphics and love.graphics.getColor"
+export loveSetColor :: (r,g,b:float, a:float=1) !foreign lua "love and love.graphics and love.graphics.setColor"
 
-export loveClear :: ()                       !foreign lua "love.graphics.clear" -- Same as loveClear(0,0,0,0)
-export loveClear :: (r,g,b:float, a:float=1) !foreign lua "love.graphics.clear"
+export loveClear :: ()                       !foreign lua "love and love.graphics and love.graphics.clear" -- Same as loveClear(0,0,0,0)
+export loveClear :: (r,g,b:float, a:float=1) !foreign lua "love and love.graphics and love.graphics.clear"
 
-export loveGetLineWidth :: () -> float !foreign lua "love.graphics.getLineWidth"
-export loveSetLineWidth :: (w:float)   !foreign lua "love.graphics.setLineWidth"
+export loveGetLineWidth :: () -> float !foreign lua "love and love.graphics and love.graphics.getLineWidth"
+export loveSetLineWidth :: (w:float)   !foreign lua "love and love.graphics and love.graphics.setLineWidth"
 
 -- Coordinate system.
 
-export loveCoordinateSystemRotate    :: (anlge:float) !foreign lua "love.graphics.rotate"
-export loveCoordinateSystemScale     :: (sx,sy:float) !foreign lua "love.graphics.scale"
-export loveCoordinateSystemShear     :: (kx,ky:float) !foreign lua "love.graphics.shear"
-export loveCoordinateSystemTranslate :: (dx,dy:float) !foreign lua "love.graphics.translate"
+export loveCoordinateSystemRotate    :: (anlge:float) !foreign lua "love and love.graphics and love.graphics.rotate"
+export loveCoordinateSystemScale     :: (sx,sy:float) !foreign lua "love and love.graphics and love.graphics.scale"
+export loveCoordinateSystemShear     :: (kx,ky:float) !foreign lua "love and love.graphics and love.graphics.shear"
+export loveCoordinateSystemTranslate :: (dx,dy:float) !foreign lua "love and love.graphics and love.graphics.translate"
 
-export loveCoordinateSystemReset :: () !foreign lua "love.graphics.origin"
+export loveCoordinateSystemReset :: () !foreign lua "love and love.graphics and love.graphics.origin"
 
-local _loveGraphicsPush :: ()             !foreign lua "love.graphics.push"
-local _loveGraphicsPush :: (stack:string) !foreign lua "love.graphics.push"
+local _loveGraphicsPush :: ()             !foreign lua "love and love.graphics and love.graphics.push"
+local _loveGraphicsPush :: (stack:string) !foreign lua "love and love.graphics and love.graphics.push"
 export loveGraphicsPushAll       :: () { _loveGraphicsPush("all") }
 export loveGraphicsPushTransform :: () { _loveGraphicsPush()      }
-export loveGraphicsPop           :: () !foreign lua "love.graphics.pop"
-export loveGraphicsReset         :: () !foreign lua "love.graphics.reset"
+export loveGraphicsPop           :: () !foreign lua "love and love.graphics and love.graphics.pop"
+export loveGraphicsReset         :: () !foreign lua "love and love.graphics and love.graphics.reset"
 
 -- Window.
 
-export loveGetWindowDimensions :: () -> int, int !foreign lua "love.graphics.getDimensions"
+export loveGetWindowDimensions :: () -> int, int !foreign lua "love and love.graphics and love.graphics.getDimensions"
 
 ----------------------------------------------------------------
 -- love.timer.*
 ----------------------------------------------------------------
 
-export loveGetTime :: () -> float !foreign lua "love.timer.getTime"
+export loveGetTime :: () -> float !foreign lua "love and love.timer and love.timer.getTime"

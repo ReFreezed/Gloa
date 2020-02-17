@@ -34,8 +34,8 @@ local function errorOrReturn(errCode, returnValueCode)
 	__LUA("if state.soft then return ",returnValueCode," end ")
 	__LUA(errCode)
 end
-local function ERROR_OR_RETURN      (errCode)  errorOrReturn(errCode, "nil"  )  end
-local function ERROR_OR_RETURN_FALSE(errCode)  errorOrReturn(errCode, "false")  end
+local function ERROR_OR_RETURN      (errCode, returnCode)  errorOrReturn(errCode, (returnCode or "nil"))  end
+local function ERROR_OR_RETURN_FALSE(errCode            )  errorOrReturn(errCode, ("false"            ))  end
 
 local function setOrReturn(assignmentCode, returnValueCode)
 	local preCode, sufCode = assignmentCode:match"^([^=]+)=(.*)$"
@@ -241,8 +241,8 @@ _G.!structAst"AstDebug:_AstNode"{
 _G.!structAst"AstArgument:_AstNode"{
 	{`declaration`, nil, ast="node"}, -- AstDeclaration
 	{`assignment`,  nil, ast="node"}, -- AstAssignment
-	{`group`,       1},     -- Arguments in the same group have the same type. This is a small optimization for the typer.
-	{`autobake`,    0},     -- 0=disabled, 1=enabled, 2=required  @Incomplete
+	{`group`,       1}, -- Arguments in the same group have the same type. This is a small optimization for the typer.
+	{`autobake`,    AUTOBAKE_DISABLED},
 	{`isUsing`,     false}, -- Is it better to store this on declarations?
 
 	-- For an input argument, this indicates optionality.
@@ -349,10 +349,10 @@ _G.!structAst"AstFor:_AstScope"{
 _G.!structAst"AstStruct:_AstScopeExpression"{
 	_scopeType = "declarative",
 
-	{`bakeDeclarations`,      {},  astRef="array"}, -- []AstDeclaration
 	{`isPolymorphic`,         false},
 	{`polymorphs`,            {},  astRef="array"}, -- []AstDeclaration
 	{`polymorphSourceStruct`, nil, astRef="node"},  -- AstStruct
+	{`bakeDeclarations`,      {},  astRef="array"}, -- []AstDeclaration
 }
 _G.!structAst"AstEnum:_AstScopeExpression"{
 	_scopeType = "declarative",
@@ -372,9 +372,10 @@ _G.!structAst"AstLambda:_AstScopeExpression"{
 
 	{`bodyEndToken`,      1}, -- For better error messages.
 
-	{`bakeDeclarations`,  {},  astRef="array"}, -- []AstDeclaration
 	{`isPolymorphic`,     false},
 	{`polymorphs`,        {},  astRef="array"}, -- []AstDeclaration
+	{`bakeDeclarations`,  {},  astRef="array"}, -- []AstDeclaration
+	{`bakeValues`,        {},  astRef="array"}, -- []AstExpression
 
 	-- Type phase:
 	{`foreignSourceId`,   ""}, -- Is foreignSource and foreignSourceName combined.
@@ -655,14 +656,36 @@ function _G.parseArguments(state, parentNode, isInput)
 		end
 
 		while true do
+			local autobake = !(AUTOBAKE_DISABLED)
 			tokType, tokValue, token = eatNextToken(state)
-			if not (tokType == !(TOKEN_IDENTIFIER) or isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"...")) then
-				!ERROR_OR_RETURN `errorParsingLast(state, "Argument list: Expected an identifier.")`
+
+			if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"$") then
+				if not isInput then
+					!ERROR_OR_RETURN `errorParsing(state, token, "Only input arguments can be auto-baked.")`
+				elseif isUsing then
+					!ERROR_OR_RETURN `errorParsing(state, argStartToken, "Cannot using auto-baked arguments.")`
+				end
+
+				autobake          = !(AUTOBAKE_REQUIRED)
+				tokType, tokValue = peekNextToken(state)
+
+				if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"?") then
+					eatNextToken(state)
+					autobake = !(AUTOBAKE_ENABLED)
+					!ERROR_OR_RETURN `errorParsing(state, token+1, "Optional auto-baking of arguments isn't supported yet. Omit '?' to force auto-baking.")` -- @Incomplete
+				end
+
+				tokType, tokValue = eatNextToken(state)
 			end
 
-			local arg   = astNewNode(AstArgument, token, args)
-			arg.group   = groupN
-			arg.isUsing = isUsing
+			if not (tokType == !(TOKEN_IDENTIFIER) or isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"...")) then
+				!ERROR_OR_RETURN `errorParsing(state, token, "Argument list: Expected an identifier.")`
+			end
+
+			local arg    = astNewNode(AstArgument, token, args)
+			arg.group    = groupN
+			arg.autobake = autobake
+			arg.isUsing  = isUsing
 
 			table.insert(args.arguments, arg)
 			table.insert(argsInGroup,    arg)
@@ -686,6 +709,8 @@ function _G.parseArguments(state, parentNode, isInput)
 
 				if isUsing then
 					!ERROR_OR_RETURN `errorParsing(state, argStartToken, "Cannot apply 'using' to varargs.")`
+				elseif autobake ~= !(AUTOBAKE_DISABLED) then
+					!ERROR_OR_RETURN `errorParsing(state, argStartToken, "Auto-baking of varargs is not supported.")`
 				end
 
 				local vararg       = astNewNode(AstVararg, token, decl)
@@ -756,7 +781,12 @@ function _G.parseArguments(state, parentNode, isInput)
 
 			for i, arg in ipairs(argsInGroup) do
 				state.nextToken = token
-				local decl      = arg.declaration
+
+				if arg.autobake ~= !(AUTOBAKE_DISABLED) then
+					!ERROR_OR_RETURN `errorParsingLast(state, "Default values for auto-baked arguments are not supported yet.")`
+				end
+
+				local decl = arg.declaration
 
 				if decl.name.nodeType == !(nodeTypes.AstVararg) then
 					!ERROR_OR_RETURN `errorParsingNext(state, "Varargs cannot have default values.")`
@@ -872,7 +902,12 @@ function _G.parseStruct(state, parentNode)
 		astVisitAllNodes(args, function(node)
 			if node.nodeType == !(nodeTypes.AstVararg) then
 				gotError = true
-				!ERROR_OR_RETURN `errorParsing(state, node.token, "Struct arguments cannot be variable.", nil, VISIT_BREAK)`
+				!ERROR_OR_RETURN(`errorParsing(state, node.token, "Struct arguments cannot be variable.")`, toLua(VISIT_BREAK))
+
+			elseif node.nodeType == !(nodeTypes.AstArgument) then
+				if node.autobake ~= !(AUTOBAKE_DISABLED) and not state.soft then
+					parserMessageLine(io.stderr, state, node.token, "Warning", "Struct arguments are always auto-baked and thus don't need any $.")
+				end
 			end
 		end)
 
@@ -2030,42 +2065,44 @@ function _G.parseLambda(state, parentNode, allowBody)
 		local gotError   = false
 
 		-- Add declarations for values that will be baked (only types so far).
-		astVisitAllNodes(args, function(node)
-			if node.nodeType ~= !(nodeTypes.AstBake) then  return  end
+		for _, arg in ipairs(args.arguments) do
+			astVisitAllNodes(arg, function(node)
+				if node.nodeType ~= !(nodeTypes.AstBake) then  return  end
 
-			lambda.isPolymorphic = true
+				lambda.isPolymorphic = true
 
-			local bake  = node
-			local ident = bake.name
-			local name  = ident.name
+				local bake  = node
+				local ident = bake.name
+				local name  = ident.name
 
-			if takenNames[name] then
-				gotError = true
-				!ERROR_OR_RETURN `
-					printerr()
-					parserMessage(io.stderr, state, ident.token,      "Error", "Duplicate placeholder type name '%s'.", name)
-					parserMessage(io.stderr, state, takenNames[name], "Info",  "...previous name is here.")
-					exitFailure()
-				`
-			end
-			takenNames[name] = ident.token
+				if takenNames[name] then
+					gotError = true
+					!ERROR_OR_RETURN `
+						printerr()
+						parserMessage(io.stderr, state, ident.token,      "Error", "Duplicate placeholder type name '%s'.", name)
+						parserMessage(io.stderr, state, takenNames[name], "Info",  "...previous name is here.")
+						exitFailure()
+					`
+				end
+				takenNames[name] = ident.token
 
-			local decl        = astNewNode(AstDeclaration, bake.token, lambda)
-			ident.declaration = decl
-			decl.name         = astCopy(ident, nil, decl)
-			decl.isConstant   = true
+				local decl        = astNewNode(AstDeclaration, bake.token, lambda)
+				ident.declaration = decl
+				decl.name         = astCopy(ident, nil, decl)
+				decl.isConstant   = true
 
-			local typeNode    = astNewNode(AstType, bake.token, decl)
-			typeNode.kind     = !(TYPE_KIND_SIMPLE_BUILTIN)
-			typeNode.typeName = "placeholder"
-			decl.value        = typeNode
+				local typeNode    = astNewNode(AstType, bake.token, decl)
+				typeNode.kind     = !(TYPE_KIND_SIMPLE_BUILTIN)
+				typeNode.typeName = "placeholder"
+				decl.value        = typeNode
 
-			table.insert(lambda.statements,       decl)
-			table.insert(lambda.declarations,     decl)
-			table.insert(lambda.bakeDeclarations, decl)
+				table.insert(lambda.statements,       decl)
+				table.insert(lambda.declarations,     decl)
+				table.insert(lambda.bakeDeclarations, decl)
 
-			return !(VISIT_IGNORE_CHILDREN)
-		end)
+				return !(VISIT_IGNORE_CHILDREN)
+			end)
+		end
 
 		if gotError then  return nil  end
 		table.insert(lambda.statements, args)
@@ -2073,8 +2110,20 @@ function _G.parseLambda(state, parentNode, allowBody)
 		for _, arg in ipairs(args.arguments) do
 			table.insert(lambda.declarations, arg.declaration)
 
+			local decl = arg.declaration
+
+			if arg.autobake == !(AUTOBAKE_REQUIRED) then
+				lambda.isPolymorphic = true
+
+				decl.isConstant      = true
+
+				local typeNode       = astNewNode(AstType, decl.token, decl)
+				typeNode.kind        = !(TYPE_KIND_SIMPLE_BUILTIN)
+				typeNode.typeName    = "placeholder"
+				decl.value           = typeNode -- During baking this may end up being replaced with something that's not a type, but we don't care about that at this moment!
+			end
+
 			if arg.isUsing then
-				local decl        = arg.declaration
 				local using       = astNewNode(AstUsing, arg.token, lambda)
 
 				local ident       = astNewNode(AstIdentifier, arg.token, using)
@@ -2302,7 +2351,8 @@ function _G.parseExpression(state, parentNode, prevOpPrecedence, expectLeftValue
 	--     inArgs [-> outArgs] [body]
 	--
 	--     inArgs  = ( [ inArg1, ... ] )
-	--     inArg   = [ using ] name1 [, ... ] : type [ = defaultValue ]
+	--     inArg   = [ $ [ ? ] ] name1 [, ... ] : [ $ ] type [ = defaultValue ]
+	--     inArg   = using       name1 [, ... ] : [ $ ] type [ = defaultValue ]
 	--     outArgs = void
 	--     outArgs = type1 [, ... ]
 	--     outArgs = ( outArg1 [, ... ] )
@@ -2313,6 +2363,7 @@ function _G.parseExpression(state, parentNode, prevOpPrecedence, expectLeftValue
 		isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"(")
 		and (
 			isToken(tokType2,tokValue2, !(TOKEN_PUNCTUATION),")")
+			or isToken(tokType2,tokValue2, !(TOKEN_PUNCTUATION),"$")
 			or isToken(tokType2,tokValue2, !(TOKEN_KEYWORD),"using")
 			or (
 				(
@@ -2977,6 +3028,8 @@ do
 
 			elseif node.nodeType == !(nodeTypes.AstArgument) then
 				local arg = node
+				if arg.autobake == !(AUTOBAKE_ENABLED)  then  write(" (autobake=may)")   end
+				if arg.autobake == !(AUTOBAKE_REQUIRED) then  write(" (autobake=must)")  end
 				!!(CHILD_PRINT_START)
 				if arg.declaration then  printNode(arg.declaration, indent+1, printed, printChildren)  end
 				!!(CHILD_PRINT_END)

@@ -9,6 +9,7 @@
 --=
 --==============================================================
 
+	areTreesEqual
 	checkBinaryOperation
 	createTypeNodeFromInfo
 	findDeclaration, findDeclarationInScope, findMemberDeclaration, findDynamicMemberDeclaration, isDeclarationVisibleToNode, printDeclarationChain
@@ -142,26 +143,22 @@ _G.XXX_TYPE_TAG_NAMESPACE = !(typeTags.TypeInfoNamespace)
 
 
 
--- typeInfo = newTypeInfo( TypeInfoCreator )
-do
-	local lastTypeId = 0
+-- typeInfo = newTypeInfo( compilationState, TypeInfoCreator )
+function _G.newTypeInfo(state, TypeInfoCreator)
+	!ifDEBUG `if not TypeInfoCreator then  errorInternal(2, "No TypeInfoCreator specified.")  end`
 
-	function _G.newTypeInfo(TypeInfoCreator)
-		!ifDEBUG `if not TypeInfoCreator then  errorInternal(2, "No TypeInfoCreator specified.")  end`
+	state.lastTypeId = state.lastTypeId+1
 
-		lastTypeId = lastTypeId+1
+	local typeInfo = TypeInfoCreator()
+	typeInfo.id    = state.lastTypeId
 
-		local typeInfo = TypeInfoCreator()
-		typeInfo.id    = lastTypeId
-
-		--[[
-		if lastTypeId == 22 then
-			errorInternal("DEBUG")
-		end
-		--]]
-
-		return typeInfo
+	--[[
+	if typeInfo.id == 22 then
+		errorInternal("DEBUG")
 	end
+	--]]
+
+	return typeInfo
 end
 
 do
@@ -186,7 +183,7 @@ do
 
 		if not typeInfo then
 			local TypeInfoCreator      = BUILTIN_TYPE_STRUCTS[typeName] or errorInternal(tostring(typeName))
-			typeInfo                   = newTypeInfo(TypeInfoCreator)
+			typeInfo                   = newTypeInfo(state, TypeInfoCreator)
 			builtinTypeInfos[typeName] = typeInfo
 
 			table.insert(state.allTypeInfos, typeInfo)
@@ -250,7 +247,7 @@ function _G.getTypeInfoForLambda(state, lambda)
 		end
 	end
 
-	local funcSig         = newTypeInfo(TypeInfoFunction)
+	local funcSig         = newTypeInfo(state, TypeInfoFunction)
 	funcSig.isPolymorphic = lambda.isPolymorphic
 
 	if lambda.argumentsIn then
@@ -278,7 +275,7 @@ do
 			end
 		end
 
-		local typeInfo = newTypeInfo(schematicForTypeInfo)
+		local typeInfo = newTypeInfo(state, schematicForTypeInfo)
 		copyToArray(typeInfos, typeInfo)
 		table.insert(state.allTypeInfos, typeInfo)
 
@@ -303,7 +300,7 @@ do
 			end
 		end
 
-		local typeInfo    = newTypeInfo(schematicForTypeInfo)
+		local typeInfo    = newTypeInfo(state, schematicForTypeInfo)
 		typeInfo.itemType = itemType
 		table.insert(state.allTypeInfos, typeInfo)
 
@@ -328,7 +325,7 @@ function _G.getTypeInfoForNamespace(state, scope)
 		end
 	end
 
-	local namespace = newTypeInfo(TypeInfoNamespace)
+	local namespace = newTypeInfo(state, TypeInfoNamespace)
 	namespace.scope = scope
 	table.insert(state.allTypeInfos, namespace)
 
@@ -431,7 +428,7 @@ end
 
 
 
--- declaration, fromUsing = findDeclaration( state, startNode, name [, declarationToIgnore ] )
+-- declaration, fromUsing = findDeclaration( compilationState, startNode, name [, declarationToIgnore ] )
 function _G.findDeclaration(state, startNode, name, declToIgnore)
 	local scope = isScope(startNode) and startNode or getClosestScope(startNode)
 
@@ -572,7 +569,7 @@ function _G.isDeclarationVisibleToNode(decl, node)
 	end
 end
 
--- printDeclarationChain( [ file=io.stdout, ] state, declaration, typeName )
+-- printDeclarationChain( [ file=io.stdout, ] compilationState, declaration, typeName )
 function _G.printDeclarationChain(file, state, decl, typeName)
 	if type(file) ~= "userdata" then  return printDeclarationChain(io.stdout, file, state, decl)  end
 
@@ -1215,10 +1212,16 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 			end
 
 		elseif typeInfo.tag == !(typeTags.TypeInfoEnum) then -- @Robustness: Actually detect whether we have a type enum and include it here above.
-			-- void  (For now we may or may not have a type enum and typeInfoForDecl.)
+			-- void  For now we may or may not have a type enum and typeInfoForDecl.
 
-		else
-			assert(not typeInfoForDecl)
+		elseif typeInfo.tag == !(typeTags.TypeInfoPlaceholder) then
+			-- void  Just ignore this for now. We get here when placeholders are combined with auto-baking (which produces constants).
+
+		elseif typeInfoForDecl then
+			errorInternal(
+				state, valueExpr, "type=%s, typeRepresented=%s",
+				getFriendlyTypeInfoName(typeInfo), getFriendlyTypeInfoName(typeInfoForDecl)
+			)
 		end
 
 		-- @Robustness: Here we set the name of structs and enums. Is this a good place to do that?
@@ -1784,8 +1787,60 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 
 	checkIfValuesMatchArgumentTypes(state, call, realArguments, realArgumentTypes, calleeTypeInfo.argumentTypesIn) -- Basically checks everything but placeholders.
 
+	-- Prepare for auto-bake stuff.
+	local autobaking               = false
+	local autobakeIndex            = 0
+	local nonAutobakeArguments     = realArguments
+	local nonAutobakeArgumentTypes = realArgumentTypes
+	local relevantPolymorphs       = lambda.polymorphs
+
+	for argIndex, arg in ipairs(lambda.argumentsIn.arguments) do
+		if arg.autobake == !(AUTOBAKE_REQUIRED) then
+			autobaking    = true
+			autobakeIndex = autobakeIndex+1
+
+			if autobakeIndex == 1 then
+				nonAutobakeArguments     = {unpack(nonAutobakeArguments)}
+				nonAutobakeArgumentTypes = {unpack(nonAutobakeArgumentTypes)}
+				relevantPolymorphs       = {unpack(relevantPolymorphs)}
+			end
+
+			if call.isMethod then
+				errorInternal(state, arg, "@Incomplete: Handle method calls when auto-baking.")
+			end
+
+			local valueExpr     = realArguments    [argIndex] or errorInternal(state, call)
+			local valueTypeInfo = realArgumentTypes[argIndex] or errorInternal(state, valueExpr)
+
+			if not isExpressionConstant(state, valueExpr) then
+				typeError(state, valueExpr, "Argument must be constant for baking.")
+			end
+
+			for i, morphDecl in ipairsr(relevantPolymorphs) do
+				local morphLambda    = morphDecl.value
+				local autobakedValue = morphLambda.bakeValues[autobakeIndex] or errorInternal()
+
+				if not areTreesEqual(state, valueExpr, autobakedValue) then
+					table.remove(relevantPolymorphs, i)
+				end
+			end
+
+		elseif arg.autobake == !(AUTOBAKE_ENABLED) then
+			errorInternal(state, arg, "@Incomplete: Optional auto-baking.")
+		end
+	end
+
+	if autobaking then
+		for argIndex, arg in ipairsr(lambda.argumentsIn.arguments) do
+			if arg.autobake == !(AUTOBAKE_REQUIRED) then
+				table.remove(nonAutobakeArguments,     argIndex)
+				table.remove(nonAutobakeArgumentTypes, argIndex)
+			end
+		end
+	end
+
 	-- Check for previous matching polymorph(s).
-	local matchingMorphs = getMatchingFunctions(state, call, realArguments, realArgumentTypes, lambda.polymorphs)
+	local matchingMorphs = getMatchingFunctions(state, call, nonAutobakeArguments, nonAutobakeArgumentTypes, relevantPolymorphs)
 
 	if matchingMorphs then
 		local morphDecl = getBestMatchOrTriggerError(
@@ -1793,16 +1848,34 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 			"Internal compiler error: There are several matching polymorphs."
 		)
 
+		if autobaking then
+			for argIndex, arg in ipairsr(lambda.argumentsIn.arguments) do
+				if arg.autobake == !(AUTOBAKE_REQUIRED) then
+					local valueExpr = call.arguments[argIndex]
+					unqueueChildrenRecursively(state, valueExpr)
+					unqueue(valueExpr)
+					table.remove(call.arguments, argIndex)
+				end
+			end
+
+			for argIndexNew, valueExpr in ipairs(call.arguments) do
+				valueExpr.container.key = argIndexNew
+			end
+		end
+
 		-- Update the callee to represent the correct polymorph.
 		ident.declaration  = morphDecl
 		ident.inferredType = nil
 
 		moveToPipe(state, ident, !(PIPE_INFER)) -- Re-infer callee.
 
-		-- !DEPEND_AND_RETURN(`call`, DEPEND_NODE_INFERRED, `ident`) -- This is an error as the same dependency already exists!
-		local dependency      = getExistingDependency(state, call, !(DEPEND_NODE_INFERRED), ident) or errorInternal()
-		call.queued.waitingOn = dependency
-		return
+		local dependency = getExistingDependency(state, call, !(DEPEND_NODE_INFERRED), ident)
+		if dependency then
+			call.queued.waitingOn = dependency
+			return
+		else
+			!DEPEND_AND_RETURN(`call`, DEPEND_NODE_INFERRED, `ident`)
+		end
 	end
 
 	-- Create declaration for the morphed lambda.
@@ -1851,62 +1924,109 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 	end)
 
 	-- Fill in baked values in morphed lambda.
-	local bakeIndex = 0
 	!ASSERT `lambda.argumentsIn`
+	local bakeIndex = 0
 
 	for argIndex, arg in ipairs(lambda.argumentsIn.arguments) do
-		local declTypeExpr = arg.declaration.type -- This is probably an AstType.
+		local declTypeExpr = arg.declaration.type -- This is probably an AstType, if anything.
 
-		astVisitAllNodes(declTypeExpr, function(node)
-			if node.nodeType ~= !(nodeTypes.AstBake) then  return  end
+		if declTypeExpr then
+			astVisitAllNodes(declTypeExpr, function(node)
+				if node.nodeType ~= !(nodeTypes.AstBake) then  return  end
 
-			local bake = node
-			bakeIndex  = bakeIndex+1
+				local bake = node
+				bakeIndex  = bakeIndex+1
 
-			-- @Incomplete: Handle optional arguments.
-			local valueExpr     = realArguments    [argIndex] or errorInternal(state, bake)
-			local valueTypeInfo = realArgumentTypes[argIndex] or errorInternal(state, valueExpr)
+				if arg.autobake ~= !(AUTOBAKE_DISABLED) then
+					typeError(state, bake, "Combinations of auto-baking and placeholder types are not supported yet.")
+				end
 
-			valueTypeInfo = adjustTypeToOne(state, valueExpr, valueTypeInfo)
+				-- @Incomplete: Handle optional arguments.
+				local valueExpr     = realArguments    [argIndex] or errorInternal(state, call)
+				local valueTypeInfo = realArgumentTypes[argIndex] or errorInternal(state, valueExpr)
 
-			for _, loc in ipairs(getPathToNode(state, declTypeExpr, bake)) do
-				if loc.node.nodeType == !(nodeTypes.AstType) then
-					if loc.node.kind == !(TYPE_KIND_ARRAY) then
-						if valueTypeInfo.tag ~= !(typeTags.TypeInfoArray) then
-							typeError(
-								state, valueExpr,
-								"Polymorphic call: Unexpected type. (Wanted an array, got %s)",
-								getFriendlyTypeInfoName(valueTypeInfo)
-							)
+				valueTypeInfo = adjustTypeToOne(state, valueExpr, valueTypeInfo)
+
+				for _, loc in ipairs(getPathToNode(state, declTypeExpr, bake)) do
+					if loc.node.nodeType == !(nodeTypes.AstType) then
+						if loc.node.kind == !(TYPE_KIND_ARRAY) then
+							if valueTypeInfo.tag ~= !(typeTags.TypeInfoArray) then
+								typeError(
+									state, valueExpr,
+									"Polymorphic call: Unexpected type. (Wanted an array, got %s)",
+									getFriendlyTypeInfoName(valueTypeInfo)
+								)
+							end
+							local arraySig = valueTypeInfo
+							valueTypeInfo  = arraySig.itemType or errorInternal(state, valueExpr)
+
+						else
+							errorUnhandledNodeType(state, loc.node)
 						end
-						local arraySig = valueTypeInfo
-						valueTypeInfo  = arraySig.itemType or errorInternal(state, valueExpr)
-
 					else
 						errorUnhandledNodeType(state, loc.node)
 					end
-				else
-					errorUnhandledNodeType(state, loc.node)
 				end
-			end
 
-			local declBaked = morphLambda.bakeDeclarations[bakeIndex] or errorInternal(state, bake)
-			local typeNode  = declBaked.value                         or errorInternal(state, bake)
+				local declBaked = morphLambda.bakeDeclarations[bakeIndex] or errorInternal(state, bake)
+				local typeNode  = declBaked.value                         or errorInternal(state, bake)
 
-			typeNode.inferredType    = getTypeInfoForBuiltinType(state, "type")
-			typeNode.representedType = valueTypeInfo or errorInternal(state, valueExpr)
+				typeNode.inferredType    = getTypeInfoForBuiltinType(state, "type")
+				typeNode.representedType = valueTypeInfo or errorInternal(state, valueExpr)
 
-			-- For debugging:
-			typeNode.typeName = ":generatedAutoInferredTypeNode:"
-			typeNode.kind     = !(TYPE_KIND_UNSET)
-		end)
+				-- For debugging:
+				typeNode.typeName = ":generatedAutoInferredTypeNode:"
+				typeNode.kind     = !(TYPE_KIND_UNSET)
+			end)
+		end
 	end
 	!ASSERT `bakeIndex == #lambda.bakeDeclarations`
+
+	if autobaking then
+		for argIndex, arg in ipairsr(morphLambda.argumentsIn.arguments) do
+			if arg.autobake == !(AUTOBAKE_REQUIRED) then
+				--
+				-- Here we convert auto-baked arguments to hidden declarations
+				-- in the lambda and update the calling site accordingly.
+				--
+				local declBaked  = arg.declaration
+				declBaked.parent = morphLambda
+				table.insert(morphLambda.statements,   declBaked)
+				table.insert(morphLambda.declarations, declBaked)
+				-- table.insert(morphLambda.bakeDeclarations, declBaked) -- Should we do this? It may be useless.
+
+				-- Reuse valueExpr instead of making a copy. Note that this is the
+				-- only thing in the morphed lambda that will already be inferred.
+				local valueExpr            = realArguments[argIndex]
+				declBaked.value            = valueExpr
+				valueExpr.parent           = declBaked
+				valueExpr.queued.container = declBaked
+				valueExpr.queued.key       = "value"
+				table.insert(morphLambda.bakeValues, 1, valueExpr)
+
+				table.remove(morphLambda.argumentsIn.arguments, argIndex)
+				table.remove(call.arguments,                    argIndex)
+
+			elseif arg.autobake == !(AUTOBAKE_ENABLED) then
+				errorInternal(state, arg, "@Incomplete: Optional auto-baking.")
+			end
+		end
+
+		if not morphLambda.argumentsIn.arguments[1] then
+			removeItem(morphLambda.statements, morphLambda.argumentsIn)
+			morphLambda.argumentsIn = nil
+		end
+
+		-- !ifDEBUG `astPrintTree(call)`
+		-- !ifDEBUG `astPrintTree(morphLambda)`
+	end
 
 	-- Update the source lambda, add queueds etc.
 	local i              = #lambda.statements+1
 	lambda.statements[i] = morphDecl
-	addToQueueRecursively(state, morphDecl, lambda.statements, i, !(PIPE_INFER))
+
+	addUnqueuedChildrenToQueueRecursively(state, morphDecl, !(PIPE_INFER))
+	addToQueue(state, morphDecl, lambda.statements, i, !(PIPE_INFER))
 
 	for _, declBaked in ipairs(morphLambda.bakeDeclarations) do
 		local valueExpr         = declBaked.value
@@ -1920,10 +2040,13 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 
 	moveToPipe(state, ident, !(PIPE_INFER)) -- Re-infer callee.
 
-	-- !DEPEND_AND_RETURN(`call`, DEPEND_NODE_INFERRED, `ident`) -- This is an error as the same dependency already exists!
-	local dependency      = getExistingDependency(state, call, !(DEPEND_NODE_INFERRED), ident) or errorInternal()
-	call.queued.waitingOn = dependency
-	return
+	local dependency = getExistingDependency(state, call, !(DEPEND_NODE_INFERRED), ident)
+	if dependency then
+		call.queued.waitingOn = dependency
+		return
+	else
+		!DEPEND_AND_RETURN(`call`, DEPEND_NODE_INFERRED, `ident`)
+	end
 end
 
 local function handleOverloadedCall(state, call, realArguments, realArgumentTypes)
@@ -3814,7 +3937,7 @@ end
 
 !NODE_INFERRER `function nodeInferrers.AstStruct(state, struct)`
 	if struct.isPolymorphic then
-		local structInfo         = newTypeInfo(TypeInfoStruct)
+		local structInfo         = newTypeInfo(state, TypeInfoStruct)
 		structInfo.astNode       = struct
 		structInfo.isPolymorphic = true
 		structInfo.hasMembers    = true -- Probably doesn't matter.
@@ -3831,7 +3954,7 @@ end
 	local structInfo = struct.representedType
 
 	if not structInfo then
-		structInfo         = newTypeInfo(TypeInfoStruct)
+		structInfo         = newTypeInfo(state, TypeInfoStruct)
 		structInfo.astNode = struct
 
 		-- Note: We don't populate structInfo.members just yet. (Is this gonna a problem?)
@@ -3892,7 +4015,7 @@ end
 		end
 	end
 
-	local enumInfo          = newTypeInfo(TypeInfoEnum)
+	local enumInfo          = newTypeInfo(state, TypeInfoEnum)
 	enumInfo.astNode        = enum
 	enumInfo.memberTypeInfo = enumMemberInfo or errorInternal()
 
@@ -5475,6 +5598,23 @@ function _G.isAnExpressionExpected(state, node)
 		return node == parent.condition
 	else
 		errorUnhandledNodeType(state, node.parent)
+	end
+end
+
+
+
+-- Note: The expressions must already be inferred!
+function _G.areTreesEqual(state, expr1, expr2)
+	if expr1 == expr2 then
+		return true
+	elseif expr1.nodeType ~= expr2.nodeType then
+		return false
+	elseif expr1.nodeType == !(nodeTypes.AstLiteral) then
+		return expr1.literalType == expr2.literalType and expr1.value == expr2.value
+	elseif expr1.nodeType == !(nodeTypes.AstType) then
+		return expr1.representedType.id == expr2.representedType.id
+	else
+		errorUnhandledNodeType(state, expr1)
 	end
 end
 
