@@ -1,0 +1,130 @@
+--[[============================================================
+--=
+--=  Entities
+--=
+--=-------------------------------------------------------------
+--=
+--=  Example program: Lövely Blaster
+--=  by Marcus 'ReFreezed' Thunström
+--=
+--============================================================]]
+
+!import "basic"
+!import "math"
+!import "love"
+
+
+
+global Entity :: struct {
+	entityType = none,
+	id:int,
+
+	x:float = LEVEL_WIDTH/2,
+	y:float,
+
+	health      = 100,
+	isDestroyed = false,
+}
+
+global Player :: struct {
+	using Entity,
+	weaponCooldown = 0.0,
+	wantsToShoot   = false,
+}
+
+local Enemy :: struct {
+	using Entity,
+	moveSpeed = 5.0,
+}
+global Carrier :: struct {
+	using Enemy,
+}
+
+global Bullet :: struct {
+	using Entity,
+	shotByPlayer = false,
+}
+
+
+
+local lastEntityId = 0
+
+global newEntity :: ($EntityType:type) -> EntityType {
+	!assert EntityType ~= Entity
+	-- !assert EntityType has Entity -- @Incomplete: Somehow make sure Entity is part of the type.
+
+	lastEntityId += 1
+
+	local ent:EntityType = {
+		entityType = EntityType,
+		id         = lastEntityId,
+	}
+
+	return ent
+}
+
+
+
+global updateEntity :: (level:Level, ent:Entity, dt:float) {
+	-- @Incomplete: Generate an enum with all entity types through metaprogramming so we can 'if !complete' here.
+	if ent.entityType == {
+	case Player:
+		local player = cast(Player) ent
+
+		local dx, dy: float
+		if loveIsScancodeDown("left")   dx -= 50*dt
+		if loveIsScancodeDown("right")  dx += 50*dt
+		if loveIsScancodeDown("up")     dy -= 40*dt
+		if loveIsScancodeDown("down")   dy += 40*dt
+
+		player.x = clamp(player.x+dx, MIN_DISTANCE_TO_CAMERA_EDGE, LEVEL_WIDTH - MIN_DISTANCE_TO_CAMERA_EDGE)
+		player.y = clamp(player.y+dy, -HUGE, -MIN_DISTANCE_TO_CAMERA_EDGE)
+
+		player.weaponCooldown = player.weaponCooldown-dt
+
+		if (player.wantsToShoot or loveIsScancodeDown("x")) and player.weaponCooldown <= 0 {
+			player.weaponCooldown = 1/15
+
+			local bullet        = newEntity(Bullet)
+			bullet.x            = player.x
+			bullet.y            = player.y
+			bullet.shotByPlayer = true
+			insert(level.entities, bullet)
+		}
+		player.wantsToShoot = false
+
+	case Bullet:
+		local bullet = cast(Bullet) ent
+
+		bullet.y += 80 * (if bullet.shotByPlayer 0-1 else 1) * dt
+		-- bullet.y += 80 * (if bullet.shotByPlayer -1 else 1) * dt -- @Compiler @Design: 'bullet.shotByPlayer -1' gets parsed as one expression. Uh oh!
+
+		-- @Incomplete: Collide with other entities.
+
+		-- if bullet.y < top_of_the_screen  destroy(bullet) -- @Incomplete
+	}
+}
+
+
+
+global drawEntity :: (level:Level, ent:Entity) {
+	if ent.entityType == {
+	case Player:
+		local player = cast(Player) ent
+		loveSetColor(1, 1, 1)
+		loveDrawRectangleFill(player.x-PLAYER_SIZE/2, player.y-PLAYER_SIZE/2, PLAYER_SIZE, PLAYER_SIZE)
+
+	case Bullet:
+		local bullet = cast(Bullet) ent
+		loveSetColor(1, 1, 0)
+		loveDrawCircleFill(bullet.x, bullet.y, .5, 24)
+	}
+}
+
+
+
+global destroy :: (ent:Entity) {
+	ent.isDestroyed = true
+}
+
+

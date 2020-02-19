@@ -1,0 +1,100 @@
+--[[============================================================
+--=
+--=  Example program: Lövely Blaster
+--=  by Marcus 'ReFreezed' Thunström
+--=
+--=  Requires LÖVE 11.3 to run!
+--=
+--============================================================]]
+
+global DEBUG :: true
+
+!import "basic"
+!import "math"
+!import "io"
+!import "love"
+
+!load "entities.gloa"
+
+!run {
+	!import "compiler"
+	compile("conf.gloa")
+}
+
+
+
+global LEVEL_WIDTH :: 100 -- In meters or something similar.
+global MIN_DISTANCE_TO_CAMERA_EDGE :: 3
+global PLAYER_SIZE :: 2
+
+global Level :: struct {
+	entities:[]Entity,
+	player:Player = !foreign lua "nil", -- @Hack
+}
+
+local currentLevel:Level = !foreign lua "nil" -- @Hack
+
+local startLevel :: (levelId:int) {
+	currentLevel = {}
+
+	local player        = newEntity(Player)
+	player.y            = -.1*LEVEL_WIDTH
+	currentLevel.player = player
+	insert(currentLevel.entities, player)
+}
+
+local onLoad :: (args:[]string, argsRaw:[]string) {
+	!if DEBUG {
+		disableBuffering(STDOUT)
+		disableBuffering(STDERR)
+	}
+	startLevel(1)
+}
+
+
+
+local onKeyPressed :: (key:LoveKey, scancode:LoveScancode, isRepeat:bool) {
+	if key == {
+		case "escape": loveQuit(0)
+	}
+	if scancode == {
+		case "x": currentLevel.player.wantsToShoot = true
+	}
+}
+
+
+
+local uiTime = 0.0
+
+local onUpdate :: (dt:float) {
+	uiTime = uiTime+dt
+
+	for currentLevel.entities  updateEntity(currentLevel, it, dt)
+}
+
+
+
+local onDraw :: () {
+	local ww, wh = loveGetWindowDimensions()
+	local player = currentLevel.player
+
+	loveClear(.8, .1, .2)
+
+	loveCoordinateSystemTranslate(0, wh)
+	loveCoordinateSystemScale(ww/LEVEL_WIDTH)
+
+	for currentLevel.entities  drawEntity(currentLevel, it)
+}
+
+
+
+local main :: () {
+	using LoveEvent
+	loveSetEventHandler(LOAD,        onLoad)
+	loveSetEventHandler(KEY_PRESSED, onKeyPressed)
+	loveSetEventHandler(UPDATE,      onUpdate)
+	loveSetEventHandler(DRAW,        onDraw)
+	loveRemoveEventHandler(ERROR_HANDLER) -- We want Glóa to handle all errors (for now, at least).
+}
+
+
