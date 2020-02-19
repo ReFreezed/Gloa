@@ -21,7 +21,7 @@
 	inferNode
 	isExpressionConstant
 	isPartOfAnyDeclaration
-	isTypeSimple, isTypeNumeric, isTypeTableLike, isTypeCompatibleWith, adjustTypeToOne
+	isTypeSimple, isTypeNumeric, isTypeTableLike, isTypeCompatibleWith, doesStructInherit, adjustTypeToOne
 	newTypeInfo, isTypeBuiltin, getTypeInfo*
 	simplifyExpressionIfConstant, simplifyTypeExpression
 	typeError, typeErrorAfter, typeError2, typeMessage
@@ -2625,7 +2625,7 @@ function _G.checkBinaryOperation(state, exprForError, exprMain,exprL,exprR, binO
 
 	-- Comparison.
 	elseif isAny(binOp, "<",">","<=",">=") then
-		if typeInfoL ~= typeInfoR then
+		if not (typeInfoL == typeInfoR or (isTypeNumeric(typeInfoL) and isTypeNumeric(typeInfoR))) then
 			!!(TYPE_MISMATCH)
 		elseif not isAny(typeInfoL.tag, !(typeTags.TypeInfoInt),!(typeTags.TypeInfoFloat),!(typeTags.TypeInfoString)) then
 			typeError(
@@ -4036,8 +4036,9 @@ end
 	end
 
 	if struct.inherits[1] then
-		for _, typeExpr in ipairs(struct.inherits) do
+		for i, typeExpr in ipairs(struct.inherits) do
 			while typeExpr.replacedBy do  typeExpr = typeExpr.replacedBy  end
+			struct.inherits[i] = typeExpr
 
 			local structInfoToInherit = requireTypeRepresentedByExpression(state, typeExpr)
 			if structInfoToInherit.tag ~= !(typeTags.TypeInfoStruct) then
@@ -5359,6 +5360,13 @@ function _G.isTypeCompatibleWith(typeToCheck, otherType)
 	!local SCORE = 0x1000
 	if typeToCheck.tag == !(typeTags.TypeInfoInt) and otherType.tag == !(typeTags.TypeInfoFloat) then  return true, !(SCORE)  end
 
+	-- Substructs are compatible with base structs.
+	!local SCORE = 0x1000
+	if typeToCheck.tag == !(typeTags.TypeInfoStruct) and otherType.tag == !(typeTags.TypeInfoStruct) then
+		if doesStructInherit(typeToCheck, otherType) then  return true, !(SCORE)  end
+		return false, 0
+	end
+
 	-- Structs and arrays are outputted as tables in Lua, so they are always compatible with tables in Glóa.
 	!local SCORE = 0x10
 	if
@@ -5394,6 +5402,18 @@ function _G.isTypeCompatibleWith(typeToCheck, otherType)
 	end
 
 	return false, 0
+end
+
+function _G.doesStructInherit(structInfoToCheck, otherStructInfo)
+	for _, typeExpr in ipairs(structInfoToCheck.astNode.inherits) do
+		local structInfoInherited = getTypeRepresentedByExpression(typeExpr)
+
+		if structInfoInherited == otherStructInfo or doesStructInherit(structInfoInherited, otherStructInfo) then
+			return true
+		end
+	end
+
+	return false
 end
 
 -- singleTypeInfo = adjustTypeToOne( state, expressionForError, typeInfo [, adjustVarargToIncludeNil=false ] )
