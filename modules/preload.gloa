@@ -1,0 +1,100 @@
+--[[============================================================
+--=
+--=  Glóa preload module
+--=
+--==============================================================
+
+	TypeInfo
+	TypeInfoArray
+	TypeInfoCompound
+	TypeInfoEnum
+	TypeInfoFunction
+	TypeInfoStruct
+	TypeInfoVararg
+
+	NULL
+
+--============================================================]]
+
+export TypeTag :: enum {
+	-- @Compiler @Robustness: Use this here:  ANY :: !foreign compiler "typeTagAny",
+	ANY         :: 1,
+	BOOL        :: 2,
+	INT         :: 3,
+	NONE        :: 4,
+	FLOAT       :: 5,
+	STRING      :: 6,
+	TABLE       :: 7,
+	TYPE        :: 8,
+	VOID        :: 9,
+	PLACEHOLDER :: 10,
+	ARRAY       :: 12,
+	VARARG      :: 13,
+	FUNCTION    :: 14,
+	STRUCT      :: 15,
+	ENUM        :: 16,
+	COMPOUND    :: 18,
+}
+
+export TypeInfo :: struct {
+	tag = TypeTag.VOID,
+}
+
+export TypeInfoArray :: struct {
+	using TypeInfo,
+	itemType:type = none,
+}
+export TypeInfoVararg :: struct {
+	using TypeInfo,
+	itemType:type = none,
+}
+
+local Argument :: struct {
+	argumentType:type = none,
+	required:bool,
+}
+export TypeInfoFunction :: struct {
+	using TypeInfo,
+	argumentsIn:[]Argument,
+	argumentsOut:[]Argument,
+}
+
+local StructMember :: struct {
+	name:string,
+	memberType:type = none,
+}
+export TypeInfoStruct :: struct {
+	using TypeInfo,
+	members:[]StructMember,
+}
+
+local EnumMember :: struct {
+	name:string,
+}
+export TypeInfoEnum :: struct {
+	using TypeInfo,
+	memberType:type = none,
+	members:[]EnumMember,
+}
+
+export TypeInfoCompound :: struct {
+	using TypeInfo,
+	types:[]type,
+}
+
+--
+-- NULL() returns a dummy value which only has the correct Glóa type, but the actual value in Lua may not be
+-- what one would expect for the type. This is useful in situations where the value doesn't matter.
+--
+-- @Compiler @Speed: Maybe NULL should actually be a language feature rather than a
+-- function. Calling a function when you don't care what the value is seem silly...
+--
+export NULL :: ($T:type) -> T {
+	-- @Compiler @Incomplete: Make type_info() a constant expression.
+	!if !run (type_info(T).tag == TypeTag.STRUCT or type_info(T).tag == TypeTag.TABLE or type_info(T).tag == TypeTag.ARRAY)  return !foreign lua "nil"
+	elseif T == int or T == float  return 0
+	elseif T == string             return ""
+	elseif T == bool               return false
+	elseif T == type or T == none  return none
+	else !assert false
+}

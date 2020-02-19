@@ -95,9 +95,10 @@ local !struct"Constant"{
 -- constant, isNew = bcAllocateConstantValueIfNew( state, simpleTypeInfo,    literalValue,    nodeForError )
 -- constant, isNew = bcAllocateConstantValueIfNew( state, enumTypeInfo,      memberName,      nodeForError ) -- Note: Enums are actually simple types but have special handling in some places.
 -- constant, isNew = bcAllocateConstantValueIfNew( state, functionSignature, lambdaWithBody,  nodeForError )
--- constant, isNew = bcAllocateConstantValueIfNew( state, foreignTypeDummy,  foreign,         nodeForError )
 -- constant, isNew = bcAllocateConstantValueIfNew( state, tableLikeTypeInfo, tableNode,       nodeForError )
 -- constant, isNew = bcAllocateConstantValueIfNew( state, typeTypeInfo,      representedType, nodeForError )
+-- constant, isNew = bcAllocateConstantValueIfNew( state, foreignTypeDummy,  foreign,         nodeForError )
+-- constant, isNew = bcAllocateConstantValueIfNew( state, typeInfoTypeInfo,  typeInfo,        nodeForError )
 function _G.bcAllocateConstantValueIfNew(state, typeInfo, v, nodeForError)
 	local tag      = typeInfo.tag
 	local isSimple = isTypeSimple(typeInfo)
@@ -132,6 +133,9 @@ function _G.bcAllocateConstantValueIfNew(state, typeInfo, v, nodeForError)
 
 		elseif tag == !(typeTags.TypeInfoForeignDummy) then
 			if const.value.sourceId == v.sourceId then  return const, false  end
+
+		elseif tag == !(typeTags.TypeInfoTypeInfoDummy) then
+			if const.value == v then  return const, false  end
 
 		else
 			errorInternal(state, nodeForError, "Incomplete: Unhandled constant value type '%s'.", (TYPE_TAG_NAMES[tag] or "?"))
@@ -472,6 +476,12 @@ function _G.bcEmit(state, node)
 		local typeInfo        = getTypeInfoForBuiltinType(state, "foreign")
 		foreign.valueConstant = bcAllocateConstantValueIfNew(state, typeInfo, foreign, foreign)
 		moveToPipe(state, foreign, !(PIPE_DONE))
+
+	elseif node.nodeType == !(nodeTypes.AstTypeInfo) then
+		local typeInfoNode         = node
+		local typeInfo             = getTypeInfoForBuiltinType(state, "typeInfo")
+		typeInfoNode.valueConstant = bcAllocateConstantValueIfNew(state, typeInfo, typeInfoNode.valueTypeInfo, typeInfoNode)
+		moveToPipe(state, typeInfoNode, !(PIPE_DONE))
 
 	else
 		errorUnhandledNodeType(state, node)

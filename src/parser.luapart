@@ -171,7 +171,7 @@ _G.!structAst"AstAccess:_AstExpression"{
 	{`object`,          nil, ast="node"}, -- AstExpression
 	{`member`,          nil, ast="node"}, -- AstExpression
 	-- Type phase:
-	{`representedType`, nil},             -- TypeInfo  (Not used anywhere. 2020-01-02)
+	{`representedType`, nil}, -- TypeInfo  (Not used anywhere. 2020-01-02)
 }
 _G.!struct"TableField"{
 	{`key`,            nil}, -- AstExpression
@@ -192,7 +192,15 @@ _G.!structAst"AstCall:_AstExpression"{
 _G.!structAst"AstTypeOf:_AstExpression"{
 	{`expression`, nil, ast="node"}, -- AstExpression
 	-- Type phase:
-	{`representedType`, nil},
+	{`representedType`, nil}, -- TypeInfo
+}
+_G.!structAst"AstTypeInfo:_AstExpression"{
+	{`expression`,    nil, ast="node"}, -- AstExpression
+	-- Type phase:
+	{`declaration`,   nil}, -- AstDeclaration for the TypeInfo* struct in preload.
+	{`valueTypeInfo`, nil}, -- TypeInfo
+	-- Bytecode phase:
+	{`valueConstant`, nil}, -- Constant
 }
 _G.!structAst"AstCast:_AstExpression"{
 	{`targetType`, nil, ast="node"}, -- AstType
@@ -2003,7 +2011,7 @@ function _G.parseFileScopeStatements(state, block, isTopLevel, singleStatement)
 		elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"import","load") then
 			-- @Incomplete: Warn about duplicate imports? Maybe not necessay as things will only ever be imported once anyway.
 			!SET_OR_RETURN_FALSE `local import = parseImportOrLoad(state, block)`
-			statement                    = import
+			statement                          = import
 
 			table.insert(block.statements, import)
 			if not import.isLoad then
@@ -2012,7 +2020,7 @@ function _G.parseFileScopeStatements(state, block, isTopLevel, singleStatement)
 
 		elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"using") then
 			!SET_OR_RETURN_FALSE `local using = parseUsing(state, block)`
-			statement                   = using
+			statement                         = using
 
 			table.insert(block.statements, using)
 			table.insert(block.usings,     using)
@@ -2037,6 +2045,9 @@ function _G.parseFileScopeStatements(state, block, isTopLevel, singleStatement)
 			eatNextToken(state)
 			break
 		else
+			!if DEBUG then
+				print(TOKEN_TITLES[state.tokens.type[state.nextToken]])
+			!end
 			if isTopLevel or singleStatement then
 				!ERROR_OR_RETURN_FALSE `errorParsingNext(state, "Expected file-level declaration.")`
 			else
@@ -2630,6 +2641,23 @@ function _G.parseExpression(state, parentNode, prevOpPrecedence, expectLeftValue
 	elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"run") then
 		putBackLastToken(state)
 		!SET_OR_RETURN_FALSE `expr = parseRun(state, parentNode, true)` -- @Incomplete: Allow a block here.
+
+	-- Type information.
+	elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"type_info") then
+		tokType, tokValue = eatNextToken(state)
+		if not isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"(") then
+			!ERROR_OR_RETURN `errorParsingAfterPrevious(state, "Expected '('.")`
+		end
+
+		local typeInfoNode                      = astNewNode(AstTypeInfo, exprStartToken, parentNode)
+		!SET_OR_RETURN `typeInfoNode.expression = parseExpression(state, typeInfoNode)`
+
+		tokType, tokValue = eatNextToken(state)
+		if not isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),")") then
+			!ERROR_OR_RETURN `errorParsingAfterPrevious(state, "Expected ')'.")`
+		end
+
+		expr = typeInfoNode
 
 	elseif isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"_") then
 		!ERROR_OR_RETURN `errorParsingLast(state, "Invalid place for a blank name.")`
@@ -3249,6 +3277,7 @@ do
 
 			elseif node.nodeType == !(nodeTypes.AstForeign) then
 				local foreign = node
+				if foreign.inferredType then  write(" (", getFriendlyTypeInfoName(foreign.inferredType), ")")  end
 				write(" (", foreign.source, " ", foreign.sourceName, ")")
 				write("\n")
 

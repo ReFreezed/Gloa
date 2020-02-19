@@ -33,7 +33,6 @@
 
 !(
 _G.typeTags        = {}
-local lastTypeTag  = 0
 local typeTagNames = {}
 
 local function structTypeInfo(nameAndParent)
@@ -41,13 +40,9 @@ local function structTypeInfo(nameAndParent)
 		local name = nameAndParent:match"^[%w_]+"
 
 		if not name:find"^_" then
-			lastTypeTag               = lastTypeTag+1
-
-			fields._overrides         = fields._overrides or {}
-			table.insert(fields._overrides, {`tag`, lastTypeTag})
-
-			typeTags[name]            = lastTypeTag
-			typeTagNames[lastTypeTag] = name:gsub("^TypeInfo", ""):lower()
+			local tag         = itemWith1(fields._overrides, 1, "tag")[2] or error()
+			typeTags[name]    = tag
+			typeTagNames[tag] = name:gsub("^TypeInfo", ""):lower()
 		end
 
 		struct(nameAndParent)(fields)
@@ -60,18 +55,19 @@ end
 	{`id`,  0},
 }
 
-local !structTypeInfo"TypeInfoAny:_TypeInfo"{}
-local !structTypeInfo"TypeInfoBool:_TypeInfo"{}
-local !structTypeInfo"TypeInfoInt:_TypeInfo"{}
-local !structTypeInfo"TypeInfoNone:_TypeInfo"{}
-local !structTypeInfo"TypeInfoFloat:_TypeInfo"{}
-local !structTypeInfo"TypeInfoString:_TypeInfo"{}
-local !structTypeInfo"TypeInfoTable:_TypeInfo"{}
-local !structTypeInfo"TypeInfoType:_TypeInfo"{}
+local !structTypeInfo"TypeInfoAny:_TypeInfo"   {_overrides={{`tag`,1}}}
+local !structTypeInfo"TypeInfoBool:_TypeInfo"  {_overrides={{`tag`,2}}}
+local !structTypeInfo"TypeInfoInt:_TypeInfo"   {_overrides={{`tag`,3}}}
+local !structTypeInfo"TypeInfoNone:_TypeInfo"  {_overrides={{`tag`,4}}}
+local !structTypeInfo"TypeInfoFloat:_TypeInfo" {_overrides={{`tag`,5}}}
+local !structTypeInfo"TypeInfoString:_TypeInfo"{_overrides={{`tag`,6}}}
+local !structTypeInfo"TypeInfoTable:_TypeInfo" {_overrides={{`tag`,7}}}
+local !structTypeInfo"TypeInfoType:_TypeInfo"  {_overrides={{`tag`,8}}}
 
-local !structTypeInfo"TypeInfoVoid:_TypeInfo"{}
-local !structTypeInfo"TypeInfoPlaceholder:_TypeInfo"{}
-local !structTypeInfo"TypeInfoForeignDummy:_TypeInfo"{}
+local !structTypeInfo"TypeInfoVoid:_TypeInfo"         {_overrides={{`tag`,9}}}
+local !structTypeInfo"TypeInfoPlaceholder:_TypeInfo"  {_overrides={{`tag`,10}}}
+local !structTypeInfo"TypeInfoForeignDummy:_TypeInfo" {_overrides={{`tag`,11}}}
+local !structTypeInfo"TypeInfoTypeInfoDummy:_TypeInfo"{_overrides={{`tag`,-1}}}
 
 _G.!(local )!!SIMPLE_TYPE_TAG = {
 	-- These small type infos don't have any extra information.
@@ -86,14 +82,17 @@ _G.!(local )!!SIMPLE_TYPE_TAG = {
 }
 
 local !structTypeInfo"TypeInfoArray:_TypeInfo"{
+	_overrides={{`tag`,12}},
 	{`itemType`, nil}, -- TypeInfo
 }
 
 local !structTypeInfo"TypeInfoVararg:_TypeInfo"{
+	_overrides={{`tag`,13}},
 	{`itemType`, nil}, -- TypeInfo
 }
 
 local !structTypeInfo"TypeInfoFunction:_TypeInfo"{ -- AKA function signature.
+	_overrides={{`tag`,14}},
 	{`argumentTypesIn`,      {}}, -- []TypeInfo  @Cleanup: Use TypeInfoList here?
 	{`argumentTypesOut`,     {}}, -- []TypeInfo  @Cleanup: Use TypeInfoList here?
 	{`requiredArgumentsIn`,  {}}, -- []bool
@@ -106,6 +105,8 @@ local !struct"TypeInfoStructMember"{
 	{`typeInfo`, nil},
 }
 local !structTypeInfo"TypeInfoStruct:_TypeInfo"{
+	_overrides={{`tag`,15}},
+
 	{`astNode`,       nil}, -- AstStruct
 	{`name`,          ""},  -- Filled in during definition.
 
@@ -119,6 +120,7 @@ local !struct"TypeInfoEnumMember"{
 	{`name`, ""},
 }
 local !structTypeInfo"TypeInfoEnum:_TypeInfo"{
+	_overrides={{`tag`,16}},
 	{`astNode`,        nil}, -- AstEnum
 	{`name`,           ""},
 	{`memberTypeInfo`, nil}, -- Must be one of these primitive types: int, string, type, bool or float.
@@ -126,14 +128,17 @@ local !structTypeInfo"TypeInfoEnum:_TypeInfo"{
 }
 
 local !structTypeInfo"TypeInfoNamespace:_TypeInfo"{
+	_overrides={{`tag`,17}},
 	{`scope`, nil}, -- AstScope
 }
 
 local !structTypeInfo"TypeInfoCompound:_TypeInfo"{
+	_overrides={{`tag`,18}},
 	-- [1]=typeInfo1, ...
 }
 
 local !structTypeInfo"TypeInfoList:_TypeInfo"{ -- Special type used for returns from calls (both when sending and receiving).
+	_overrides={{`tag`,19}},
 	-- [1]=typeInfo1, ...
 }
 
@@ -172,10 +177,13 @@ do
 		["float"]       = TypeInfoFloat,
 		["string"]      = TypeInfoString,
 		["table"]       = TypeInfoTable,
-		["type"]        = TypeInfoType,         -- The result of e.g. type_of(int) or type_of(type_of(expression)).
-		["void"]        = TypeInfoVoid,         -- Used when no useful type is expected or available.
-		["placeholder"] = TypeInfoPlaceholder,  -- Used in polymorphic functions.
-		["foreign"]     = TypeInfoForeignDummy, -- Dummy type used for foreign constants in bytecode pipe and forward.
+		["type"]        = TypeInfoType,        -- The result of e.g. type_of(int) or type_of(type_of(expression)).
+		["void"]        = TypeInfoVoid,        -- Used when no useful type is expected or available.
+		["placeholder"] = TypeInfoPlaceholder, -- Used in polymorphic functions.
+
+		-- Dummy types used for constants in bytecode pipe and forward:
+		["foreign"]     = TypeInfoForeignDummy,  -- @Cleanup
+		["typeInfo"]    = TypeInfoTypeInfoDummy, -- @Cleanup
 	}
 
 	function _G.getTypeInfoForBuiltinType(state, typeName)
@@ -2584,6 +2592,8 @@ local function isValidEqualityCheck(state, binary, typeInfoL, typeInfoR)
 	if typeInfoL.tag == !(typeTags.TypeInfoAny) then  return true  end
 	if typeInfoR.tag == !(typeTags.TypeInfoAny) then  return true  end
 
+	if isTypeNumeric(typeInfoL) and isTypeNumeric(typeInfoR) then  return true  end
+
 	if isArrayItemOrTableFieldCheck(state, binary, typeInfoL, typeInfoR) then  return true  end
 	if isCompoundCompare           (state, binary, typeInfoL, typeInfoR) then  return true  end
 
@@ -3260,6 +3270,68 @@ end
 	simplifyTypeExpression(state, typeOf, typeOf.representedType)
 end
 
+!NODE_INFERRER `function nodeInferrers.AstTypeInfo(state, typeInfoNode)`
+	-- @Robustness: Check that the expression doesn't have code that looks like it's going to be executed, because it's not!
+
+	if not typeInfoNode.expression.inferredType then
+		!DEPEND_AND_RETURN(`typeInfoNode`, DEPEND_NODE_INFERRED, `typeInfoNode.expression`)
+	end
+
+	local typeRepresented = requireTypeRepresentedByExpression(state, typeInfoNode.expression)
+	local tag             = typeRepresented.tag
+	local typeInfoStructName
+
+	if tag == !(typeTags.TypeInfoArray) then
+		typeInfoStructName = "TypeInfoArray"
+	elseif tag == !(typeTags.TypeInfoCompound) then
+		typeInfoStructName = "TypeInfoCompound"
+	elseif tag == !(typeTags.TypeInfoEnum) then
+		typeInfoStructName = "TypeInfoEnum"
+	elseif tag == !(typeTags.TypeInfoFunction) then
+		typeInfoStructName = "TypeInfoFunction"
+	elseif tag == !(typeTags.TypeInfoStruct) then
+		typeInfoStructName = "TypeInfoStruct"
+	elseif tag == !(typeTags.TypeInfoVararg) then
+		typeInfoStructName = "TypeInfoVararg"
+
+	elseif isAny(tag,
+		!(typeTags.TypeInfoAny),
+		!(typeTags.TypeInfoBool),
+		!(typeTags.TypeInfoFloat),
+		!(typeTags.TypeInfoInt),
+		!(typeTags.TypeInfoNone),
+		!(typeTags.TypeInfoPlaceholder),
+		!(typeTags.TypeInfoString),
+		!(typeTags.TypeInfoTable),
+		!(typeTags.TypeInfoType),
+		!(typeTags.TypeInfoVoid)
+	) then
+		typeInfoStructName = "TypeInfo"
+
+	else
+		errorUnhandledType(state, typeInfoNode, typeRepresented)
+	end
+
+	!ASSERT `typeInfoStructName`
+
+	local module = itemWith1(state.globalScope.fileScopes, "moduleName", "preload") or errorInternal()
+	local decl   = findDeclarationInScope(state, module, typeInfoStructName, true)  or errorInternal()
+
+	if not decl.name.inferredType then
+		!DEPEND_AND_RETURN(`typeInfoNode`, DEPEND_NODE_INFERRED, `decl`)
+	end
+
+	assert(decl.valueTypeInfo)
+	assert(decl.valueTypeInfo.tag == !(typeTags.TypeInfoStruct))
+
+	typeInfoNode.declaration   = decl
+	typeInfoNode.valueTypeInfo = typeRepresented
+	typeInfoNode.inferredType  = decl.valueTypeInfo
+
+	moveToNextRelevantPipe(state, typeInfoNode)
+	-- @Incomplete: Allow type_info to exist in constant context and simplify it here.
+end
+
 !NODE_INFERRER `function nodeInferrers.AstCast(state, cast)`
 	-- Note: For convenience, cast.targetType may be nil here for generated casts. cast.inferredType must be set in those cases.
 
@@ -3291,6 +3363,9 @@ end
 		-- void  (Valid cast.)
 
 	elseif isTypeNumeric(castTypeInfo) and isTypeNumeric(exprTypeInfo) then
+		-- void  (Valid cast.)
+
+	elseif exprTypeInfo.tag == !(typeTags.TypeInfoStruct) and castTypeInfo.tag == !(typeTags.TypeInfoStruct) and doesStructInherit(castTypeInfo, exprTypeInfo) then
 		-- void  (Valid cast.)
 
 	elseif castTypeInfo.tag == !(typeTags.TypeInfoBool) and isAny(
@@ -3388,6 +3463,9 @@ end
 	local globalScope = state.globalScope
 
 	if not state.fileBuffers[path] then
+		insertToken(state.tokens, !(TOKEN_DIRECTIVE), "import",  path)
+		insertToken(state.tokens, !(TOKEN_STRING),    "preload", path)
+
 		-- @Incomplete: Include times in compilation stats.
 		local timeStartLexing, timeEndLexing = readAndTokenizeFile(state, path)
 		!ASSERT `state.fileBuffers[path], path`
@@ -4060,26 +4138,28 @@ end
 			end
 
 			for _, declToCopy in ipairs(structInfoToInherit.astNode.declarations) do
-				local decl = findMemberDeclaration(state, struct, declToCopy.name.name)
-				if decl then
-					typeError2(state,
-						typeExpr, F("Trying to inherit a member called '%s' but the struct already has a member with that name.", decl.name.name),
-						decl,     F("Previous member was added here.") -- This may be an inherited member too.
-					)
+				if not declToCopy.isConstant then
+					local decl = findMemberDeclaration(state, struct, declToCopy.name.name)
+					if decl then
+						typeError2(state,
+							typeExpr, F("Trying to inherit a member called '%s' but the struct already has a member with that name.", decl.name.name),
+							decl,     F("Previous member was added here.") -- This may be an inherited member too.
+						)
+					end
+
+					-- @Check @Robustness: What happens with functions (and maybe more things)? Is too much copied? Need to test! Maybe we shouldn't skip PIPE_INFER here below.
+					decl = astCopy(declToCopy, typeExpr.token, struct)
+
+					table.insert(struct.statements,   insertIndexStatement, decl)
+					table.insert(struct.declarations, insertIndexDecl,      decl)
+					insertIndexStatement = insertIndexStatement+1
+					insertIndexDecl      = insertIndexDecl+1
+
+					addToQueueRecursively(state, decl, struct.statements, 0, !(PIPE_INFER)) -- Note: We'll update all keys in a moment.
+
+					moveChildrenToNextRelevantPipe(state, decl)
+					moveToNextRelevantPipe(state, decl)
 				end
-
-				-- @Check @Robustness: What happens with static functions (and maybe more things)? Is too much copied? Need to test! Maybe we shouldn't skip PIPE_INFER here below.
-				decl = astCopy(declToCopy, typeExpr.token, struct)
-
-				table.insert(struct.statements,   insertIndexStatement, decl)
-				table.insert(struct.declarations, insertIndexDecl,      decl)
-				insertIndexStatement = insertIndexStatement+1
-				insertIndexDecl      = insertIndexDecl+1
-
-				addToQueueRecursively(state, decl, struct.statements, 0, !(PIPE_INFER)) -- Note: We'll update all keys in a moment.
-
-				moveChildrenToNextRelevantPipe(state, decl)
-				moveToNextRelevantPipe(state, decl)
 			end
 		end
 
@@ -4139,7 +4219,12 @@ end
 	for i, decl in ipairs(enum.declarations) do
 		local valueExpr = decl.value
 
-		if not isTypeCompatibleWith(valueExpr.inferredType, enumMemberInfo) then
+		if valueExpr.nodeType == !(nodeTypes.AstForeign) then
+			-- @UX @Bug: This should be possible but something swaps the enum type with the member type somewhere.
+			typeError(state, valueExpr, "Enum values cannot be foreign.")
+		elseif not isExpressionConstant(state, valueExpr) then
+			typeError(state, valueExpr, "Enum value is not constant.")
+		elseif not isTypeCompatibleWith(valueExpr.inferredType, enumMemberInfo) then
 			typeError(state, valueExpr,
 				"Value type mismatch for '%s'. (Wanted %s, got %s)",
 				decl.name.name,
@@ -4193,7 +4278,7 @@ end
 	moveToNextRelevantPipe(state, block)
 end
 
-local function prepareForRunning(state, runNode, unit, visited)
+local function visitNodesForRunning(state, runNode, unit, visited)
 	astVisitAllNodes(unit, function(node)
 		visited[node] = true
 
@@ -4204,17 +4289,16 @@ local function prepareForRunning(state, runNode, unit, visited)
 			!DEPEND_AND_RETURN(`runNode`, DEPEND_NODE_EMITTED, `node`, nil, toLua(VISIT_BREAK))
 
 		elseif node.nodeType == !(nodeTypes.AstIdentifier) then
-			local ident = node
-			local decl  = ident.declaration or errorInternal()
+			local decl = node.declaration or errorInternal()
 
 			if not visited[decl] then
-				prepareForRunning(state, runNode, decl, visited)
+				visitNodesForRunning(state, runNode, decl, visited)
 				if runNode.queued.waitingOn then  return !(VISIT_BREAK)  end
 
 				local valueExpr = getDeclarationValue(decl)
 
 				if valueExpr then
-					prepareForRunning(state, runNode, valueExpr, visited)
+					visitNodesForRunning(state, runNode, valueExpr, visited)
 					if runNode.queued.waitingOn then  return !(VISIT_BREAK)  end
 				end
 			end
@@ -4435,7 +4519,7 @@ end
 
 	local visited = {}
 
-	prepareForRunning(state, runNode, lambda, visited)
+	visitNodesForRunning(state, runNode, lambda, visited)
 	if runNode.queued.waitingOn then  return  end
 
 	for _, const in ipairs(state.constants) do
@@ -4594,6 +4678,9 @@ function _G.isExpressionConstant(state, expr)
 		-- Technically foreign values are seen as constant at runtime, but since we don't know
 		-- what they are at compile-time we (usually) treat them as runtime values.
 		return false
+
+	elseif expr.nodeType == !(nodeTypes.AstTypeInfo) then
+		return false -- @Incomplete: Make type_info() a constant expression.
 
 	else
 		errorUnhandledNodeType(state, expr)
@@ -5506,10 +5593,25 @@ function _G.getExpectedTypeInfo(state, node, strict, expectantTerm, nodeForError
 
 		if decl.name.inferredType then
 			return decl.name.inferredType
+
+		elseif decl.parent.nodeType == !(nodeTypes.AstEnum) then
+			local enum     = decl.parent
+			local enumInfo = enum.representedType
+			if enumInfo then
+				return enumInfo
+			elseif enum.memberType or decl ~= enum.declarations[1] then
+				-- @Incomplete: This doesn't work right now as enums wait for their members. Enums need to be more like structs!
+				!DEPEND_AND_RETURN(`node`, DEPEND_NODE_INFERRED, `enum`, nil, `nil`)
+			else
+				!!(NO_EXPECTATION)
+			end
+
 		elseif not decl.type then
 			!!(NO_EXPECTATION)
+
 		elseif not decl.type.inferredType then
 			!DEPEND_AND_RETURN(`node`, DEPEND_NODE_INFERRED, `decl.type`, nil, `nil`)
+
 		else
 			return getTypeRepresentedByExpression(decl.type) or errorInternal()
 		end
