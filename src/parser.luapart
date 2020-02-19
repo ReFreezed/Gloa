@@ -14,7 +14,7 @@
 	astGetDepth
 	astGetExpressionVisuallyFurthestToThe*, astGetCalleeVisuallyFurthestToTheLeft
 	astIsOrIsInModule
-	astMoveGlobalDeclarationsToGlobalScope
+	astMoveRelevantThingsFromFileScopeToGlobalScope
 	astNewNode
 	astPrint, astPrintTree
 	astVisitAllNodes, astVisitAllNodesLeavesFirst
@@ -2077,11 +2077,11 @@ function _G.parseFileScope(state, parentNode, path, isModule, moduleName)
 	return fileScope
 end
 
-function _G.astMoveGlobalDeclarationsToGlobalScope(state, fileScope)
+function _G.astMoveRelevantThingsFromFileScopeToGlobalScope(state, fileScope)
+	!ASSERT `not fileScope.isModule`
 	!ASSERT `not fileScope.queued`
 
 	local globalScope = state.globalScope
-	table.insert(globalScope.fileScopes, fileScope)
 
 	for i, decl in ipairsr(fileScope.declarations) do
 		if decl.isGlobalOrExported then
@@ -2089,6 +2089,9 @@ function _G.astMoveGlobalDeclarationsToGlobalScope(state, fileScope)
 			table.insert(globalScope.declarations, decl)
 		end
 	end
+
+	insertArrayItems(globalScope.imports, fileScope.imports)
+	fileScope.imports = {}
 end
 
 function _G.parseGlobalScope(state, firstFilePath)
@@ -2099,7 +2102,9 @@ function _G.parseGlobalScope(state, firstFilePath)
 	globalScope.firstFileScope = firstFileScope
 
 	table.insert(globalScope.statements, firstFileScope)
-	astMoveGlobalDeclarationsToGlobalScope(state, firstFileScope)
+	table.insert(globalScope.fileScopes, firstFileScope)
+
+	astMoveRelevantThingsFromFileScopeToGlobalScope(state, firstFileScope)
 
 	return globalScope
 end
