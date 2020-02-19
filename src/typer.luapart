@@ -3702,6 +3702,70 @@ end
 	-- @Optimize: Remove/replace the branch if the condition is statically known.
 end
 
+!NODE_INFERRER `function nodeInferrers.AstSwitch(state, switch)`
+	local typeInfo = switch.value.inferredType
+	if not typeInfo then
+		!DEPEND_AND_RETURN(`switch`, DEPEND_NODE_INFERRED, `switch.value`)
+	end
+	for i, case in ipairs(switch.cases) do
+		if case.body.queued.pipe <= !(PIPE_INFER) then
+			!DEPEND_AND_RETURN(`switch`, DEPEND_NODE_INFERRED, `case.body`)
+		elseif case.value and not case.value.inferredType then
+			!DEPEND_AND_RETURN(`switch`, DEPEND_NODE_INFERRED, `case.value`)
+		end
+	end
+
+	for i, case in ipairs(switch.cases) do
+		if not case.value then
+			-- void
+		elseif not isExpressionConstant(state, case.value) then
+			typeError(state, astGetExpressionVisuallyFurthestToTheLeft(case.value), "Case expression must be constant.")
+		elseif not isTypeCompatibleWith(case.value.inferredType, typeInfo) then
+			typeError(
+				state, case.value,
+				"Case type mismatch. (Wanted %s, got %s)",
+				getFriendlyTypeInfoName(typeInfo), getFriendlyTypeInfoName(case.value.inferredType)
+			)
+		end
+	end
+
+	if switch.complete then
+		local enumInfo = typeInfo
+
+		if enumInfo.tag ~= !(typeTags.TypeInfoEnum) then
+			typeError(
+				state, switch.value,
+				"!complete requires the value to be an enum. (Got %s)",
+				getFriendlyTypeInfoName(enumInfo)
+			)
+		end
+
+		local coveredEnums = {}
+
+		for _, case in ipairs(switch.cases) do
+			if case.value then
+				!ASSERT("case.value.nodeType == "..nodeTypes.AstIdentifier)
+				coveredEnums[case.value.name] = true
+			end
+		end
+
+		local missingEnums = {}
+
+		for _, member in ipairs(enumInfo.members) do
+			if not coveredEnums[member.name] then
+				table.insert(missingEnums, member.name)
+			end
+		end
+
+		if missingEnums[1] then
+			typeError(state, switch, "Missing cases: %s", table.concat(missingEnums, ", "))
+		end
+	end
+
+	moveToNextRelevantPipe(state, switch)
+	-- @Incomplete: Simplify AstSwitch.
+end
+
 local function addDeclarationInForLoop(state, forLoop, name, typeInfo)
 	-- @Incomplete: Care about name shadowing.
 

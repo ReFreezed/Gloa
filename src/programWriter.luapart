@@ -371,6 +371,7 @@ local function doesTypeContainBoolOrNone(typeInfo)
 end
 
 function _G.writeExpression(state, writer, expr)
+	!ASSERT `expr.inferredType`
 	local file = writer.file
 
 	if expr.nodeType == !(nodeTypes.AstCall) then
@@ -703,8 +704,6 @@ function _G.writeDefaultValueForType(state, writer, typeInfo, nodeForError)
 		file:write("0.0")
 	elseif tag == !(typeTags.TypeInfoString) then
 		file:write('""')
-	elseif tag == !(typeTags.TypeInfoType) then
-		file:write("0") -- @Robustness: Maybe 'type' variables should have no defult value and this should be an error. :DefaultValueForTypes
 	elseif tag == !(typeTags.TypeInfoArray) or tag == !(typeTags.TypeInfoTable) then
 		file:write("{}")
 
@@ -1172,6 +1171,36 @@ function _G.writeBlock(state, writer, block, indent, nextLocalN, localsStack, is
 		elseif nodeType == !(nodeTypes.AstDefer) then
 			local defer = statement
 			table.insert(writer.deferStack, defer)
+
+		elseif nodeType == !(nodeTypes.AstSwitch) then
+			local switch = statement
+
+			file:write(indentStr, "local _SWITCH = ")
+			writeExpression(state, writer, switch.value)
+			writeEol(state, writer)
+
+			if switch.cases[1] then
+				for i, case in ipairs(switch.cases) do
+					if case.value then
+						file:write(indentStr)
+						if i > 1 then  file:write("else")  end
+						file:write("if _SWITCH == ")
+						writeExpression(state, writer, case.value)
+						file:write(" then")
+					else
+						if i == 1 then
+							file:write(indentStr, "do")
+						else
+							file:write(indentStr, "else")
+						end
+					end
+
+					writeEol(state, writer)
+					writeBlock(state, writer, case.body, indent+1, nextLocalN, localsStack)
+				end
+
+				file:write(indentStr, "end") ; writeEol(state, writer)
+			end
 
 		elseif isAny(nodeType, !(nodeTypes.AstImport),!(nodeTypes.AstUsing),!(nodeTypes.AstDebug),!(nodeTypes.AstRun)) then
 			-- void  (Ignore these statements.)
@@ -1957,7 +1986,6 @@ function _G.doesTypeHaveAnyDefaultValue(typeInfo)
 		!(typeTags.TypeInfoNone),
 		!(typeTags.TypeInfoFloat),
 		!(typeTags.TypeInfoString),
-		!(typeTags.TypeInfoType), -- Not sure about this one. Should zero represent no type or must a value always be specified? @Robustness :DefaultValueForTypes
 		!(typeTags.TypeInfoArray),
 		!(typeTags.TypeInfoTable),
 		!(typeTags.TypeInfoStruct),

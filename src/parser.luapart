@@ -174,8 +174,8 @@ _G.!structAst"AstAccess:_AstExpression"{
 	{`representedType`, nil},             -- TypeInfo  (Not used anywhere. 2020-01-02)
 }
 _G.!struct"TableField"{
-	{`key`,            nil},
-	{`value`,          nil},
+	{`key`,            nil}, -- AstExpression
+	{`value`,          nil}, -- AstExpression
 	{`keyIsGenerated`, false},
 }
 _G.!structAst"AstTable:_AstExpression"{
@@ -367,7 +367,7 @@ _G.!structAst"AstLambda:_AstScopeExpression"{
 	{`argumentsOut`,      nil, astRef="node"}, -- AstArguments
 	{`takingVararg`,      false},
 
-	{`body`,              nil, astRef="node"},   -- AstBlock  (If this is nil then the lambda is a function signature. If bodyIsForeign is set then this is a dummy block.)
+	{`body`,              nil, astRef="node"}, -- AstBlock  (If this is nil then the lambda is a function signature. If bodyIsForeign is set then this is a dummy block.)
 	{`bodyIsForeign`,     false}, -- @Cleanup: Use AstForeign instead of all this stuff.
 	{`foreignSource`,     ""},
 	{`foreignSourceName`, ""},
@@ -397,6 +397,15 @@ _G.!structAst"AstWhile:_AstNode"{
 	{`condition`,      nil, ast="node"}, -- AstExpression
 	{`body`,           nil, ast="node"}, -- AstBlock
 	{`hasNamedBreaks`, false},
+}
+_G.!struct"SwitchCase"{
+	{`value`, nil}, -- AstExpression
+	{`body`,  nil}, -- AstBlock
+}
+_G.!structAst"AstSwitch:_AstNode"{
+	{`value`,    nil, ast="node"},  -- AstExpression
+	{`cases`,    {},  ast="cases"}, -- []SwitchCase
+	{`complete`, false},
 }
 
 _G.AST_NODE_TYPE_NAMES = !(nodeTypeNames)
@@ -1435,6 +1444,58 @@ local function getBreakableNameFromSimpleExpression(expr)
 	return ""
 end
 
+function _G.parseSwitch(state, parentNode, statementStartToken, valueExpr, complete)
+	-- Note: We assume '... == {' has been eaten already.
+	local switch     = astNewNode(AstSwitch, statementStartToken, parentNode)
+	switch.complete  = complete
+	switch.value     = valueExpr
+	valueExpr.parent = switch
+
+	local gotDefault = false
+	local lastCaseToken
+
+	while true do
+		local tokType, tokValue = eatNextToken(state)
+		if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"}") then
+			break
+		elseif not isToken(tokType,tokValue, !(TOKEN_KEYWORD),"case") then
+			!ERROR_OR_RETURN `errorParsingLast(state, "Expected 'case'.")`
+		elseif gotDefault then
+			!ERROR_OR_RETURN `errorParsing(state, lastCaseToken, "The default case must be last.")`
+		end
+
+		lastCaseToken = state.nextToken-1
+
+		local case = SwitchCase()
+		table.insert(switch.cases, case)
+
+		tokType, tokValue = peekNextToken(state)
+		if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),":") then
+			gotDefault = true -- Omitted value means the default case.
+		else
+			!SET_OR_RETURN `case.value = parseExpression(state, switch)`
+		end
+
+		tokType, tokValue = eatNextToken(state)
+		if not isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),":") then
+			!ERROR_OR_RETURN `errorParsingAfterPrevious(state, "Expected ':'.")`
+		end
+
+		!SET_OR_RETURN `local body = astNewNode(AstBlock, state.nextToken, switch)`
+		case.body                  = body
+
+		while true do
+			tokType, tokValue = peekNextToken(state)
+			if isToken(tokType,tokValue, !(TOKEN_KEYWORD),"case") or isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"}") then
+				break
+			end
+			!DO_OR_RETURN `parseOneStatementButSometimesMoreAndAddToBlock(state, body)`
+		end
+	end
+
+	return switch
+end
+
 -- success = parseOneStatementButSometimesMoreAndAddToBlock( state, block )
 function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 	local tokType,  tokValue  = peekNextToken(state, 1)
@@ -1548,18 +1609,41 @@ function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 
 		statement = defer
 
-	elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"if") and (
-		isToken(tokType2,tokValue2, !(TOKEN_DIRECTIVE),"complete")
-		or (
-			isToken(tokType2,tokValue2, !(TOKEN_IDENTIFIER))
-			and isToken(tokType3,tokValue3, !(TOKEN_PUNCTUATION),"==")
-			and isToken(tokType4,tokValue4, !(TOKEN_PUNCTUATION),"{")
-		)
-	) then
-		!ERROR_OR_RETURN_FALSE `errorParsingNext(state, "@Incomplete: if x == {case...}")`
+	elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"if") and isToken(tokType2,tokValue2, !(TOKEN_DIRECTIVE),"complete") then
+		eatNextToken(state) -- 'if'
+		eatNextToken(state) -- '!complete'
+		!SET_OR_RETURN_FALSE `local expr = parseExpression(state, block)`
 
-	elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"if") or isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"if") then
-		!ERROR_OR_RETURN_FALSE `statement = parseIfOrStaticIf(state, block, false)`
+		tokType, tokValue = eatNextToken(state)
+		if not isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"==") then
+			!ERROR_OR_RETURN_FALSE `errorParsingLast(state, "Expected '=='.")`
+		end
+
+		tokType, tokValue = eatNextToken(state)
+		if not isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"{") then
+			!ERROR_OR_RETURN_FALSE `errorParsingLast(state, "Expected '{'.")`
+		end
+
+		!SET_OR_RETURN_FALSE `statement = parseSwitch(state, block, statementStartToken, expr, true)`
+
+	elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"if") then
+		eatNextToken(state) -- 'if'
+		!SET_OR_RETURN_FALSE `local expr = parseExpression(state, block)`
+		tokType,  tokValue  = peekNextToken(state, 1)
+		tokType2, tokValue2 = peekNextToken(state, 2)
+
+		if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"==") and isToken(tokType2,tokValue2, !(TOKEN_PUNCTUATION),"{") then
+			eatNextToken(state) -- '=='
+			eatNextToken(state) -- '{'
+			!SET_OR_RETURN_FALSE `statement = parseSwitch(state, block, statementStartToken, expr, false)`
+
+		else
+			state.nextToken = statementStartToken
+			!SET_OR_RETURN_FALSE `statement = parseIfOrStaticIf(state, block, false)`
+		end
+
+	elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"if") then
+		!SET_OR_RETURN_FALSE `statement = parseIfOrStaticIf(state, block, false)`
 
 	elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"while") then
 		local whileLoop = astNewNode(AstWhile, state.nextToken, block)
@@ -1615,7 +1699,7 @@ function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 					!ERROR_OR_RETURN_FALSE `errorParsing(state, forLoop.names[2].token, "Expected only one name in numeric 'for' loop.")`
 				end
 
-				tokType, tokValue = eatNextToken(state) -- Should eat the '='.
+				tokType, tokValue = eatNextToken(state)
 				assert(isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"="))
 
 				!DO_OR_RETURN_FALSE `parseExpressionList(state, forLoop, forLoop.expressions)`
@@ -1638,7 +1722,7 @@ function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 				state.nextToken = forStartIndex
 				!DO_OR_RETURN_FALSE `parseNameList(state, forLoop, forLoop.names, false)`
 
-				tokType, tokValue = eatNextToken(state) -- Should eat the ':'.
+				tokType, tokValue = eatNextToken(state)
 				assert(isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),":"))
 
 				!DO_OR_RETURN_FALSE `parseExpressionList(state, forLoop, forLoop.expressions)`
@@ -1662,7 +1746,7 @@ function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 			state.nextToken = forStartIndex
 			!DO_OR_RETURN_FALSE `parseNameList(state, forLoop, forLoop.names, false)`
 
-			tokType, tokValue = eatNextToken(state) -- Should eat the 'in'.
+			tokType, tokValue = eatNextToken(state)
 			assert(isToken(tokType,tokValue, !(TOKEN_KEYWORD),"in"))
 
 			!DO_OR_RETURN_FALSE `parseExpressionList(state, forLoop, forLoop.expressions)`
@@ -1938,11 +2022,11 @@ function _G.parseFileScopeStatements(state, block, isTopLevel, singleStatement)
 			table.insert(block.statements, debugNode)
 
 		elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"if") then
-			!ERROR_OR_RETURN_FALSE `local ifOrStaticIf = parseIfOrStaticIf(state, block, true)`
+			!SET_OR_RETURN_FALSE `local ifOrStaticIf = parseIfOrStaticIf(state, block, true)`
 			table.insert(block.statements, ifOrStaticIf)
 
 		elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"run") then
-			!ERROR_OR_RETURN_FALSE `local runNode = parseRun(state, block, false)`
+			!SET_OR_RETURN_FALSE `local runNode = parseRun(state, block, false)`
 			table.insert(block.statements, runNode)
 
 		elseif isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),";") then
@@ -2545,7 +2629,7 @@ function _G.parseExpression(state, parentNode, prevOpPrecedence, expectLeftValue
 	-- Run directive.
 	elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"run") then
 		putBackLastToken(state)
-		!ERROR_OR_RETURN_FALSE `expr = parseRun(state, parentNode, true)` -- @Incomplete: Allow a block here.
+		!SET_OR_RETURN_FALSE `expr = parseRun(state, parentNode, true)` -- @Incomplete: Allow a block here.
 
 	elseif isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"_") then
 		!ERROR_OR_RETURN `errorParsingLast(state, "Invalid place for a blank name.")`
@@ -2598,9 +2682,14 @@ function _G.parseExpression(state, parentNode, prevOpPrecedence, expectLeftValue
 		-- Left-associative operations.
 		elseif
 			(
-				isToken(tokType,tokValue, !(TOKEN_KEYWORD),"and","or")
-				or isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"+","-","*","/","//","%","<",">","<=",">=","==","~=")
-			) and OPERATOR_PRECEDENCE[tokValue] > prevOpPrecedence
+				isToken(tokType,tokValue, !(TOKEN_KEYWORD),"and","or") or
+				isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"+","-","*","/","//","%","<",">","<=",">=","==","~=")
+			)
+			and OPERATOR_PRECEDENCE[tokValue] > prevOpPrecedence
+			and not (
+				isToken(tokType, tokValue,  !(TOKEN_PUNCTUATION),"==") and
+				isToken(tokType2,tokValue2, !(TOKEN_PUNCTUATION),"{")
+			)
 		then
 			eatNextToken(state)
 
@@ -3230,6 +3319,17 @@ do
 
 				write(")\n")
 
+			elseif node.nodeType == !(nodeTypes.AstSwitch) then
+				local switch = node
+				if switch.complete then  write(" (complete)")  end
+				!!(CHILD_PRINT_START)
+				if switch.value then  printNode(switch.value, indent+1, printed, printChildren)  end
+				for _, case in ipairs(switch.cases) do
+					if case.value then  printNode(case.value, indent+1, printed, printChildren)  end
+					if case.body  then  printNode(case.body,  indent+1, printed, printChildren)  end
+				end
+				!!(CHILD_PRINT_END)
+
 			elseif node.declarations then -- AstScope and substructs.
 				if node.nodeType == !(nodeTypes.AstLambda) then
 					local lambda     = node
@@ -3345,7 +3445,7 @@ do
 		`
 
 		local TEMPLATE_TRAVERSE_NODE_IF_SET = `
-			if node.$field and visit(visited, cb, leavesFirst, node, $fieldLiteral, node.$field) then  return true  end
+			if node.$field and visit(visited, cb, leavesFirst, node, "$field", node.$field) then  return true  end
 		`
 		local TEMPLATE_TRAVERSE_ARRAY = `
 			local arr = node.$field
@@ -3363,8 +3463,14 @@ do
 		`
 		local TEMPLATE_TRAVERSE_FIELDS = `
 			for _, tableField in ipairs(node.$field) do
-				if tableField.key   and visit(visited, cb, leavesFirst, tableField, $fieldLiteral, tableField.key  ) then  return true  end
-				if tableField.value and visit(visited, cb, leavesFirst, tableField, $fieldLiteral, tableField.value) then  return true  end
+				if tableField.key   and visit(visited, cb, leavesFirst, tableField, "key",   tableField.key  ) then  return true  end
+				if tableField.value and visit(visited, cb, leavesFirst, tableField, "value", tableField.value) then  return true  end
+			end
+		`
+		local TEMPLATE_TRAVERSE_CASES = `
+			for _, case in ipairs(node.$field) do
+				if case.value and visit(visited, cb, leavesFirst, case, "value", case.value) then  return true  end
+				if case.body  and visit(visited, cb, leavesFirst, case, "body",  case.body ) then  return true  end
 			end
 		`
 
@@ -3377,17 +3483,20 @@ do
 				local k = field[1]
 
 				if field.ast == "node" then
-					__LUA(templateToLua(TEMPLATE_TRAVERSE_NODE_IF_SET, {field=k, fieldLiteral=toLua(k)}))
+					__LUA(templateToLua(TEMPLATE_TRAVERSE_NODE_IF_SET, {field=k}))
 
 				elseif field.ast == "array" then
 					if field[2] then
-						__LUA(templateToLua(TEMPLATE_TRAVERSE_ARRAY, {field=k, fieldLiteral=toLua(k)}))
+						__LUA(templateToLua(TEMPLATE_TRAVERSE_ARRAY, {field=k}))
 					else
-						__LUA(templateToLua(TEMPLATE_TRAVERSE_ARRAY_IF_SET, {field=k, fieldLiteral=toLua(k)}))
+						__LUA(templateToLua(TEMPLATE_TRAVERSE_ARRAY_IF_SET, {field=k}))
 					end
 
 				elseif field.ast == "fields" then
-					__LUA(templateToLua(TEMPLATE_TRAVERSE_FIELDS, {field=k, fieldLiteral=toLua(k)}))
+					__LUA(templateToLua(TEMPLATE_TRAVERSE_FIELDS, {field=k}))
+
+				elseif field.ast == "cases" then
+					__LUA(templateToLua(TEMPLATE_TRAVERSE_CASES, {field=k}))
 
 				elseif field.ast then
 					error(field.ast)
@@ -3518,9 +3627,19 @@ do
 
 			for i, tableField in ipairs(node.$field) do
 				local tableFieldCopy = TableField()
-				tableFieldCopy.key   = tableField.key and copyTree(tableField.key, token, copy, copies)
+				tableFieldCopy.key   = tableField.key   and copyTree(tableField.key,   token, copy, copies)
 				tableFieldCopy.value = tableField.value and copyTree(tableField.value, token, copy, copies)
 				fieldsCopy[i]        = tableFieldCopy
+			end
+		`
+		local TEMPLATE_COPY_CASES = `
+			local casesCopy = copy.$field
+
+			for i, case in ipairs(node.$field) do
+				local caseCopy = SwitchCase()
+				caseCopy.value = case.value and copyTree(case.value, token, copy, copies)
+				caseCopy.body  = case.body  and copyTree(case.body,  token, copy, copies)
+				casesCopy[i]   = caseCopy
 			end
 		`
 
@@ -3552,6 +3671,9 @@ do
 
 				elseif field.ast == "fields" then
 					__LUA(templateToLua(TEMPLATE_COPY_FIELDS, {field=k}))
+
+				elseif field.ast == "cases" then
+					__LUA(templateToLua(TEMPLATE_COPY_CASES, {field=k}))
 
 				elseif field.ast then
 					error(field.ast)
