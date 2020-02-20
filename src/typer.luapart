@@ -859,19 +859,6 @@ local function checkRedeclaration(state, ident, decl, isMember, scope)
 
 			assert(not lambdaExisting.inferredType)
 
-			-- For now, polymorphic functions cannot be overloaded. Though maybe it should be allowed? Not sure!
-			if lambda.isPolymorphic or lambdaExisting.isPolymorphic then
-				local lambdaPoly  = lambda
-				local lambdaOther = lambdaExisting
-				if not lambda.isPolymorphic then
-					lambdaPoly, lambdaOther = lambdaOther, lambdaPoly
-				end
-				typeError2(state,
-					lambdaPoly,  F("Cannot overload polymorphic function '%s'.", ident.name),
-					lambdaOther, F("...here is the other function.")
-				)
-			end
-
 			-- This dependency means lambdaExisting won't get inferred until earliest next cycle
 			-- by which time all overloads should have been added (I think). This should work as
 			-- the first occurence of a name will make the second occurence wait before the
@@ -2314,14 +2301,19 @@ end
 		table.insert(realArgumentTypes, typeInfo)
 	end
 
+	-- Overloaded call.
+	if callee.nodeType == !(nodeTypes.AstIdentifier) and callee.declaration.overloadOf then
+		calleeTypeInfo = handleOverloadedCall(state, call, realArguments, realArgumentTypes) or errorInternal(state, call)
+
+		if calleeTypeInfo.isPolymorphic then
+			handlePolymorphicCall(state, call, calleeTypeInfo, realArguments, realArgumentTypes)
+			return -- Wait for the polymorphed function to infer.
+		end
+
 	-- Polymorphic call.
-	if calleeTypeInfo.isPolymorphic then
+	elseif calleeTypeInfo.isPolymorphic then
 		handlePolymorphicCall(state, call, calleeTypeInfo, realArguments, realArgumentTypes)
 		return -- Wait for the polymorphed function to infer.
-
-	-- Overloaded call.
-	elseif callee.nodeType == !(nodeTypes.AstIdentifier) and callee.declaration.overloadOf then
-		calleeTypeInfo = handleOverloadedCall(state, call, realArguments, realArgumentTypes) or errorInternal(state, call)
 
 	-- Plain call.
 	else
@@ -3941,6 +3933,14 @@ end
 					state, objExpr,
 					"Cannot iterate over values in type group '%s'. (Type is %s)",
 					TYPE_TAG_NAMES[objExpr.inferredType.tag],
+					getFriendlyTypeInfoName(objExpr.inferredType)
+				)
+			end
+
+			if forLoop.reverse and objExpr.inferredType.tag ~= !(typeTags.TypeInfoArray) then
+				typeError(
+					state, objExpr,
+					"Only arrays can be iterated in reverse. (This is %s)",
 					getFriendlyTypeInfoName(objExpr.inferredType)
 				)
 			end

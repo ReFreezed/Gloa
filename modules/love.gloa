@@ -163,9 +163,14 @@ using export LoveEvent :: enum {
 	CONFIG            :: "conf",
 }
 
+export LoveFilterMode :: enum {
+	LINEAR  :: "linear",
+	NEAREST :: "nearest",
+}
+
 local love:table : !foreign lua "love"
 
-export loveSetEventHandler :: (event:LoveEvent, handler:any, catchErrorsInGloa:bool=true) { -- @Compiler @Cleanup :RestrictAnyToTypeTag
+export loveSetEventHandler :: (event:LoveEvent, handler:any, catchErrorsInGloa=true) { -- @Compiler @Cleanup :RestrictAnyToTypeTag
 	!import "basic"
 
 	assert(getLuaType(handler) == LuaType.FUNCTION, "Handler is not a function.") -- @Cleanup: Remove this when :RestrictAnyToTypeTag is solved.
@@ -190,7 +195,7 @@ export loveRemoveEventHandler :: (event:LoveEvent) {
 	if event == ERROR_HANDLER  love.errhand = nil
 }
 
-export loveQuit :: (exitStatus:int=0) !foreign lua "love and love.event and love.event.quit"
+export loveQuit :: (exitStatus=0) !foreign lua "love and love.event and love.event.quit"
 
 local _loveRestart :: (restart:string) !foreign lua "love and love.event and love.event.quit"
 export loveRestart :: () { _loveRestart("restart") }
@@ -221,11 +226,14 @@ export loveWriteFile :: (path:string, data:string) -> (success:bool, error:strin
 
 -- Drawing.
 
-export loveDrawText :: (text:string, x,y:float=0, r:float=0                                         ) !foreign lua "love and love.graphics and love.graphics.print"
-export loveDrawText :: (text:string, x,y:float,   r:float, sx:float                                 ) { loveDrawText(text, x,y, r, sx,sx) }
-export loveDrawText :: (text:string, x,y:float,   r:float, sx,sy:float, ox,oy:float=0, kx,ky:float=0) !foreign lua "love and love.graphics and love.graphics.print"
+export loveClear :: ()                   !foreign lua "love and love.graphics and love.graphics.clear" -- Same as loveClear(0,0,0,0)
+export loveClear :: (r,g,b:float, a=1.0) !foreign lua "love and love.graphics and love.graphics.clear"
+
+export loveDrawText :: (text:string, x,y=0.0,   r=0.0                                     ) !foreign lua "love and love.graphics and love.graphics.print"
+export loveDrawText :: (text:string, x,y:float, r:float, sx:float                         ) { loveDrawText(text, x,y, r, sx,sx) }
+export loveDrawText :: (text:string, x,y:float, r:float, sx,sy:float, ox,oy=0.0, kx,ky=0.0) !foreign lua "love and love.graphics and love.graphics.print"
 -- @Compiler @Incomplete: Make sy:float=sx work somehow here below and remove the overloads here above.
--- export loveDrawText :: (text:string, x,y:float=0, r:float=0, sx:float=1,sy:float=sx, ox,oy:float=0, kx,ky:float=0) !foreign lua "love and love.graphics and love.graphics.print"
+-- export loveDrawText :: (text:string, x,y=0.0, r=0.0, sx=1.0,sy=sx, ox,oy=0.0, kx,ky=0.0) !foreign lua "love and love.graphics and love.graphics.print"
 
 local _loveDrawRectangle :: (mode:string, x,y:float, w,h:float)                                      !foreign lua "love and love.graphics and love.graphics.rectangle"
 local _loveDrawRectangle :: (mode:string, x,y:float, w,h:float, radiusX,radiusY:float)               !foreign lua "love and love.graphics and love.graphics.rectangle"
@@ -244,18 +252,141 @@ export loveDrawCircleLine :: (x,y:float, radius:float)               { _loveDraw
 export loveDrawCircleFill :: (x,y:float, radius:float, segments:int) { _loveDrawCircle("fill", x,y, radius, segments) }
 export loveDrawCircleLine :: (x,y:float, radius:float, segments:int) { _loveDrawCircle("line", x,y, radius, segments) }
 
+local _loveDrawEllipse :: (mode:string, x,y:float, radiusX,radiusY:float)               !foreign lua "love and love.graphics and love.graphics.ellipse"
+local _loveDrawEllipse :: (mode:string, x,y:float, radiusX,radiusY:float, segments:int) !foreign lua "love and love.graphics and love.graphics.ellipse"
+export loveDrawEllipseFill :: (x,y:float, radiusX,radiusY:float)               { _loveDrawEllipse("fill", x,y, radiusX,radiusY) }
+export loveDrawEllipseLine :: (x,y:float, radiusX,radiusY:float)               { _loveDrawEllipse("line", x,y, radiusX,radiusY) }
+export loveDrawEllipseFill :: (x,y:float, radiusX,radiusY:float, segments:int) { _loveDrawEllipse("fill", x,y, radiusX,radiusY, segments) }
+export loveDrawEllipseLine :: (x,y:float, radiusX,radiusY:float, segments:int) { _loveDrawEllipse("line", x,y, radiusX,radiusY, segments) }
+
 export loveDrawLine :: (x1,y1,x2,y2,...:float) !foreign lua "love and love.graphics and love.graphics.line"
 
 -- Graphics state.
 
-export loveGetColor :: () -> (r,g,b,a:float)    !foreign lua "love and love.graphics and love.graphics.getColor"
-export loveSetColor :: (r,g,b:float, a:float=1) !foreign lua "love and love.graphics and love.graphics.setColor"
+-- Font
+	local LoveFont :: struct {
+		-- These functions are abstract dummies as the LoveFont struct itself is foreign.
+		getBaseline   = (font:LoveFont) -> int !foreign lua "nil",
+		getAscent     = (font:LoveFont) -> int !foreign lua "nil",
+		getDescent    = (font:LoveFont) -> int !foreign lua "nil",
 
-export loveClear :: ()                       !foreign lua "love and love.graphics and love.graphics.clear" -- Same as loveClear(0,0,0,0)
-export loveClear :: (r,g,b:float, a:float=1) !foreign lua "love and love.graphics and love.graphics.clear"
+		getFilter     = (font:LoveFont) -> (min,mag:LoveFilterMode, anisotropy:int) !foreign lua "nil",
+		setFilter     = (font:LoveFont, min,mag:LoveFilterMode, anisotropy=1)       !foreign lua "nil",
+
+		getWidth      = (font:LoveFont, text:string) -> int !foreign lua "nil",
+		getHeight     = (font:LoveFont)              -> int !foreign lua "nil",
+		getWrap       = (font:LoveFont, text:string, wrapLimit:int) -> (width:int, lines:[]string) !foreign lua "nil",
+
+		getLineHeight = (font:LoveFont) -> float          !foreign lua "nil",
+		setLineHeight = (font:LoveFont, lineHeight:float) !foreign lua "nil",
+
+		getDPIScale   = (font:LoveFont) -> float !foreign lua "nil",
+		hasGlyphs     = (font:LoveFont, x,...:string|int) -> bool !foreign lua "nil",
+		setFallbacks  = (font:LoveFont, ...:LoveFont) !foreign lua "nil",
+	}
+
+	export loveGetBaseline   :: (font:LoveFont) -> int { return font.getBaseline!() }
+	export loveGetAscent     :: (font:LoveFont) -> int { return font.getAscent!() }
+	export loveGetDescent    :: (font:LoveFont) -> int { return font.getDescent!() }
+
+	export loveGetDpiScale   :: (font:LoveFont) -> float { return font.getDPIScale!() }
+
+	export loveGetFilter     :: (font:LoveFont) -> (min,mag:LoveFilterMode, anisotropy:int) { return font.getFilter!() }
+	export loveSetFilter     :: (font:LoveFont, min,mag:LoveFilterMode, anisotropy=1)       { font.setFilter!(min, mag, anisotropy) }
+
+	export loveGetWidth      :: (font:LoveFont, text:string) -> int { return font.getWidth!(text) }
+	export loveGetHeight     :: (font:LoveFont)              -> int { return font.getHeight!() }
+
+	export loveGetLineHeight :: (font:LoveFont) -> float          { return font.getLineHeight!() }
+	export loveSetLineHeight :: (font:LoveFont, lineHeight:float) { font.setLineHeight!(lineHeight) }
+
+	export loveGetWrap       :: (font:LoveFont, text:string, wrapLimit:int) -> (width:int, lines:[]string) { return font.getWrap!(text, wrapLimit) }
+
+	export loveHasGlyphs     :: (font:LoveFont, text:string)            -> bool { return font.hasGlyphs!(text) }
+	export loveHasGlyphs     :: (font:LoveFont, char1,char2,...:string) -> bool { return font.hasGlyphs!(char1, char2, ...) }
+	export loveHasGlyphs     :: (font:LoveFont, codepoint,...:int)      -> bool { return font.hasGlyphs!(codepoint, ...) }
+
+	export loveSetFallbacks  :: (font:LoveFont, ...:LoveFont) { font.setFallbacks!(...) }
+--
+
+local DEFAULT_FONT_SIZE :: 12
+export loveGetFont    :: () -> LoveFont  !foreign lua "love and love.graphics and love.graphics.getFont" -- @Check: Can this return nil?
+export loveSetFont    :: (font:LoveFont) !foreign lua "love and love.graphics and love.graphics.setFont"
+export loveSetNewFont :: (                 size=DEFAULT_FONT_SIZE) -> LoveFont !foreign lua "love and love.graphics and love.graphics.setNewFont"
+export loveSetNewFont :: (filename:string, size=DEFAULT_FONT_SIZE) -> LoveFont !foreign lua "love and love.graphics and love.graphics.setNewFont"
+-- export loveSetNewFont :: (file:LoveFile,   size=DEFAULT_FONT_SIZE) -> LoveFont !foreign lua "love and love.graphics and love.graphics.setNewFont"
+-- export loveSetNewFont :: (data:LoveData,   size=DEFAULT_FONT_SIZE) -> LoveFont !foreign lua "love and love.graphics and love.graphics.setNewFont"
+-- export loveSetNewFont :: (rasterizer:LoveRasterizer)               -> LoveFont !foreign lua "love and love.graphics and love.graphics.setNewFont"
+
+export loveGetBackgroundColor :: () -> (r,g,b,a:float) !foreign lua "love and love.graphics and love.graphics.getBackgroundColor"
+export loveSetBackgroundColor :: (r,g,b:float, a=1.0)  !foreign lua "love and love.graphics and love.graphics.setBackgroundColor"
+
+export LoveBlendMode :: enum {
+	ALPHA    :: "alpha",
+	REPLACE  :: "replace",
+	SCREEN   :: "screen",
+	ADD      :: "add",
+	SUBTRACT :: "subtract",
+	MULTIPLY :: "multiply",
+	LIGHTEN  :: "lighten",
+	DARKEN   :: "darken",
+	PREMULTIPLIED :: "premultiplied",
+}
+export LoveBlendAlphaMode :: enum {
+	ALPHAMULTIPLY :: "alphamultiply",
+	PREMULTIPLIED :: "premultiplied",
+}
+export loveGetBlendMode :: () -> LoveBlendMode                                              !foreign lua "love and love.graphics and love.graphics.getBlendMode"
+export loveSetBlendMode :: (mode:LoveBlendMode, alphaMode=LoveBlendAlphaMode.ALPHAMULTIPLY) !foreign lua "love and love.graphics and love.graphics.setBlendMode"
+
+-- export LoveCanvasSetup :: struct {
+-- 	!value:LoveCanvas,
+-- 	stencil = false,
+-- 	depth   = false,
+-- 	depthstencil:LoveCanvas|none = nil,
+-- }
+-- export loveGetCanvas   :: () -> LoveCanvas|none                      !foreign lua "love and love.graphics and love.graphics.getCanvas"
+-- export loveSetCanvas   :: (canvas:LoveCanvas, mipmap=1)              !foreign lua "love and love.graphics and love.graphics.setCanvas"
+-- export loveSetCanvas   :: (canvas:LoveCanvas, slice:int, mipmap:int) !foreign lua "love and love.graphics and love.graphics.setCanvas"
+-- export loveSetCanvas   :: (canvas1,canvas2,...:LoveCanvas)           !foreign lua "love and love.graphics and love.graphics.setCanvas"
+-- export loveSetCanvas   :: (setup:LoveCanvasSetup)                    !foreign lua "love and love.graphics and love.graphics.setCanvas"
+-- export loveSetNoCanvas :: ()                                         !foreign lua "love and love.graphics and love.graphics.setCanvas"
+
+export loveGetColor :: () -> (r,g,b,a:float) !foreign lua "love and love.graphics and love.graphics.getColor"
+export loveSetColor :: (r,g,b:float, a=1.0)  !foreign lua "love and love.graphics and love.graphics.setColor"
+
+export loveGetColorMask   :: () -> (r,g,b,a:bool) !foreign lua "love and love.graphics and love.graphics.getColorMask"
+export loveSetColorMask   :: (r,g,b,a:bool)       !foreign lua "love and love.graphics and love.graphics.setColorMask"
+export loveResetColorMask :: ()                   !foreign lua "love and love.graphics and love.graphics.setColorMask"
+
+export loveGetDefaultFilter :: () -> (min,mag:LoveFilterMode, anisotropy:int) !foreign lua "love and love.graphics and love.graphics.getDefaultFilter"
+export loveSetDefaultFilter :: (min,mag:LoveFilterMode, anisotropy=1)         !foreign lua "love and love.graphics and love.graphics.setDefaultFilter"
+
+export LoveLineJoin    :: enum { MITER::"miter", NONE::"none", BEVEL::"bevel" }
+export loveGetLineJoin :: () -> LoveLineJoin  !foreign lua "love and love.graphics and love.graphics.getLineJoin"
+export loveSetLineJoin :: (join:LoveLineJoin) !foreign lua "love and love.graphics and love.graphics.setLineJoin"
+
+export LoveLineStyle    :: enum { ROUGH::"rough", SMOOTH::"smooth" }
+export loveGetLineStyle :: () -> LoveLineStyle   !foreign lua "love and love.graphics and love.graphics.getLineStyle"
+export loveSetLineStyle :: (style:LoveLineStyle) !foreign lua "love and love.graphics and love.graphics.setLineStyle"
 
 export loveGetLineWidth :: () -> float !foreign lua "love and love.graphics and love.graphics.getLineWidth"
 export loveSetLineWidth :: (w:float)   !foreign lua "love and love.graphics and love.graphics.setLineWidth"
+
+-- export LoveShader :: { ??? }
+-- export loveGetShader :: () -> LoveShader    !foreign lua "love and love.graphics and love.graphics.getShader"
+-- export loveSetShader :: (shader:LoveShader) !foreign lua "love and love.graphics and love.graphics.setShader"
+
+export loveGetPointSize :: () -> float  !foreign lua "love and love.graphics and love.graphics.getPointSize"
+export loveSetPointSize :: (size:float) !foreign lua "love and love.graphics and love.graphics.setPointSize"
+
+export loveGetScissor       :: () -> (x,y,w,h:float) !foreign lua "love and love.graphics and love.graphics.getScissor"
+export loveSetScissor       :: (x,y,w,h:float)       !foreign lua "love and love.graphics and love.graphics.setScissor"
+export loveIntersectScissor :: (x,y,w,h:float)       !foreign lua "love and love.graphics and love.graphics.intersectScissor"
+export loveResetScissor     :: ()                    !foreign lua "love and love.graphics and love.graphics.setScissor"
+
+export loveIsWireframe  :: () -> bool     !foreign lua "love and love.graphics and love.graphics.isWireframe"
+export loveSetWireframe :: (enabled:bool) !foreign lua "love and love.graphics and love.graphics.setWireframe"
 
 -- Coordinate system.
 
@@ -274,9 +405,14 @@ export loveGraphicsPushTransform :: () { _loveGraphicsPush()      }
 export loveGraphicsPop           :: () !foreign lua "love and love.graphics and love.graphics.pop"
 export loveGraphicsReset         :: () !foreign lua "love and love.graphics and love.graphics.reset"
 
+export loveGlobalToScreen :: (globalX, globalY: float) -> (screenX, screenY: float) !foreign lua "love and love.graphics and love.graphics.transformPoint"
+export loveScreenToGlobal :: (screenX, screenY: float) -> (globalX, globalY: float) !foreign lua "love and love.graphics and love.graphics.inverseTransformPoint"
+
 -- Window.
 
 export loveGetWindowDimensions :: () -> int, int !foreign lua "love and love.graphics and love.graphics.getDimensions"
+export loveGetWindowWidth      :: () -> int      !foreign lua "love and love.graphics and love.graphics.getWidth"
+export loveGetWindowHeight     :: () -> int      !foreign lua "love and love.graphics and love.graphics.getHeight"
 
 ----------------------------------------------------------------
 -- love.image.*

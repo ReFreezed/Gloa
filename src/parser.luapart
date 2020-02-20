@@ -347,6 +347,7 @@ _G.!structAst"AstFor:_AstScope"{
 	{`names`,          {},  ast=nil    },   -- []AstIdentifier  These are never inferred, but instead copied to declarations. @Cleanup: Can we get rid of this in favor of the copy we currently make?
 	{`forType`,        FOR_NUMERIC},
 	{`body`,           nil, astRef="node"}, -- AstBlock
+	{`reverse`,        false},
 	{`hasNamedBreaks`, false},
 }
 !structAst"_AstScopeExpression:_AstScope"{
@@ -1666,6 +1667,14 @@ function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 		local forLoop = astNewNode(AstFor, state.nextToken, block)
 
 		eatNextToken(state)
+		tokType, tokValue = peekNextToken(state)
+
+		-- FOR_SHORT  for < [ v1, ... : ] obj
+		if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"<") then
+			eatNextToken(state)
+			forLoop.reverse = true
+		end
+
 		local forStartIndex = state.nextToken
 
 		local exprListWeMayOrMayNotUse = {}
@@ -1677,7 +1686,7 @@ function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 		-- FOR_ITERATOR  for v1, ... in iter [, state [, init ] ]
 		if isToken(tokType,tokValue, !(TOKEN_KEYWORD),"in") then
 			forLoop.forType = !(FOR_ITERATOR)
-		-- FOR_SHORT  for v1, ... : obj
+		-- FOR_SHORT  for [ < ] v1, ... : obj
 		elseif isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),":") then
 			forLoop.forType = !(FOR_SHORT)
 			twoParter       = true
@@ -1689,12 +1698,16 @@ function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 		elseif #exprListWeMayOrMayNotUse >= 2 then -- If more than 3 arguments are specified then we'll get an error later.
 			forLoop.forType = !(FOR_NUMERIC)
 			twoParter       = false
-		-- FOR_SHORT  for obj
+		-- FOR_SHORT  for [ < ] obj
 		elseif #exprListWeMayOrMayNotUse == 1 then
 			forLoop.forType = !(FOR_SHORT)
 			twoParter       = false
 		else
 			!ERROR_OR_RETURN_FALSE `errorParsing(state, forLoop.token, "Could not determine what kind of 'for' statement this is.")`
+		end
+
+		if forLoop.reverse and forLoop.forType ~= !(FOR_SHORT) then
+			!ERROR_OR_RETURN_FALSE `errorParsing(state, forLoop.token+1, "Only short-form 'for' loops support the reverse operator.")`
 		end
 
 		if forLoop.forType == !(FOR_NUMERIC) then
@@ -1725,7 +1738,7 @@ function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 			end
 
 		elseif forLoop.forType == !(FOR_SHORT) then
-			-- for v1, ... : obj
+			-- for [ < ] v1, ... : obj
 			if twoParter then
 				state.nextToken = forStartIndex
 				!DO_OR_RETURN_FALSE `parseNameList(state, forLoop, forLoop.names, false)`
@@ -1739,14 +1752,10 @@ function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 					!ERROR_OR_RETURN_FALSE `errorParsing(state, forLoop.expressions[2].token-1, "Expected a single parameter for the short-form 'for' loop.")`
 				end
 
-				-- @Incomplete: Generate 'itIndex' name for arrays (and more?) if necessary (when types are figured out).
-
-			-- for obj
+			-- for [ < ] obj
 			else
 				forLoop.expressions = exprListWeMayOrMayNotUse
 				assert(#forLoop.expressions == 1)
-
-				-- @Incomplete: Generate 'it' and 'itIndex' names for arrays (and more?) if necessary (when types are figured out).
 			end
 
 		-- for v1, ... in iter [, state [, init ] ]
@@ -3250,7 +3259,9 @@ do
 
 			elseif node.nodeType == !(nodeTypes.AstFor) then
 				local forLoop = node
-				write(" (", FOR_TITLES[forLoop.forType], ")")
+				write(" (", FOR_TITLES[forLoop.forType])
+				if forLoop.reverse then  write(", reverse")  end
+				write(")")
 				!!(CHILD_PRINT_START)
 				printNodeList(forLoop.names,       indent+1, printed, printChildren, "NAME")
 				printNodeList(forLoop.expressions, indent+1, printed, printChildren, "EXPR")

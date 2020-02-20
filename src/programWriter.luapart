@@ -79,6 +79,11 @@ local FOREIGN_API_COMPILER_SYMBOLS = {
 		end
 	`),
 
+	-- ipairsr
+	-- Reverse iteration of an array.
+	-- for i, item in ipairsr( array ) do
+	ipairsr = `_IPAIRSR`,
+
 	typeTagAny         = !(toLua(typeTags.TypeInfoAny)),
 	typeTagArray       = !(toLua(typeTags.TypeInfoArray)),
 	typeTagBool        = !(toLua(typeTags.TypeInfoBool)),
@@ -1140,13 +1145,22 @@ function _G.writeBlock(state, writer, block, indent, nextLocalN, localsStack, is
 
 				if objExpr.inferredType.tag == !(typeTags.TypeInfoArray) then
 					addLineMapping(state, writer, objExpr.token)
-					file:write("_IPAIRS")
+					if forLoop.reverse then
+						file:write("_IPAIRSR")
+					else
+						file:write("_IPAIRS")
+					end
+
 				elseif objExpr.inferredType.tag == !(typeTags.TypeInfoTable) then
+					assert(not forLoop.reverse)
 					addLineMapping(state, writer, objExpr.token)
 					file:write("_PAIRS")
+
 				elseif objExpr.inferredType.tag == !(typeTags.TypeInfoStruct) then
+					assert(not forLoop.reverse)
 					errorUnhandledNodeType(state, objExpr)
 					-- writeConstantValueOrReference(state, writer, interatorFuncConst?) -- @Incomplete: Output default iterator for the struct.
+
 				else
 					errorInternal(state, objExpr)
 				end
@@ -1775,6 +1789,19 @@ function _G.writeCompilerSymbols(state, writer)
 		`_MATH_FLOOR`, `math.floor`, -- Used for integer division.
 		`_IPAIRS`,     `ipairs`,     -- Used for short-form array loops.
 		`_PAIRS`,      `pairs`,      -- Used for short-form table loops.
+
+		-- Used for short-form array loops in reverse.
+		`_IPAIRSR`, trimTemplate`
+			(function()
+				local function inext(arr, i)
+					i = i-1
+					if i > 0 then  return i, arr[i]  end
+				end
+				return function(arr)
+					return inext, arr, #arr+1
+				end
+			end)()
+		`,
 	}
 	)
 
