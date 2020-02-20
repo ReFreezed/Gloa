@@ -41,7 +41,7 @@ end
 _G.DEFAULT_GLOBALS = defaultGlobals
 
 xpcall(function()
-	local timeStartCompiling = os.clock()
+	local timeStartInitial = os.clock()
 
 	!if DEBUG then
 		-- This fixes a Sublime Text 2 stdout/stderr desync in build system results. Sigh... :SublimeText2Desync
@@ -72,7 +72,8 @@ xpcall(function()
 	local silent            = false
 	local outputDebugInfo   = false
 	local keepDeadCode      = false
-	local metaprogramArgs   = {}
+	_G.compilerArguments    = {}
+	_G.metaprogramArguments = {}
 
 	!if DEBUG then
 	_G.debug_onlyParse      = false
@@ -97,36 +98,44 @@ xpcall(function()
 			local arg = args[i]
 
 			if not forCompiler then
-				table.insert(metaprogramArgs, arg)
-				i = i+1
-			elseif not arg:find"^%-" then
-				table.insert(pathsToCompile, (arg:gsub("\\", "/")))
+				table.insert(metaprogramArguments, arg)
 				i = i+1
 			elseif arg == "--" then
 				forCompiler = false
 				i           = i+1
+			elseif not arg:find"^%-" then
+				local path = arg:gsub("\\", "/")
+				table.insert(pathsToCompile,    path)
+				table.insert(compilerArguments, path)
+				i = i+1
 
 			elseif arg == "--help" or arg == "-help" or arg == "-?" or arg == "/help" or arg == "/?" then
 				printHelpAndExit()
 			elseif arg == "--nogc" then
 				disableGc = true
+				table.insert(compilerArguments, arg)
 				i = i+1
 			elseif arg == "--silent" then
 				silent = true
+				table.insert(compilerArguments, arg)
 				i = i+1
 			elseif arg == "--debug" then
 				outputDebugInfo = true
+				table.insert(compilerArguments, arg)
 				i = i+1
 			elseif arg == "--nostrip" then
 				keepDeadCode = true
+				table.insert(compilerArguments, arg)
 				i = i+1
 
 			!if DEBUG then
 			elseif arg == "--debug:onlyparse" then
 				_G.debug_onlyParse = true
+				table.insert(compilerArguments, arg)
 				i = i+1
 			elseif arg == "--debug:onlyinfer" then
 				_G.debug_onlyInferTypes = true
+				table.insert(compilerArguments, arg)
 				i = i+1
 			!end
 
@@ -211,7 +220,12 @@ xpcall(function()
 		{`runnerWrittenObjects`, {}},
 	}
 
+	local timeDoingSubCompilations = 0
+
 	function _G.compileProgram(pathToFirstFile)
+		local timeStartCompiling            = os.clock()
+		local timeDoingSubCompilationsStart = timeDoingSubCompilations
+
 		local state  = CompilationState()
 		state.tokens = Tokens()
 
@@ -451,30 +465,51 @@ xpcall(function()
 		-- All done!
 		local timeEndCompilation = os.clock()
 
-		!if DEBUG then
-			if debug_onlyParse then  astPrintTree(globalScope)  end
-			printf("██████████████████████ %s", pathToFirstFile)
-			printf("████    ████  ████  ██ Total:   %.3f sec", timeEndCompilation - timeStartCompiling)
-			printf("██  ████  ██  ██  ████ Lexing:  %.3f sec", timeEndLexing      - timeStartLexing)
-			printf("██  ████  ██    ██████ Parsing: %.3f sec", timeEndParsing     - timeStartParsing)
-			printf("██  ████  ██  ██  ████ Pipes:   %.3f sec", timeEndPipes       - timeStartPipes)
-			printf("████    ████  ████  ██ Output:  %.3f sec", timeEndOutput      - timeStartOutput)
-			printf("██████████████████████ Cycles:%d Queue:%d Deps:%d", pipeCycles, maxQueueSize, #state.dependencies)
-		!else
-			if not silent then
-				printf("Successfully compiled %s", pathToFirstFile)
-				printf("Completed in %.3f seconds", timeEndCompilation-timeStartCompiling)
-				if disableGc then
-					printf("Memory usage: %.0f bytes", collectgarbage"count"*1024)
-				end
-				print()
+		!ifNotDEBUG`if not silent then`
+			!ifDEBUG`if debug_onlyParse then  astPrintTree(globalScope)  end`
+
+			local subTime = timeDoingSubCompilations-timeDoingSubCompilationsStart
+
+			!local OK = {
+				"██████████████████████ ",
+				"████    ████  ████  ██ ",
+				"██  ████  ██  ██  ████ ",
+				"██  ████  ██    ██████ ",
+				"██  ████  ██  ██  ████ ",
+				"████    ████  ████  ██ ",
+				"██████████████████████ ",
+			}
+			printf(!((DEBUG and OK[1] or "Successfully compiled ").."%s"), pathToFirstFile)
+			if subTime > 0 then
+			printf(!((DEBUG and OK[2] or "").."Total:   %.3f (+%.3f) sec"), timeEndCompilation-timeStartCompiling-subTime, subTime)
+			else
+			printf(!((DEBUG and OK[2] or "").."Total:   %.3f sec"        ), timeEndCompilation-timeStartCompiling-subTime)
 			end
-		!end
+			printf(!((DEBUG and OK[3] or "").."Lexing:  %.3f sec"), timeEndLexing  - timeStartLexing)
+			printf(!((DEBUG and OK[4] or "").."Parsing: %.3f sec"), timeEndParsing - timeStartParsing)
+			printf(!((DEBUG and OK[5] or "").."Pipes:   %.3f sec"), timeEndPipes   - timeStartPipes - subTime)
+			printf(!((DEBUG and OK[6] or "").."Output:  %.3f sec"), timeEndOutput  - timeStartOutput)
+			!if DEBUG then
+			printf(!((DEBUG and OK[7] or "").."Cycles:%d Queue:%d Deps:%d"), pipeCycles, maxQueueSize, #state.dependencies)
+			!end
+			print()
+		!ifNotDEBUG`end`
+
+		timeDoingSubCompilations = timeDoingSubCompilationsStart + timeEndCompilation - timeStartCompiling
 	end
 
 	for _, path in ipairs(pathsToCompile) do
 		compileProgram(path)
 	end
+
+	!ifNotDEBUG`if not silent then`
+		if pathsToCompile[2] then
+			printf("Compiled all %d programs in %.3f sec", #pathsToCompile, os.clock()-timeStartInitial)
+		end
+		if disableGc then
+			printf("Memory usage: %s bytes", formatNumber(collectgarbage"count"*1024))
+		end
+	!ifNotDEBUG`end`
 
 	exit()
 

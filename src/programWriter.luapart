@@ -17,15 +17,16 @@
 ----------------------------------------------------------------
 
 	Format for written programs:
-	- Foreign imports.
-	- Constants.
-	- Forward declarations.
-	- Functions.
-	- Global/file-scope variables.
-	- Program entry point.
+	1. Glóa header.
+	2. Foreign imports.
+	3. Constants.
+	4. Forward declarations.
+	5. Functions.
+	6. Global/file-scope variables.
+	7. Program entry point.
 
 	Notes:
-	- No Lua globals are read from or written to. (Glóa globals are not Lua globals.)
+	- Usage of Lua globals is minimized. (Glóa globals are not Lua globals.)
 	- All functions are top-level in Lua no matter where they were defined in Glóa.
 	- Local variables in Lua are uniquely named and thus never shadow anything (which might help with debugging).
 
@@ -36,53 +37,15 @@
 
 
 
-local FOREIGN_API_COMPILER_SYMBOLS = {
-	-- APP_PATH
-	-- Get the path to the application file. The path may be relative to the current working directory.
-	APP_PATH = `(debug.getinfo(1, "S").source:match"^@(.+)" or error("Could not get application path.")) :gsub("\\", "/")`,
+local foreignApiCompilerSymbols = {
+	-- These can be used in user code through !foreign compiler "symbolName".
+	-- (See utils.gloa, io.gloa and other modules for declarations.)
+	-- (See compiler.gloa for things only available during compile-time.)
 
-	-- APP_DIRECTORY
-	-- Get the path to the directory the application is located in. The path may be relative to the current working directory.
-	APP_DIRECTORY = `(debug.getinfo(1, "S").source:match"^@(.+)" or error("Could not get application path.")) :gsub("\\", "/"):gsub("/?[^/]+$", ""):gsub("^$", ".")`,
-
-	-- COMPILER_PATH
-	-- Get the path to the compiler. This will be a hardcoded value in the compiled program.
-	COMPILER_PATH = F("%q", COMPILER_PATH),
-
-	-- COMPILER_DIRECTORY
-	-- Get the path to the directory the compiler is located in. This will be a hardcoded value in the compiled program.
-	COMPILER_DIRECTORY = F("%q", COMPILER_DIRECTORY),
-
-	-- wrapFunctionInGloaErrorHandler()
-	-- Make Glóa handle errors triggered by a function.
-	--
-	-- This is useful if an external library or framework tries to handle an error
-	-- triggered by a callback provided by you, but you instead want to trigger a
-	-- normal Glóa error before the library knows what happened.
-	--
-	-- wrappedFunction = wrapFunctionInGloaErrorHandler( function )
-	--
-	wrapFunctionInGloaErrorHandler = !(trimTemplate`
-		function(cb)
-			return function(...)
-				local args = {n=select("#", ...), ...}
-
-				if not xpcall(
-					function()
-						cb(unpack(args, 1, args.n))
-					end,
-					gloaErrorHandler
-				) then
-					os.exit(1)
-				end
-			end
-		end
-	`),
-
-	-- ipairsr
-	-- Reverse iteration of an array.
-	-- for i, item in ipairsr( array ) do
-	ipairsr = `_IPAIRSR`,
+	appPath            = `(debug.getinfo(1, "S").source:match"^@(.+)" or error("Could not get application path.")) :gsub("\\", "/")`,
+	appDirectory       = `(debug.getinfo(1, "S").source:match"^@(.+)" or error("Could not get application path.")) :gsub("\\", "/"):gsub("/?[^/]+$", ""):gsub("^$", ".")`,
+	compilerPath       = F("%q", COMPILER_PATH),
+	compilerDirectory  = F("%q", COMPILER_DIRECTORY),
 
 	typeTagAny         = !(toLua(typeTags.TypeInfoAny)),
 	typeTagArray       = !(toLua(typeTags.TypeInfoArray)),
@@ -100,15 +63,40 @@ local FOREIGN_API_COMPILER_SYMBOLS = {
 	typeTagType        = !(toLua(typeTags.TypeInfoType)),
 	typeTagVararg      = !(toLua(typeTags.TypeInfoVararg)),
 	typeTagVoid        = !(toLua(typeTags.TypeInfoVoid)),
+
+	ipairsr            = `_IPAIRSR`,
+
+	wrapFunctionInGloaErrorHandler = !(trimTemplate`
+		function(cb)
+			return function(...)
+				local args = {n=select("#", ...), ...}
+
+				if not xpcall(
+					function()
+						cb(unpack(args, 1, args.n))
+					end,
+					gloaErrorHandler
+				) then
+					os.exit(1)
+				end
+			end
+		end
+	`),
+
+	getProgramArguments = !(trimTemplate`
+		function()
+			return {unpack(programArguments)}
+		end
+	`),
 }
 
-local FOREIGN_API_COMPILER_SYMBOLS_DURING_COMPILATION = {}
+local foreignApiCompilerSymbolsDuringCompilation = {}
 
 do !(do) @insert "compilerApi.luapart" !(end) end
 
 for k in pairsSorted(compilerApi) do
-	FOREIGN_API_COMPILER_SYMBOLS[k]                    = `function() error("Function not available during runtime.") end`
-	FOREIGN_API_COMPILER_SYMBOLS_DURING_COMPILATION[k] = "_COMPILER."..k
+	foreignApiCompilerSymbols[k]                  = `function() error("Function not available during runtime.") end`
+	foreignApiCompilerSymbolsDuringCompilation[k] = "_COMPILER."..k
 end
 
 local LUA_KEYWORDS = !(Set{"and","break","do","else","elseif","end","false","for","function","goto","if","in","local","nil","not","or","repeat","return","then","true","until","while"})
@@ -545,7 +533,7 @@ function _G.writeExpression(state, writer, expr)
 		local typeNode = expr
 		file:write(F("%d", typeNode.representedType.id)) -- @Cleanup: We probably have a constant for the type ID to use with writeConstantValue(state,) here who cares...
 		if state.settings.outputDebugInfo then
-			file:write("--[[", getFriendlyTypeInfoName(typeNode.representedType):gsub("%]", "%0 "), "]]")
+			file:write(formatInfoComment(getFriendlyTypeInfoName(typeNode.representedType)))
 		end
 
 	elseif expr.nodeType == !(nodeTypes.AstLambda) then
@@ -1133,6 +1121,7 @@ function _G.writeBlock(state, writer, block, indent, nextLocalN, localsStack, is
 
 			elseif forLoop.forType == !(FOR_SHORT) then
 				local objExpr = forLoop.expressions[1]
+				local objType = adjustTypeToOne(state, objExpr, objExpr.inferredType, true)
 
 				file:write(indentStr, "for ")
 
@@ -1143,7 +1132,7 @@ function _G.writeBlock(state, writer, block, indent, nextLocalN, localsStack, is
 
 				file:write(" in ")
 
-				if objExpr.inferredType.tag == !(typeTags.TypeInfoArray) then
+				if objType.tag == !(typeTags.TypeInfoArray) then
 					addLineMapping(state, writer, objExpr.token)
 					if forLoop.reverse then
 						file:write("_IPAIRSR")
@@ -1151,12 +1140,12 @@ function _G.writeBlock(state, writer, block, indent, nextLocalN, localsStack, is
 						file:write("_IPAIRS")
 					end
 
-				elseif objExpr.inferredType.tag == !(typeTags.TypeInfoTable) then
+				elseif objType.tag == !(typeTags.TypeInfoTable) then
 					assert(not forLoop.reverse)
 					addLineMapping(state, writer, objExpr.token)
 					file:write("_PAIRS")
 
-				elseif objExpr.inferredType.tag == !(typeTags.TypeInfoStruct) then
+				elseif objType.tag == !(typeTags.TypeInfoStruct) then
 					assert(not forLoop.reverse)
 					errorUnhandledNodeType(state, objExpr)
 					-- writeConstantValueOrReference(state, writer, interatorFuncConst?) -- @Incomplete: Output default iterator for the struct.
@@ -1331,8 +1320,8 @@ function _G.writeForeignImportIfNew(state, writer, typeInfo, foreignSource, fore
 	addLineMapping(state, writer, token) -- Must happen after _FOREIGN is declared.
 
 	if foreignSource == "lua" then
-		if outputDebugInfo then
-			writer.foreignReferences[foreignSourceId] = F("_FOREIGN[%d--[[%s]]]", foreignN, (foreignSourceId:gsub("[%[%]]", "%0 ")))
+		if state.settings.outputDebugInfo then
+			writer.foreignReferences[foreignSourceId] = F("_FOREIGN[%d%s]", foreignN, formatInfoComment(foreignSourceId))
 			file:write("\t_FOREIGN[", F("%d", foreignN), "]")
 		else
 			local foreignRef                         = F("_FOREIGN[%d]", foreignN)
@@ -1349,11 +1338,11 @@ function _G.writeForeignImportIfNew(state, writer, typeInfo, foreignSource, fore
 		end
 
 	elseif foreignSource == "compiler" then
-		local symbols = writer.outputRuntime and FOREIGN_API_COMPILER_SYMBOLS or FOREIGN_API_COMPILER_SYMBOLS_DURING_COMPILATION
-		local lua     = symbols[foreignSourceName] or FOREIGN_API_COMPILER_SYMBOLS[foreignSourceName] or errorInternal("%s", foreignSourceName)
+		local symbols = writer.outputRuntime and foreignApiCompilerSymbols or foreignApiCompilerSymbolsDuringCompilation
+		local lua     = symbols[foreignSourceName] or foreignApiCompilerSymbols[foreignSourceName] or errorInternal("%s", foreignSourceName)
 
-		if outputDebugInfo then
-			writer.foreignReferences[foreignSourceId] = F("_FOREIGN[%d--[[%s]]]", foreignN, (foreignSourceId:gsub("[%[%]]", "%0 ")))
+		if state.settings.outputDebugInfo then
+			writer.foreignReferences[foreignSourceId] = F("_FOREIGN[%d--[[%s]]]", foreignN, foreignSourceId)
 			file:write("\t_FOREIGN[", F("%d", foreignN), "]")
 		else
 			local foreignRef                          = F("_FOREIGN[%d]", foreignN)
@@ -1429,7 +1418,7 @@ local function writeSimpleConstant(state, writer, typeInfo, v, isEnum)
 		file:write(F("%d", typeInfo.id))
 
 		if state.settings.outputDebugInfo and not isEnum then
-			file:write("--[[", getFriendlyTypeInfoName(typeInfo):gsub("%]", "] "), "]]")
+			file:write(formatInfoComment(getFriendlyTypeInfoName(typeInfo)))
 		end
 
 	else
@@ -1686,6 +1675,13 @@ function _G.writeCompilerSymbols(state, writer)
 	local file = writer.file
 
 	file:write("local lineMappingPaths, lineMappingFiles, lineMappingLines = {}, {}, {}")
+	writeEol(state, writer)
+
+	if writer.outputRuntime then
+		file:write("local programArguments = {...}")
+	else
+		file:write("local programArguments = metaprogramArguments")
+	end
 	writeEol(state, writer)
 
 	!(
@@ -2192,13 +2188,19 @@ function _G.validateForeignSource(state, foreignSource, foreignSourceName, nodeF
 		end
 
 	elseif foreignSource == "compiler" then
-		if not FOREIGN_API_COMPILER_SYMBOLS[foreignSourceName] then
+		if not foreignApiCompilerSymbols[foreignSourceName] then
 			nodeError(state, nodeForError, "ForeignValidator", "This is not a valid compiler symbol: '%s'", foreignSourceName)
 		end
 
 	else
 		errorInternal(state, nodeForError, "Incomplete: Handle foreignSource=%s", foreignSource)
 	end
+end
+
+
+
+function _G.formatInfoComment(info)
+	return "--[[" .. info:gsub("[%[%]]", "%0 ") .. "]]"
 end
 
 
