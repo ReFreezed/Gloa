@@ -364,6 +364,9 @@ _G.!structAst"AstStruct:_AstScopeExpression"{
 	{`polymorphs`,            {},  astRef="array"}, -- []AstDeclaration
 	{`polymorphSourceStruct`, nil, astRef="node"},  -- AstStruct
 	{`bakeDeclarations`,      {},  astRef="array"}, -- []AstDeclaration
+
+	{`isForeign`,             false},               -- Foreign structs cannot be instantiated.
+	{`foreignThroughNode`,    nil, astRef="node"},  -- AstNode
 }
 _G.!structAst"AstEnum:_AstScopeExpression"{
 	_scopeType = "declarative",
@@ -2614,14 +2617,23 @@ function _G.parseExpression(state, parentNode, prevOpPrecedence, expectLeftValue
 	-- Struct/enum.
 	elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"struct") then
 		-- eatNextToken(state)
-		!SET_OR_RETURN `expr = parseStruct(state, parentNode)` -- @Cleanup: Make this an AstType node instead?
+		!SET_OR_RETURN `expr = parseStruct(state, parentNode)`
 	elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"enum") then
 		-- eatNextToken(state)
-		!SET_OR_RETURN `expr = parseEnum(state, parentNode)` -- @Cleanup: Make this an AstType node instead?
+		!SET_OR_RETURN `expr = parseEnum(state, parentNode)`
 
-	-- Foreign value.
+	-- Foreign value or struct.
 	elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"foreign") then
-		!SET_OR_RETURN `expr = parseForeign(state, parentNode)`
+		tokType, tokValue = peekNextToken(state)
+
+		if isToken(tokType,tokValue, !(TOKEN_KEYWORD),"struct") then
+			eatNextToken(state)
+			!SET_OR_RETURN `struct = parseStruct(state, parentNode)`
+			struct.isForeign       = true
+			expr                   = struct
+		else
+			!SET_OR_RETURN `expr = parseForeign(state, parentNode)`
+		end
 
 	-- Conditional.
 	elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"if") then

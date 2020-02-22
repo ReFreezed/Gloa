@@ -9,7 +9,7 @@
 	PI, TAU
 
 	abs
-	acos, asin, atan, cos, cosh, sin, sinh, tan, tanh
+	acos, asin, atan, cos, cosh, cos01, sin, sinh, sin01, tan, tanh
 	ceil, floor, round
 	clamp, clamp01
 	exp, frexp, ldexp
@@ -18,6 +18,7 @@
 	lerp
 	log, log10
 	min, max
+	moveTowards
 	pow
 	splitFraction
 	sqrt
@@ -60,16 +61,18 @@ export log   :: (x:float) -> float !foreign lua "math.log"
 export log10 :: (x:float) -> float !foreign lua "math.log10"
 -- export log :: (x:float, base:int) -> float { @Incomplete }
 
-export acos :: (x:float)          -> float !foreign lua "math.acos"
-export asin :: (x:float)          -> float !foreign lua "math.asin"
-export atan :: (x:float)          -> float !foreign lua "math.atan"
-export atan :: (y:float, x:float) -> float !foreign lua "math.atan2"
-export cos  :: (angle:float)      -> float !foreign lua "math.cos"
-export cosh :: (x:float)          -> float !foreign lua "math.cosh"
-export sin  :: (angle:float)      -> float !foreign lua "math.sin"
-export sinh :: (x:float)          -> float !foreign lua "math.sinh"
-export tan  :: (angle:float)      -> float !foreign lua "math.tan"
-export tanh :: (x:float)          -> float !foreign lua "math.tanh"
+export acos  :: (x:float)          -> float !foreign lua "math.acos"
+export asin  :: (x:float)          -> float !foreign lua "math.asin"
+export atan  :: (x:float)          -> float !foreign lua "math.atan"
+export atan  :: (y:float, x:float) -> float !foreign lua "math.atan2"
+export cos   :: (angle:float)      -> float !foreign lua "math.cos"
+export cosh  :: (x:float)          -> float !foreign lua "math.cosh"
+export cos01 :: (angle:float)      -> float { return .5+.5*cos(angle) }
+export sin   :: (angle:float)      -> float !foreign lua "math.sin"
+export sinh  :: (x:float)          -> float !foreign lua "math.sinh"
+export sin01 :: (angle:float)      -> float { return .5+.5*sin(angle) }
+export tan   :: (angle:float)      -> float !foreign lua "math.tan"
+export tanh  :: (x:float)          -> float !foreign lua "math.tanh"
 
 export toDegrees :: (radians:float) -> (degrees:float) !foreign lua "math.deg"
 export toRadians :: (degrees:float) -> (radians:float) !foreign lua "math.rad"
@@ -77,12 +80,24 @@ export toRadians :: (degrees:float) -> (radians:float) !foreign lua "math.rad"
 export pow  :: (x,power:float) -> float !foreign lua "math.pow" -- '^' should be used instead whenever possible!
 export sqrt :: (x:float) -> float !foreign lua "math.sqrt"
 
-export getRandom :: (low,high:int) -> int   !foreign lua "math.random"
-export getRandom :: (    high:int) -> int   !foreign lua "math.random" -- Same as random(1, high)
-export getRandom :: (            ) -> float !foreign lua "math.random"
+export getRandom :: (    high:int) -> int !foreign lua "math.random" -- Same as random(1, high)
+export getRandom :: (low,high:int) -> int !foreign lua "math.random"
+
+export getRandom :: (              ) -> float !foreign lua "math.random"
+export getRandom :: (    high:float) -> float { return high * getRandom() }
+export getRandom :: (low,high:float) -> float { return low + (high-low) * getRandom() }
 
 export setRandomSeed :: (seed:int) {
 	local _setRandomSeed :: (seed:int) !foreign lua "math.randomseed"
 	_setRandomSeed(seed)
 	getRandom() -- Gets rid of the lingering random number from the last seed. Why is this even a thing, Lua...
+}
+
+-- value, targetReached = moveTowards( currentValue, targetValue, speed )
+export moveTowards :: (current,target,speed:float) -> (value:float, targetReached:bool) {
+	if current < target
+		current = min(current+speed, target)
+	elseif current > target
+		current = max(current-speed, target)
+	return current, (current == target)
 }

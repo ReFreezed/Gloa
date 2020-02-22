@@ -1854,7 +1854,7 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 			end
 
 			for argIndexNew, valueExpr in ipairs(call.arguments) do
-				valueExpr.container.key = argIndexNew
+				valueExpr.queued.key = argIndexNew
 			end
 		end
 
@@ -2054,9 +2054,9 @@ local function handleOverloadedCall(state, call, realArguments, realArgumentType
 
 	if not matchingOverloads then
 		printerr()
-		typeMessage(io.stderr, state, ident, "Error", "Did not find any matching overload to call.")
+		typeMessage(io.stderr, state, ident, "Error", "Did not find any matching overload to call.") -- @UX: Show expected signature.
 		for i, declOverload in ipairs(declBase.overloads) do
-			typeMessage(io.stderr, state, declOverload.name, "Info", "...overload #%d.", i)
+			typeMessage(io.stderr, state, declOverload.name, "Info", "...overload #%d: %s", i, getFriendlyTypeInfoName(declOverload.name.inferredType))
 		end
 		exitFailure()
 	end
@@ -3083,6 +3083,15 @@ end
 	elseif typeInfoExpected.tag == !(typeTags.TypeInfoStruct) then
 		local structInfo = typeInfoExpected
 
+		if structInfo.astNode.isForeign then
+			printerr()
+			nodeMessage(io.stderr, state, tableNode, "Error", "Typer", "Cannot instantiate foreign struct '%s'.", getFriendlyTypeInfoName(structInfo))
+			if structInfo.astNode.foreignThroughNode then
+				nodeMessage(io.stderr, state, structInfo.astNode.foreignThroughNode, "Info", "Typer", "...the struct got its foreign state through this.")
+			end
+			exitFailure()
+		end
+
 		-- @Incomplete: This dependency is problematic in these cases:
 		-- local Struct :: struct{ bad:Struct = {} }
 		-- local Struct :: struct{ bad = cast(Struct) {} }
@@ -3873,11 +3882,13 @@ end
 			!ASSERT `values[2] and not values[4]`
 
 			for _, valueExpr in ipairs(values) do
-				if valueExpr.inferredType.tag ~= !(typeTags.TypeInfoInt) then
+				local typeInfo = adjustTypeToOne(state, valueExpr, valueExpr.inferredType, true)
+
+				if typeInfo.tag ~= !(typeTags.TypeInfoInt) then
 					typeError(
 						state, astGetExpressionVisuallyFurthestToTheLeft(valueExpr),
 						"For loop: Expected an int. (Got %s)",
-						getFriendlyTypeInfoName(valueExpr.inferredType)
+						getFriendlyTypeInfoName(typeInfo)
 					)
 				end
 			end
@@ -4163,6 +4174,11 @@ end
 					moveToNextRelevantPipe(state, decl)
 				end
 			end
+
+			if structInfoToInherit.astNode.isForeign then
+				struct.isForeign          = true
+				struct.foreignThroughNode = typeExpr
+			end
 		end
 
 		for i, expr in ipairs(struct.statements) do
@@ -4178,6 +4194,28 @@ end
 			table.insert(structInfo.members, member)
 
 			checkForRecursiveStruct(state, decl, {member}, member, structInfo, structInfo)
+
+			if struct.isForeign then
+				-- void
+
+			elseif decl.value and decl.value.nodeType == !(nodeTypes.AstForeign) then
+				-- void
+
+			elseif member.typeInfo.tag == !(typeTags.TypeInfoStruct) then
+				if member.typeInfo.astNode.isForeign then
+					struct.isForeign          = true
+					struct.foreignThroughNode = decl
+				end
+
+			elseif member.typeInfo.tag == !(typeTags.TypeInfoCompound) then
+				!ASSERT("decl.value.inferredType.tag ~= "..typeTags.TypeInfoCompound)
+
+				if decl.value.inferredType.tag == !(typeTags.TypeInfoStruct) and decl.value.inferredType.astNode.isForeign then
+					struct.isForeign          = true
+					struct.foreignThroughNode = decl
+					break
+				end
+			end
 		end
 	end
 	structInfo.hasMembers = true
@@ -5105,9 +5143,13 @@ local function simplifyCast(state, cast)
 			errorInternal(state, cast, "Incomplete: Handle casting enum to %s.", getFriendlyTypeInfoName(castTypeInfo))
 		end
 
+	-- (whatever) -> compound
+	elseif castTypeInfo.tag == !(typeTags.TypeInfoCompound) then
+		typeError(state, cast, "Cannot cast constants to compound types. (Target type is %s)", getFriendlyTypeInfoName(castTypeInfo))
+
 	-- (whatever) -> any
 	-- any -> (whatever)
-	elseif exprTypeInfo.tag == !(typeTags.TypeInfoAny) or castTypeInfo.tag == !(typeTags.TypeInfoAny) then
+	elseif exprTypeInfo.tag == !(typeTags.TypeInfoAny) or castTypeInfo.tag == !(typeTags.TypeInfoAny) then -- Handle this last!
 		-- void
 
 	else
@@ -5494,6 +5536,8 @@ function _G.isTypeCompatibleWith(typeToCheck, otherType)
 end
 
 function _G.doesStructInherit(structInfoToCheck, otherStructInfo)
+	!ASSERT `otherStructInfo`
+
 	for _, typeExpr in ipairs(structInfoToCheck.astNode.inherits) do
 		local structInfoInherited = getTypeRepresentedByExpression(typeExpr)
 

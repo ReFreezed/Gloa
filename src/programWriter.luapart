@@ -319,19 +319,23 @@ function _G.writeCast(state, writer, cast, nameToCast)
 		!!(WRITE_EXPRESSION)
 		writer.file:write("[1] ~= nil")
 
-	-- (whatever) -> any
-	-- any -> (whatever)
-	elseif typeInfoSource.tag == !(typeTags.TypeInfoAny) or typeInfoTarget.tag == !(typeTags.TypeInfoAny) then
-		-- The user better know what they're doing!
-		-- @Incomplete: Compiler setting for runtime checks of 'any' and 'compound' casts.
-		!!(WRITE_EXPRESSION)
-
 	-- enum -> (real enum member type)
 	elseif typeInfoSource.tag == !(typeTags.TypeInfoEnum) and typeInfoTarget == typeInfoSource.memberTypeInfo then
 		!!(WRITE_EXPRESSION)
 
 	-- (base struct) -> (substruct)
 	elseif typeInfoSource.tag == !(typeTags.TypeInfoStruct) and typeInfoTarget.tag == !(typeTags.TypeInfoStruct) then
+		!!(WRITE_EXPRESSION)
+
+	-- (table-like) -> table
+	elseif isTypeTableLike(typeInfoSource) and typeInfoTarget.tag == !(typeTags.TypeInfoTable) then
+		!!(WRITE_EXPRESSION)
+
+	-- (whatever) -> any
+	-- any -> (whatever)
+	elseif typeInfoSource.tag == !(typeTags.TypeInfoAny) or typeInfoTarget.tag == !(typeTags.TypeInfoAny) then
+		-- The user better know what they're doing!
+		-- @Incomplete: Compiler setting for runtime checks of 'any' and 'compound' casts.
 		!!(WRITE_EXPRESSION)
 
 	else
@@ -728,6 +732,16 @@ function _G.writeDefaultValueForType(state, writer, typeInfo, nodeForError)
 	elseif tag == !(typeTags.TypeInfoStruct) then
 		local structInfo = typeInfo
 		!ASSERT `not structInfo.isPolymorphic`
+
+		if structInfo.astNode.isForeign then
+			-- @Speed: Detect this sooner (probably when inferring AstDeclaration).
+			printerr()
+			nodeMessage(io.stderr, state, nodeForError, "Error", "Typer", "Cannot instantiate foreign struct '%s'.", getFriendlyTypeInfoName(structInfo))
+			if structInfo.astNode.foreignThroughNode then
+				nodeMessage(io.stderr, state, structInfo.astNode.foreignThroughNode, "Info", "Typer", "...the struct got its foreign state through this.")
+			end
+			exitFailure()
+		end
 
 		file:write("{")
 
