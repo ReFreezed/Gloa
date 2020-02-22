@@ -184,18 +184,18 @@ function _G.writeStringConcatenation(state, writer, left, right)
 end
 
 function _G.shouldOperationHaveSurroundingParentheses(node)
-	local parent = node.parent
+	local parent         = node.parent
+	local parentNodeType = parent.nodeType
 	return not (
-		isAny(
-			parent.nodeType,
-			!(nodeTypes.AstCast), -- Casts should always add their own parentheses.
-			!(nodeTypes.AstAssignment),
-			!(nodeTypes.AstCall), -- Both callee and arguments.
-			!(nodeTypes.AstReturn),
-			!(nodeTypes.AstIf),
-			!(nodeTypes.AstFor),
-			!(nodeTypes.AstWhile)
-		)
+		!!(anyV(`parentNodeType`,
+			nodeTypes.AstCast, -- Casts should always add their own parentheses.
+			nodeTypes.AstAssignment,
+			nodeTypes.AstCall, -- Both callee and arguments.
+			nodeTypes.AstReturn,
+			nodeTypes.AstIf,
+			nodeTypes.AstFor,
+			nodeTypes.AstWhile
+		))
 		or parent.nodeType == !(nodeTypes.AstAccess) and node == parent.member -- The member should be inside [].
 	)
 end
@@ -377,13 +377,13 @@ local function findTableFieldInStructConstructor(tableNode, memberName)
 end
 
 local function doesTypeContainBoolOrNone(typeInfo)
-	if isAny(typeInfo.tag, !(typeTags.TypeInfoBool),!(typeTags.TypeInfoNone),!(typeTags.TypeInfoAny)) then  return true  end
+	if !!(anyV(`typeInfo.tag`, typeTags.TypeInfoBool,typeTags.TypeInfoNone,typeTags.TypeInfoAny)) then  return true  end
 
 	if typeInfo.tag ~= !(typeTags.TypeInfoCompound) then  return false  end
 	local compound = typeInfo
 
 	for _, compoundItem in ipairs(compound) do
-		if isAny(compoundItem.tag, !(typeTags.TypeInfoBool),!(typeTags.TypeInfoNone)) then  return true  end
+		if !!(anyV(`compoundItem.tag`, typeTags.TypeInfoBool,typeTags.TypeInfoNone)) then  return true  end
 	end
 	return false
 end
@@ -1256,7 +1256,7 @@ function _G.writeBlock(state, writer, block, indent, nextLocalN, localsStack, is
 				file:write(indentStr, "end") ; writeEol(state, writer)
 			end
 
-		elseif isAny(nodeType, !(nodeTypes.AstImport),!(nodeTypes.AstUsing),!(nodeTypes.AstDebug),!(nodeTypes.AstRun)) then
+		elseif !!(anyV(`nodeType`, nodeTypes.AstImport,nodeTypes.AstUsing,nodeTypes.AstDebug,nodeTypes.AstRun)) then
 			-- void  (Ignore these statements.)
 
 		else
@@ -1668,18 +1668,18 @@ function _G.writeConstantValue(state, writer, const)
 
 			!!(END_OF_TYPE_INFO"TypeInfoCompound")
 
-		elseif isAny(tag,
-			!(typeTags.TypeInfoAny),
-			!(typeTags.TypeInfoBool),
-			!(typeTags.TypeInfoFloat),
-			!(typeTags.TypeInfoInt),
-			!(typeTags.TypeInfoNone),
-			!(typeTags.TypeInfoPlaceholder),
-			!(typeTags.TypeInfoString),
-			!(typeTags.TypeInfoTable),
-			!(typeTags.TypeInfoType),
-			!(typeTags.TypeInfoVoid)
-		) then
+		elseif !!(anyV(`tag`,
+			typeTags.TypeInfoAny,
+			typeTags.TypeInfoBool,
+			typeTags.TypeInfoFloat,
+			typeTags.TypeInfoInt,
+			typeTags.TypeInfoNone,
+			typeTags.TypeInfoPlaceholder,
+			typeTags.TypeInfoString,
+			typeTags.TypeInfoTable,
+			typeTags.TypeInfoType,
+			typeTags.TypeInfoVoid
+		)) then
 			-- void  No more information.
 			!!(END_OF_TYPE_INFO"TypeInfo")
 
@@ -1687,7 +1687,7 @@ function _G.writeConstantValue(state, writer, const)
 			errorInternal("Incomplete: %s", getFriendlyTypeInfoName(typeInfo))
 		end
 
-	elseif isAny(tag, !(typeTags.TypeInfoAny),!(typeTags.TypeInfoNamespace),!(typeTags.TypeInfoCompound),!(typeTags.TypeInfoList)) then
+	elseif !!(anyV(`tag`, typeTags.TypeInfoAny,typeTags.TypeInfoNamespace,typeTags.TypeInfoCompound,typeTags.TypeInfoList)) then
 		errorInternal("Cannot write invalid value type '%s'.", TYPE_TAG_NAMES[tag])
 	else
 		errorInternal("Incomplete: Handle constant value of type '%s'.", (TYPE_TAG_NAMES[tag] or "?"))
@@ -2015,7 +2015,7 @@ function _G.writeProgram(state, writer)
 					local typeInfoNode = node
 					relevantObjects[typeInfoNode.valueConstant] = true
 
-				elseif isAny(node.nodeType, !(nodeTypes.AstDeclaration),!(nodeTypes.AstLiteral),!(nodeTypes.AstLambda),!(nodeTypes.AstForeign)) then
+				elseif !!(anyV(`node.nodeType`, nodeTypes.AstDeclaration,nodeTypes.AstLiteral,nodeTypes.AstLambda,nodeTypes.AstForeign)) then
 					if node.valueConstant then
 						relevantObjects[node.valueConstant] = true
 					end
@@ -2196,18 +2196,18 @@ end
 
 
 function _G.doesTypeHaveAnyDefaultValue(typeInfo)
-	return isAny(
-		typeInfo.tag,
-		!(typeTags.TypeInfoBool),
-		!(typeTags.TypeInfoInt),
-		!(typeTags.TypeInfoNone),
-		!(typeTags.TypeInfoFloat),
-		!(typeTags.TypeInfoString),
-		!(typeTags.TypeInfoArray),
-		!(typeTags.TypeInfoTable),
-		!(typeTags.TypeInfoStruct),
-		!(typeTags.TypeInfoVararg) -- Varargs never have any default value(s), but because it's a list we can just say that the default value is "nothing".
-	)
+	local tag = typeInfo.tag
+	return !!(anyV(`tag`,
+		typeTags.TypeInfoBool,
+		typeTags.TypeInfoInt,
+		typeTags.TypeInfoNone,
+		typeTags.TypeInfoFloat,
+		typeTags.TypeInfoString,
+		typeTags.TypeInfoArray,
+		typeTags.TypeInfoTable,
+		typeTags.TypeInfoStruct,
+		typeTags.TypeInfoVararg -- Varargs never have any default value(s), but because it's a list we can just say that the default value is "nothing".
+	))
 end
 
 

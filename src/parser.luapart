@@ -10,7 +10,7 @@
 --==============================================================
 
 	astCopy
-	astFindParent, astFindCommonParent, astHasParent, astFindInTree
+	astFindParent*, astFindParentScope, astFindCommonParent, astHasParent, astFindInTree
 	astGetDepth
 	astGetExpressionVisuallyFurthestToThe*, astGetCalleeVisuallyFurthestToTheLeft
 	astIsOrIsInModule
@@ -507,7 +507,7 @@ function _G.parseForeign(state, parentNode)
 	local tokType, tokValue = eatNextToken(state)
 	if not isToken(tokType,tokValue, !(TOKEN_IDENTIFIER)) then
 		!ERROR_OR_RETURN `errorParsingLast(state, "Expected foreign source. (Valid values: lua, compiler)")`
-	elseif not isAny(tokValue, "lua","compiler") then
+	elseif not !!(anyV(`tokValue`, "lua","compiler")) then
 		!ERROR_OR_RETURN `errorParsingLast(state, "Invalid source '%s'. (Valid values: lua, compiler)", tokValue)`
 	end
 	foreign.source = tokValue
@@ -1311,7 +1311,7 @@ function _G.parseAssignment(state, parentNode)
 	!DO_OR_RETURN `parseExpressionList(state, assignment, assignment.targets, true)`
 
 	for i, expr in ipairs(assignment.targets) do
-		if not isAny(expr.nodeType, !(nodeTypes.AstIdentifier),!(nodeTypes.AstAccess),!(nodeTypes.AstBlank)) then
+		if not !!(anyV(`expr.nodeType`, nodeTypes.AstIdentifier,nodeTypes.AstAccess,nodeTypes.AstBlank)) then
 			!ERROR_OR_RETURN `errorParsing(state, expr.token, "Expected assignment target expression to resolve into a variable or namespace access.")`
 		end
 	end
@@ -1568,7 +1568,7 @@ function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 
 		eatNextToken(state)
 
-		local loopOrLambda = astFindParent(breakOrContinue, !(nodeTypes.AstFor),!(nodeTypes.AstWhile),!(nodeTypes.AstLambda))
+		local loopOrLambda = astFindParent3(breakOrContinue, !(nodeTypes.AstFor),!(nodeTypes.AstWhile),!(nodeTypes.AstLambda))
 		if not loopOrLambda or loopOrLambda.nodeType == !(nodeTypes.AstLambda) then
 			!ERROR_OR_RETURN_FALSE `errorParsingLast(state, "Not inside a loop.")`
 		end
@@ -1604,7 +1604,7 @@ function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 					break -- Assume the identifier is part of a different statement.
 				end
 
-				loopOrLambda = astFindParent(loopOrLambda, !(nodeTypes.AstFor),!(nodeTypes.AstWhile),!(nodeTypes.AstLambda))
+				loopOrLambda = astFindParent3(loopOrLambda, !(nodeTypes.AstFor),!(nodeTypes.AstWhile),!(nodeTypes.AstLambda))
 			until not loopOrLambda
 		end
 
@@ -1874,7 +1874,7 @@ function _G.parseBlock(state, parentNode)
 			if not state.soft then  parserMessageLine(io.stderr, state, token, "Warning", "Empty statement.")  end
 
 		else
-			if isAny(lastNodeType, !(nodeTypes.AstReturn),!(nodeTypes.AstBreak),!(nodeTypes.AstContinue)) then
+			if !!(anyV(`lastNodeType`, nodeTypes.AstReturn,nodeTypes.AstBreak,nodeTypes.AstContinue)) then
 				local nodeTitle
 					=  lastNodeType == !(nodeTypes.AstReturn)   and "Return"
 					or lastNodeType == !(nodeTypes.AstBreak)    and "Break"
@@ -2361,7 +2361,7 @@ function _G.parseLambda(state, parentNode, allowBody)
 			tokType, tokValue = eatNextToken(state)
 			if not isToken(tokType,tokValue, !(TOKEN_IDENTIFIER)) then
 				!ERROR_OR_RETURN `errorParsingLast(state, "Expected foreign source. (Valid values: lua, compiler)")`
-			elseif not isAny(tokValue, "lua","compiler") then
+			elseif not !!(anyV(`tokValue`, "lua","compiler")) then
 				!ERROR_OR_RETURN `errorParsingLast(state, "Invalid source '%s'. (Valid values: lua, compiler)", tokValue)`
 			end
 			lambda.foreignSource = tokValue
@@ -2431,7 +2431,7 @@ function _G.parseExpression(state, parentNode, prevOpPrecedence, expectLeftValue
 		expr        = ident
 
 	-- Literal.
-	elseif isTokenLiteral(tokType, tokValue) or (isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"+","-") and isAny(tokType2, !(TOKEN_FLOAT),!(TOKEN_INTEGER))) then
+	elseif isTokenLiteral(tokType, tokValue) or (isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"+","-") and !!(anyV(`tokType2`, TOKEN_FLOAT,TOKEN_INTEGER))) then
 		local literal = astNewNode(AstLiteral, exprStartToken, parentNode)
 
 		if tokType == !(TOKEN_KEYWORD) then
@@ -2521,7 +2521,7 @@ function _G.parseExpression(state, parentNode, prevOpPrecedence, expectLeftValue
 		encounteredParentheses = true
 		!SET_OR_RETURN `expr   = parseExpression(state, parentNode)`
 
-		if isAny(expr.nodeType, !(nodeTypes.AstCall), !(nodeTypes.AstVararg)) then
+		if !!(anyV(`expr.nodeType`, nodeTypes.AstCall,nodeTypes.AstVararg)) then
 			-- This is so we know whether to adjust the return values to one or not in certain situations.
 			-- Note: Functions with a return argument after the first one marked as #must cannot have their
 			-- return arguments adjusted to one.
@@ -3088,7 +3088,7 @@ do
 			local dependency = queued.waitingOn
 			if dependency then
 				write(" w:", DEPEND_TITLES[dependency.dependType])
-				if isAny(dependency.dependType, !(DEPEND_NODE_INFERRED),!(DEPEND_NODE_EMITTED)) then
+				if !!(anyV(`dependency.dependType`, DEPEND_NODE_INFERRED,DEPEND_NODE_EMITTED)) then
 					write(":", dependency.dependOn.node.s)
 				end
 			end
@@ -3292,7 +3292,7 @@ do
 				printNodeList(returnNode.values, indent+1, printed, printChildren)
 				!!(CHILD_PRINT_END)
 
-			elseif isAny(node.nodeType, !(nodeTypes.AstBreak),!(nodeTypes.AstContinue)) then
+			elseif !!(anyV(`node.nodeType`, nodeTypes.AstBreak,nodeTypes.AstContinue)) then
 				local breakOrContinue = node
 				if breakOrContinue.loopName then  write(" (", breakOrContinue.loopName.name, ")")  end
 				write("\n")
@@ -3353,7 +3353,7 @@ do
 				local literal = node
 				write(" (")
 
-				if isAny(literal.literalType, !(LITERAL_BOOLEAN),!(LITERAL_NIL)) then
+				if !!(anyV(`literal.literalType`, LITERAL_BOOLEAN,LITERAL_NIL)) then
 					write(tostring(literal.value))
 
 				else
@@ -3395,7 +3395,7 @@ do
 			elseif node.declarations then -- AstScope and substructs.
 				if node.nodeType == !(nodeTypes.AstLambda) then
 					local lambda     = node
-					local assignment = astFindParent(lambda, !(nodeTypes.AstAssignment))
+					local assignment = astFindParent1(lambda, !(nodeTypes.AstAssignment))
 					local i          = assignment and assignment.forDeclaration and indexOf(assignment.values, lambda)
 					if lambda.isPolymorphic then  write(" (polymorphs=", #lambda.polymorphs, ")")  end
 					if i                    then  write(" (", assignment.targets[i].name,     ")")  end
@@ -3404,7 +3404,7 @@ do
 					local fileScope = node
 					write(" (", fileScope.path, ")")
 
-				elseif isAny(node.nodeType, !(nodeTypes.AstStruct),!(nodeTypes.AstEnum)) then
+				elseif !!(anyV(`node.nodeType`, nodeTypes.AstStruct,nodeTypes.AstEnum)) then
 					local structOrEnum = node
 					local typeInfo     = structOrEnum.representedType
 					if typeInfo and typeInfo.name ~= "" then  write(" (", typeInfo.name, ")")  end
@@ -3435,7 +3435,7 @@ end
 
 
 
--- parent, childClosestToParent = astFindParent( node, nodeType1, ... )
+-- parent, childClosestToParent = astFindParent( node, parentNodeType1, ... )
 function _G.astFindParent(node, ...)
 	local lastNode = node
 
@@ -3443,6 +3443,48 @@ function _G.astFindParent(node, ...)
 		node = node.parent
 		if not node                  then  return nil,  nil       end
 		if isAny(node.nodeType, ...) then  return node, lastNode  end
+
+		lastNode = node
+	end
+end
+-- parent, childClosestToParent = astFindParent1( node, parentNodeType )
+function _G.astFindParent1(node, parentNodeType)
+	local lastNode = node
+
+	while true do
+		node = node.parent
+		if not node                        then  return nil,  nil       end
+		if node.nodeType == parentNodeType then  return node, lastNode  end
+
+		lastNode = node
+	end
+end
+-- parent, childClosestToParent = astFindParent3( node, parentNodeType1, parentNodeType2, parentNodeType3 )
+function _G.astFindParent3(node, parentNodeType1, parentNodeType2, parentNodeType3)
+	local lastNode = node
+	local _nodeType
+
+	while true do
+		node = node.parent
+		if not node  then  return nil, nil end
+
+		_nodeType = node.nodeType
+		if _nodeType == parentNodeType1 or _nodeType == parentNodeType2 or _nodeType == parentNodeType3 then  return node, lastNode  end
+
+		lastNode = node
+	end
+end
+-- scope, statement = astFindParentScope( node )
+function _G.astFindParentScope(node)
+	local lastNode = node
+	local _nodeType
+
+	while true do
+		node = node.parent
+		if not node  then  return nil, nil end
+
+		_nodeType = node.nodeType
+		if !!(anyV(`_nodeType`, unpack(scopeNodeTypes))) then  return node, lastNode  end
 
 		lastNode = node
 	end
@@ -3483,7 +3525,7 @@ end
 
 
 function _G.astIsOrIsInModule(node)
-	local fileScope = (node.nodeType == !(nodeTypes.AstFileScope) and node or astFindParent(node, !(nodeTypes.AstFileScope)))
+	local fileScope = (node.nodeType == !(nodeTypes.AstFileScope) and node or astFindParent1(node, !(nodeTypes.AstFileScope)))
 	return fileScope ~= nil and fileScope.isModule
 end
 

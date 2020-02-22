@@ -219,18 +219,24 @@ do
 end
 
 local function doesLambdaHaveSignature(lambda, funcSig)
-	if (lambda.argumentsIn  and #lambda.argumentsIn .arguments or 0) ~= #funcSig.argumentTypesIn  then  return false  end
-	if (lambda.argumentsOut and #lambda.argumentsOut.arguments or 0) ~= #funcSig.argumentTypesOut then  return false  end
+	local argsIn      = lambda.argumentsIn
+	local argsTypesIn = funcSig.argumentTypesIn
+	if (argsIn  and #argsIn .arguments or 0) ~= #argsTypesIn  then  return false  end
 
-	if lambda.argumentsIn then
-		for i, arg in ipairs(lambda.argumentsIn.arguments) do
-			if arg.declaration.name.inferredType ~= funcSig.argumentTypesIn[i]      then  return false  end
-			if arg.isRequired                    ~= funcSig.requiredArgumentsIn[i]  then  return false  end
+	local argsOut      = lambda.argumentsOut
+	local argsTypesOut = funcSig.argumentTypesOut
+	if (argsOut and #argsOut.arguments or 0) ~= #argsTypesOut then  return false  end
+
+	if argsIn then
+		local requiredArgsIn = funcSig.requiredArgumentsIn
+		for i, arg in ipairs(argsIn.arguments) do
+			if arg.declaration.name.inferredType ~= argsTypesIn[i]     then  return false  end
+			if arg.isRequired                    ~= requiredArgsIn[i]  then  return false  end
 		end
 	end
-	if lambda.argumentsOut then
-		for i, arg in ipairs(lambda.argumentsOut.arguments) do
-			if arg.declaration.name.inferredType ~= funcSig.argumentTypesOut[i] then  return false  end
+	if argsOut then
+		for i, arg in ipairs(argsOut.arguments) do
+			if arg.declaration.name.inferredType ~= argsTypesOut[i] then  return false  end
 		end
 	end
 
@@ -405,6 +411,8 @@ end
 
 
 -- scope, childClosestToScope = getClosestScope( node )
+_G.getClosestScope = astFindParentScope
+--[[
 function _G.getClosestScope(node)
 	-- @Incomplete: Treat global declarations differently and depricate
 	-- getClosestScopeForDeclaration() (or simply change the parent of
@@ -413,6 +421,7 @@ function _G.getClosestScope(node)
 		!outputCommaSeparatedValues(unpack(scopeNodeTypes))
 	)
 end
+]]
 
 -- Since the physical parent of global declarations actually is a file scope
 -- we have to treat these declarations differently sometimes. This function
@@ -420,7 +429,7 @@ end
 function _G.getClosestScopeForDeclaration(state, decl)
 	-- do return getClosestScope(decl) end
 	if decl.isGlobalOrExported then
-		local fileScope = astFindParent(decl, !(nodeTypes.AstFileScope))
+		local fileScope = astFindParent1(decl, !(nodeTypes.AstFileScope))
 		if fileScope and not fileScope.isModule then  return state.globalScope  end
 	end
 	return (getClosestScope(decl))
@@ -433,7 +442,7 @@ function _G.isScopeImperative (scope)  return SCOPE_SET_IMPERATIVE [scope.nodeTy
 
 
 function _G.getLambda(node)
-	return astFindParent(node, !(nodeTypes.AstLambda))
+	return astFindParent1(node, !(nodeTypes.AstLambda))
 end
 
 
@@ -496,8 +505,6 @@ function _G.findDeclaration(state, startNode, name, declToIgnore)
 end
 
 function _G.findDeclarationInScope(state, scope, name, onlyLookInExportsIfScopeIsModule)
-	!ASSERT `type(onlyLookInExportsIfScopeIsModule) == "boolean"`
-
 	if onlyLookInExportsIfScopeIsModule and scope.nodeType == !(nodeTypes.AstFileScope) and scope.isModule then
 		for _, decl in ipairs(scope.declarations) do
 			if decl.isGlobalOrExported and decl.name.name == name then  return decl  end
@@ -540,7 +547,7 @@ function _G.isDeclarationVisibleToNode(decl, node)
 		elseif not canSeeImperativeVariables then
 			return false
 
-		elseif isAny(nodeScope.nodeType, !(nodeTypes.AstFor),!(nodeTypes.AstLambda)) then -- These are really a combination of declarative and imperative scopes.
+		elseif !!(anyV(`nodeScope.nodeType`, nodeTypes.AstFor,nodeTypes.AstLambda)) then -- These are really a combination of declarative and imperative scopes.
 			return true
 
 		elseif nodeScope.nodeType == !(nodeTypes.AstBlock) then
@@ -560,7 +567,7 @@ function _G.isDeclarationVisibleToNode(decl, node)
 			else
 				-- The declaration is probably from a using. The only things you can use right
 				-- now are structs and enums, both being declarative scopes. 2020-01-03
-				assert(isScopeDeclarative(declScope))
+				!ASSERT `isScopeDeclarative(declScope)`
 				return true
 			end
 
@@ -917,6 +924,7 @@ end
 local function inferIdentifierOrVararg(state, identOrVararg)
 	local vararg = identOrVararg.nodeType == !(nodeTypes.AstVararg) and identOrVararg or nil
 	local ident  = not vararg                                       and identOrVararg or nil
+	local parent = identOrVararg.parent
 	local decl   = identOrVararg.declaration
 
 	-- 1. Loose identifier.
@@ -935,8 +943,8 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 
 		if
 			not ident
-			or (ident.parent.nodeType == !(nodeTypes.AstCall)  and ident == ident.parent.callee)
-			or (ident.parent.nodeType == !(nodeTypes.AstDebug) and ident.parent.action == "print")
+			or (parent.nodeType == !(nodeTypes.AstCall)  and ident == parent.callee)
+			or (parent.nodeType == !(nodeTypes.AstDebug) and parent.action == "print")
 		then
 			-- void
 
@@ -979,7 +987,7 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 		if identOrVararg.fromUsing then
 			-- @Cleanup: Move this to simplifyExpressionIfConstant()?
 			!ASSERT `ident`
-			local access        = astNewNode(AstAccess, ident.token, ident.parent)
+			local access        = astNewNode(AstAccess, ident.token, parent)
 			access.object       = astCopy(ident.fromUsing.expression, access.token, access)
 
 			local literal       = astNewNode(AstLiteral, access.token, access)
@@ -1002,10 +1010,10 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 	end
 
 	!ASSERT("decl")
-	!ASSERT("isAny(identOrVararg.parent.nodeType, "..nodeTypes.AstDeclaration..","..nodeTypes.AstAssignment..")")
+	!ASSERT("parent.nodeType == "..nodeTypes.AstDeclaration.." or parent.nodeType == "..nodeTypes.AstAssignment)
 
 	-- 2. Assignment target in declaration (which is a copy of the identifier in the declaration).
-	if identOrVararg.parent.nodeType == !(nodeTypes.AstAssignment) then
+	if parent.nodeType == !(nodeTypes.AstAssignment) then
 		local identInDecl = decl.name
 		if not identInDecl.inferredType then
 			!DEPEND_AND_RETURN(`identOrVararg`, DEPEND_NODE_INFERRED, `identInDecl`)
@@ -1033,7 +1041,7 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 		not isMember
 		and scope.nodeType == !(nodeTypes.AstLambda)
 		and scope.argumentsOut ~= nil
-		and indexOf(scope.argumentsOut.arguments, astFindParent(decl, !(nodeTypes.AstArgument))) ~= nil
+		and indexOf(scope.argumentsOut.arguments, astFindParent1(decl, !(nodeTypes.AstArgument))) ~= nil
 	)
 
 	-- Check for redeclaration/shadowing (before we DEPEND_AND_RETURN).
@@ -1172,8 +1180,8 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 
 	-- Infer type from value.
 	else
-		!ASSERT `valueExpr, "Missing both type and value from declaration."`
-		!ASSERT `not vararg`
+		!ASSERT(`valueExpr`, toLua("Missing both type and value from declaration."))
+		!ASSERT(`not vararg`)
 
 		if decl.value then
 			typeInfo = valueExpr.inferredType
@@ -1895,7 +1903,7 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 		morphLambda.polymorphs    = {}
 
 		for i, statement in ipairsr(morphLambda.statements) do
-			if isAny(statement.nodeType, !(nodeTypes.AstDeclaration),!(nodeTypes.AstAssignment)) and statement.addedByPolymorph then
+			if !!(anyV(`statement.nodeType`, nodeTypes.AstDeclaration,nodeTypes.AstAssignment)) and statement.addedByPolymorph then
 				table.remove(morphLambda.statements, i) -- Should be fast enough. There shouldn't be that many statements in lambdas.
 			end
 		end
@@ -2180,7 +2188,7 @@ local function handlePolymorphicStruct(state, call)
 		morphStruct.polymorphs    = {}
 
 		for i, statement in ipairsr(morphStruct.statements) do
-			if isAny(statement.nodeType, !(nodeTypes.AstDeclaration),!(nodeTypes.AstAssignment)) and statement.addedByPolymorph then
+			if !!(anyV(`statement.nodeType`, nodeTypes.AstDeclaration,nodeTypes.AstAssignment)) and statement.addedByPolymorph then
 				table.remove(morphStruct.statements, i) -- This line should only trigger at most twice per polymorph.
 			end
 		end
@@ -2297,7 +2305,7 @@ end
 	end
 	for _, argExpr in ipairs(call.arguments) do
 		local typeInfo = argExpr.inferredType
-		if isAny(argExpr.nodeType, !(nodeTypes.AstVararg),!(nodeTypes.AstCall)) and argExpr.surroundedByParentheses then
+		if !!(anyV(`argExpr.nodeType`, nodeTypes.AstVararg,nodeTypes.AstCall)) and argExpr.surroundedByParentheses then
 			typeInfo = adjustTypeToOne(state, argExpr, typeInfo, true)
 		end
 		table.insert(realArgumentTypes, typeInfo)
@@ -2497,7 +2505,7 @@ end
 
 	typeInfo = adjustTypeToOne(state, unary.expression, typeInfo, true)
 
-	if isAny(unary.operation, "+","-") then
+	if unary.operation == "+" or unary.operation == "-" then
 		-- @Incomplete: Allow int|float compound type here (or disallow declarations of that specific compound type).
 		if not isTypeNumeric(typeInfo) then
 			typeError(
@@ -2515,7 +2523,7 @@ end
 		end
 
 	elseif unary.operation == "#" then
-		if not isAny(typeInfo.tag, !(typeTags.TypeInfoArray),!(typeTags.TypeInfoTable)) then
+		if not !!(anyV(`typeInfo.tag`, typeTags.TypeInfoArray,typeTags.TypeInfoTable)) then
 			typeError(
 				state, unary.expression,
 				"Unary length operation (#): Expected an array or a table. (Got %s)",
@@ -2550,7 +2558,9 @@ local function isArrayItemOrTableFieldCheck(state, binary, typeInfoL, typeInfoR)
 	end
 
 	if maybeAccess.nodeType ~= !(nodeTypes.AstAccess) then  return false  end
-	if not isAny(maybeAccess.object.inferredType.tag, !(typeTags.TypeInfoArray),!(typeTags.TypeInfoTable)) then  return false  end
+
+	local tag = maybeAccess.object.inferredType.tag
+	if not !!(anyV(`tag`, typeTags.TypeInfoArray,typeTags.TypeInfoTable)) then  return false  end
 
 	return true
 end
@@ -2606,7 +2616,7 @@ function _G.checkBinaryOperation(state, exprForError, exprMain,exprL,exprR, binO
 	)`
 
 	-- Numeric operation.
-	if isAny(binOp, "+","-","*","^","%","/","//") then
+	if !!(anyV(`binOp`, "+","-","*","^","%","/","//")) then
 		if not (isTypeNumeric(typeInfoL) and isTypeNumeric(typeInfoR)) then
 			typeError(
 				state, exprMain,
@@ -2621,17 +2631,17 @@ function _G.checkBinaryOperation(state, exprForError, exprMain,exprL,exprR, binO
 			return getTypeInfoForBuiltinType(state, "float")
 		elseif binOp == "//" then
 			return getTypeInfoForBuiltinType(state, "int")
-		elseif isAny(!(typeTags.TypeInfoFloat), typeInfoL.tag,typeInfoR.tag) then
+		elseif typeInfoL.tag == !(typeTags.TypeInfoFloat) or typeInfoR.tag == !(typeTags.TypeInfoFloat) then
 			return getTypeInfoForBuiltinType(state, "float")
 		else
 			return getTypeInfoForBuiltinType(state, "int")
 		end
 
 	-- Comparison.
-	elseif isAny(binOp, "<",">","<=",">=") then
+	elseif !!(anyV(`binOp`, "<",">","<=",">=")) then
 		if not (typeInfoL == typeInfoR or (isTypeNumeric(typeInfoL) and isTypeNumeric(typeInfoR))) then
 			!!(TYPE_MISMATCH)
-		elseif not isAny(typeInfoL.tag, !(typeTags.TypeInfoInt),!(typeTags.TypeInfoFloat),!(typeTags.TypeInfoString)) then
+		elseif not !!(anyV(`typeInfoL.tag`, typeTags.TypeInfoInt,typeTags.TypeInfoFloat,typeTags.TypeInfoString)) then
 			typeError(
 				state, exprMain,
 				"Binary comparison (%s): Expected a float, int or string. (Got %s)",
@@ -2643,14 +2653,14 @@ function _G.checkBinaryOperation(state, exprForError, exprMain,exprL,exprR, binO
 		return getTypeInfoForBuiltinType(state, "bool")
 
 	-- Equality.
-	elseif isAny(binOp, "==","~=") then
+	elseif !!(anyV(`binOp`, "==","~=")) then
 		if not isValidEqualityCheck(state, exprForError, typeInfoL, typeInfoR) then
 			!!(TYPE_MISMATCH)
 		end
 		return getTypeInfoForBuiltinType(state, "bool")
 
 	-- Boolean operation.
-	elseif isAny(binOp, "and","or") then
+	elseif !!(anyV(`binOp`, "and","or")) then
 		local bothAreBool = true
 		local typeInfo    = getTypeInfoForBuiltinType(state, "bool")
 
@@ -3297,18 +3307,18 @@ end
 	elseif tag == !(typeTags.TypeInfoVararg) then
 		typeInfoStructName = "TypeInfoVararg"
 
-	elseif isAny(tag,
-		!(typeTags.TypeInfoAny),
-		!(typeTags.TypeInfoBool),
-		!(typeTags.TypeInfoFloat),
-		!(typeTags.TypeInfoInt),
-		!(typeTags.TypeInfoNone),
-		!(typeTags.TypeInfoPlaceholder),
-		!(typeTags.TypeInfoString),
-		!(typeTags.TypeInfoTable),
-		!(typeTags.TypeInfoType),
-		!(typeTags.TypeInfoVoid)
-	) then
+	elseif !!(anyV(`tag`,
+		typeTags.TypeInfoAny,
+		typeTags.TypeInfoBool,
+		typeTags.TypeInfoFloat,
+		typeTags.TypeInfoInt,
+		typeTags.TypeInfoNone,
+		typeTags.TypeInfoPlaceholder,
+		typeTags.TypeInfoString,
+		typeTags.TypeInfoTable,
+		typeTags.TypeInfoType,
+		typeTags.TypeInfoVoid
+	)) then
 		typeInfoStructName = "TypeInfo"
 
 	else
@@ -3371,13 +3381,13 @@ end
 	elseif exprTypeInfo.tag == !(typeTags.TypeInfoStruct) and castTypeInfo.tag == !(typeTags.TypeInfoStruct) and doesStructInherit(castTypeInfo, exprTypeInfo) then
 		-- void  (Valid cast.)
 
-	elseif castTypeInfo.tag == !(typeTags.TypeInfoBool) and isAny(
-		exprTypeInfo.tag,
-		!(typeTags.TypeInfoInt),
-		!(typeTags.TypeInfoFloat),
-		!(typeTags.TypeInfoString),
-		!(typeTags.TypeInfoArray)
-	) then
+	elseif castTypeInfo.tag == !(typeTags.TypeInfoBool) and !!(anyV(
+		`exprTypeInfo.tag`,
+		typeTags.TypeInfoInt,
+		typeTags.TypeInfoFloat,
+		typeTags.TypeInfoString,
+		typeTags.TypeInfoArray
+	)) then
 		-- void  (Valid cast.)
 
 	elseif exprTypeInfo.tag == !(typeTags.TypeInfoEnum) and isTypeCompatibleWith(castTypeInfo, exprTypeInfo.memberTypeInfo) then
@@ -3419,7 +3429,7 @@ end
 
 	-- Validate targets.
 	for _, targetExpr in ipairs(assignment.targets) do
-		if not isAny(targetExpr.nodeType, !(nodeTypes.AstIdentifier),!(nodeTypes.AstAccess),!(nodeTypes.AstBlank)) then
+		if not !!(anyV(`targetExpr.nodeType`, nodeTypes.AstIdentifier,nodeTypes.AstAccess,nodeTypes.AstBlank)) then
 			!ifDEBUG`astPrint(targetExpr)`
 			typeError(state, astGetExpressionVisuallyFurthestToTheLeft(targetExpr), "Invalid assignment target. Expected a variable name or object field.")
 		end
@@ -3466,12 +3476,14 @@ end
 	local globalScope = state.globalScope
 
 	if not state.fileBuffers[path] then
+		!ifDEBUG `debugCountCallsPause()`
+
 		insertToken(state.tokens, !(TOKEN_DIRECTIVE), "import",  path)
 		insertToken(state.tokens, !(TOKEN_STRING),    "preload", path)
 
 		-- @Incomplete: Include times in compilation stats.
 		local timeStartLexing, timeEndLexing = readAndTokenizeFile(state, path)
-		!ASSERT `state.fileBuffers[path], path`
+		!ASSERT(`state.fileBuffers[path]`, `path`)
 
 		local timeStartParsing = os.clock()
 		local fileScope        = parseFileScope(state, globalScope, path, (not import.isLoad), import.importName)
@@ -3480,6 +3492,8 @@ end
 		if peekNextToken(state) then
 			errorParsingNext(state, "Expected the end of the file.")
 		end
+
+		!ifDEBUG `debugCountCallsUnpause()`
 
 		table.insert(globalScope.statements, fileScope)
 		table.insert(globalScope.fileScopes, fileScope)
@@ -4200,7 +4214,7 @@ end
 			if struct.isForeign then
 				-- void
 
-			elseif decl.value and isAny(decl.value.nodeType, !(nodeTypes.AstForeign),!(nodeTypes.AstNull)) then
+			elseif decl.value and !!(anyV(`decl.value.nodeType`, nodeTypes.AstForeign,nodeTypes.AstNull)) then
 				-- void
 
 			elseif member.typeInfo.tag == !(typeTags.TypeInfoStruct) then
@@ -4249,7 +4263,7 @@ end
 	else
 		-- Just use the type of the first member as the wanted type for the enum.
 		enumMemberInfo = enum.declarations[1].value.inferredType
-		if not isAny(enumMemberInfo.tag, !(typeTags.TypeInfoInt),!(typeTags.TypeInfoString),!(typeTags.TypeInfoType),!(typeTags.TypeInfoBool),!(typeTags.TypeInfoFloat)) then
+		if not !!(anyV(`enumMemberInfo.tag`, typeTags.TypeInfoInt,typeTags.TypeInfoString,typeTags.TypeInfoType,typeTags.TypeInfoBool,typeTags.TypeInfoFloat)) then
 			typeError(state, enum, "Supported enum member types are: int, string, type, bool, float")
 		end
 	end
@@ -4467,7 +4481,7 @@ local function createRunReplacementFromTypeAndLuaValue(state, runNode, parent, t
 		local ident        = astNewNode(AstIdentifier, runNode.token, parent)
 		ident.inferredType = enumInfo
 
-		if isAny(enumInfo.memberTypeInfo.tag, !(typeTags.TypeInfoInt),!(typeTags.TypeInfoString),!(typeTags.TypeInfoBool),!(typeTags.TypeInfoFloat)) then
+		if !!(anyV(`enumInfo.memberTypeInfo.tag`, typeTags.TypeInfoInt,typeTags.TypeInfoString,typeTags.TypeInfoBool,typeTags.TypeInfoFloat)) then
 			for _, decl in ipairs(enumInfo.astNode.declarations) do
 				local literal = decl.value
 				assert(literal.nodeType == !(nodeTypes.AstLiteral))
@@ -4582,6 +4596,7 @@ end
 		end
 	end
 
+	!ifDEBUG `debugCountCallsPause()`
 	runnerSetup(state)
 
 	local newConstants            = {}
@@ -4619,6 +4634,7 @@ end
 
 	-- !ifDEBUG `print(writer.file:getBuffer())`
 	runnerRunBufferAsChunk(state)
+	!ifDEBUG `debugCountCallsUnpause()`
 
 	local constName = lambda.valueConstant.name
 	local func      = state.runnerEnvironment[constName]
@@ -4664,36 +4680,38 @@ end
 
 -- Note: It's assumed that the expression tree has all types figured out.
 function _G.isExpressionConstant(state, expr)
-	if expr.nodeType == !(nodeTypes.AstLiteral) then
+	local nodeType = expr.nodeType
+
+	if nodeType == !(nodeTypes.AstLiteral) then
 		return true
 
-	elseif expr.nodeType == !(nodeTypes.AstIdentifier) then
+	elseif nodeType == !(nodeTypes.AstIdentifier) then
 		local ident = expr
 		local decl  = ident.declaration or errorInternal()
 		return decl.isConstant and isExpressionConstant(state, decl.value)
 
-	elseif isAny(expr.nodeType, !(nodeTypes.AstType),!(nodeTypes.AstTypeOf)) then
+	elseif !!(anyV(`nodeType`, nodeTypes.AstType,nodeTypes.AstTypeOf)) then
 		return true--, expr.representedType.id -- All types are constant, just like literals.
 
-	elseif isAny(expr.nodeType, !(nodeTypes.AstStruct),!(nodeTypes.AstEnum)) then
+	elseif !!(anyV(`nodeType`, nodeTypes.AstStruct,nodeTypes.AstEnum)) then
 		return true--, expr.representedType.id -- Structs and enums are types (which are constant, just like literals).
-	elseif expr.nodeType == !(nodeTypes.AstLambda) then
+	elseif nodeType == !(nodeTypes.AstLambda) then
 		local lambda = expr
 		return true--, lambda.inferredType.id -- Lambdas (which are function signatures) are types too, thus constant.
 
-	elseif expr.nodeType == !(nodeTypes.AstCast) then
+	elseif nodeType == !(nodeTypes.AstCast) then
 		local cast = expr
 		return isExpressionConstant(state, cast.expression)
 
-	elseif expr.nodeType == !(nodeTypes.AstUnary) then
+	elseif nodeType == !(nodeTypes.AstUnary) then
 		local unary = expr
 		return isExpressionConstant(state, unary.expression)
 
-	elseif expr.nodeType == !(nodeTypes.AstBinary) then
+	elseif nodeType == !(nodeTypes.AstBinary) then
 		local binary = expr
 		return (isExpressionConstant(state, binary.left) and isExpressionConstant(state, binary.right))
 
-	elseif expr.nodeType == !(nodeTypes.AstConditional) then
+	elseif nodeType == !(nodeTypes.AstConditional) then
 		local conditional = expr
 		return (
 			isExpressionConstant(state, conditional.condition)
@@ -4701,10 +4719,10 @@ function _G.isExpressionConstant(state, expr)
 			and isExpressionConstant(state, conditional.branchFalse)
 		)
 
-	elseif expr.nodeType == !(nodeTypes.AstCall) then
+	elseif nodeType == !(nodeTypes.AstCall) then
 		return false -- Calls are always a runtime operation.
 
-	elseif expr.nodeType == !(nodeTypes.AstAccess) then
+	elseif nodeType == !(nodeTypes.AstAccess) then
 		local access              = expr
 		local typeInfoRepresented = getTypeRepresentedByExpression(access.object)
 
@@ -4714,10 +4732,10 @@ function _G.isExpressionConstant(state, expr)
 			return false -- Other accesses resolving to constants should have simplified to something else already (I think).
 		end
 
-	elseif expr.nodeType == !(nodeTypes.AstImport) then
+	elseif nodeType == !(nodeTypes.AstImport) then
 		return true -- Namespaces, just like types, are always constant.
 
-	elseif expr.nodeType == !(nodeTypes.AstTable) then
+	elseif nodeType == !(nodeTypes.AstTable) then
 		local tableNode = expr
 		for _, tableField in ipairs(tableNode.fields) do
 			if not isExpressionConstant(state, tableField.key)   then  return false  end
@@ -4725,18 +4743,18 @@ function _G.isExpressionConstant(state, expr)
 		end
 		return true
 
-	elseif expr.nodeType == !(nodeTypes.AstVararg) then
+	elseif nodeType == !(nodeTypes.AstVararg) then
 		return false
 
-	elseif expr.nodeType == !(nodeTypes.AstTypeInfo) then
+	elseif nodeType == !(nodeTypes.AstTypeInfo) then
 		return false -- @Incomplete: Make type_info() a constant expression.
 
-	elseif expr.nodeType == !(nodeTypes.AstForeign) then
+	elseif nodeType == !(nodeTypes.AstForeign) then
 		-- Technically foreign values are seen as constant at runtime, but since we don't know
 		-- what they are at compile-time we (usually) treat them as runtime values.
 		return false
 
-	elseif expr.nodeType == !(nodeTypes.AstNull) then
+	elseif nodeType == !(nodeTypes.AstNull) then
 		return true
 
 	else
@@ -5044,8 +5062,8 @@ local function simplifyCast(state, cast)
 
 	-- int -> float
 	elseif exprTypeInfo.tag == !(typeTags.TypeInfoInt) and castTypeInfo.tag == !(typeTags.TypeInfoFloat) then
-		assert(cast.expression.nodeType == !(nodeTypes.AstLiteral))
-		assert(type(cast.expression.value) == "number")
+		!ASSERT("cast.expression.nodeType == "..nodeTypes.AstLiteral)
+		!ASSERT("type(cast.expression.value) == 'number'")
 
 		local literal        = astNewNode(AstLiteral, cast.token, cast.parent)
 		literal.literalType  = !(LITERAL_FLOAT)
@@ -5057,8 +5075,8 @@ local function simplifyCast(state, cast)
 
 	-- float -> int
 	elseif exprTypeInfo.tag == !(typeTags.TypeInfoFloat) and castTypeInfo.tag == !(typeTags.TypeInfoInt) then
-		assert(cast.expression.nodeType == !(nodeTypes.AstLiteral))
-		assert(type(cast.expression.value) == "number")
+		!ASSERT("cast.expression.nodeType == "..nodeTypes.AstLiteral)
+		!ASSERT("type(cast.expression.value) == 'number'")
 
 		local literal        = astNewNode(AstLiteral, cast.token, cast.parent)
 		literal.literalType  = !(LITERAL_INTEGER)
@@ -5070,8 +5088,8 @@ local function simplifyCast(state, cast)
 
 	-- (numeric) -> bool
 	elseif isTypeNumeric(exprTypeInfo) and castTypeInfo.tag == !(typeTags.TypeInfoBool) then
-		assert(cast.expression.nodeType == !(nodeTypes.AstLiteral))
-		assert(type(cast.expression.value) == "number")
+		!ASSERT("cast.expression.nodeType == "..nodeTypes.AstLiteral)
+		!ASSERT("type(cast.expression.value) == 'number'")
 
 		local literal        = astNewNode(AstLiteral, cast.token, cast.parent)
 		literal.literalType  = !(LITERAL_BOOLEAN)
@@ -5083,8 +5101,8 @@ local function simplifyCast(state, cast)
 
 	-- string -> bool
 	elseif exprTypeInfo.tag == !(typeTags.TypeInfoString) and castTypeInfo.tag == !(typeTags.TypeInfoBool) then
-		assert(cast.expression.nodeType == !(nodeTypes.AstLiteral))
-		assert(type(cast.expression.value) == "string")
+		!ASSERT("cast.expression.nodeType == "..nodeTypes.AstLiteral)
+		!ASSERT("type(cast.expression.value) == 'string'")
 
 		local literal        = astNewNode(AstLiteral, cast.token, cast.parent)
 		literal.literalType  = !(LITERAL_BOOLEAN)
@@ -5187,8 +5205,8 @@ local function simplifyUnary(state, unary)
 
 	!for _, opArithmetic in ipairs{"+","-"} do
 	elseif unary.operation == !(opArithmetic) then
-		assert(unary.expression.nodeType == !(nodeTypes.AstLiteral))
-		assert(type(unary.expression.value) == "number")
+		!ASSERT("unary.expression.nodeType == "..nodeTypes.AstLiteral)
+		!ASSERT("type(unary.expression.value) == 'number'")
 
 		local literal = astNewNode(AstLiteral, unary.token, unary.parent)
 
@@ -5205,8 +5223,8 @@ local function simplifyUnary(state, unary)
 	!end
 
 	elseif unary.operation == "not" then
-		assert(unary.expression.nodeType == !(nodeTypes.AstLiteral))
-		assert(type(unary.expression.value) == "boolean")
+		!ASSERT("unary.expression.nodeType == "..nodeTypes.AstLiteral)
+		!ASSERT("type(unary.expression.value) == 'boolean'")
 
 		local literal        = astNewNode(AstLiteral, unary.token, unary.parent)
 		literal.literalType  = !(LITERAL_BOOLEAN)
@@ -5253,10 +5271,10 @@ local function simplifyBinary(state, binary)
 
 	!local ASSERT_BOTH_OPERANDS_NUMERIC_LITERALS = templateToLua(
 		`
-			assert(l.nodeType == $nodeTypeLiteral)
-			assert(r.nodeType == $nodeTypeLiteral)
-			assert(type(l.value) == "number")
-			assert(type(r.value) == "number")
+			if l.nodeType    ~= $nodeTypeLiteral then  errorInternal()  end
+			if r.nodeType    ~= $nodeTypeLiteral then  errorInternal()  end
+			if type(l.value) ~= "number"         then  errorInternal()  end
+			if type(r.value) ~= "number"         then  errorInternal()  end
 		`, {
 			nodeTypeLiteral = toLua(nodeTypes.AstLiteral),
 		}
@@ -5311,10 +5329,14 @@ local function simplifyBinary(state, binary)
 
 	!for _, opComparison in ipairs{"<",">","<=",">="} do
 	elseif op == !(opComparison) then
-		assert(l.nodeType == !(nodeTypes.AstLiteral))
-		assert(r.nodeType == !(nodeTypes.AstLiteral))
-		assert(type(l.value) == type(r.value))
-		assert(isAny(type(l.value), "number","string"))
+		!ASSERT("l.nodeType == "..nodeTypes.AstLiteral)
+		!ASSERT("r.nodeType == "..nodeTypes.AstLiteral)
+
+		!if DEBUG then
+			local lType = type(l.value)
+			!ASSERT("lType == type(r.value)")
+			!ASSERT("lType == 'number' or lType == 'string'")
+		!end
 
 		local literal        = astNewNode(AstLiteral, binary.token, binary.parent)
 		literal.literalType  = !(LITERAL_BOOLEAN)
@@ -5330,20 +5352,20 @@ local function simplifyBinary(state, binary)
 		local valueL, valueR
 
 		if l.inferredType.tag == !(typeTags.TypeInfoType) then
-			assert(r.inferredType.tag == !(typeTags.TypeInfoType))
+			!ASSERT("r.inferredType.tag == "..typeTags.TypeInfoType)
 			valueL = getTypeRepresentedByExpression(l).id
 			valueR = getTypeRepresentedByExpression(r).id
 
 		elseif l.inferredType.tag == !(typeTags.TypeInfoEnum) then
-			assert(r.inferredType.tag == !(typeTags.TypeInfoEnum))
-			assert(l.nodeType == !(nodeTypes.AstIdentifier))
-			assert(r.nodeType == !(nodeTypes.AstIdentifier))
+			!ASSERT("r.inferredType.tag == "..typeTags.TypeInfoEnum)
+			!ASSERT("l.nodeType == "..nodeTypes.AstIdentifier)
+			!ASSERT("r.nodeType == "..nodeTypes.AstIdentifier)
 			valueL = l.name
 			valueR = r.name
 
 		elseif l.nodeType == !(nodeTypes.AstLiteral) then
-			assert(r.nodeType == !(nodeTypes.AstLiteral))
-			assert(type(l.value) == type(r.value))
+			!ASSERT("r.nodeType == "..nodeTypes.AstLiteral)
+			!ASSERT("type(l.value) == type(r.value)")
 			valueL = l.value
 			valueR = r.value
 
@@ -5363,10 +5385,10 @@ local function simplifyBinary(state, binary)
 
 	!for _, opLogical in ipairs{"and","or"} do
 	elseif op == !(opLogical) then
-		assert(l.nodeType == !(nodeTypes.AstLiteral))
-		assert(r.nodeType == !(nodeTypes.AstLiteral))
-		assert(type(l.value) == "boolean")
-		assert(type(r.value) == "boolean")
+		!ASSERT("l.nodeType == "..nodeTypes.AstLiteral)
+		!ASSERT("r.nodeType == "..nodeTypes.AstLiteral)
+		!ASSERT("type(l.value) == 'boolean'")
+		!ASSERT("type(r.value) == 'boolean'")
 
 		local literal        = astNewNode(AstLiteral, binary.token, binary.parent)
 		literal.literalType  = !(LITERAL_BOOLEAN)
@@ -5378,10 +5400,10 @@ local function simplifyBinary(state, binary)
 	!end
 
 	elseif op == ".." then
-		assert(l.nodeType == !(nodeTypes.AstLiteral))
-		assert(r.nodeType == !(nodeTypes.AstLiteral))
-		assert(type(l.value)  == "string")
-		assert(type(r.value) == "string")
+		!ASSERT("l.nodeType == "..nodeTypes.AstLiteral)
+		!ASSERT("r.nodeType == "..nodeTypes.AstLiteral)
+		!ASSERT("type(l.value) == 'string'")
+		!ASSERT("type(r.value) == 'string'")
 
 		local literal        = astNewNode(AstLiteral, binary.token, binary.parent)
 		literal.literalType  = !(LITERAL_STRING)
@@ -5467,24 +5489,25 @@ end
 -- Values of simple types are non-objects (e.g. ints) in the outputted Lua code.
 -- Note: Glóa types are represented as ints in Lua and thus are 'simple'.
 function _G.isTypeSimple(typeInfo)
-	return isAny(typeInfo.tag,
-		!(typeTags.TypeInfoBool),
-		!(typeTags.TypeInfoInt),
-		!(typeTags.TypeInfoNone),
-		!(typeTags.TypeInfoFloat),
-		!(typeTags.TypeInfoString),
-		!(typeTags.TypeInfoType),
-		!(typeTags.TypeInfoEnum), -- The true enum member types are simple.
-		!(typeTags.TypeInfoNullDummy) -- @Cleanup
-	)
+	local tag = typeInfo.tag
+	return !!(anyV(`tag`,
+		typeTags.TypeInfoBool,
+		typeTags.TypeInfoInt,
+		typeTags.TypeInfoNone,
+		typeTags.TypeInfoFloat,
+		typeTags.TypeInfoString,
+		typeTags.TypeInfoType,
+		typeTags.TypeInfoEnum, -- All enum member types are simple.
+		typeTags.TypeInfoNullDummy -- @Cleanup
+	))
 end
 
 function _G.isTypeNumeric(typeInfo)
-	return isAny(typeInfo.tag, !(typeTags.TypeInfoInt),!(typeTags.TypeInfoFloat))
+	return !!(anyV(`typeInfo.tag`, typeTags.TypeInfoInt,typeTags.TypeInfoFloat))
 end
 
 function _G.isTypeTableLike(typeInfo)
-	return isAny(typeInfo.tag, !(typeTags.TypeInfoTable),!(typeTags.TypeInfoStruct),!(typeTags.TypeInfoArray))
+	return !!(anyV(`typeInfo.tag`, typeTags.TypeInfoTable,typeTags.TypeInfoStruct,typeTags.TypeInfoArray))
 end
 
 -- isCompatible, compatibilityScore = isTypeCompatibleWith( typeToCheck, otherType )
@@ -5520,7 +5543,7 @@ function _G.isTypeCompatibleWith(typeToCheck, otherType)
 	!local SCORE = 0x10
 	if
 		otherType.tag == !(typeTags.TypeInfoTable)
-		and isAny(typeToCheck.tag, !(typeTags.TypeInfoStruct),!(typeTags.TypeInfoArray))
+		and !!(anyV(`typeToCheck.tag`, typeTags.TypeInfoStruct,typeTags.TypeInfoArray))
 	then
 		return true, !(SCORE)
 	end
@@ -5575,7 +5598,7 @@ do
 	end
 
 	local function adjustVarargItemTypeToOneAndToIncludeNil(state, itemType)
-		if isAny(itemType.tag, !(typeTags.TypeInfoNone),!(typeTags.TypeInfoAny)) then
+		if !!(anyV(`itemType.tag`, typeTags.TypeInfoNone,typeTags.TypeInfoAny)) then
 			return itemType
 		end
 
@@ -5896,7 +5919,7 @@ function _G.isAnExpressionExpected(state, node)
 		return node == parent.name or node == parent.type or node == parent.value
 	elseif parentNodeType == !(nodeTypes.AstFor) then
 		return node ~= parent.body
-	elseif isAny(parentNodeType, !(nodeTypes.AstIf),!(nodeTypes.AstStaticIf),!(nodeTypes.AstWhile)) then
+	elseif !!(anyV(`parentNodeType`, nodeTypes.AstIf,nodeTypes.AstStaticIf,nodeTypes.AstWhile)) then
 		return node == parent.condition
 	else
 		errorUnhandledNodeType(state, node.parent)

@@ -34,10 +34,10 @@ local !struct"Dependency"{ -- @Cleanup: Rename to something with "wait"?
 function _G.addDependency(state, dependent, dependType, dependOn, extraData)
 	!if DEBUG then
 		if dependType == !(DEPEND_DECLARATION) then
-			assert(type(dependOn) == "string")
-			assert(extraData == nil or type(extraData) == "table")
-		elseif isAny(dependType, !(DEPEND_NODE_INFERRED),!(DEPEND_NODE_EMITTED),!(DEPEND_STRUCT_MEMBERS_READY),!(DEPEND_CONSTANT_READY)) then
-			assert(type(dependOn) == "table")
+			!ASSERT `type(dependOn) == "string"`
+			!ASSERT `extraData == nil or type(extraData) == "table"`
+		elseif !!(anyV(`dependType`, DEPEND_NODE_INFERRED,DEPEND_NODE_EMITTED,DEPEND_STRUCT_MEMBERS_READY,DEPEND_CONSTANT_READY)) then
+			!ASSERT `type(dependOn) == "table"`
 		else
 			errorInternal("%d", dependType)
 		end
@@ -50,7 +50,7 @@ function _G.addDependency(state, dependent, dependType, dependOn, extraData)
 		!ifDEBUG `astPrint(dependent)`
 		nodeMessage(io.stderr, state, dependent, "Error", "Pipes", "Internal compiler error: Trying to add dependency twice.")
 
-		if isAny(dependType, !(DEPEND_NODE_INFERRED),!(DEPEND_NODE_EMITTED)) then
+		if !!(anyV(`dependType`, DEPEND_NODE_INFERRED,DEPEND_NODE_EMITTED)) then
 			!ifDEBUG `astPrint(dependOn)`
 			nodeMessage(io.stderr, state, dependOn, "Info", "Pipes", "...depending on this.")
 		end
@@ -60,7 +60,7 @@ function _G.addDependency(state, dependent, dependType, dependOn, extraData)
 
 	dependent = dependent.queued
 
-	if isAny(dependType, !(DEPEND_NODE_INFERRED),!(DEPEND_NODE_EMITTED)) then
+	if !!(anyV(`dependType`, DEPEND_NODE_INFERRED,DEPEND_NODE_EMITTED)) then
 		assert(dependent ~= dependOn.node)
 		dependOn = dependOn.queued
 	end
@@ -125,7 +125,7 @@ end
 function _G.getExistingDependency(state, dependent, dependType, dependOn)
 	dependent = dependent.queued
 
-	if isAny(dependType, !(DEPEND_NODE_INFERRED),!(DEPEND_NODE_EMITTED)) then
+	if !!(anyV(`dependType`, DEPEND_NODE_INFERRED,DEPEND_NODE_EMITTED)) then
 		dependOn = dependOn.queued
 	end
 
@@ -135,17 +135,16 @@ end
 
 
 local !struct"Queued"{
-	{`node`,              nil},       -- AstNode
-	{`container`,         nil},       -- Any table.
-	{`key`,               nil},       -- String or integer.
-	{`pipe`,              PIPE_NONE},
-	{`pipeHighestExited`, PIPE_NONE}, -- (Not really used. @Cleanup)
-	{`waitingOn`,         nil},       -- Dependency
-	{`unqueued`,          false},
+	{`node`,      nil}, -- AstNode
+	{`container`, nil}, -- Any table.
+	{`key`,       nil}, -- String or integer.
+	{`pipe`,      PIPE_NONE},
+	{`waitingOn`, nil}, -- Dependency
+	{`unqueued`,  false},
 }
 
--- addToQueue( state, node, container=nil, key=nil, pipe [, pipeHighestExited=pipe-1 ] )
-function _G.addToQueue(state, node, container, key, pipe, pipeHighestExited)
+-- addToQueue( state, node, container=nil, key=nil, pipe )
+function _G.addToQueue(state, node, container, key, pipe)
 	-- astPrint(node)
 	!ASSERT `not node.queued`
 
@@ -154,7 +153,6 @@ function _G.addToQueue(state, node, container, key, pipe, pipeHighestExited)
 	queued.container = container
 	queued.key       = key
 	queued.pipe      = pipe or errorInternal()
-	queued.pipeHighestExited = math.max(pipeHighestExited or pipe-1, !(PIPE_NONE))
 
 	node.queued = queued
 	table.insert(state.queue, queued)
@@ -350,9 +348,8 @@ end
 
 
 function _G.moveToPipe(state, node, targetPipe)
-	local queued             = node.queued
-	queued.pipeHighestExited = math.max(queued.pipeHighestExited, queued.pipe)
-	queued.pipe              = targetPipe
+	local queued = node.queued
+	queued.pipe  = targetPipe
 end
 
 -- moveToNextRelevantPipe( state, node [, fromPipe=current ] )
@@ -360,7 +357,7 @@ function _G.moveToNextRelevantPipe(state, node, fromPipe)
 	fromPipe = fromPipe or node.queued.pipe
 
 	if fromPipe == !(PIPE_INFER) then
-		if isAny(node.nodeType, !(nodeTypes.AstLiteral),!(nodeTypes.AstForeign)) then
+		if !!(anyV(`node.nodeType`, nodeTypes.AstLiteral,nodeTypes.AstForeign)) then
 			moveToPipe(state, node, !(PIPE_BYTECODE))
 
 		elseif node.nodeType == !(nodeTypes.AstDeclaration) then
@@ -430,7 +427,7 @@ end
 
 function _G.errorPipesAreStuck(state)
 	!if PLANTUML_PATH ~= "" then
-		--[=[
+		--[=[ Dependency graph.
 		!local PATH_UML = "local/dependencies.plantuml"
 		!local PATH_PNG = "local/dependencies.png"
 		!local MAX_SIZE = 8192
@@ -474,7 +471,7 @@ function _G.errorPipesAreStuck(state)
 						local name = dependency.dependOn
 						file:write(" --|> (Name ", name, ")")
 
-					elseif isAny(dependency.dependType, !(DEPEND_NODE_INFERRED),!(DEPEND_NODE_EMITTED)) then
+					elseif !!(anyV(`dependency.dependType`, DEPEND_NODE_INFERRED,DEPEND_NODE_EMITTED)) then
 						local nodeOther = dependency.dependOn.node
 						file:write(" --|> ")
 						writeNode(nodeOther)
@@ -562,7 +559,7 @@ function _G.errorPipesAreStuck(state)
 						exitFailure()
 					end
 
-				elseif isAny(name, "it","itIndex") then
+				elseif name == "it" or name == "itIndex" then
 					generatedIdent = node
 					-- Continue, as we prefer to report on user-defined identifiers first...
 

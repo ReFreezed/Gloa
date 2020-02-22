@@ -11,6 +11,7 @@
 
 	areArraysEqual
 	copyTable, copyArray, copyToArray, emptyArray, fillArray, reverseArray, flipArray, removeItem, removeUnordered, insertArrayItems
+	debugCountCalls*
 	errorInternal, errorLine, errorOnLine, errorInFile, assert
 	exit, exitFailure
 	F
@@ -1030,7 +1031,7 @@ function _G.newVirtualFile()
 	function file:write(...)
 		for i = 1, select("#", ...) do
 			local v = select(i, ...)
-			!ASSERT `isAny(type(v), "string","number")`
+			!ASSERT `type(v) == "string" or type(v) == "number"`
 			insert(buffer, tostring(v))
 		end
 	end
@@ -1046,6 +1047,77 @@ function _G.newVirtualFile()
 	end
 
 	return file
+end
+
+
+
+do
+	local calls      = {}
+	local isRunning  = false
+	local pauseDepth = 0
+
+	function _G.debugCountCallsStart()
+		if isRunning then  return  end
+
+		local getinfo = debug.getinfo
+
+		debug.sethook(function(event)
+			-- [[ All calls.
+			local name = getinfo(2, "n").name or "?"
+			calls[name] = (calls[name] or 0)+1
+			--]]
+			--[[ Callees for one call.
+			local name = getinfo(2, "n").name
+			if name ~= "assert" then  return  end
+			name = getinfo(3, "n").name or "?"
+			calls[name] = (calls[name] or 0)+1
+			--]]
+		end, "c")
+
+		isRunning  = true
+		pauseDepth = 0
+	end
+	function _G.debugCountCallsStop()
+		pauseDepth = 0
+		if isRunning then
+			debug.sethook(nil)
+			isRunning = false
+		end
+	end
+
+	function _G.debugCountCallsPause()
+		if isRunning then
+			debugCountCallsStop()
+			pauseDepth = 1
+		elseif pauseDepth > 0 then
+			pauseDepth = pauseDepth+1
+		end
+	end
+	function _G.debugCountCallsUnpause()
+		if pauseDepth > 0 then
+			pauseDepth = pauseDepth-1
+			if pauseDepth == 0 then
+				debugCountCallsStart()
+			end
+		end
+	end
+
+	function _G.debugCountCallsPrint()
+		local sources = {}
+
+		for source, count in pairs(calls) do
+			table.insert(sources, source)
+		end
+
+		table.sort(sources, function(a, b)
+			if calls[a] ~= calls[b] then  return calls[a] > calls[b]  end
+			return a < b
+		end)
+
+		for i, source in ipairs(sources) do
+			print(i, source, calls[source])
+		end
+	end
 end
 
 
