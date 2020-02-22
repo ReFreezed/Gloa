@@ -7,14 +7,19 @@
 --=
 --============================================================]]
 
-global DEBUG :: true
+global DEV :: true
 
 !import "basic"
 !import "math"
 !import "io"
-!import "love"
+
+!import "love/basic"
+!import "love/event"
+!import "love/graphics"
+!import "love/keyboard"
 
 !load "entities.gloa"
+!load "levels.gloa"
 
 !run {
 	!import "compiler"
@@ -27,29 +32,52 @@ global LEVEL_WIDTH   :: 100 -- In meters or something similar.
 global CAMERA_HEIGHT :: 75
 
 global MIN_DISTANCE_TO_CAMERA_EDGE :: 3
-global PLAYER_SIZE :: 2
+
+global SpawnInstruction :: struct {
+	time   = 0.00,
+	entity = none,
+	x      = 0.0,
+	y      = 0.0,
+}
 
 global Level :: struct {
-	entities:[]Entity,
-	player:Player = !foreign lua "nil", -- @Hack
+	time        = 0.00,
+	timeSpeed   = 1.0,
+	progression = 0.00,
+
+	entities: []Entity,
+	player: Player = !foreign lua "nil", -- @Hack
+
+	cameraShake = 0.0,
+
+	entitySpawnQueue: []SpawnInstruction = !foreign lua "nil", -- @Hack
+	nextIndexToSpawn = 1,
+
+	lightsToDraw: []Light,
 }
 
 local currentLevel:Level = !foreign lua "nil" -- @Hack
 
-local startLevel :: (levelId:int) {
-	currentLevel = {}
+local lightImage:LoveImage = !foreign lua "nil" -- @Hack
 
-	local player        = newEntity(Player)
-	player.y            = .8*CAMERA_HEIGHT
+
+
+local startLevel :: (levelId:int) {
+	currentLevel        = {entitySpawnQueue=LEVEL1_SPAWN_QUEUE}
+
+	local player        = newEntity(Player, LEVEL_WIDTH/2, .8*CAMERA_HEIGHT)
 	currentLevel.player = player
 	insert(currentLevel.entities, player)
 }
 
 local onLoad :: (args:[]string, argsRaw:[]string) {
-	!if DEBUG {
+	!if DEV {
 		disableBuffering(STDOUT)
 		disableBuffering(STDERR)
 	}
+
+	lightImage = loveNewImage("gfx/light.png")
+
 	startLevel(1)
 }
 
@@ -58,6 +86,7 @@ local onLoad :: (args:[]string, argsRaw:[]string) {
 local onKeyPressed :: (key:LoveKey, scancode:LoveScancode, isRepeat:bool) {
 	if key == {
 		case "escape": loveQuit(0)
+		case "f10": if loveIsKeyDown("lctrl","rctrl") loveRestart() else startLevel(1)
 	}
 	if scancode == {
 		case "x": currentLevel.player.wantsToShoot = true
@@ -66,10 +95,28 @@ local onKeyPressed :: (key:LoveKey, scancode:LoveScancode, isRepeat:bool) {
 
 
 
-local uiTime = 0.0
+local uiTime = 0.00
 
 local onUpdate :: (dt:float) {
-	uiTime = uiTime+dt
+	!if DEV {
+		if loveIsKeyDown("lctrl","rctrl")
+			dt *= if loveIsKeyDown("lshift","rshift") 1.0/80 else 1.0/5
+		elseif loveIsKeyDown("<")
+			dt *= if loveIsKeyDown("lshift","rshift") 1.0*20 else 1.0*5
+	}
+
+	uiTime                    = uiTime+dt
+	currentLevel.time        += currentLevel.timeSpeed*dt
+	currentLevel.progression += currentLevel.timeSpeed*dt
+
+	currentLevel.cameraShake = max(currentLevel.cameraShake-dt/.60, 0)
+
+	while
+		currentLevel.entitySpawnQueue[currentLevel.nextIndexToSpawn] ~= nil
+		and currentLevel.progression >= currentLevel.entitySpawnQueue[currentLevel.nextIndexToSpawn].time
+	{
+		spawnNextEntity(currentLevel)
+	}
 
 	for currentLevel.entities  updateEntity(currentLevel, it, dt)
 
@@ -95,9 +142,34 @@ local onDraw :: () {
 	local x1, y1 = loveGlobalToScreen(0, 0)
 	local x2, y2 = loveGlobalToScreen(LEVEL_WIDTH, CAMERA_HEIGHT)
 	loveSetScissor(x1, y1, x2-x1, y2-y1)
-	loveClear(.8, .1, .2)
+	loveClear(.5, .05, .1)
+
+	local shakeX = .6 * currentLevel.cameraShake * cos(currentLevel.time/.10*TAU)
+	local shakeY = .4 * currentLevel.cameraShake * cos(currentLevel.time/.17*TAU)
+	loveCoordinateSystemTranslate(shakeX, shakeY)
 
 	for currentLevel.entities  drawEntity(currentLevel, it)
+
+	do {
+		local iw, ih = loveGetDimensions(lightImage)
+
+		loveSetBlendMode(LoveBlendMode.ADD)
+		for currentLevel.lightsToDraw {
+			loveSetColor(1, 1, 1, it.opacity)
+			loveDrawAnchored(lightImage, it.x,it.y, .5,.5, 0, it.radiusX/(iw/2),it.radiusY/(ih/2))
+		}
+		loveResetBlendMode()
+	}
+
+	currentLevel.lightsToDraw = {}
+}
+
+global Light :: struct {
+	x       = 0.0,
+	y       = 0.0,
+	radiusX = 0.0,
+	radiusY = 0.0,
+	opacity = 0.0,
 }
 
 

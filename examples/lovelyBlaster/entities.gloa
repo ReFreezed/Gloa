@@ -15,22 +15,29 @@ global Entity :: struct {
 	entityType = none,
 	id:int,
 
+	width  = 1.0,
+	height = 1.0,
+	health = 1,
+
 	x:float = LEVEL_WIDTH/2,
 	y:float,
 
-	health      = 100,
+	timeSpawned = 0.00,
+	timeDamaged = -9999.00,
+
 	isDestroyed = false,
 }
 
 global Player :: struct {
 	using Entity,
+	speedX         = 0.0,
+	speedY         = 0.0,
 	weaponCooldown = 0.0,
 	wantsToShoot   = false,
 }
 
 local Enemy :: struct {
 	using Entity,
-	moveSpeed = 5.0,
 }
 global Carrier :: struct {
 	using Enemy,
@@ -41,49 +48,146 @@ global Bullet :: struct {
 	shotByPlayer = false,
 }
 
+global Fx :: struct {
+	using Entity,
+	timeTotal     = 1.00,
+	timeRemaining = 1.00,
+}
+global Spark :: struct {
+	using Fx,
+	speed  = 0.0,
+	angleX = 0.0,
+	angleY = 0.0,
+}
+global Explosion :: struct {
+	using Fx,
+	radius = 1.0,
+}
+
+-- @Incomplete: Generate this enum through metaprogramming.
+global EntityType :: enum {
+	PLAYER  :: Player,
+	CARRIER :: Carrier,
+	BULLET  :: Bullet,
+}
+
 
 
 local lastEntityId = 0
 
-global newEntity :: ($EntityType:type) -> EntityType {
-	!assert EntityType ~= Entity
-	-- !assert EntityType has Entity -- @Incomplete: Somehow make sure Entity is part of the type.
+global newEntity :: ($T:type, x,y:float) -> T {
+	!assert T ~= Entity
+	-- !assert T has Entity -- @Incomplete: Somehow make sure Entity is part of the type.
 
 	lastEntityId += 1
 
-	local ent:EntityType = {
-		entityType = EntityType,
+	local ent:T = {
+		entityType = T,
 		id         = lastEntityId,
+		x          = x,
+		y          = y,
+	}
+
+	!if T == Player {
+		ent.width  = 2.2
+		ent.height = 2.2
+		ent.health = 3
+
+	} elseif T == Carrier {
+		ent.width  = 3
+		ent.height = 5
+		ent.health = 10
+
+	} elseif T == Bullet {
+		ent.width  = 1.4
+		ent.height = 3
+
+	} elseif T == Spark {
+		local angle       = getRandom(TAU)
+		ent.timeTotal     = lerp(.1, .3, getRandom()^2)
+		ent.timeRemaining = ent.timeTotal
+		ent.speed         = getRandom(25.0, 30.0)
+		ent.angleX        = cos(angle)
+		ent.angleY        = sin(angle)
+
+	} elseif T == Explosion {
+		ent.timeTotal     = 0.70
+		ent.timeRemaining = ent.timeTotal
 	}
 
 	return ent
 }
 
+global spawnNextEntity :: (level:Level) {
+	local instr             = level.entitySpawnQueue[level.nextIndexToSpawn]
+	level.nextIndexToSpawn += 1
+
+	local ent:Entity = NULL(Entity)
+
+	if instr.entity == {
+		case Carrier:  ent = newEntity(Carrier, instr.x, instr.y)
+		case:          printf("Error: Unhandled entity type %s.", toString(instr.entity))
+	}
+
+	if ent ~= NULL(Entity) {
+		ent.timeSpawned = level.time
+		insert(level.entities, ent)
+	}
+}
+
 
 
 global updateEntity :: (level:Level, ent:Entity, dt:float) {
-	-- @Incomplete: Generate an enum with all entity types through metaprogramming so we can 'if !complete' here.
+	-- @Incomplete: Use EntityType and 'if !complete' here.
 	if ent.entityType == {
 	case Player:
 		local player = cast(Player) ent
 
-		local dx, dy: float
-		if loveIsScancodeDown("left")   dx -= 50*dt
-		if loveIsScancodeDown("right")  dx += 50*dt
-		if loveIsScancodeDown("up")     dy -= 40*dt
-		if loveIsScancodeDown("down")   dy += 40*dt
+		local dirX, dirY = 0, 0
+		if loveIsScancodeDown("left")   dirX -= 1
+		if loveIsScancodeDown("right")  dirX += 1
+		if loveIsScancodeDown("up")     dirY -= 1
+		if loveIsScancodeDown("down")   dirY += 1
 
-		player.x = clamp(player.x+dx, MIN_DISTANCE_TO_CAMERA_EDGE, LEVEL_WIDTH   - MIN_DISTANCE_TO_CAMERA_EDGE)
-		player.y = clamp(player.y+dy, MIN_DISTANCE_TO_CAMERA_EDGE, CAMERA_HEIGHT - MIN_DISTANCE_TO_CAMERA_EDGE)
+		local MAX_SPEED_X    :: 50.0
+		local MAX_SPEED_Y    :: 40.0
+		local ACCELERATION_X :: 1000
+		local ACCELERATION_Y :: 1000
+
+		player.speedX =
+			if dirX == 0
+			moveTowards(player.speedX, 0, ACCELERATION_X*dt)
+			else clamp(player.speedX+dirX*ACCELERATION_X*dt, -MAX_SPEED_X, MAX_SPEED_X)
+
+		player.speedY =
+			if dirY == 0
+			moveTowards(player.speedY, 0, ACCELERATION_Y*dt)
+			else clamp(player.speedY+dirY*ACCELERATION_Y*dt, -MAX_SPEED_Y, MAX_SPEED_Y)
+
+		player.x += player.speedX*dt
+		player.y += player.speedY*dt
+
+		if player.x < MIN_DISTANCE_TO_CAMERA_EDGE {
+			player.x      = MIN_DISTANCE_TO_CAMERA_EDGE
+			player.speedX = 0
+		} elseif player.x > LEVEL_WIDTH-MIN_DISTANCE_TO_CAMERA_EDGE {
+			player.x      = LEVEL_WIDTH-MIN_DISTANCE_TO_CAMERA_EDGE
+			player.speedX = 0
+		}
+		if player.y < MIN_DISTANCE_TO_CAMERA_EDGE {
+			player.y      = MIN_DISTANCE_TO_CAMERA_EDGE
+			player.speedY = 0
+		} elseif player.y > CAMERA_HEIGHT-MIN_DISTANCE_TO_CAMERA_EDGE {
+			player.y      = CAMERA_HEIGHT-MIN_DISTANCE_TO_CAMERA_EDGE
+			player.speedY = 0
+		}
 
 		player.weaponCooldown = player.weaponCooldown-dt
 
 		if (player.wantsToShoot or loveIsScancodeDown("x")) and player.weaponCooldown <= 0 {
 			player.weaponCooldown = 1/15
 
-			local bullet        = newEntity(Bullet)
-			bullet.x            = player.x
-			bullet.y            = player.y
+			local bullet        = newEntity(Bullet, player.x, player.y)
 			bullet.shotByPlayer = true
 			insert(level.entities, bullet)
 		}
@@ -95,32 +199,165 @@ global updateEntity :: (level:Level, ent:Entity, dt:float) {
 		bullet.y += (if bullet.shotByPlayer 0-120 else 50) * dt
 		-- bullet.y += 110 * (if bullet.shotByPlayer -1 else 1) * dt -- @Compiler @Design: 'bullet.shotByPlayer -1' gets parsed as one expression. Uh oh!
 
-		-- @Incomplete: Collide with other entities.
+		for level.entities {
+			local areEntitiesOverlapping :: (ent1,ent2:Entity) -> bool {
+				return
+					abs(ent1.x-ent2.x) < (ent1.width  + ent2.width ) / 2 and
+					abs(ent1.y-ent2.y) < (ent1.height + ent2.height) / 2
+			}
+
+			if it.entityType == Carrier and areEntitiesOverlapping(bullet, it) {
+				damage(level, it, 1, bullet.x, bullet.y)
+				destroy(bullet)
+				break
+			}
+		}
 
 		if bullet.y < -20  destroy(bullet)
+
+	case Carrier:
+		local carrier = cast(Carrier) ent
+		carrier.y += 10*dt
+
+		if carrier.y > CAMERA_HEIGHT+20  destroy(carrier)
+
+	case Spark:
+		local spark = cast(Spark) ent
+
+		spark.x += spark.speed * spark.angleX * dt
+		spark.y += spark.speed * spark.angleY * dt
+
+		spark.timeRemaining -= dt
+		if spark.timeRemaining <= 0  destroy(spark)
+
+	case Explosion:
+		local explosion          = cast(Explosion) ent
+		explosion.timeRemaining -= dt
+		if explosion.timeRemaining <= 0  destroy(explosion)
 	}
 }
 
 
 
 global drawEntity :: (level:Level, ent:Entity) {
+	local setColorWithEffects :: (damageEffect:float, r,g,b:float, a=1.0) {
+		r = lerp(r, 1, damageEffect)
+		g = lerp(g, 1, damageEffect)
+		b = lerp(b, 1, damageEffect)
+		loveSetColor(r, g, b, a)
+	}
+
+	local DAMAGE_EFFECT_TIME :: 0.10
+	local damageEffect = clamp01(1-(level.time-ent.timeDamaged)/DAMAGE_EFFECT_TIME)
+
 	if ent.entityType == {
 	case Player:
+		local SIZE_OUTER :: 2.2
+		local SIZE_INNER :: .4*SIZE_OUTER
 		local player = cast(Player) ent
-		loveSetColor(1, 1, 1)
-		loveDrawRectangleFill(player.x-PLAYER_SIZE/2, player.y-PLAYER_SIZE/2, PLAYER_SIZE, PLAYER_SIZE)
+		setColorWithEffects(damageEffect, 0, 0, 0)
+		loveDrawRectangleFill(player.x-SIZE_OUTER/2, player.y-SIZE_OUTER/2, SIZE_OUTER, SIZE_OUTER)
+		setColorWithEffects(damageEffect, 1, 1, 1)
+		loveDrawRectangleFill(player.x-SIZE_INNER/2, player.y-SIZE_INNER/2, SIZE_INNER, SIZE_INNER)
 
 	case Bullet:
 		local bullet = cast(Bullet) ent
-		loveSetColor(1, 1, 0)
-		loveDrawEllipseFill(bullet.x,bullet.y, .5,2, 24)
+		setColorWithEffects(damageEffect, 1, 1, 1)
+		loveDrawEllipseFill(bullet.x,bullet.y, .3,1.8, 24)
+		drawLight(level, bullet.x,bullet.y, 4,6, .2)
+
+	case Carrier:
+		local SIZE_X, SIZE_Y :: 3, 5
+		local carrier = cast(Carrier) ent
+		local phase   = sin01((level.time-ent.timeSpawned)*TAU)
+		local r       = lerp(0.80, 1.00, phase)
+		local g       = lerp(0.40, 0.70, phase)
+		local b       = lerp(0.95, 0.60, phase)
+		setColorWithEffects(damageEffect, r, g, b)
+		loveDrawRectangleFill(carrier.x-SIZE_X/2, carrier.y-SIZE_Y/2, SIZE_X, SIZE_Y)
+
+	case Spark:
+		local spark    = cast(Spark) ent
+		local progress = 1 - spark.timeRemaining/spark.timeTotal
+		local radius   = lerp(.4, .2, progress)
+		local a        = 1 - progress^2
+		loveSetColor(1, 1, 1, a)
+		loveDrawCircleFill(spark.x, spark.y, radius, 5)
+		drawLight(level, spark.x,spark.y, 4*radius, .5*a)
+
+	case Explosion:
+		local explosion = cast(Explosion) ent
+		local progress  = 1 - explosion.timeRemaining/explosion.timeTotal
+		local radius    = explosion.radius * lerp(.1, 1, progress^.4)
+		local a         = .6 * (1 - sin(progress^2 * TAU/4))
+		loveSetColor(1, 1, 1, a)
+		loveSetBlendMode(LoveBlendMode.ADD)
+		loveDrawCircleFill(explosion.x, explosion.y, radius, 32)
+		loveResetBlendMode()
+		drawLight(level, explosion.x,explosion.y, 4*radius, .8*a)
 	}
+
+	!if DEV {
+		-- Collision box.
+		if loveIsKeyDown("tab") {
+			loveSetColor(0, 1, 0, .4)
+			loveDrawRectangleFill(ent.x-ent.width/2, ent.y-ent.height/2, ent.width, ent.height)
+		}
+	}
+}
+
+local drawLight :: (level:Level, x,y:float, radius:float, opacity:float) {
+	drawLight(level, x,y, radius,radius, opacity)
+}
+local drawLight :: (level:Level, x,y:float, radiusX,radiusY:float, opacity:float) {
+	local light:Light = {x=x, y=y, radiusX=radiusX, radiusY=radiusY, opacity=opacity} -- @Speed
+	insert(level.lightsToDraw, light)
 }
 
 
 
 global destroy :: (ent:Entity) {
 	ent.isDestroyed = true
+}
+
+
+
+global damage :: (level:Level, ent:Entity, amount:int, damagePointX,damagePointY:float) {
+	if ent.isDestroyed  return
+
+	ent.timeDamaged  = level.time
+	ent.health      -= amount
+
+	local getRandomizedDamageEffectPosition :: (ent:Entity, damagePointX,damagePointY:float) -> (x,y:float) {
+		return
+			clamp(damagePointX, ent.x-.4*ent.width , ent.x+.4*ent.width ) + getRandom(-.1, .1),
+			clamp(damagePointY, ent.y-.4*ent.height, ent.y+.4*ent.height) + getRandom(-.1, .1)
+	}
+
+	for 1, getRandom(5, 8) {
+		local x, y  = getRandomizedDamageEffectPosition(ent, damagePointX,damagePointY)
+		local spark = newEntity(Spark, x, y)
+		insert(level.entities, spark)
+	}
+
+	level.cameraShake = max(level.cameraShake, .3)
+
+	if ent.health > 0  return
+
+	-- We're dead!
+
+	for 1, 3 {
+		local x                  = ent.x + ent.width  * getRandom(-.4, .4)
+		local y                  = ent.y + ent.height * getRandom(-.4, .4)
+		local explosion          = newEntity(Explosion, x, y)
+		explosion.timeTotal     *= getRandom(.6, 1/.6)
+		explosion.timeRemaining  = explosion.timeTotal
+		explosion.radius         = getRandom(3.0, 12.0)
+		insert(level.entities, explosion)
+	}
+
+	level.cameraShake = max(level.cameraShake, 1)
+	destroy(ent)
 }
 
 

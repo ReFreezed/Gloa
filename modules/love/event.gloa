@@ -1,0 +1,49 @@
+--[[============================================================
+--=
+--=  LÖVE bindings (love2d.org)
+--=  love.event
+--=
+--=  Supported versions: 11.3
+--=
+--==============================================================
+
+	loveSetEventHandler, loveSetConfigHandler, loveRemoveEventHandler
+	loveQuit, loveRestart
+
+--============================================================]]
+
+!import "love/basic"
+
+local love:table : !foreign lua "love"
+
+export loveSetEventHandler :: (event:LoveEvent, handler:any, catchErrorsInGloa=true) { -- @Compiler @Cleanup :RestrictAnyToTypeTag
+	!import "basic"
+
+	assert(getLuaType(handler) == LuaType.FUNCTION, "Handler is not a function.") -- @Cleanup: Remove this when :RestrictAnyToTypeTag is solved.
+
+	if catchErrorsInGloa {
+		-- Because LÖVE has it's own error handling that the user may not want we have
+		-- to do some trickery to catch errors in Glóa before LÖVE sees them.
+		local wrap :: (func:any) -> any !foreign compiler "wrapFunctionInGloaErrorHandler"
+		handler = wrap(handler)
+	}
+
+	love[event] = handler
+	if event == LoveEvent.ERROR_HANDLER  love.errhand = handler
+}
+
+export loveSetConfigHandler :: (handler:(conf:LoveConfig)) {
+	loveSetEventHandler(LoveEvent.CONFIG, handler, false)
+}
+
+export loveRemoveEventHandler :: (event:LoveEvent) {
+	love[event] = nil
+	if event == LoveEvent.ERROR_HANDLER  love.errhand = nil
+}
+
+export loveQuit :: (exitStatus=0) !foreign lua "love and love.event and love.event.quit"
+
+export loveRestart :: () {
+	local _loveRestart :: (restart:string) !foreign lua "love and love.event and love.event.quit"
+	_loveRestart("restart")
+}
