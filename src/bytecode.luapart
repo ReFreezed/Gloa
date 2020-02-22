@@ -99,6 +99,7 @@ local !struct"Constant"{
 -- constant, isNew = bcAllocateConstantValueIfNew( state, typeTypeInfo,      representedType, nodeForError )
 -- constant, isNew = bcAllocateConstantValueIfNew( state, foreignTypeDummy,  foreign,         nodeForError )
 -- constant, isNew = bcAllocateConstantValueIfNew( state, typeInfoTypeInfo,  typeInfo,        nodeForError )
+-- constant, isNew = bcAllocateConstantValueIfNew( state, nullType,          nil,             nodeForError )
 function _G.bcAllocateConstantValueIfNew(state, typeInfo, v, nodeForError)
 	local tag      = typeInfo.tag
 	local isSimple = isTypeSimple(typeInfo)
@@ -266,6 +267,10 @@ function _G.bcAllocateConstantValueForExpressionIfNew(state, expr, dependent)
 		end
 
 		return const, isNew
+
+	elseif expr.nodeType == !(nodeTypes.AstNull) then
+		typeInfo = getTypeInfoForBuiltinType(state, "null")
+		return bcAllocateConstantValueIfNew(state, typeInfo, nil, dependent)
 
 	else
 		errorUnhandledNodeType(state, expr)
@@ -482,6 +487,12 @@ function _G.bcEmit(state, node)
 		local typeInfo             = getTypeInfoForBuiltinType(state, "typeInfo")
 		typeInfoNode.valueConstant = bcAllocateConstantValueIfNew(state, typeInfo, typeInfoNode.valueTypeInfo, typeInfoNode)
 		moveToPipe(state, typeInfoNode, !(PIPE_DONE))
+
+	elseif node.nodeType == !(nodeTypes.AstNull) then
+		local null         = node
+		local typeInfo     = getTypeInfoForBuiltinType(state, "null")
+		null.valueConstant = bcAllocateConstantValueIfNew(state, typeInfo, nil, null)
+		moveToPipe(state, null, !(PIPE_DONE))
 
 	else
 		errorUnhandledNodeType(state, node)

@@ -602,20 +602,24 @@ function _G.writeExpression(state, writer, expr)
 
 		elseif tableNode.inferredType.tag == !(typeTags.TypeInfoStruct) then
 			local structInfo = tableNode.inferredType
+			local first      = true
 			!ASSERT `not structInfo.isPolymorphic`
 
-			for i, member in ipairs(structInfo.members) do
-				if i > 1 then  file:write(", ")  end
-
+			for _, member in ipairs(structInfo.members) do
 				local tableField = findTableFieldInStructConstructor(tableNode, member.name)
 
-				writeTableConstructorKeyName(writer, member.name)
-				file:write("=")
+				if not (tableField and tableField.value.nodeType == !(nodeTypes.AstNull)) then -- @Incomplete: Also check if the default value is NULL.
+					if not first then  file:write(", ")  end
+					first = false
 
-				if tableField then
-					writeExpression(state, writer, tableField.value)
-				else
-					writeDefaultValueForStructMember(state, writer, structInfo, member, tableNode) -- @UX: Maybe use a better nodeForError.
+					writeTableConstructorKeyName(writer, member.name)
+					file:write("=")
+
+					if tableField then
+						writeExpression(state, writer, tableField.value)
+					else
+						writeDefaultValueForStructMember(state, writer, structInfo, member, tableNode) -- @UX: Maybe use a better nodeForError.
+					end
 				end
 			end
 
@@ -705,6 +709,9 @@ function _G.writeExpression(state, writer, expr)
 			file:write(")")
 		end
 
+	elseif expr.nodeType == !(nodeTypes.AstNull) then
+		file:write("nil")
+
 	elseif expr.inferredType.tag == !(typeTags.TypeInfoNamespace) then
 		nodeError(state, expr, "ProgramWriter", "Invalid place for a namespace.")
 	else
@@ -743,13 +750,18 @@ function _G.writeDefaultValueForType(state, writer, typeInfo, nodeForError)
 			exitFailure()
 		end
 
+		local first = true
 		file:write("{")
 
 		for i, member in ipairs(structInfo.members) do
-			if i > 1 then  file:write(", ")  end
-			writeTableConstructorKeyName(writer, member.name)
-			file:write("=")
-			writeDefaultValueForStructMember(state, writer, structInfo, member, nodeForError)
+			if not first then  file:write(", ")  end
+			first = false
+
+			-- if not (default_value_for_struct_member is AstNull) then -- @Incomplete
+				writeTableConstructorKeyName(writer, member.name)
+				file:write("=")
+				writeDefaultValueForStructMember(state, writer, structInfo, member, nodeForError)
+			-- end
 		end
 
 		file:write("}")
@@ -1435,6 +1447,9 @@ local function writeSimpleConstant(state, writer, typeInfo, v, isEnum)
 			file:write(formatInfoComment(getFriendlyTypeInfoName(typeInfo)))
 		end
 
+	elseif tag == !(typeTags.TypeInfoNullDummy) then
+		file:write("nil")
+
 	else
 		errorInternal("Incomplete: Handle constant value of type '%s'.", (TYPE_TAG_NAMES[tag] or "?"))
 	end
@@ -1513,20 +1528,24 @@ function _G.writeConstantValue(state, writer, const)
 		local tableNode  = const.value
 		!ASSERT `not structInfo.isPolymorphic`
 
+		local first = true
 		file:write("{")
 
-		for i, member in ipairs(structInfo.members) do
-			if i > 1 then  file:write(", ")  end
-
+		for _, member in ipairs(structInfo.members) do
 			local tableField = findTableFieldInStructConstructor(tableNode, member.name)
 
-			writeTableConstructorKeyName(writer, member.name)
-			file:write("=")
+			if not (tableField and tableField.value.nodeType == !(nodeTypes.AstNull)) then
+				if not first then  file:write(", ")  end
+				first = false
 
-			if tableField then
-				writeExpression(state, writer, tableField.value)
-			else
-				writeDefaultValueForStructMember(state, writer, structInfo, member, tableNode) -- @UX: Maybe use a better nodeForError.
+				writeTableConstructorKeyName(writer, member.name)
+				file:write("=")
+
+				if tableField then
+					writeExpression(state, writer, tableField.value)
+				else
+					writeDefaultValueForStructMember(state, writer, structInfo, member, tableNode) -- @UX: Maybe use a better nodeForError.
+				end
 			end
 		end
 

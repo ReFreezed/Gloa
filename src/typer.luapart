@@ -66,8 +66,9 @@ local !structTypeInfo"TypeInfoType:_TypeInfo"  {_overrides={{`tag`,8}}}
 
 local !structTypeInfo"TypeInfoVoid:_TypeInfo"         {_overrides={{`tag`,9}}}
 local !structTypeInfo"TypeInfoPlaceholder:_TypeInfo"  {_overrides={{`tag`,10}}}
-local !structTypeInfo"TypeInfoForeignDummy:_TypeInfo" {_overrides={{`tag`,11}}}
-local !structTypeInfo"TypeInfoTypeInfoDummy:_TypeInfo"{_overrides={{`tag`,-1}}}
+local !structTypeInfo"TypeInfoForeignDummy:_TypeInfo" {_overrides={{`tag`,-1}}}
+local !structTypeInfo"TypeInfoTypeInfoDummy:_TypeInfo"{_overrides={{`tag`,-2}}}
+local !structTypeInfo"TypeInfoNullDummy:_TypeInfo"    {_overrides={{`tag`,-3}}}
 
 _G.!(local )!!SIMPLE_TYPE_TAG = {
 	-- These small type infos don't have any extra information.
@@ -184,6 +185,7 @@ do
 		-- Dummy types used for constants in bytecode pipe and forward:
 		["foreign"]     = TypeInfoForeignDummy,  -- @Cleanup
 		["typeInfo"]    = TypeInfoTypeInfoDummy, -- @Cleanup
+		["null"]        = TypeInfoNullDummy,     -- @Cleanup
 	}
 
 	function _G.getTypeInfoForBuiltinType(state, typeName)
@@ -4198,7 +4200,7 @@ end
 			if struct.isForeign then
 				-- void
 
-			elseif decl.value and decl.value.nodeType == !(nodeTypes.AstForeign) then
+			elseif decl.value and isAny(decl.value.nodeType, !(nodeTypes.AstForeign),!(nodeTypes.AstNull)) then
 				-- void
 
 			elseif member.typeInfo.tag == !(typeTags.TypeInfoStruct) then
@@ -4545,6 +4547,18 @@ local function createRunReplacementFromTypeAndLuaValue(state, runNode, parent, t
 	end
 end
 
+!NODE_INFERRER `function nodeInferrers.AstNull(state, null)`
+	local typeInfoExpected = getExpectedTypeInfo(state, null, false, "NULL value", null)
+	if not typeInfoExpected then  return  end
+
+	if not isTypeTableLike(typeInfoExpected) then
+		typeError(state, null, "Null only works in place of table-like objects.")
+	end
+
+	null.inferredType = typeInfoExpected
+	moveToNextRelevantPipe(state, null)
+end
+
 !NODE_INFERRER `function nodeInferrers.AstRun(state, runNode)`
 	local lambda = runNode.lambda
 
@@ -4714,13 +4728,16 @@ function _G.isExpressionConstant(state, expr)
 	elseif expr.nodeType == !(nodeTypes.AstVararg) then
 		return false
 
+	elseif expr.nodeType == !(nodeTypes.AstTypeInfo) then
+		return false -- @Incomplete: Make type_info() a constant expression.
+
 	elseif expr.nodeType == !(nodeTypes.AstForeign) then
 		-- Technically foreign values are seen as constant at runtime, but since we don't know
 		-- what they are at compile-time we (usually) treat them as runtime values.
 		return false
 
-	elseif expr.nodeType == !(nodeTypes.AstTypeInfo) then
-		return false -- @Incomplete: Make type_info() a constant expression.
+	elseif expr.nodeType == !(nodeTypes.AstNull) then
+		return true
 
 	else
 		errorUnhandledNodeType(state, expr)
@@ -5457,7 +5474,8 @@ function _G.isTypeSimple(typeInfo)
 		!(typeTags.TypeInfoFloat),
 		!(typeTags.TypeInfoString),
 		!(typeTags.TypeInfoType),
-		!(typeTags.TypeInfoEnum) -- The true enum member types are simple.
+		!(typeTags.TypeInfoEnum), -- The true enum member types are simple.
+		!(typeTags.TypeInfoNullDummy) -- @Cleanup
 	)
 end
 
