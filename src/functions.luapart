@@ -11,7 +11,7 @@
 
 	areArraysEqual
 	copyTable, copyArray, copyToArray, emptyArray, fillArray, reverseArray, flipArray, removeItem, removeUnordered, insertArrayItems
-	debugCountCalls*
+	profiler*
 	errorInternal, errorLine, errorOnLine, errorInFile, assert
 	exit, exitFailure
 	F
@@ -174,6 +174,7 @@ function _G.printerr(...)
 end
 !if DEBUG then
 	-- :SublimeText2Desync
+	local _print          = print
 	_G.print              = printerr
 	DEFAULT_GLOBALS.print = print
 !end
@@ -1052,72 +1053,157 @@ end
 
 
 do
-	local calls      = {}
 	local isRunning  = false
 	local pauseDepth = 0
 
-	function _G.debugCountCallsStart()
-		if isRunning then  return  end
+	local calls = {}
+	local n     = 0
+	local names = {}
+	local times = {}
+	local file  = nil
 
-		local getinfo = debug.getinfo
+	-- !local PROF_CALLS = true
+	-- !local PROF_CALLEES = true
+	-- !local PROF_TIMES = true
 
-		debug.sethook(function(event)
-			-- [[ All calls.
-			local name = getinfo(2, "n").name or "?"
-			calls[name] = (calls[name] or 0)+1
-			--]]
-			--[[ Callees for one call.
-			local name = getinfo(2, "n").name
-			if name ~= "assert" then  return  end
-			name = getinfo(3, "n").name or "?"
-			calls[name] = (calls[name] or 0)+1
-			--]]
-		end, "c")
+	function _G.profilerStart()
+		!if PROF_CALLS or PROF_CALLEES or PROF_TIMES then
+			if isRunning then  return  end
 
-		isRunning  = true
-		pauseDepth = 0
+			isRunning     = true
+			pauseDepth    = 0
+
+			local getinfo = debug.getinfo
+			local clock   = os.clock
+
+			!if PROF_CALLS then
+				debug.sethook(function()
+					local name = getinfo(2, "n").name or "?"
+					calls[name] = (calls[name] or 0)+1
+				end, "c")
+
+			!elseif PROF_CALLEES then
+				debug.sethook(function()
+					local name = getinfo(2, "n").name
+					if name ~= "assert" then  return  end
+					name = getinfo(3, "n").name or "?"
+					calls[name] = (calls[name] or 0)+1
+				end, "c")
+
+			!elseif PROF_TIMES then
+				n        = n+1
+				names[n] = "__PROFILER"
+				times[n] = os.clock()
+
+				collectgarbage()
+
+				debug.sethook(function(event, ln)
+					local info = getinfo(2, "nS")
+					local name = info.name or info.linedefined or "?"
+					if name == names[n] then  return  end
+
+					n        = n+1
+					names[n] = name
+					times[n] = clock()
+				end, "l")
+			!end
+		!end
 	end
-	function _G.debugCountCallsStop()
+	function _G.profilerStop()
+		debug.sethook(nil)
+		!if PROF_TIMES then
+			n        = n+1
+			names[n] = "__PROFILER"
+			times[n] = os.clock()
+		!end
 		pauseDepth = 0
-		if isRunning then
-			debug.sethook(nil)
-			isRunning = false
-		end
+		isRunning  = false
 	end
 
-	function _G.debugCountCallsPause()
+	function _G.profilerPause()
 		if isRunning then
-			debugCountCallsStop()
+			profilerStop()
 			pauseDepth = 1
 		elseif pauseDepth > 0 then
 			pauseDepth = pauseDepth+1
 		end
 	end
-	function _G.debugCountCallsUnpause()
-		if pauseDepth > 0 then
-			pauseDepth = pauseDepth-1
-			if pauseDepth == 0 then
-				debugCountCallsStart()
+	function _G.profilerUnpause()
+		if pauseDepth == 0 then  return  end
+		pauseDepth = pauseDepth-1
+		if pauseDepth == 0 then  profilerStart()  end
+	end
+
+	function _G.profilerPrint()
+		!if PROF_CALLS or PROF_CALLEES then
+			local sources = {}
+
+			for source in pairs(calls) do
+				table.insert(sources, source)
 			end
-		end
+
+			table.sort(sources, function(a, b)
+				if calls[a] ~= calls[b] then  return calls[a] > calls[b]  end
+				return a < b
+			end)
+
+			print(os.date"calls %Y-%m-%d %H:%M:%S")
+			for _, source in ipairs(sources) do
+				printf("%d  %s", calls[source], source)
+			end
+
+		!elseif PROF_TIMES then
+			local runTimes = {}
+
+			for i = 2, n-1 do
+				local name     = type(names[i]) == "number" and ":"..names[i] or tostring(names[i])
+				runTimes[name] = (runTimes[name] or 0) + (times[i+1] - times[i])
+			end
+
+			local sources = {}
+
+			for source in pairs(runTimes) do
+				table.insert(sources, source)
+			end
+
+			table.sort(sources, function(a, b)
+				if runTimes[a] ~= runTimes[b] then  return runTimes[a] > runTimes[b]  end
+				return a < b
+			end)
+
+			print(os.date"times %Y-%m-%d %H:%M:%S")
+			for _, source in ipairs(sources) do
+				printf("%.3f  %s", runTimes[source], source)
+			end
+		!end
 	end
 
-	function _G.debugCountCallsPrint()
-		local sources = {}
-
-		for source, count in pairs(calls) do
-			table.insert(sources, source)
-		end
-
-		table.sort(sources, function(a, b)
-			if calls[a] ~= calls[b] then  return calls[a] > calls[b]  end
-			return a < b
-		end)
-
-		for i, source in ipairs(sources) do
-			print(i, source, calls[source])
-		end
+	--[[ TEST
+	local function deep()
+		local x = 0
 	end
+	local function first()
+		local x = 0
+		deep()
+		local y = 0
+	end
+	local function tail()
+		local x = 0
+		return first()
+	end
+
+	debug.sethook(function(event, ln)
+		local name = debug.getinfo(2, "n").name or "?"
+		_print(event, (ln or "    "), name)
+	end, "crl")
+
+	first()
+	_print("--------")
+	tail()
+
+	debug.sethook(nil)
+	os.exit(2)
+	--]]
 end
 
 

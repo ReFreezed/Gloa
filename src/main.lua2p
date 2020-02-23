@@ -262,12 +262,13 @@ xpcall(function()
 
 
 		-- Run pipes.
-		-- !ifDEBUG `debugCountCallsStart()`
+		!ifDEBUG `profilerStart()`
 		local timeStartPipes = os.clock()
 
 		!if DEBUG then
-		local pipeCycles   = 0
-		local maxQueueSize = 0
+		local queuedUpdates  = 0
+		local pipeCycles     = 0
+		local maxQueueSize   = 0
 		!end
 
 		!ifDEBUG`if not debug_onlyParse then`
@@ -281,8 +282,8 @@ xpcall(function()
 			addToQueueRecursively(state, globalScope)
 
 			for cycle = 1, math.huge do
+				-- print("cycle", cycle)
 				!if DEBUG then
-					-- print("cycle", cycle)
 					pipeCycles   = pipeCycles+1
 					maxQueueSize = math.max(maxQueueSize, #queue)
 				!end
@@ -300,6 +301,10 @@ xpcall(function()
 						removeUnordered(queue, i)
 					end
 					if not queued then  break  end
+
+					!if DEBUG then
+						queuedUpdates = queuedUpdates+1
+					!end
 
 					if queued.waitingOn then
 						waitCount = waitCount+1
@@ -439,7 +444,7 @@ xpcall(function()
 		!ifDEBUG`end`
 
 		local timeEndPipes = os.clock()
-		!ifDEBUG `debugCountCallsStop()`
+		!ifDEBUG `profilerStop()`
 
 
 
@@ -473,14 +478,16 @@ xpcall(function()
 
 			!local OK = {
 				"██████████████████████ ",
-				"████    ████  ████  ██ ",
-				"██  ████  ██  ██  ████ ",
-				"██  ████  ██    ██████ ",
-				"██  ████  ██  ██  ████ ",
-				"████    ████  ████  ██ ",
+				"███▀    ▀███  ███▀  ██ ",
+				"██  ▄██▄  ██  █▀  ▄███ ",
+				"██  ████  ██     █████ ",
+				"██  ▀██▀  ██  █▄  ▀███ ",
+				"███▄    ▄███  ███▄  ██ ",
 				"██████████████████████ ",
 			}
+
 			printf(!((DEBUG and OK[1] or "Successfully compiled ").."%s"), pathToFirstFile)
+
 			if subTime > 0 then
 			printf(!((DEBUG and OK[2] or "").."Total:   %.3f (+%.3f) sec"), timeEndCompilation-timeStartCompiling-subTime, subTime)
 			else
@@ -490,9 +497,21 @@ xpcall(function()
 			printf(!((DEBUG and OK[4] or "").."Parsing: %.3f sec"), timeEndParsing - timeStartParsing)
 			printf(!((DEBUG and OK[5] or "").."Pipes:   %.3f sec"), timeEndPipes   - timeStartPipes - subTime)
 			printf(!((DEBUG and OK[6] or "").."Output:  %.3f sec"), timeEndOutput  - timeStartOutput)
+
 			!if DEBUG then
-			printf(!((DEBUG and OK[7] or "").."Cycles:%d Queue:%d Deps:%d"), pipeCycles, maxQueueSize, #state.dependencies)
+				local dependencyCount = {}
+				for _, dependency in ipairs(state.dependencies) do
+					dependencyCount[dependency.dependType] = (dependencyCount[dependency.dependType] or 0)+1
+				end
+
+				local depencyCountTexts = {}
+				for dependType, title in ipairs(DEPEND_TITLES) do
+					depencyCountTexts[dependType] = F("%s:%d", title, (dependencyCount[dependType] or 0))
+				end
+
+				printf(!((DEBUG and OK[7] or "").."Updates:%d Cycles:%d Queue:%d Deps:%d (%s)"), queuedUpdates, pipeCycles, maxQueueSize, #state.dependencies, table.concat(depencyCountTexts, " "))
 			!end
+
 			print()
 		!ifNotDEBUG`end`
 
@@ -512,7 +531,7 @@ xpcall(function()
 		end
 	!ifNotDEBUG`end`
 
-	!ifDEBUG `debugCountCallsPrint()`
+	!ifDEBUG `profilerPrint()`
 
 	exit()
 
