@@ -88,6 +88,12 @@ local foreignApiCompilerSymbols = {
 			return {unpack(programArguments)}
 		end
 	`),
+
+	-- getTypeInfo = !(trimTemplate`
+	-- 	function(T)
+	-- 		return _TYPE_INFO[T]
+	-- 	end
+	-- `),
 }
 
 local foreignApiCompilerSymbolsDuringCompilation = {}
@@ -235,7 +241,9 @@ function _G.writeBinaryOperation(state, writer, left, right, binOp, token, binar
 end
 
 function _G.writeAccess(state, writer, access)
-	if isTypeTableLike(access.object.inferredType) then
+	local typeInfo = adjustTypeToOne(state, access.object, access.object.inferredType, true)
+
+	if isTypeTableLike(typeInfo) then
 		-- @Incomplete: Compiler setting for runtime checks of array bounds.
 		writeExpression(state, writer, access.object)
 
@@ -261,11 +269,11 @@ function _G.writeAccess(state, writer, access)
 			writer.file:write("]")
 		end
 
-	elseif access.object.inferredType.tag == !(typeTags.TypeInfoEnum) then
+	elseif typeInfo.tag == !(typeTags.TypeInfoEnum) then
 		errorInternal(state, access) -- Enum accesses should have been simplified away.
 
 	else
-		errorUnhandledNodeType(state, access.object)
+		errorUnhandledType(state, access.object, typeInfo)
 	end
 end
 
@@ -1818,6 +1826,7 @@ function _G.writeCompilerSymbols(state, writer)
 		`_MATH_FLOOR`, `math.floor`, -- Used for integer division.
 		`_IPAIRS`,     `ipairs`,     -- Used for short-form array loops.
 		`_PAIRS`,      `pairs`,      -- Used for short-form table loops.
+		`_SELECT`,     `select`,     -- Used for short-form vararg loops. @Incomplete
 
 		-- Used for short-form array loops in reverse.
 		`_IPAIRSR`, trimTemplate`
