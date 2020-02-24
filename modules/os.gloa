@@ -1,0 +1,211 @@
+--[[============================================================
+--=
+--=  Glóa operative system module
+--=
+--==============================================================
+
+	execute, escapeArguments
+	exit
+	getClock
+	getDate, getDateUtc
+	getEnvironmentVariable
+	getLocale, setLocale
+	getTime, getTimeDifference
+
+	Structs:
+	LocaleTable
+
+	Enums:
+	LocaleCategory
+
+--============================================================]]
+
+!import "basic"
+!import "string"
+
+export escapeArguments :: (arguments:[]string) -> (success:bool, error:string, result:string) {
+	local buffer:[]string = {}
+
+	for arg, i: arguments {
+		if findPattern(arg, '[%z\n\r]')
+			return false, format('Argument %d contains invalid characters.', i), ""
+
+		if i > 1  insert(buffer, ' ')
+
+		if arg == '' {
+			insert(buffer, '""')
+		} elseif not findPattern(arg, '[%s"]') {
+			insert(buffer, arg)
+		} else {
+			arg = replacePatternWithPattern(arg, '(\\*)"', '%1%1\\"')
+			arg = replacePatternWithPattern(arg, '(\\+)$', '%1%1')
+			insert(buffer, '"')
+			insert(buffer, arg)
+			insert(buffer, '"')
+		}
+	}
+
+	return true, "", concatinate(buffer)
+}
+
+export execute :: (command:string) -> (exitCode:int) !foreign lua "os.execute"
+
+export execute :: (program:string, arguments:[]string) -> (success:bool, error:string, exitCode:int) {
+	local ok, err, argsStr = escapeArguments(arguments)
+	if not ok  return false, err, 0
+
+	local command = format([[""%s" %s"]], program, argsStr)
+	return true, "", execute(command)
+}
+
+export exit :: (exitCode:int=0) !foreign lua "os.exit"
+
+export getClock :: () -> float !foreign lua "os.clock"
+
+local Date :: struct {
+	year:  int,
+	month: int,
+	day:   int,
+	hour:  int|none  = nil,
+	min:   int|none  = nil,
+	sec:   int|none  = nil,
+	isdst: bool|none = nil,
+}
+local date:Date
+
+local _getTime :: (_date:Date) -> int !foreign lua "os.time"
+
+export getTime :: () -> int !foreign lua "os.time"
+export getTime :: (year,month,day:int, hour,min,sec=0) -> int {
+	date.year  = year
+	date.month = month
+	date.day   = day
+	date.hour  = hour
+	date.min   = min
+	date.sec   = sec
+	date.isdst = nil
+	return _getTime(date)
+}
+export getTime :: (year,month,day:int, hour,min,sec:int, isDst:bool) -> int {
+	date.year  = year
+	date.month = month
+	date.day   = day
+	date.hour  = hour
+	date.min   = min
+	date.sec   = sec
+	date.isdst = isDst
+	return _getTime(date)
+}
+
+export getTimeDifference :: (time2:int, time1:int) !foreign lua "os.difftime" -- This usually returns time2-time1.
+
+local _getDate :: (dateFormat:string)           -> string|Date !foreign lua "os.date"
+local _getDate :: (dateFormat:string, time:int) -> string|Date !foreign lua "os.date"
+
+local validateDateFormat :: (dateFormat:string) {
+	local b = getByte(dateFormat, 1)
+	if (b == !char "*" or b == !char "!")  errorf("Date format cannot start with '*' or '!'. (Format is %s)", dateFormat)
+}
+
+export getDate :: () -> (year,month,day:int, hour,min,sec:int, isDst:bool) {
+	date = cast(Date) _getDate("*t")
+	return date.year, date.month, date.day, cast(int)date.hour, cast(int)date.min, cast(int)date.sec, cast(bool)date.isdst
+}
+export getDate :: (time:int) -> (year,month,day:int, hour,min,sec:int, isDst:bool) {
+	date = cast(Date) _getDate("*t", time)
+	return date.year, date.month, date.day, cast(int)date.hour, cast(int)date.min, cast(int)date.sec, cast(bool)date.isdst
+}
+export getDate :: (dateFormat:string) -> string {
+	validateDateFormat(dateFormat)
+	return cast(string) _getDate(dateFormat)
+}
+export getDate :: (dateFormat:string, time:int) -> string {
+	validateDateFormat(dateFormat)
+	return cast(string) _getDate(dateFormat, time)
+}
+
+export getDateUtc :: () -> (year,month,day:int, hour,min,sec:int, isDst:bool) {
+	date = cast(Date) _getDate("!*t")
+	return date.year, date.month, date.day, cast(int)date.hour, cast(int)date.min, cast(int)date.sec, cast(bool)date.isdst
+}
+export getDateUtc :: (time:int) -> (year,month,day:int, hour,min,sec:int, isDst:bool) {
+	date = cast(Date) _getDate("!*t", time)
+	return date.year, date.month, date.day, cast(int)date.hour, cast(int)date.min, cast(int)date.sec, cast(bool)date.isdst
+}
+export getDateUtc :: (dateFormat:string) -> string {
+	validateDateFormat(dateFormat)
+	return cast(string) _getDate("!"..dateFormat)
+}
+export getDateUtc :: (dateFormat:string, time:int) -> string {
+	validateDateFormat(dateFormat)
+	return cast(string) _getDate("!"..dateFormat, time)
+}
+
+export getEnvironmentVariable :: (name:string) -> (isDefined:bool, value:string) {
+	local getenv :: (name:string) -> string|none !foreign lua "os.getenv"
+
+	local v = getenv(name)
+	if v == nil  return false, ""
+
+	return true, cast(string) v
+}
+
+export LocaleCategory :: enum {
+	ALL      :: "all",
+	COLLATE  :: "collate",
+	CTYPE    :: "ctype",
+	MONETARY :: "monetary",
+	NUMERIC  :: "numeric",
+	TIME     :: "time",
+}
+
+export LocaleTable :: struct {
+	collate:string,
+	ctype:string,
+	monetary:string,
+	numeric:string,
+	time:string,
+}
+
+local getOrSetLocale :: (locale:string|none, category:LocaleCategory) -> string|none !foreign lua "os.setlocale"
+
+export getLocale :: (category:LocaleCategory) -> string {
+	if category == LocaleCategory.ALL  error("Cannot retrieve locale for all categories with getLocale(). (Use getLocaleForAllCategories() instead.)")
+	return cast(string) getOrSetLocale(nil, category)
+}
+export setLocale :: (locale:string, category=LocaleCategory.ALL) -> (success:bool, locale:string) {
+	local newLocale = getOrSetLocale(locale, category)
+	if newLocale == nil  return false, ""
+	return true, cast(string) newLocale
+}
+
+export getLocaleForAllCategories :: () -> LocaleTable {
+	local Iterator :: (_1,_2:none) -> string|none, string -- @Temp until iterators are better. @Compiler
+	local each     :: (s:string, pattern:string) -> Iterator, none, none !foreign lua "string.gmatch"
+
+	local localeSequence = cast(string) getOrSetLocale(nil, LocaleCategory.ALL)
+	local t:LocaleTable
+
+	if find(localeSequence, "=") {
+		for categoryName, locale in each(localeSequence, "LC_(%a+)=([^;]+)") {
+			if categoryName == {
+				case "COLLATE":  t.collate  = locale
+				case "CTYPE":    t.ctype    = locale
+				case "MONETARY": t.monetary = locale
+				case "NUMERIC":  t.numeric  = locale
+				case "TIME":     t.time     = locale
+				case:
+					!import "io"
+					writeLine(STDERR, "Error: getLocaleForAllCategories: Unknown category name: ", categoryName)
+			}
+		}
+	} else {
+		t.collate  = localeSequence
+		t.ctype    = localeSequence
+		t.monetary = localeSequence
+		t.numeric  = localeSequence
+		t.time     = localeSequence
+	}
+
+	return t
+}
