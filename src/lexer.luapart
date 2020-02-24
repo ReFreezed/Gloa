@@ -130,6 +130,8 @@ function _G.tokenize(s, path, tokens)
 	local ln    = 1
 	local lnPtr = 1
 
+	local forceIdentifier = false
+
 	local function updateLineNumber()
 		while lnPtr < ptr do
 			if getByte(s, lnPtr) == !(getByte"\n") then
@@ -176,7 +178,11 @@ function _G.tokenize(s, path, tokens)
 
 			local word = s:sub(i1, ptr-1)
 
-			if word == "_" then
+			if forceIdentifier then
+				forceIdentifier = false
+				tokType  = !(TOKEN_IDENTIFIER)
+				tokValue = word
+			elseif word == "_" then
 				tokType  = !(TOKEN_PUNCTUATION)
 				tokValue = "_"
 			elseif word == "elseif" then
@@ -188,6 +194,15 @@ function _G.tokenize(s, path, tokens)
 				tokType  = KEYWORDS[word] and !(TOKEN_KEYWORD) or !(TOKEN_IDENTIFIER)
 				tokValue = word
 			end
+
+		elseif forceIdentifier then
+			errorInFile(s, path, ptr, "Tokenizer", "Expected a word after '\\'.")
+
+		-- Escaped identifier.
+		elseif s:find("^\\", ptr) then
+			ptr             = ptr+1
+			forceIdentifier = true
+			tokType         = nil
 
 		-- Directive.
 		elseif s:find("^!%a", ptr) then
