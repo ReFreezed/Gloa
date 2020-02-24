@@ -7,7 +7,8 @@
 --=
 --============================================================]]
 
-global DEV :: true
+global DEV            :: true
+global DISABLE_SOUNDS :: DEV and true
 
 !import "basic"
 !import "io"
@@ -15,6 +16,7 @@ global DEV :: true
 !import "os"
 !import "utils"
 
+!import "love/audio"
 !import "love/basic"
 !import "love/event"
 !import "love/graphics"
@@ -59,8 +61,52 @@ global Level :: struct {
 	lightsToDraw: []Light,
 }
 
-local currentLevel:Level   = NULL
-local lightImage:LoveImage = NULL
+local currentLevel: Level    = NULL
+local lightImage: LoveImage  = NULL
+
+
+
+local Sound :: struct {
+	source: LoveSource = NULL,
+	volumeVariation: float,
+	pitchVariation:  float,
+}
+
+local sounds: table
+-- local sounds: struct { !key:string, !value:Sound } -- @Compiler @Incomplete: Structured hash tables.
+
+local loadSounds :: () {
+	local loadSound :: (name:string, path:string, loop:bool, volume,volumeVar:float, pitch,pitchVar:float) {
+		!if DISABLE_SOUNDS  path = "sounds/silence.ogg"
+
+		local source = loveNewSource(path, LoveSourceType.STATIC)
+
+		loveSetVolume (source, volume)
+		loveSetPitch  (source, pitch)
+		loveSetLooping(source, loop)
+
+		local sound: Sound = {source=source, volumeVariation=volumeVar, pitchVariation=pitchVar}
+		sounds[name] = sound
+	}
+
+	loadSound("death",     "sounds/death.ogg",     false, 0.80,0.00, 1.00,0.00)
+	loadSound("explosion", "sounds/explosion.ogg", false, 0.60,0.05, 1.00,0.06)
+	loadSound("impact",    "sounds/impact.ogg",    false, 0.30,0.00, 1.00,0.06)
+	loadSound("shot1",     "sounds/shot1.ogg",     false, 0.20,0.05, 0.80,0.03)
+	loadSound("shot2",     "sounds/shot2.ogg",     false, 0.50,0.05, 1.00,0.03)
+}
+
+global playSound :: (name:string) {
+	local sound = cast(Sound) sounds[name]
+	if sound == NULL {
+		writeLine(STDERR, format("Error: No sound '%s'.", name))
+		return
+	}
+	local clone = loveCloneSource(sound.source)
+	loveSetVolume(clone, loveGetVolume(clone)*getRandom(1-sound.volumeVariation, 1+sound.volumeVariation))
+	loveSetPitch (clone, loveGetPitch (clone)*getRandom(1-sound.pitchVariation,  1+sound.pitchVariation ))
+	lovePlay(clone)
+}
 
 
 
@@ -79,6 +125,8 @@ local onLoad :: (args:[]string, argsRaw:[]string) {
 	}
 
 	lightImage = loveNewImage("gfx/light.png")
+
+	loadSounds()
 
 	setRandomSeed(getTime())
 	startLevel(1)
