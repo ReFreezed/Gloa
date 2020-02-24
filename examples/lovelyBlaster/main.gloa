@@ -10,8 +10,10 @@
 global DEV :: true
 
 !import "basic"
-!import "math"
 !import "io"
+!import "math"
+!import "os"
+!import "utils"
 
 !import "love/basic"
 !import "love/event"
@@ -34,10 +36,10 @@ global CAMERA_HEIGHT :: 75
 global MIN_DISTANCE_TO_CAMERA_EDGE :: 3
 
 global SpawnInstruction :: struct {
-	time   = 0.00,
-	entity = none,
-	x      = 0.0,
-	y      = 0.0,
+	timeRelative = 0.00,
+	entity       = none,
+	x            = 0.0,
+	y            = 0.0,
 }
 
 global Level :: struct {
@@ -52,6 +54,7 @@ global Level :: struct {
 
 	entitySpawnQueue: []SpawnInstruction = NULL,
 	nextIndexToSpawn = 1,
+	lastSpawnTime    = 0.00,
 
 	lightsToDraw: []Light,
 }
@@ -64,7 +67,7 @@ local lightImage:LoveImage = NULL
 local startLevel :: (levelId:int) {
 	currentLevel        = {entitySpawnQueue=LEVEL1_SPAWN_QUEUE}
 
-	local player        = newEntity(Player, LEVEL_WIDTH/2, .8*CAMERA_HEIGHT)
+	local player        = newEntity(currentLevel, Player, LEVEL_WIDTH/2, .8*CAMERA_HEIGHT)
 	currentLevel.player = player
 	insert(currentLevel.entities, player)
 }
@@ -77,18 +80,39 @@ local onLoad :: (args:[]string, argsRaw:[]string) {
 
 	lightImage = loveNewImage("gfx/light.png")
 
+	setRandomSeed(getTime())
 	startLevel(1)
 }
 
 
 
 local onKeyPressed :: (key:LoveKey, scancode:LoveScancode, isRepeat:bool) {
+	local player = currentLevel.player
 	if key == {
 		case "escape": loveQuit(0)
 		case "f10": if loveIsKeyDown("lctrl","rctrl") loveRestart() else startLevel(1)
 	}
 	if scancode == {
-		case "x": currentLevel.player.wantsToShoot = true
+		case "x": player.wantsToShoot = true
+	}
+	!if DEV {
+		if key == {
+		case "kp1": player.bulletMods.level    = 1
+		case "kp2": player.bulletMods.level    = 2
+		case "kp3": player.bulletMods.level    = 3
+		case "kp4": player.bulletMods.movement = BulletMovement.LINEAR
+		case "kp5": player.bulletMods.movement = BulletMovement.WAVE
+		case "kp6": --
+		case "kp7": player.bulletMods.pulsing  = not player.bulletMods.pulsing
+		case "kp8": player.rearWeapon          = not player.rearWeapon
+		case "kp9": --
+		case "kp+":
+			player.health = player.healthMax
+			if player.isDestroyed {
+				player.isDestroyed = false
+				insert(currentLevel.entities, player)
+			}
+		}
 	}
 }
 
@@ -110,11 +134,12 @@ local onUpdate :: (dt:float) {
 
 	currentLevel.cameraShake = max(currentLevel.cameraShake-dt/.60, 0)
 
-	while
-		currentLevel.entitySpawnQueue[currentLevel.nextIndexToSpawn] ~= nil
-		and currentLevel.progression >= currentLevel.entitySpawnQueue[currentLevel.nextIndexToSpawn].time
-	{
+	while true {
+		local ent = currentLevel.entitySpawnQueue[currentLevel.nextIndexToSpawn]
+		if ent == NULL or currentLevel.progression < currentLevel.lastSpawnTime + ent.timeRelative  break
+
 		spawnNextEntity(currentLevel)
+		currentLevel.lastSpawnTime = currentLevel.lastSpawnTime + ent.timeRelative
 	}
 
 	for currentLevel.entities  updateEntity(currentLevel, it, dt)
@@ -138,11 +163,12 @@ local onDraw :: () {
 	loveCoordinateSystemScale(scale)
 	loveCoordinateSystemTranslate(-LEVEL_WIDTH/2, -CAMERA_HEIGHT/2)
 
-	local x1, y1 = loveGlobalToScreen(0, 0)
-	local x2, y2 = loveGlobalToScreen(LEVEL_WIDTH, CAMERA_HEIGHT)
-	loveSetScissor(x1, y1, x2-x1, y2-y1)
+	local viewX1, viewY1 = loveGlobalToScreen(0, 0)
+	local viewX2, viewY2 = loveGlobalToScreen(LEVEL_WIDTH, CAMERA_HEIGHT)
+	loveSetScissor(viewX1, viewY1, viewX2-viewX1, viewY2-viewY1)
 	loveClear(.5, .05, .1)
 
+	-- World.
 	local shakeX = .6 * currentLevel.cameraShake * cos(currentLevel.time/.10*TAU)
 	local shakeY = .4 * currentLevel.cameraShake * cos(currentLevel.time/.17*TAU)
 	loveCoordinateSystemTranslate(shakeX, shakeY)
@@ -161,6 +187,32 @@ local onDraw :: () {
 	}
 
 	currentLevel.lightsToDraw = {}
+	loveCoordinateSystemTranslate(-shakeX, -shakeY)
+
+	-- HUD.
+	for i = 1, player.healthMax {
+		if i > player.health
+			loveSetColor(0, 0, 0)
+		else
+			loveSetColor(0, 1, 0)
+
+		local RADIUS  :: 1
+		local SPACING :: .5
+		loveDrawCircleFill(SPACING+RADIUS + (i-1)*(SPACING+2*RADIUS), SPACING+RADIUS, RADIUS, 32)
+	}
+
+	!if DEV {
+		if loveIsKeyDown("tab") {
+			loveGraphicsReset()
+
+			local font  = loveGetFont()
+			local fontH = loveGetHeight(font)
+			local y     = viewY2-fontH
+
+			loveSetColor(1, 1, 1)
+			loveDrawText(format("Entities: %d", #currentLevel.entities), viewX1, y) ; y -= fontH
+		}
+	}
 }
 
 global Light :: struct {

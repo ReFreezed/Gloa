@@ -15,12 +15,14 @@ global Entity :: struct {
 	entityType = none,
 	id:int,
 
-	width  = 1.0,
-	height = 1.0,
-	health = 1,
+	width     = 1.0,
+	height    = 1.0,
+	healthMax = 1,
 
-	x:float = LEVEL_WIDTH/2,
+	x:float,
 	y:float,
+
+	health = 1,
 
 	timeSpawned = 0.00,
 	timeDamaged = -9999.00,
@@ -28,12 +30,28 @@ global Entity :: struct {
 	isDestroyed = false,
 }
 
+global BulletMovement :: enum {
+	LINEAR :: 1,
+	WAVE   :: 2,
+}
+global BulletMods :: struct {
+	level    = 1,
+	movement = BulletMovement.LINEAR,
+	pulsing  = false, -- @Incomplete
+}
+
 global Player :: struct {
 	using Entity,
-	speedX         = 0.0,
-	speedY         = 0.0,
-	weaponCooldown = 0.0,
+
+	speedX = 0.0,
+	speedY = 0.0,
+
 	wantsToShoot   = false,
+	weaponCooldown = 0.00,
+	shootCount     = 0,
+
+	bulletMods: BulletMods,
+	rearWeapon = false,
 }
 
 local Enemy :: struct {
@@ -42,10 +60,35 @@ local Enemy :: struct {
 global Carrier :: struct {
 	using Enemy,
 }
+global Fly :: struct {
+	Phase :: enum {
+		ENTER :: 1,
+		SHOOT :: 2,
+		EXIT  :: 3,
+	},
+	using Enemy,
+
+	phase = Phase.ENTER,
+
+	targetX:float,
+	targetY:float,
+
+	weaponCooldown = 0.00,
+	shootCount     = 0,
+}
+global isEnemy :: (ent:Entity) -> bool {
+	local entityType = ent.entityType
+	return entityType == Carrier or entityType == Fly
+}
 
 global Bullet :: struct {
 	using Entity,
+
 	shotByPlayer = false,
+	mods: BulletMods,
+
+	angleBase:float,
+	angle:float,
 }
 
 global Fx :: struct {
@@ -65,42 +108,75 @@ global Explosion :: struct {
 }
 
 -- @Incomplete: Generate this enum through metaprogramming.
-global EntityType :: enum {
-	PLAYER  :: Player,
-	CARRIER :: Carrier,
-	BULLET  :: Bullet,
-}
+-- global EntityType :: enum {
+-- 	PLAYER  :: Player,
+-- 	CARRIER :: Carrier,
+-- 	BULLET  :: Bullet,
+-- 	-- ...
+-- }
 
 
 
 local lastEntityId = 0
 
-global newEntity :: ($T:type, x,y:float) -> T {
+global newEntity :: (level:Level, $T:type, initX,initY:float) -> T {
 	!assert T ~= Entity
 	-- !assert T has Entity -- @Incomplete: Somehow make sure Entity is part of the type.
 
 	lastEntityId += 1
 
 	local ent:T = {
-		entityType = T,
-		id         = lastEntityId,
-		x          = x,
-		y          = y,
+		entityType  = T,
+		id          = lastEntityId,
+		x           = initX,
+		y           = initY,
+		timeSpawned = level.time,
 	}
 
 	!if T == Player {
-		ent.width  = 2.2
-		ent.height = 2.2
-		ent.health = 3
+		ent.width     = 1.5
+		ent.height    = 1.5
+		ent.healthMax = 3
+
+	-- Enemies.
 
 	} elseif T == Carrier {
-		ent.width  = 3
-		ent.height = 5
-		ent.health = 10
+		ent.width     = 3
+		ent.height    = 5
+		ent.healthMax = 10
+
+	} elseif T == Fly {
+		local targetX:float
+
+		for try = 1, 50 {
+			local ok = true
+			targetX  = getRandom(1.0*MIN_DISTANCE_TO_CAMERA_EDGE, 1.0*LEVEL_WIDTH-MIN_DISTANCE_TO_CAMERA_EDGE)
+
+			for level.entities {
+				local x = if it.entityType == Fly then (cast(Fly)it).targetX else it.x
+
+				if abs(targetX-x) < 5 and isEnemy(it) {
+					ok = false
+					break
+				}
+			}
+
+			if ok  break
+		}
+
+		ent.x         = if targetX > LEVEL_WIDTH/2  0 else LEVEL_WIDTH
+		ent.width     = 2
+		ent.height    = 3
+		ent.healthMax = 3
+
+		ent.targetX   = targetX
+		ent.targetY   = getRandom(.1*CAMERA_HEIGHT, .4*CAMERA_HEIGHT)
 
 	} elseif T == Bullet {
 		ent.width  = 1.4
 		ent.height = 3
+
+	-- Effects.
 
 	} elseif T == Spark {
 		local angle       = getRandom(TAU)
@@ -115,6 +191,7 @@ global newEntity :: ($T:type, x,y:float) -> T {
 		ent.timeRemaining = ent.timeTotal
 	}
 
+	ent.health = ent.healthMax
 	return ent
 }
 
@@ -125,12 +202,12 @@ global spawnNextEntity :: (level:Level) {
 	local ent:Entity = NULL
 
 	if instr.entity == {
-		case Carrier:  ent = newEntity(Carrier, instr.x, instr.y)
+		case Carrier:  ent = newEntity(level, Carrier, instr.x, instr.y)
+		case Fly:      ent = newEntity(level, Fly,     instr.x, instr.y)
 		case:          printf("Error: Unhandled entity type %s.", toString(instr.entity))
 	}
 
 	if ent ~= NULL {
-		ent.timeSpawned = level.time
 		insert(level.entities, ent)
 	}
 }
@@ -182,22 +259,51 @@ global updateEntity :: (level:Level, ent:Entity, dt:float) {
 			player.speedY = 0
 		}
 
-		player.weaponCooldown = player.weaponCooldown-dt
+		-- @Incomplete: Collide with other entities.
+
+		player.weaponCooldown -= dt
 
 		if (player.wantsToShoot or loveIsScancodeDown("x")) and player.weaponCooldown <= 0 {
-			player.weaponCooldown = 1/15
+			player.weaponCooldown  = 1/15
+			player.shootCount     += 1
 
-			local bullet        = newEntity(Bullet, player.x, player.y)
-			bullet.shotByPlayer = true
-			insert(level.entities, bullet)
+			if player.bulletMods.level == {
+			case 1:
+				spawnBullet(level, player.x, player.y, -TAU/4, player.bulletMods, true)
+
+			case 2:
+				if player.shootCount%2 == 0
+					spawnBullet(level, player.x, player.y, -TAU/4, player.bulletMods, true)
+				else
+					for spread = -1, 1  spawnBullet(level, player.x, player.y, -TAU/4+spread*(.04*TAU), player.bulletMods, true)
+
+			case 3:
+				if player.shootCount%2 == 0
+					for spread = -1, 1  spawnBullet(level, player.x, player.y, -TAU/4+spread*(.06*TAU), player.bulletMods, true)
+				else
+					for spread = -1, 1  spawnBullet(level, player.x, player.y, -TAU/4+spread*(.03*TAU), player.bulletMods, true)
+			}
+
+			if player.rearWeapon {
+				if player.shootCount%2 == 0  spawnBullet(level, player.x, player.y, TAU/4, player.bulletMods, true)
+			}
 		}
+
 		player.wantsToShoot = false
 
 	case Bullet:
-		local bullet = cast(Bullet) ent
+		local bullet    = cast(Bullet) ent
+		local deltaDist = (if bullet.shotByPlayer then 120 else 50) * dt
+		local angle     = bullet.angleBase
 
-		bullet.y += (if bullet.shotByPlayer 0-120 else 50) * dt
-		-- bullet.y += 110 * (if bullet.shotByPlayer -1 else 1) * dt -- @Compiler @Design: 'bullet.shotByPlayer -1' gets parsed as one expression. Uh oh!
+		if bullet.mods.movement == BulletMovement.WAVE {
+			local phase  = (level.time-bullet.timeSpawned)/0.30 + level.time/0.95
+			angle       += .06*sin(phase*TAU)*TAU
+		}
+		bullet.angle = angle
+
+		bullet.x += deltaDist * cos(angle)
+		bullet.y += deltaDist * sin(angle)
 
 		for level.entities {
 			local areEntitiesOverlapping :: (ent1,ent2:Entity) -> bool {
@@ -206,20 +312,62 @@ global updateEntity :: (level:Level, ent:Entity, dt:float) {
 					abs(ent1.y-ent2.y) < (ent1.height + ent2.height) / 2
 			}
 
-			if it.entityType == Carrier and areEntitiesOverlapping(bullet, it) {
+			if ((not bullet.shotByPlayer and it.entityType == Player) or (bullet.shotByPlayer and isEnemy(it))) and areEntitiesOverlapping(bullet, it) {
 				damage(level, it, 1, bullet.x, bullet.y)
 				destroy(bullet)
 				break
 			}
 		}
 
-		if bullet.y < -20  destroy(bullet)
+		if bullet.x < -50 or bullet.x > LEVEL_WIDTH+50 {
+			destroy(bullet)
+		} elseif bullet.angleBase > 0 {
+			if bullet.y > CAMERA_HEIGHT+20  destroy(bullet)
+		} else {
+			if bullet.y < -20  destroy(bullet)
+		}
 
 	case Carrier:
-		local carrier = cast(Carrier) ent
-		carrier.y += 10*dt
+		local carrier  = cast(Carrier) ent
+		carrier.y     += 10*dt
 
 		if carrier.y > CAMERA_HEIGHT+20  destroy(carrier)
+
+	case Fly:
+		local MOVE_SPEED :: 40.0
+
+		local fly = cast(Fly) ent
+		using fly.Phase
+
+		if !complete fly.phase == {
+		case ENTER:
+			local angle = atan(fly.targetY-fly.y, fly.targetX-fly.x)
+
+			fly.x = moveTowards(fly.x, fly.targetX, MOVE_SPEED*abs(cos(angle))*dt)
+			fly.y = moveTowards(fly.y, fly.targetY, MOVE_SPEED*abs(sin(angle))*dt)
+
+			if fly.x == fly.targetX and fly.y == fly.targetY {
+				fly.phase          = SHOOT
+				fly.weaponCooldown = .60
+			}
+
+		case SHOOT:
+			fly.weaponCooldown -= dt
+
+			if fly.shootCount < 5 {
+				if fly.weaponCooldown <= 0 {
+					fly.weaponCooldown  = 1/3
+					fly.shootCount += 1
+					spawnBullet(level, fly.x, fly.y, TAU/4, nil)
+				}
+			} else {
+				if fly.weaponCooldown < -.50  fly.phase = EXIT
+			}
+
+		case EXIT:
+			fly.y += MOVE_SPEED*dt
+			if fly.y > CAMERA_HEIGHT+20  destroy(fly)
+		}
 
 	case Spark:
 		local spark = cast(Spark) ent
@@ -262,8 +410,17 @@ global drawEntity :: (level:Level, ent:Entity) {
 
 	case Bullet:
 		local bullet = cast(Bullet) ent
-		setColorWithEffects(damageEffect, 1, 1, 1)
-		loveDrawEllipseFill(bullet.x,bullet.y, .3,1.8, 24)
+		if bullet.shotByPlayer
+			setColorWithEffects(damageEffect, 1, 1, 1)
+		else
+			setColorWithEffects(damageEffect, 1, 0, 0)
+
+		loveGraphicsPushTransform()
+		loveCoordinateSystemTranslate(bullet.x, bullet.y)
+		loveCoordinateSystemRotate(bullet.angle+TAU/4)
+		loveDrawEllipseFill(0,0, .3,1.8, 24)
+		loveGraphicsPop()
+
 		drawLight(level, bullet.x,bullet.y, 4,6, .2)
 
 	case Carrier:
@@ -275,6 +432,12 @@ global drawEntity :: (level:Level, ent:Entity) {
 		local b       = lerp(0.95, 0.60, phase)
 		setColorWithEffects(damageEffect, r, g, b)
 		loveDrawRectangleFill(carrier.x-SIZE_X/2, carrier.y-SIZE_Y/2, SIZE_X, SIZE_Y)
+
+	case Fly:
+		local SIZE_X, SIZE_Y :: 2, 3
+		local fly = cast(Fly) ent
+		setColorWithEffects(damageEffect, 1, .9, .4)
+		loveDrawRectangleFill(fly.x-SIZE_X/2, fly.y-SIZE_Y/2, SIZE_X, SIZE_Y)
 
 	case Spark:
 		local spark    = cast(Spark) ent
@@ -336,7 +499,7 @@ global damage :: (level:Level, ent:Entity, amount:int, damagePointX,damagePointY
 
 	for 1, getRandom(5, 8) {
 		local x, y  = getRandomizedDamageEffectPosition(ent, damagePointX,damagePointY)
-		local spark = newEntity(Spark, x, y)
+		local spark = newEntity(level, Spark, x, y)
 		insert(level.entities, spark)
 	}
 
@@ -349,7 +512,7 @@ global damage :: (level:Level, ent:Entity, amount:int, damagePointX,damagePointY
 	for 1, 3 {
 		local x                  = ent.x + ent.width  * getRandom(-.4, .4)
 		local y                  = ent.y + ent.height * getRandom(-.4, .4)
-		local explosion          = newEntity(Explosion, x, y)
+		local explosion          = newEntity(level, Explosion, x, y)
 		explosion.timeTotal     *= getRandom(.6, 1/.6)
 		explosion.timeRemaining  = explosion.timeTotal
 		explosion.radius         = getRandom(3.0, 12.0)
@@ -358,6 +521,27 @@ global damage :: (level:Level, ent:Entity, amount:int, damagePointX,damagePointY
 
 	level.cameraShake = max(level.cameraShake, 1)
 	destroy(ent)
+}
+
+
+
+global spawnBullet :: (level:Level, x,y:float, angle:float, modsToCopy:BulletMods|none, shotByPlayer=false) {
+	local members :: !run type_info(BulletMods).members
+
+	local bullet        = newEntity(level, Bullet, x, y)
+	bullet.angleBase    = angle
+	bullet.angle        = angle
+	bullet.shotByPlayer = shotByPlayer
+
+	if modsToCopy ~= nil {
+		local mods = cast(table) bullet.mods
+		for members {
+			local name = it.name;
+			mods[name] = (cast(table) cast(BulletMods) modsToCopy) [name] -- So much @Hack...
+		}
+	}
+
+	insert(level.entities, bullet)
 }
 
 
