@@ -3236,17 +3236,20 @@ end
 end
 
 !NODE_INFERRER `function nodeInferrers.AstLambda(state, lambda)`
-	if lambda.argumentsIn and lambda.argumentsIn.queued.pipe <= !(PIPE_INFER) then
-		!DEPEND_AND_RETURN(`lambda`, DEPEND_NODE_INFERRED, `lambda.argumentsIn`)
+	local argsIn  = lambda.argumentsIn
+	local argsOut = lambda.argumentsOut
+
+	if argsIn and argsIn.queued.pipe <= !(PIPE_INFER) then
+		!DEPEND_AND_RETURN(`lambda`, DEPEND_NODE_INFERRED, `argsIn`)
 	end
-	if lambda.argumentsOut and lambda.argumentsOut.queued.pipe <= !(PIPE_INFER) then
-		!DEPEND_AND_RETURN(`lambda`, DEPEND_NODE_INFERRED, `lambda.argumentsOut`)
+	if argsOut and argsOut.queued.pipe <= !(PIPE_INFER) then
+		!DEPEND_AND_RETURN(`lambda`, DEPEND_NODE_INFERRED, `argsOut`)
 	end
 
 	-- Note: We don't require the body to inferred - just the "header".
 
-	if lambda.argumentsIn then
-		for _, arg in ipairs(lambda.argumentsIn.arguments) do
+	if argsIn then
+		for _, arg in ipairs(argsIn.arguments) do
 			if arg.declaration.value and not isExpressionConstant(state, arg.declaration.value) then
 				typeError(state, astGetExpressionVisuallyFurthestToTheLeft(arg.declaration.value), "Non-constant default values for arguments are not supported yet.")
 			end
@@ -3258,18 +3261,27 @@ end
 
 	if lambda.bodyIsForeign then
 		if lambda.foreignSource == "method" then
-			if not funcSig.argumentTypesIn[1] then
+			-- Validate method.
+			local argType1 = funcSig.argumentTypesIn[1]
+
+			if not argType1 then
 				typeError(state, lambda, "Expected a struct as first argument for foreign method.")
 
-			elseif funcSig.argumentTypesIn[1].tag ~= !(typeTags.TypeInfoStruct) then
+			elseif argType1.tag ~= !(typeTags.TypeInfoStruct) then
 				typeError(
-					state, lambda.argumentsIn.arguments[1],
+					state, argsIn.arguments[1],
 					"Expected the first arguments to be a struct. Foreign methods are only supported on structs. (Type is %s)",
-					getFriendlyTypeInfoName(funcSig.argumentTypesIn[1])
+					getFriendlyTypeInfoName(argType1)
+				)
+
+			elseif not argType1.astNode.isForeign then
+				typeError2(state,
+					argsIn.arguments[1].declaration.type, F("%s is not a foreign struct. Foreign methods only work on foreign structs.", getFriendlyTypeInfoName(argType1)),
+					argType1.astNode,                     F("...here is the struct")
 				)
 
 			elseif not funcSig.requiredArgumentsIn[1] then
-				typeError(state, lambda.argumentsIn.arguments[1], "The first argument must not be optional for foreign methods.")
+				typeError(state, argsIn.arguments[1], "The first argument must not be optional for foreign methods.")
 			end
 		end
 
@@ -3374,15 +3386,6 @@ end
 !NODE_INFERRER `function nodeInferrers.AstCast(state, cast)`
 	-- Note: For convenience, cast.targetType may be nil here for generated casts. cast.inferredType must be set in those cases.
 
-	!local INVALID_CAST = `
-		typeError(
-			state, astGetExpressionVisuallyFurthestToTheLeft(cast.expression),
-			"Cannot cast from %s to %s.",
-			getFriendlyTypeInfoName(exprTypeInfo),
-			getFriendlyTypeInfoName(castTypeInfo)
-		)
-	`
-
 	if cast.targetType and not cast.targetType.inferredType then
 		!DEPEND_AND_RETURN(`cast`, DEPEND_NODE_INFERRED, `cast.targetType`)
 	end
@@ -3390,25 +3393,36 @@ end
 		!DEPEND_AND_RETURN(`cast`, DEPEND_NODE_INFERRED, `cast.expression`)
 	end
 
-	local castTypeInfo = cast.inferredType or requireTypeRepresentedByExpression(state, cast.targetType)
-	local exprTypeInfo = adjustTypeToOne(state, cast.expression, cast.expression.inferredType, true)
+	local castType    = cast.inferredType or requireTypeRepresentedByExpression(state, cast.targetType)
+	local exprType    = adjustTypeToOne(state, cast.expression, cast.expression.inferredType, true)
+	local castTypeTag = castType.tag
+	local exprTypeTag = exprType.tag
 
-	if castTypeInfo == exprTypeInfo then
-		moveToPipe(state, cast, cast.expression.queued.pipe) -- @Cleanup: Maybe cutOutPartOfNodeTree()/replaceQueuedNode() should do this.
+	!local INVALID_CAST = `
+		typeError(
+			state, astGetExpressionVisuallyFurthestToTheLeft(cast.expression),
+			"Cannot cast from %s to %s.",
+			getFriendlyTypeInfoName(exprType),
+			getFriendlyTypeInfoName(castType)
+		)
+	`
+
+	if castType == exprType then
+		moveToPipe(state, cast, cast.expression.queued.pipe) -- @Cleanup: Maybe cutOutPartOfNodeTree()/replaceQueuedNode() should do this (or maybe we just keep the wrong queued in cutOutPartOfNodeTree()).
 		cutOutPartOfNodeTree(state, cast, cast.expression)
 		return
 
-	elseif isTypeCompatibleWith(exprTypeInfo, castTypeInfo) or exprTypeInfo.tag == !(typeTags.TypeInfoAny) then
+	elseif isTypeCompatibleWith(exprType, castType) or exprTypeTag == !(typeTags.TypeInfoAny) then
 		-- void  (Valid cast.)
 
-	elseif isTypeNumeric(castTypeInfo) and isTypeNumeric(exprTypeInfo) then
+	elseif isTypeNumeric(castType) and isTypeNumeric(exprType) then
 		-- void  (Valid cast.)
 
-	elseif exprTypeInfo.tag == !(typeTags.TypeInfoStruct) and castTypeInfo.tag == !(typeTags.TypeInfoStruct) and doesStructInherit(castTypeInfo, exprTypeInfo) then
+	elseif exprTypeTag == !(typeTags.TypeInfoStruct) and castTypeTag == !(typeTags.TypeInfoStruct) and doesStructInherit(castType, exprType) then
 		-- void  (Valid cast.)
 
-	elseif castTypeInfo.tag == !(typeTags.TypeInfoBool) and !!(anyV(
-		`exprTypeInfo.tag`,
+	elseif castTypeTag == !(typeTags.TypeInfoBool) and !!(anyV(
+		`exprTypeTag`,
 		typeTags.TypeInfoInt,
 		typeTags.TypeInfoFloat,
 		typeTags.TypeInfoString,
@@ -3416,18 +3430,18 @@ end
 	)) then
 		-- void  (Valid cast.)
 
-	elseif exprTypeInfo.tag == !(typeTags.TypeInfoEnum) and isTypeCompatibleWith(castTypeInfo, exprTypeInfo.memberTypeInfo) then
+	elseif exprTypeTag == !(typeTags.TypeInfoEnum) and isTypeCompatibleWith(castType, exprType.memberTypeInfo) then
 		-- void  (Enum members can cast to the real member type.)
 
-	elseif exprTypeInfo.tag == !(typeTags.TypeInfoEnum) and isTypeNumeric(castTypeInfo) and isTypeNumeric(exprTypeInfo.memberTypeInfo) then
+	elseif exprTypeTag == !(typeTags.TypeInfoEnum) and isTypeNumeric(castType) and isTypeNumeric(exprType.memberTypeInfo) then
 		-- We need two casts to happen in sequence here so we wrap ourselves in another cast.
-		wrapInImplicitCast(state, cast, exprTypeInfo.memberTypeInfo, false)
+		wrapInImplicitCast(state, cast, exprType.memberTypeInfo, false)
 
-	elseif castTypeInfo.tag ~= !(typeTags.TypeInfoCompound) and exprTypeInfo.tag == !(typeTags.TypeInfoCompound) then
+	elseif castTypeTag ~= !(typeTags.TypeInfoCompound) and exprTypeTag == !(typeTags.TypeInfoCompound) then
 		-- We get here for situations like these: local xMaybe:int|nil = 0 ; local x = cast(int) xMaybe
 		-- The user better know what they're doing!
-		local compound = exprTypeInfo
-		if not indexOf(compound, castTypeInfo) then
+		local compound = exprType
+		if not indexOf(compound, castType) then
 			!!(INVALID_CAST)
 		end
 
@@ -3435,7 +3449,7 @@ end
 		!!(INVALID_CAST)
 	end
 
-	cast.inferredType = castTypeInfo
+	cast.inferredType = castType
 
 	moveToNextRelevantPipe(state, cast)
 	simplifyExpressionIfConstant(state, cast)
