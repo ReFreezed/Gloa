@@ -404,45 +404,66 @@ function _G.writeExpression(state, writer, expr)
 		local call   = expr
 		local callee = call.callee
 
+		local callingForeignMethod = false
+
 		addLineMapping(state, writer, call.token)
 
 		if call.surroundedByParentheses then  file:write("(")  end
 
 		if callee.nodeType == !(nodeTypes.AstIdentifier) then
 			local ident = callee
+
 			!if DEBUG then
 				if not ident.declaration.valueConstant then
 					if ident.declaration.value then  astPrintTree(ident.declaration.value)  end
 					errorInternal(state, ident.declaration)
 				end
 			!end
-			writeConstantValueOrReference(state, writer, ident.declaration.valueConstant)
+
+			local const = ident.declaration.valueConstant
+
+			if const.valueType.tag == !(typeTags.TypeInfoFunction) and const.value.bodyIsForeign and const.value.foreignSource == "method" then
+				callingForeignMethod = true
+				local argExpr        = call.arguments[1] or errorInternal(state, call)
+
+				if argExpr.nodeType == !(nodeTypes.AstIdentifier) then
+					-- Note: It doesn't matter if argExpr a reference to a constant or not since it's be an object reference
+					-- either way (unless the type inference borked and argExpr somehow isn't a struct instance).
+					writeExpression(state, writer, argExpr)
+
+				elseif argExpr.nodeType == !(nodeTypes.AstAccess) then
+					-- Table lookups have precedence over method calls in Lua.
+					writeExpression(state, writer, argExpr)
+
+				else
+					-- I think the parenthesis here is needed since argExpr (or shouldOperationHaveSurroundingParentheses())
+					-- will think it's part of a comma-separated list between the parenthesis of the call.
+					file:write("(")
+					writeExpression(state, writer, argExpr)
+					file:write(")")
+				end
+
+				file:write(":", const.value.foreignSourceName)
+				if state.settings.outputDebugInfo then
+					file:write(formatInfoComment(ident.name)) -- Not sure this is that helpful...
+				end
+
+			else
+				writeConstantValueOrReference(state, writer, const, ident)
+			end
+
 		else
 			writeExpression(state, writer, callee)
 		end
 
-		local argsNeedParentheses = true
-		--[[ @Incomplete: Consider optional arguments if omitting parentheses.
-		local argsNeedParentheses = not (
-			#call.arguments == 1 and (
-				call.arguments[1].nodeType == !(nodeTypes.AstTable)
-				or (
-					call.arguments[1].nodeType == !(nodeTypes.AstLiteral)
-					and call.arguments[1].literalType == !(LITERAL_STRING)
-				)
-			)
-		)
-		]]
-
-		if argsNeedParentheses then  file:write("(")  end
-
+		file:write("(")
 		local first = true
 
 		-- Write given arguments.
-		for _, argExpr in ipairs(call.arguments) do
+		for i = (callingForeignMethod and 2 or 1), #call.arguments do
 			if not first then  file:write(", ")  end
 			first = false
-			writeExpression(state, writer, argExpr)
+			writeExpression(state, writer, call.arguments[i])
 		end
 
 		-- Write default values for arguments.
@@ -450,8 +471,10 @@ function _G.writeExpression(state, writer, expr)
 			local calleeDecl = callee.declaration
 
 			if calleeDecl.isConstant then
-				local lambda = calleeDecl.value or errorInternal()
-				!ASSERT("lambda.nodeType == "..nodeTypes.AstLambda)
+				local lambda = calleeDecl.value or errorInternal(state, calleeDecl)
+				lambda       = followIdentifiersToConstantValue(lambda)
+
+				!ASSERT("lambda.nodeType == "..nodeTypes.AstLambda, nil, "lambda")
 
 				-- Only write a value if the last non-vararg argument is optional.
 				local argLast = lambda.argumentsIn and getLast(lambda.argumentsIn.arguments)
@@ -492,7 +515,7 @@ function _G.writeExpression(state, writer, expr)
 			end
 		end
 
-		if argsNeedParentheses then  file:write(")")  end
+		file:write(")")
 
 		if call.surroundedByParentheses then  file:write(")")  end
 
@@ -531,7 +554,7 @@ function _G.writeExpression(state, writer, expr)
 		if not decl.isConstant then
 			writeIdentifierName(state, writer, ident)
 		else
-			writeConstantValueOrReference(state, writer, decl.valueConstant)
+			writeConstantValueOrReference(state, writer, decl.valueConstant, ident)
 		end
 
 	elseif expr.nodeType == !(nodeTypes.AstVararg) then
@@ -551,7 +574,7 @@ function _G.writeExpression(state, writer, expr)
 	elseif expr.nodeType == !(nodeTypes.AstLambda) then
 		local lambda = expr
 		local const  = lambda.valueConstant or errorInternal(state, lambda)
-		writeConstantValueOrReference(state, writer, const)
+		writeConstantValueOrReference(state, writer, const, lambda)
 
 	elseif expr.nodeType == !(nodeTypes.AstAccess) then
 		local access = expr
@@ -639,11 +662,11 @@ function _G.writeExpression(state, writer, expr)
 
 	elseif expr.nodeType == !(nodeTypes.AstForeign) then
 		local foreign = expr
-		writeConstantValueOrReference(state, writer, foreign.valueConstant)
+		writeConstantValueOrReference(state, writer, foreign.valueConstant, foreign)
 
 	elseif expr.nodeType == !(nodeTypes.AstTypeInfo) then
 		local typeInfoNode = expr
-		writeConstantValueOrReference(state, writer, typeInfoNode.valueConstant)
+		writeConstantValueOrReference(state, writer, typeInfoNode.valueConstant, typeInfoNode)
 
 	elseif expr.nodeType == !(nodeTypes.AstConditional) then
 		local conditional = expr
@@ -1182,7 +1205,7 @@ function _G.writeBlock(state, writer, block, indent, nextLocalN, localsStack, is
 				elseif objType.tag == !(typeTags.TypeInfoStruct) then
 					assert(not forLoop.reverse)
 					errorUnhandledNodeType(state, objExpr)
-					-- writeConstantValueOrReference(state, writer, interatorFuncConst?) -- @Incomplete: Output default iterator for the struct.
+					-- writeConstantValueOrReference(state, writer, interatorFuncConst?, objExpr) -- @Incomplete: Output default iterator for the struct.
 
 				else
 					errorInternal(state, objExpr)
@@ -1335,6 +1358,7 @@ function _G.writeForeignImportIfNew(state, writer, typeInfo, foreignSource, fore
 	assert(foreignSourceId ~= "")
 
 	if writer.foreignReferences[foreignSourceId] then  return  end
+	if foreignSource == "method"                 then  return  end
 
 	-- @Incomplete: Compiler setting for runtime checks of anything originating from foreign sources.
 	-- (We can probably wrap the importing code in something here using typeInfo.)
@@ -1702,9 +1726,22 @@ function _G.writeConstantValue(state, writer, const)
 	end
 end
 
-function _G.writeConstantValueOrReference(state, writer, const)
+function _G.writeConstantValueOrReference(state, writer, const, nodeForError)
 	if const.isObject then
+		if const.valueType.tag == !(typeTags.TypeInfoFunction) then
+			local lambda = const.value
+			if lambda.bodyIsForeign and lambda.foreignSource == "method" then
+				printerr()
+				nodeMessage(io.stderr, state, nodeForError, "Error", "ProgramWriter", "Cannot output references to foreign methods.")
+				if nodeForError ~= lambda then
+					nodeMessage(io.stderr, state, lambda, "Info", "ProgramWriter", "...here is the method.")
+				end
+				exitFailure()
+			end
+		end
+
 		writer.file:write(const.name)
+
 	else
 		return writeConstantValue(state, writer, const)
 	end
@@ -1896,9 +1933,12 @@ function _G.writeFunctionObjects(state, writer, constants, relevantObjects)
 	for _, const in ipairs(constants) do
 		if relevantObjects and not relevantObjects[const] then
 			--void
-		-- @Cleanup: Don't generate constants for polymorphic functions. (It's probably declarations doing this.)
-		elseif const.valueType.tag == !(typeTags.TypeInfoFunction) and not const.value.isPolymorphic then
-			table.insert(functionConstants, const)
+		elseif const.valueType.tag == !(typeTags.TypeInfoFunction) then
+			local lambda = const.value
+			-- @Cleanup: Don't generate constants for polymorphic functions. (It's probably declarations doing this.) (I guess don't generate constants for foreign methods either.)
+			if not (lambda.isPolymorphic or (lambda.bodyIsForeign and lambda.foreignSource == "method")) then
+				table.insert(functionConstants, const)
+			end
 		end
 	end
 
@@ -1931,7 +1971,7 @@ function _G.writeTopScopeDeclarations(state, writer, declarations, relevantObjec
 		elseif decl.topScopeName ~= "" then -- Constant declarations of non-objects (e.g. ints) should have an empty topScopeName.
 			file:write("\t", decl.topScopeName, " = ")
 			if decl.valueConstant then
-				writeConstantValueOrReference(state, writer, decl.valueConstant)
+				writeConstantValueOrReference(state, writer, decl.valueConstant, decl.name)
 			else
 				-- We should have a declared struct instance or something similar here (I think) that doesn't have a specified initial value.
 				writeDefaultValueForType(state, writer, decl.name.inferredType, decl.name)
@@ -2063,9 +2103,12 @@ function _G.writeProgram(state, writer)
 			if relevantObjects and not relevantObjects[const] then
 				-- void
 			elseif const.valueType.tag == !(typeTags.TypeInfoFunction) then
-				if not first then  file:write(", ")  end
-				first = false
-				file:write(const.name)
+				local lambda = const.value
+				if not (lambda.isPolymorphic or (lambda.bodyIsForeign and lambda.foreignSource == "method")) then
+					if not first then  file:write(", ")  end
+					first = false
+					file:write(const.name)
+				end
 			end
 		end
 
@@ -2232,6 +2275,12 @@ function _G.validateForeignSource(state, foreignSource, foreignSourceName, nodeF
 	elseif foreignSource == "compiler" then
 		if not foreignApiCompilerSymbols[foreignSourceName] then
 			nodeError(state, nodeForError, "ForeignValidator", "This is not a valid compiler symbol: '%s'", foreignSourceName)
+		end
+
+	elseif foreignSource == "method" then
+		if not (foreignSourceName:find"^[%a_][%w_]*$" ~= nil and not LUA_KEYWORDS[foreignSourceName]) then
+			-- @UX: The error arrow is way off!
+			nodeError(state, nodeForError, "ForeignValidator", "This is not a valid Lua identifier to use as method name: '%s'", foreignSourceName)
 		end
 
 	else

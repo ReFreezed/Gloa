@@ -1589,8 +1589,13 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 
 		if calleeDecl.isConstant then
 			local lambda = getDeclarationValue(calleeDecl) or errorInternal()
-			assert(lambda.nodeType == !(nodeTypes.AstLambda))
-			assert(lambda.inferredType)
+			lambda       = followIdentifiersToConstantValue(lambda)
+
+			if lambda.nodeType ~= !(nodeTypes.AstLambda) then
+				errorInternal(state, lambda)
+			end
+
+			!ASSERT `lambda.inferredType`
 
 			if not areArraysEqual(typeInfos, lambda.inferredType.argumentTypesIn) then
 				-- We should only get here if checking overloads.
@@ -2372,7 +2377,7 @@ end
 !NODE_INFERRER `function nodeInferrers.AstDeclaration(state, decl)`
 	local valueExpr = getDeclarationValue(decl, true)
 	if valueExpr and not valueExpr.inferredType then
-		!DEPEND_AND_RETURN(`decl`, DEPEND_NODE_INFERRED, `valueExpr`)
+		!DEPEND_AND_RETURN(`decl`, DEPEND_NODE_INFERRED_FULLY, `valueExpr`) -- FULLY is needed if valueExpr is an AstTable.
 	end
 
 	local identOrVararg = decl.name
@@ -3248,12 +3253,30 @@ end
 		end
 	end
 
-	lambda.inferredType = getTypeInfoForLambda(state, lambda) or errorInternal()
+	local funcSig       = getTypeInfoForLambda(state, lambda) or errorInternal()
+	lambda.inferredType = funcSig
 
 	if lambda.bodyIsForeign then
+		if lambda.foreignSource == "method" then
+			if not funcSig.argumentTypesIn[1] then
+				typeError(state, lambda, "Expected a struct as first argument for foreign method.")
+
+			elseif funcSig.argumentTypesIn[1].tag ~= !(typeTags.TypeInfoStruct) then
+				typeError(
+					state, lambda.argumentsIn.arguments[1],
+					"Expected the first arguments to be a struct. Foreign methods are only supported on structs. (Type is %s)",
+					getFriendlyTypeInfoName(funcSig.argumentTypesIn[1])
+				)
+
+			elseif not funcSig.requiredArgumentsIn[1] then
+				typeError(state, lambda.argumentsIn.arguments[1], "The first argument must not be optional for foreign methods.")
+			end
+		end
+
 		if lambda.foreignSourceName == "" then
 			errorInternal(state, lambda, "@Incomplete: Infer lambda.foreignSourceName")
 		end
+
 		validateForeignSource(state, lambda.foreignSource, lambda.foreignSourceName, lambda)
 		lambda.foreignSourceId = lambda.foreignSource.." "..lambda.foreignSourceName
 	end
@@ -3590,7 +3613,12 @@ end
 end
 
 !NODE_INFERRER `function nodeInferrers.AstForeign(state, foreign)`
-	-- @Robustness: Limit places the "expected" type can be inferred from.
+	-- @Cleanup: Make AstLambda use AstForeign?
+	if foreign.source == "method" then
+		errorParsing(state, foreign.token+1, "Only function bodies can be marked as foreign methods.")
+	end
+
+	-- @Robustness: Further limit places the expected type can be inferred from for foreign values.
 	local typeInfoExpected = getExpectedTypeInfo(state, foreign, true, "foreign value", foreign)
 	if not typeInfoExpected then  return  end
 
@@ -4690,7 +4718,7 @@ function _G.isExpressionConstant(state, expr)
 
 	elseif nodeType == !(nodeTypes.AstIdentifier) then
 		local ident = expr
-		local decl  = ident.declaration or errorInternal()
+		local decl  = ident.declaration or errorInternal(state, ident)
 		return decl.isConstant and isExpressionConstant(state, decl.value)
 
 	elseif !!(anyV(`nodeType`, nodeTypes.AstType,nodeTypes.AstTypeOf)) then

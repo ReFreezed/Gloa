@@ -20,7 +20,7 @@
 
 local !struct"Dependency"{ -- @Cleanup: Rename to something with "wait"?
 	{`dependent`,  nil}, -- Queued
-	{`dependType`, 0},   -- DEPEND_DECLARATION|DEPEND_NODE_INFERRED|DEPEND_NODE_EMITTED|DEPEND_STRUCT_MEMBERS_READY|DEPEND_CONSTANT_READY
+	{`dependType`, 0},   -- DEPEND_DECLARATION|DEPEND_NODE_INFERRED|DEPEND_NODE_INFERRED_FULLY|DEPEND_NODE_EMITTED|DEPEND_STRUCT_MEMBERS_READY|DEPEND_CONSTANT_READY
 	{`dependOn`,   nil}, -- string|Queued  (The value depends on what dependType is.)
 	{`extraData`,  nil}, -- AstScope|nil
 	{`next`,       nil}, -- Dependency  (This is for chaining multiple dependencies.)
@@ -28,6 +28,7 @@ local !struct"Dependency"{ -- @Cleanup: Rename to something with "wait"?
 
 -- addDependency( state, dependent, DEPEND_DECLARATION,          name [, scope ] )
 -- addDependency( state, dependent, DEPEND_NODE_INFERRED,        astNode )
+-- addDependency( state, dependent, DEPEND_NODE_INFERRED_FULLY,  astNode )
 -- addDependency( state, dependent, DEPEND_NODE_EMITTED,         astNode )
 -- addDependency( state, dependent, DEPEND_STRUCT_MEMBERS_READY, structInfo )
 -- addDependency( state, dependent, DEPEND_CONSTANT_READY,       constant )
@@ -36,7 +37,7 @@ function _G.addDependency(state, dependent, dependType, dependOn, extraData)
 		if dependType == !(DEPEND_DECLARATION) then
 			!ASSERT `type(dependOn) == "string"`
 			!ASSERT `extraData == nil or type(extraData) == "table"`
-		elseif !!(anyV(`dependType`, DEPEND_NODE_INFERRED,DEPEND_NODE_EMITTED,DEPEND_STRUCT_MEMBERS_READY,DEPEND_CONSTANT_READY)) then
+		elseif !!(anyV(`dependType`, DEPEND_NODE_INFERRED,DEPEND_NODE_INFERRED_FULLY,DEPEND_NODE_EMITTED,DEPEND_STRUCT_MEMBERS_READY,DEPEND_CONSTANT_READY)) then
 			!ASSERT `type(dependOn) == "table"`
 		else
 			errorInternal("%d", dependType)
@@ -51,7 +52,7 @@ function _G.addDependency(state, dependent, dependType, dependOn, extraData)
 		!ifDEBUG `astPrint(dependent)`
 		nodeMessage(io.stderr, state, dependent, "Error", "Pipes", "Internal compiler error: Trying to add dependency twice.")
 
-		if !!(anyV(`dependType`, DEPEND_NODE_INFERRED,DEPEND_NODE_EMITTED)) then
+		if !!(anyV(`dependType`, DEPEND_NODE_INFERRED,DEPEND_NODE_INFERRED_FULLY,DEPEND_NODE_EMITTED)) then
 			!ifDEBUG `astPrint(dependOn)`
 			nodeMessage(io.stderr, state, dependOn, "Info", "Pipes", "...depending on this.")
 		end
@@ -62,7 +63,7 @@ function _G.addDependency(state, dependent, dependType, dependOn, extraData)
 
 	dependent = dependent.queued
 
-	if !!(anyV(`dependType`, DEPEND_NODE_INFERRED,DEPEND_NODE_EMITTED)) then
+	if !!(anyV(`dependType`, DEPEND_NODE_INFERRED,DEPEND_NODE_INFERRED_FULLY,DEPEND_NODE_EMITTED)) then
 		assert(dependent ~= dependOn.node)
 		dependOn = dependOn.queued
 	end
@@ -96,6 +97,8 @@ function _G.addDependency(state, dependent, dependType, dependOn, extraData)
 				print(dependOn)
 			elseif dependType == !(DEPEND_NODE_INFERRED) then
 				astPrint(dependOn.node)
+			elseif dependType == !(DEPEND_NODE_INFERRED_FULLY) then
+				astPrint(dependOn.node)
 			elseif dependType == !(DEPEND_NODE_EMITTED) then
 				astPrint(dependOn.node)
 			elseif dependType == !(DEPEND_STRUCT_MEMBERS_READY) then
@@ -127,7 +130,7 @@ end
 function _G.getExistingDependency(state, dependent, dependType, dependOn)
 	dependent = dependent.queued
 
-	if !!(anyV(`dependType`, DEPEND_NODE_INFERRED,DEPEND_NODE_EMITTED)) then
+	if !!(anyV(`dependType`, DEPEND_NODE_INFERRED,DEPEND_NODE_INFERRED_FULLY,DEPEND_NODE_EMITTED)) then
 		dependOn = dependOn.queued
 	end
 
@@ -473,7 +476,7 @@ function _G.errorPipesAreStuck(state)
 						local name = dependency.dependOn
 						file:write(" --|> (Name ", name, ")")
 
-					elseif !!(anyV(`dependency.dependType`, DEPEND_NODE_INFERRED,DEPEND_NODE_EMITTED)) then
+					elseif !!(anyV(`dependency.dependType`, DEPEND_NODE_INFERRED,DEPEND_NODE_INFERRED_FULLY,DEPEND_NODE_EMITTED)) then
 						local nodeOther = dependency.dependOn.node
 						file:write(" --|> ")
 						writeNode(nodeOther)
@@ -622,7 +625,7 @@ function _G.errorPipesAreStuck(state)
 
 		if
 			dependency
-			and dependency.dependType             == !(DEPEND_NODE_INFERRED)
+			and (dependency.dependType == !(DEPEND_NODE_INFERRED) or dependency.dependType == !(DEPEND_NODE_INFERRED_FULLY))
 			and queued.node.nodeType              == !(nodeTypes.AstIdentifier)
 			and dependency.dependOn.node.nodeType == !(nodeTypes.AstDeclaration)
 		then
@@ -644,9 +647,9 @@ function _G.errorPipesAreStuck(state)
 
 		if
 			dependency
-			and dependency.dependType == !(DEPEND_NODE_INFERRED)
-			and queued.node.nodeType  == !(nodeTypes.AstIdentifier)
-			and queued.node.parent    == queued.node.declaration
+			and (dependency.dependType == !(DEPEND_NODE_INFERRED) or dependency.dependType == !(DEPEND_NODE_INFERRED_FULLY))
+			and queued.node.nodeType == !(nodeTypes.AstIdentifier)
+			and queued.node.parent   == queued.node.declaration
 		then
 			local expr = dependency.dependOn.node
 
@@ -664,7 +667,7 @@ function _G.errorPipesAreStuck(state)
 	for _, queued in ipairs(state.queue) do
 		local dependency = not queued.unqueued and queued.waitingOn
 
-		if dependency and dependency.dependType == !(DEPEND_NODE_INFERRED) then
+		if dependency and (dependency.dependType == !(DEPEND_NODE_INFERRED) or dependency.dependType == !(DEPEND_NODE_INFERRED_FULLY)) then
 			local expr = dependency.dependOn.node
 
 			printerr()
