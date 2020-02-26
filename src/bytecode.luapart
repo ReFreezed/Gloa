@@ -84,25 +84,32 @@ end
 
 
 local !struct"Constant"{
-	{`name`,       ""},  -- Only used for constants that are objects.
+	{`name`,       ""},  -- Only used for constants that are objects.  @Incomplete: Separate name for metaprogram (which may be limited) and final name.
 	{`nameLocked`, false},
+
+	{`kind`,       CONST_KIND_NORMAL}, -- CONST_KIND_NORMAL|CONST_KIND_FOREIGN|CONST_KIND_TYPE_INFO|CONST_KIND_NULL
 	{`valueType`,  nil}, -- TypeInfo
 	{`value`,      nil},
+
 	{`isObject`,   false},
 	{`isReady`,    false},
 }
 
--- constant, isNew = bcAllocateConstantValueIfNew( state, simpleTypeInfo,    literalValue,    nodeForError )
--- constant, isNew = bcAllocateConstantValueIfNew( state, enumTypeInfo,      memberName,      nodeForError ) -- Note: Enums are actually simple types but have special handling in some places.
--- constant, isNew = bcAllocateConstantValueIfNew( state, functionSignature, lambdaWithBody,  nodeForError )
--- constant, isNew = bcAllocateConstantValueIfNew( state, tableLikeTypeInfo, tableNode,       nodeForError )
--- constant, isNew = bcAllocateConstantValueIfNew( state, typeTypeInfo,      representedType, nodeForError )
--- constant, isNew = bcAllocateConstantValueIfNew( state, foreignTypeDummy,  foreign,         nodeForError )
--- constant, isNew = bcAllocateConstantValueIfNew( state, typeInfoTypeInfo,  typeInfo,        nodeForError )
--- constant, isNew = bcAllocateConstantValueIfNew( state, nullType,          nil,             nodeForError )
-function _G.bcAllocateConstantValueIfNew(state, typeInfo, v, nodeForError)
-	local tag      = typeInfo.tag
-	local isSimple = isTypeSimple(typeInfo)
+-- constant, isNew = bcAllocateConstantValueIfNew( state, CONST_KIND_NORMAL,    simpleTypeInfo,    literalValue,    nodeForError )
+-- constant, isNew = bcAllocateConstantValueIfNew( state, CONST_KIND_NORMAL,    enumTypeInfo,      memberName,      nodeForError ) -- Note: Enums are actually simple types but have special handling in some places.
+-- constant, isNew = bcAllocateConstantValueIfNew( state, CONST_KIND_NORMAL,    functionSignature, lambdaWithBody,  nodeForError )
+-- constant, isNew = bcAllocateConstantValueIfNew( state, CONST_KIND_NORMAL,    tableLikeTypeInfo, tableNode,       nodeForError )
+-- constant, isNew = bcAllocateConstantValueIfNew( state, CONST_KIND_NORMAL,    typeTypeInfo,      representedType, nodeForError )
+-- constant, isNew = bcAllocateConstantValueIfNew( state, CONST_KIND_FOREIGN,   dummyTypeInfo,     foreign,         nodeForError )
+-- constant, isNew = bcAllocateConstantValueIfNew( state, CONST_KIND_TYPE_INFO, dummyTypeInfo,     typeInfo,        nodeForError )
+-- constant, isNew = bcAllocateConstantValueIfNew( state, CONST_KIND_NULL,      dummyTypeInfo,     nil,             nodeForError )
+function _G.bcAllocateConstantValueIfNew(state, kind, typeInfo, v, nodeForError)
+	local tag          = typeInfo.tag
+	local kindIsNormal = kind == !(CONST_KIND_NORMAL)
+
+	local isSimple
+		=  (kindIsNormal and isTypeSimple(typeInfo))
+		or kind == !(CONST_KIND_NULL)
 
 	if not isSimple and !!(anyV(`tag`, typeTags.TypeInfoAny,typeTags.TypeInfoNamespace,typeTags.TypeInfoCompound,typeTags.TypeInfoList,typeTags.TypeInfoPlaceholder)) then
 		errorInternal(state, nodeForError, "Invalid type '%s' for constant.", (TYPE_TAG_NAMES[tag] or "?"))
@@ -110,48 +117,60 @@ function _G.bcAllocateConstantValueIfNew(state, typeInfo, v, nodeForError)
 	local isObject = not isSimple
 
 	for _, const in ipairs(state.constants) do
-		if const.valueType ~= typeInfo then
+		if kind ~= const.kind then
 			-- void
 
-		elseif isSimple then
-			if const.value == v then  return const, false  end
+		elseif kindIsNormal then
+			if const.valueType ~= typeInfo then
+				-- void
 
-		elseif tag == !(typeTags.TypeInfoFunction) then
-			-- All functions are unique for now (except foreign functions, which are identified differently).
-			-- We may detect duplicate non-foreign functions at some point.
-			if
-				const.value == v or (
-					v.bodyIsForeign and const.value.bodyIsForeign
-					and v.foreignSourceId == const.value.foreignSourceId
-				)
-			then
-				return const, false
+			elseif isSimple then
+				if const.value == v then  return const, false  end
+
+			elseif tag == !(typeTags.TypeInfoFunction) then
+				-- All functions are unique for now (except foreign functions, which are identified differently).
+				-- We may detect duplicate non-foreign functions at some point.
+				if
+					const.value == v or (
+						v.bodyIsForeign and const.value.bodyIsForeign
+						and v.foreignSourceId == const.value.foreignSourceId
+					)
+				then
+					return const, false
+				end
+
+			-- All table-likes are always unique.
+			elseif !!(anyV(`tag`, typeTags.TypeInfoStruct,typeTags.TypeInfoArray,typeTags.TypeInfoTable)) then
+				if const.value == v then  return const, false  end
+
+			else
+				errorInternal(state, nodeForError, "Incomplete: Unhandled constant value type '%s'.", (TYPE_TAG_NAMES[tag] or "?"))
 			end
 
-		-- All table-likes are always unique.
-		elseif !!(anyV(`tag`, typeTags.TypeInfoStruct,typeTags.TypeInfoArray,typeTags.TypeInfoTable)) then
-			if const.value == v then  return const, false  end
-
-		elseif tag == !(typeTags.TypeInfoForeignDummy) then
+		elseif kind == !(CONST_KIND_FOREIGN) then
 			if const.value.sourceId == v.sourceId then  return const, false  end
 
-		elseif tag == !(typeTags.TypeInfoTypeInfoDummy) then
+		elseif kind == !(CONST_KIND_TYPE_INFO) then
 			if const.value == v then  return const, false  end
 
+		elseif kind == !(CONST_KIND_NULL) then
+			return const, false -- NULL is always the same value (nil).
+
 		else
-			errorInternal(state, nodeForError, "Incomplete: Unhandled constant value type '%s'.", (TYPE_TAG_NAMES[tag] or "?"))
+			errorInternal(state, nodeForError, "Incomplete: Unhandled constant kind '%s'.", (CONST_KIND_TITLES[kind] or "?"))
 		end
 	end
 
 	local const     = Constant()
+	const.kind      = kind
 	const.valueType = typeInfo
 	const.value     = v
 	const.isObject  = isObject
-	const.isReady   = tag ~= !(typeTags.TypeInfoFunction)
+	const.isReady   = not (kindIsNormal and tag == !(typeTags.TypeInfoFunction))
 
 	-- Note: Simple constants (like ints) don't need a referencable name as we write those values directly everywhere.
 	if isObject then
-		if tag == !(typeTags.TypeInfoFunction) then
+		if kindIsNormal and tag == !(typeTags.TypeInfoFunction) then
 			assert(not v.isPolymorphic)
 			state.functionN = state.functionN+1
 			const.name      = "_F"..state.functionN
@@ -191,14 +210,14 @@ function _G.bcAllocateConstantValueForExpressionIfNew(state, expr, dependent)
 		assert(not lambda.isPolymorphic)
 
 		local isNew
-		lambda.valueConstant, isNew = bcAllocateConstantValueIfNew(state, typeInfo, lambda, dependent)
+		lambda.valueConstant, isNew = bcAllocateConstantValueIfNew(state, !(CONST_KIND_NORMAL), typeInfo, lambda, dependent)
 
 		return lambda.valueConstant, isNew
 
 	elseif expr.nodeType == !(nodeTypes.AstType) then
 		local typeNode = expr
 		typeInfo       = getTypeInfoForBuiltinType(state, "type")
-		return bcAllocateConstantValueIfNew(state, typeInfo, typeNode.representedType, dependent)
+		return bcAllocateConstantValueIfNew(state, !(CONST_KIND_NORMAL), typeInfo, typeNode.representedType, dependent)
 
 	elseif expr.nodeType == !(nodeTypes.AstStruct) then
 		local struct     = expr
@@ -206,7 +225,7 @@ function _G.bcAllocateConstantValueForExpressionIfNew(state, expr, dependent)
 
 		-- @Incomplete: Wait for statements to get inferred (when we got struct self-referencing working).
 
-		local const, isNew = bcAllocateConstantValueIfNew(state, typeInfo, structInfo, dependent)
+		local const, isNew = bcAllocateConstantValueIfNew(state, !(CONST_KIND_NORMAL), typeInfo, structInfo, dependent)
 
 		if isNew and state.settings.outputDebugInfo and structInfo.name ~= "" then
 			bcMaybeSetConstantName(state, const, structInfo.name)
@@ -217,7 +236,7 @@ function _G.bcAllocateConstantValueForExpressionIfNew(state, expr, dependent)
 	elseif expr.nodeType == !(nodeTypes.AstEnum) then
 		local enum         = expr
 		local enumInfo     = enum.representedType
-		local const, isNew = bcAllocateConstantValueIfNew(state, typeInfo, enumInfo, dependent)
+		local const, isNew = bcAllocateConstantValueIfNew(state, !(CONST_KIND_NORMAL), typeInfo, enumInfo, dependent)
 
 		if isNew and state.settings.outputDebugInfo and enumInfo.name ~= "" then
 			bcMaybeSetConstantName(state, const, enumInfo.name)
@@ -230,7 +249,7 @@ function _G.bcAllocateConstantValueForExpressionIfNew(state, expr, dependent)
 
 		if typeInfo.tag == !(typeTags.TypeInfoEnum) then
 			local enumInfo = typeInfo
-			return bcAllocateConstantValueIfNew(state, enumInfo, ident.name, dependent)
+			return bcAllocateConstantValueIfNew(state, !(CONST_KIND_NORMAL), enumInfo, ident.name, dependent)
 
 		else
 			local decl = ident.declaration
@@ -247,12 +266,11 @@ function _G.bcAllocateConstantValueForExpressionIfNew(state, expr, dependent)
 
 	elseif expr.nodeType == !(nodeTypes.AstForeign) then
 		local foreign = expr
-		typeInfo      = getTypeInfoForBuiltinType(state, "foreign")
-		return bcAllocateConstantValueIfNew(state, typeInfo, foreign, dependent)
+		return bcAllocateConstantValueIfNew(state, !(CONST_KIND_FOREIGN), typeInfo, foreign, dependent) -- Note: What typeInfo is doesn't matter here.
 
 	elseif expr.nodeType == !(nodeTypes.AstTable) then
 		local tableNode    = expr
-		local const, isNew = bcAllocateConstantValueIfNew(state, typeInfo, tableNode, dependent)
+		local const, isNew = bcAllocateConstantValueIfNew(state, !(CONST_KIND_NORMAL), typeInfo, tableNode, dependent)
 
 		if
 			isNew
@@ -269,8 +287,7 @@ function _G.bcAllocateConstantValueForExpressionIfNew(state, expr, dependent)
 		return const, isNew
 
 	elseif expr.nodeType == !(nodeTypes.AstNull) then
-		typeInfo = getTypeInfoForBuiltinType(state, "null")
-		return bcAllocateConstantValueIfNew(state, typeInfo, nil, dependent)
+		return bcAllocateConstantValueIfNew(state, !(CONST_KIND_NULL), typeInfo, nil, dependent) -- Note: What typeInfo is doesn't matter here.
 
 	else
 		errorUnhandledNodeType(state, expr)
@@ -345,11 +362,11 @@ end
 --]]
 
 function _G.bcEmitForLambda(state, lambda)
-	lambda.valueConstant = bcAllocateConstantValueIfNew(state, lambda.inferredType, lambda, lambda)
+	lambda.valueConstant = bcAllocateConstantValueIfNew(state, !(CONST_KIND_NORMAL), lambda.inferredType, lambda, lambda)
 
 	if lambda.bodyIsForeign then
 		-- @Incomplete: Emit for foreign function.
-		lambda.valueConstant.isReady = true
+		lambda.valueConstant.isReady = true -- @Cleanup: We can probably set this in bcAllocateConstantValueIfNew(). (Should we though? Maybe.)
 		moveToPipe(state, lambda, !(PIPE_DONE))
 		return
 	end
@@ -426,7 +443,7 @@ function _G.bcEmitForDeclaration(state, decl)
 		local const
 		if decl.name.inferredType.tag == !(typeTags.TypeInfoEnum) then
 			local enumInfo = decl.name.inferredType
-			const          = bcAllocateConstantValueIfNew(state, enumInfo, decl.name.name, decl)
+			const          = bcAllocateConstantValueIfNew(state, !(CONST_KIND_NORMAL), enumInfo, decl.name.name, decl)
 		else
 			const          = bcAllocateConstantValueForExpressionIfNew(state, valueExpr, decl)
 		end
@@ -463,7 +480,7 @@ end
 function _G.bcEmit(state, node)
 	if node.nodeType == !(nodeTypes.AstLiteral) then
 		local literal         = node
-		literal.valueConstant = bcAllocateConstantValueIfNew(state, literal.inferredType, literal.value, literal)
+		literal.valueConstant = bcAllocateConstantValueIfNew(state, !(CONST_KIND_NORMAL), literal.inferredType, literal.value, literal)
 		moveToPipe(state, literal, !(PIPE_DONE))
 
 	elseif node.nodeType == !(nodeTypes.AstLambda) then
@@ -478,20 +495,20 @@ function _G.bcEmit(state, node)
 
 	elseif node.nodeType == !(nodeTypes.AstForeign) then
 		local foreign         = node
-		local typeInfo        = getTypeInfoForBuiltinType(state, "foreign")
-		foreign.valueConstant = bcAllocateConstantValueIfNew(state, typeInfo, foreign, foreign)
+		local typeInfo        = getTypeInfoForBuiltinType(state, "void") -- (What this is probably doesn't matter here.)
+		foreign.valueConstant = bcAllocateConstantValueIfNew(state, !(CONST_KIND_FOREIGN), typeInfo, foreign, foreign)
 		moveToPipe(state, foreign, !(PIPE_DONE))
 
 	elseif node.nodeType == !(nodeTypes.AstTypeInfo) then
 		local typeInfoNode         = node
-		local typeInfo             = getTypeInfoForBuiltinType(state, "typeInfo")
-		typeInfoNode.valueConstant = bcAllocateConstantValueIfNew(state, typeInfo, typeInfoNode.valueTypeInfo, typeInfoNode)
+		local typeInfo             = getTypeInfoForBuiltinType(state, "void") -- (What this is probably doesn't matter here.)
+		typeInfoNode.valueConstant = bcAllocateConstantValueIfNew(state, !(CONST_KIND_TYPE_INFO), typeInfo, typeInfoNode.valueTypeInfo, typeInfoNode)
 		moveToPipe(state, typeInfoNode, !(PIPE_DONE))
 
 	elseif node.nodeType == !(nodeTypes.AstNull) then
 		local null         = node
-		local typeInfo     = getTypeInfoForBuiltinType(state, "null")
-		null.valueConstant = bcAllocateConstantValueIfNew(state, typeInfo, nil, null)
+		local typeInfo     = getTypeInfoForBuiltinType(state, "void") -- What this is doesn't matter for NULL.
+		null.valueConstant = bcAllocateConstantValueIfNew(state, !(CONST_KIND_NULL), typeInfo, nil, null)
 		moveToPipe(state, null, !(PIPE_DONE))
 
 	else

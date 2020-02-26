@@ -64,11 +64,8 @@ local !structTypeInfo"TypeInfoString:_TypeInfo"{_overrides={{`tag`,6}}}
 local !structTypeInfo"TypeInfoTable:_TypeInfo" {_overrides={{`tag`,7}}}
 local !structTypeInfo"TypeInfoType:_TypeInfo"  {_overrides={{`tag`,8}}}
 
-local !structTypeInfo"TypeInfoVoid:_TypeInfo"         {_overrides={{`tag`,9}}}
-local !structTypeInfo"TypeInfoPlaceholder:_TypeInfo"  {_overrides={{`tag`,10}}}
-local !structTypeInfo"TypeInfoForeignDummy:_TypeInfo" {_overrides={{`tag`,-1}}}
-local !structTypeInfo"TypeInfoTypeInfoDummy:_TypeInfo"{_overrides={{`tag`,-2}}}
-local !structTypeInfo"TypeInfoNullDummy:_TypeInfo"    {_overrides={{`tag`,-3}}}
+local !structTypeInfo"TypeInfoVoid:_TypeInfo"       {_overrides={{`tag`,9}}}
+local !structTypeInfo"TypeInfoPlaceholder:_TypeInfo"{_overrides={{`tag`,10}}}
 
 _G.!(local )!!SIMPLE_TYPE_TAG = {
 	-- These small type infos don't have any extra information.
@@ -181,11 +178,6 @@ do
 		["type"]        = TypeInfoType,        -- The result of e.g. type_of(int) or type_of(type_of(expression)).
 		["void"]        = TypeInfoVoid,        -- Used when no useful type is expected or available.
 		["placeholder"] = TypeInfoPlaceholder, -- Used in polymorphic functions.
-
-		-- Dummy types used for constants in bytecode pipe and forward:
-		["foreign"]     = TypeInfoForeignDummy,  -- @Cleanup
-		["typeInfo"]    = TypeInfoTypeInfoDummy, -- @Cleanup
-		["null"]        = TypeInfoNullDummy,     -- @Cleanup
 	}
 
 	function _G.getTypeInfoForBuiltinType(state, typeName)
@@ -3018,6 +3010,7 @@ end
 			!DEPEND_AND_RETURN(`tableNode`, DEPEND_NODE_INFERRED, `tableNode.vararg`)
 		end
 
+		-- @Incomplete: Handle 'arr = { getVararg() }' (and maybe depricate tableNode.vararg as that situation is very similar).
 		for _, tableField in ipairs(tableNode.fields) do
 			local indexLiteral = tableField.key
 
@@ -4560,20 +4553,20 @@ local function createRunReplacementFromTypeAndLuaValue(state, runNode, parent, t
 		local func = v
 		assert(type(func) == "function")
 
-		local const = nil
+		local theConst = nil
 
-		for _, _const in ipairs(state.constants) do
-			if _const.valueType.tag == !(typeTags.TypeInfoFunction) and state.runnerEnvironment[_const.name] == func then
-				const = _const
+		for _, const in ipairs(state.constants) do
+			if const.kind == !(CONST_KIND_NORMAL) and const.valueType.tag == !(typeTags.TypeInfoFunction) and state.runnerEnvironment[const.name] == func then
+				theConst = const
 				break
 			end
 		end
 
-		if not const then
+		if not theConst then
 			errorInternal(state, runNode, "The resulting function is no an existing constant for some reason.")
 		end
 
-		local lambda = const.value
+		local lambda = theConst.value
 
 		if lambda.parent.nodeType == !(nodeTypes.AstDeclaration) then
 			local decl  = lambda.parent
@@ -4606,29 +4599,19 @@ local function createRunReplacementFromTypeAndLuaValue(state, runNode, parent, t
 	end
 end
 
-!NODE_INFERRER `function nodeInferrers.AstNull(state, null)`
-	local typeInfoExpected = getExpectedTypeInfo(state, null, false, "NULL value", null)
-	if not typeInfoExpected then  return  end
-
-	if not isTypeTableLike(typeInfoExpected) then
-		typeError(state, null, "Null only works in place of table-like objects.")
-	end
-
-	null.inferredType = typeInfoExpected
-	moveToNextRelevantPipe(state, null)
-end
-
 !NODE_INFERRER `function nodeInferrers.AstRun(state, runNode)`
 	local lambda = runNode.lambda
 
 	if lambda.queued.pipe <= !(PIPE_BYTECODE) then
 		!DEPEND_AND_RETURN(`runNode`, DEPEND_NODE_EMITTED, `lambda`)
 	end
-	-- for _, const in ipairs(state.constants) do
-	-- 	if not const.isReady and const.valueType.tag ~= !(typeTags.TypeInfoFunction) then
-	-- 		!DEPEND_AND_RETURN(`runNode`, DEPEND_CONSTANT_READY, `const`)
-	-- 	end
-	-- end
+	--[[ This is currently not needed as only functions may be waiting. 2020-02-26
+	for _, const in ipairs(state.constants) do
+		if not const.isReady and not (const.kind == !(CONST_KIND_NORMAL) and const.valueType.tag == !(typeTags.TypeInfoFunction)) then
+			!DEPEND_AND_RETURN(`runNode`, DEPEND_CONSTANT_READY, `const`)
+		end
+	end
+	--]]
 
 	local visited = {}
 
@@ -4636,7 +4619,7 @@ end
 	if runNode.queued.waitingOn then  return  end
 
 	for _, const in ipairs(state.constants) do
-		if not const.isReady and const.valueType.tag == !(typeTags.TypeInfoFunction) and visited[const.value] then
+		if not const.isReady and (const.kind == !(CONST_KIND_NORMAL) and const.valueType.tag == !(typeTags.TypeInfoFunction)) and visited[const.value] then
 			!DEPEND_AND_RETURN(`runNode`, DEPEND_CONSTANT_READY, `const`)
 		end
 	end
@@ -4714,6 +4697,18 @@ end
 
 	moveChildrenToNextRelevantPipe(state, replacement)
 	moveToNextRelevantPipe(state, replacement)
+end
+
+!NODE_INFERRER `function nodeInferrers.AstNull(state, null)`
+	local typeInfoExpected = getExpectedTypeInfo(state, null, false, "NULL value", null)
+	if not typeInfoExpected then  return  end
+
+	-- if not isTypeTableLike(typeInfoExpected) then
+	-- 	typeError(state, null, "Null only works in place of table-like objects.")
+	-- end
+
+	null.inferredType = typeInfoExpected
+	moveToNextRelevantPipe(state, null)
 end
 
 function _G.inferNode(state, node)
@@ -5542,8 +5537,7 @@ function _G.isTypeSimple(typeInfo)
 		typeTags.TypeInfoFloat,
 		typeTags.TypeInfoString,
 		typeTags.TypeInfoType,
-		typeTags.TypeInfoEnum, -- All enum member types are simple.
-		typeTags.TypeInfoNullDummy -- @Cleanup
+		typeTags.TypeInfoEnum -- All enum member types are simple.
 	))
 end
 

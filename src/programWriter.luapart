@@ -1421,7 +1421,7 @@ function _G.writeForeignImportIfNew(state, writer, typeInfo, foreignSource, fore
 	end
 end
 
-local function writeSimpleConstant(state, writer, typeInfo, v, isEnum)
+local function writeNormalSimpleConstant(state, writer, typeInfo, v, isEnum)
 	local file = writer.file
 	local tag  = typeInfo.tag
 
@@ -1442,9 +1442,6 @@ local function writeSimpleConstant(state, writer, typeInfo, v, isEnum)
 				file:write(nStr)
 			end
 		end
-
-	elseif tag == !(typeTags.TypeInfoNone) then
-		file:write("nil")
 
 	elseif tag == !(typeTags.TypeInfoFloat) then
 		-- @Incomplete: Use shouldOperationHaveSurroundingParentheses().
@@ -1468,6 +1465,9 @@ local function writeSimpleConstant(state, writer, typeInfo, v, isEnum)
 			end
 		end
 
+	elseif tag == !(typeTags.TypeInfoNone) then
+		file:write("nil")
+
 	elseif tag == !(typeTags.TypeInfoString) then
 		writeStringLiteral(writer, v)
 
@@ -1479,11 +1479,141 @@ local function writeSimpleConstant(state, writer, typeInfo, v, isEnum)
 			file:write(formatInfoComment(getFriendlyTypeInfoName(typeInfo)))
 		end
 
-	elseif tag == !(typeTags.TypeInfoNullDummy) then
-		file:write("nil")
-
 	else
 		errorInternal("Incomplete: Handle constant value of type '%s'.", (TYPE_TAG_NAMES[tag] or "?"))
+	end
+end
+
+local function writeTypeInfo(state, writer, typeInfo)
+	local file = writer.file
+
+	!(
+	local function END_OF_TYPE_INFO(typeInfoStructName)
+		-- @Robustness: Get the name in the comment from the correct TypeInfo* struct declaration.
+		return templateToLua(
+			trimTemplate`
+				file:write("}")
+				if state.settings.outputDebugInfo then  file:write("--[[$typeInfoStructName]]")  end
+			`,
+			{typeInfoStructName=typeInfoStructName}
+		)
+	end
+	)
+
+	local tag          = typeInfo.tag
+	local typeInfoType = getTypeInfoForBuiltinType(state, "type")
+	local typeInfoBool = getTypeInfoForBuiltinType(state, "bool")
+
+	file:write("{tag=", tag)
+	if state.settings.outputDebugInfo then
+		file:write("--[[TypeTag.", TYPE_TAG_NAMES[tag]:upper(), "]]")
+	end
+	file:write(", id=", typeInfo.id)
+
+	if tag == !(typeTags.TypeInfoArray) then
+		local arraySig = typeInfo
+
+		file:write(", itemType=")
+		writeNormalSimpleConstant(state, writer, typeInfoType, arraySig.itemType, false)
+
+		!!(END_OF_TYPE_INFO"TypeInfoArray")
+
+	elseif tag == !(typeTags.TypeInfoVararg) then
+		local varargSig = typeInfo
+
+		file:write(", itemType=")
+		writeNormalSimpleConstant(state, writer, typeInfoType, varargSig.itemType, false)
+
+		!!(END_OF_TYPE_INFO"TypeInfoVararg")
+
+	elseif tag == !(typeTags.TypeInfoFunction) then
+		local funcSig = typeInfo
+
+		file:write(", argumentsIn={")
+		for i, typeInfo in ipairs(funcSig.argumentTypesIn) do
+			if i > 1 then  file:write(", ")  end
+			file:write("{argumentType=")
+			writeNormalSimpleConstant(state, writer, typeInfoType, typeInfo, false)
+			file:write(", required=")
+			writeNormalSimpleConstant(state, writer, typeInfoBool, funcSig.requiredArgumentsIn[i], false)
+			file:write("}")
+		end
+		file:write("}")
+
+		file:write(", argumentsOut={")
+		for i, typeInfo in ipairs(funcSig.argumentTypesOut) do
+			if i > 1 then  file:write(", ")  end
+			file:write("{argumentType=")
+			writeNormalSimpleConstant(state, writer, typeInfoType, typeInfo, false)
+			file:write(", required=")
+			writeNormalSimpleConstant(state, writer, typeInfoBool, funcSig.requiredArgumentsOut[i], false)
+			file:write("}")
+		end
+		file:write("}")
+
+		!!(END_OF_TYPE_INFO"TypeInfoFunction")
+
+	elseif tag == !(typeTags.TypeInfoStruct) then
+		local structInfo = typeInfo
+
+		file:write(", members={")
+		for i, member in ipairs(structInfo.members) do
+			if i > 1 then  file:write(", ")  end
+			file:write("{name=")
+			writeStringLiteral(writer, member.name)
+			file:write(", memberType=")
+			writeNormalSimpleConstant(state, writer, typeInfoType, member.typeInfo, false)
+			file:write("}")
+		end
+		file:write("}")
+
+		!!(END_OF_TYPE_INFO"TypeInfoStruct")
+
+	elseif tag == !(typeTags.TypeInfoEnum) then
+		local enumInfo = typeInfo
+
+		file:write(", memberType=")
+		writeNormalSimpleConstant(state, writer, typeInfoType, enumInfo.memberTypeInfo, false)
+
+		file:write(", members={")
+		for i, member in ipairs(enumInfo.members) do
+			if i > 1 then  file:write(", ")  end
+			file:write("{name=")
+			writeStringLiteral(writer, member.name)
+			file:write("}")
+		end
+		file:write("}")
+
+		!!(END_OF_TYPE_INFO"TypeInfoEnum")
+
+	elseif tag == !(typeTags.TypeInfoCompound) then
+		local compound = typeInfo
+
+		file:write(", types={")
+		for i, compoundItem in ipairs(compound) do
+			if i > 1 then  file:write(", ")  end
+			writeNormalSimpleConstant(state, writer, typeInfoType, compoundItem, false)
+		end
+		file:write("}")
+
+		!!(END_OF_TYPE_INFO"TypeInfoCompound")
+
+	elseif !!(anyV(`tag`,
+		typeTags.TypeInfoAny,
+		typeTags.TypeInfoBool,
+		typeTags.TypeInfoFloat,
+		typeTags.TypeInfoInt,
+		typeTags.TypeInfoNone,
+		typeTags.TypeInfoPlaceholder,
+		typeTags.TypeInfoString,
+		typeTags.TypeInfoTable,
+		typeTags.TypeInfoType
+	)) then
+		-- void  No more information.
+		!!(END_OF_TYPE_INFO"TypeInfo")
+
+	else
+		errorInternal("Incomplete: %s", getFriendlyTypeInfoName(typeInfo))
 	end
 end
 
@@ -1491,29 +1621,42 @@ function _G.writeConstantValue(state, writer, const)
 	local file = writer.file
 	local tag  = const.valueType.tag
 
-	if not const.isObject then
-		if tag == !(typeTags.TypeInfoEnum) then
-			local enumInfo   = const.valueType
-			local memberName = const.value
-			local decl       = findMemberDeclaration(state, enumInfo.astNode, memberName) or errorInternal(state, enumInfo.astNode, "Did not find member '%s'.", memberName)
-			local valueExpr  = decl.value
+	if const.kind == !(CONST_KIND_FOREIGN) then
+		local foreign = const.value
+		file:write(writer.foreignReferences[foreign.sourceId])
 
-			if enumInfo.memberTypeInfo.tag == !(typeTags.TypeInfoType) then
-				local typeNode = valueExpr
-				!ASSERT("typeNode.nodeType == "..nodeTypes.AstType)
-				writeSimpleConstant(state, writer, enumInfo.memberTypeInfo, typeNode.representedType, true)
-			else
-				local literal = valueExpr
-				!ASSERT("literal.nodeType == "..nodeTypes.AstLiteral)
-				writeSimpleConstant(state, writer, enumInfo.memberTypeInfo, literal.value, true)
-			end
+	elseif const.kind == !(CONST_KIND_TYPE_INFO) then
+		writeTypeInfo(state, writer, const.value)
 
-			if state.settings.outputDebugInfo then
-				file:write("--[[", enumInfo.name, ".", memberName, "]]")
-			end
+	elseif const.kind == !(CONST_KIND_NULL) then
+		file:write("nil")
 
+	elseif const.kind ~= !(CONST_KIND_NORMAL) then
+		errorInternal("Incomplete: Handle constant kind '%s'.", (CONST_KIND_TITLES[const.tag] or "?"))
+
+	elseif not const.isObject then
+		if tag ~= !(typeTags.TypeInfoEnum) then
+			writeNormalSimpleConstant(state, writer, const.valueType, const.value, false)
+			return
+		end
+
+		local enumInfo   = const.valueType
+		local memberName = const.value
+		local decl       = findMemberDeclaration(state, enumInfo.astNode, memberName) or errorInternal(state, enumInfo.astNode, "Did not find member '%s'.", memberName)
+		local valueExpr  = decl.value
+
+		if enumInfo.memberTypeInfo.tag == !(typeTags.TypeInfoType) then
+			local typeNode = valueExpr
+			!ASSERT("typeNode.nodeType == "..nodeTypes.AstType)
+			writeNormalSimpleConstant(state, writer, enumInfo.memberTypeInfo, typeNode.representedType, true)
 		else
-			writeSimpleConstant(state, writer, const.valueType, const.value, false)
+			local literal = valueExpr
+			!ASSERT("literal.nodeType == "..nodeTypes.AstLiteral)
+			writeNormalSimpleConstant(state, writer, enumInfo.memberTypeInfo, literal.value, true)
+		end
+
+		if state.settings.outputDebugInfo then
+			file:write("--[[", enumInfo.name, ".", memberName, "]]")
 		end
 
 	elseif tag == !(typeTags.TypeInfoFunction) then
@@ -1582,142 +1725,6 @@ function _G.writeConstantValue(state, writer, const)
 		end
 
 		file:write("}")
-
-	elseif tag == !(typeTags.TypeInfoForeignDummy) then
-		local foreign = const.value
-		file:write(writer.foreignReferences[foreign.sourceId])
-
-	elseif tag == !(typeTags.TypeInfoTypeInfoDummy) then
-		!(
-		local function END_OF_TYPE_INFO(typeInfoStructName)
-			-- @Robustness: Get the name in the comment from the correct TypeInfo* struct declaration.
-			return templateToLua(
-				trimTemplate`
-					file:write("}")
-					if state.settings.outputDebugInfo then  file:write("--[[$typeInfoStructName]]")  end
-				`,
-				{typeInfoStructName=typeInfoStructName}
-			)
-		end
-		)
-
-		local typeInfo     = const.value
-		local tag          = typeInfo.tag
-		local typeInfoType = getTypeInfoForBuiltinType(state, "type")
-		local typeInfoBool = getTypeInfoForBuiltinType(state, "bool")
-
-		file:write("{tag=", tag)
-		if state.settings.outputDebugInfo then
-			file:write("--[[TypeTag.", TYPE_TAG_NAMES[tag]:upper(), "]]")
-		end
-		file:write(", id=", typeInfo.id)
-
-		if tag == !(typeTags.TypeInfoArray) then
-			local arraySig = typeInfo
-
-			file:write(", itemType=")
-			writeSimpleConstant(state, writer, typeInfoType, arraySig.itemType, false)
-
-			!!(END_OF_TYPE_INFO"TypeInfoArray")
-
-		elseif tag == !(typeTags.TypeInfoVararg) then
-			local varargSig = typeInfo
-
-			file:write(", itemType=")
-			writeSimpleConstant(state, writer, typeInfoType, varargSig.itemType, false)
-
-			!!(END_OF_TYPE_INFO"TypeInfoVararg")
-
-		elseif tag == !(typeTags.TypeInfoFunction) then
-			local funcSig = typeInfo
-
-			file:write(", argumentsIn={")
-			for i, typeInfo in ipairs(funcSig.argumentTypesIn) do
-				if i > 1 then  file:write(", ")  end
-				file:write("{argumentType=")
-				writeSimpleConstant(state, writer, typeInfoType, typeInfo, false)
-				file:write(", required=")
-				writeSimpleConstant(state, writer, typeInfoBool, funcSig.requiredArgumentsIn[i], false)
-				file:write("}")
-			end
-			file:write("}")
-
-			file:write(", argumentsOut={")
-			for i, typeInfo in ipairs(funcSig.argumentTypesOut) do
-				if i > 1 then  file:write(", ")  end
-				file:write("{argumentType=")
-				writeSimpleConstant(state, writer, typeInfoType, typeInfo, false)
-				file:write(", required=")
-				writeSimpleConstant(state, writer, typeInfoBool, funcSig.requiredArgumentsOut[i], false)
-				file:write("}")
-			end
-			file:write("}")
-
-			!!(END_OF_TYPE_INFO"TypeInfoFunction")
-
-		elseif tag == !(typeTags.TypeInfoStruct) then
-			local structInfo = typeInfo
-
-			file:write(", members={")
-			for i, member in ipairs(structInfo.members) do
-				if i > 1 then  file:write(", ")  end
-				file:write("{name=")
-				writeStringLiteral(writer, member.name)
-				file:write(", memberType=")
-				writeSimpleConstant(state, writer, typeInfoType, member.typeInfo, false)
-				file:write("}")
-			end
-			file:write("}")
-
-			!!(END_OF_TYPE_INFO"TypeInfoStruct")
-
-		elseif tag == !(typeTags.TypeInfoEnum) then
-			local enumInfo = typeInfo
-
-			file:write(", memberType=")
-			writeSimpleConstant(state, writer, typeInfoType, enumInfo.memberTypeInfo, false)
-
-			file:write(", members={")
-			for i, member in ipairs(enumInfo.members) do
-				if i > 1 then  file:write(", ")  end
-				file:write("{name=")
-				writeStringLiteral(writer, member.name)
-				file:write("}")
-			end
-			file:write("}")
-
-			!!(END_OF_TYPE_INFO"TypeInfoEnum")
-
-		elseif tag == !(typeTags.TypeInfoCompound) then
-			local compound = typeInfo
-
-			file:write(", types={")
-			for i, compoundItem in ipairs(compound) do
-				if i > 1 then  file:write(", ")  end
-				writeSimpleConstant(state, writer, typeInfoType, compoundItem, false)
-			end
-			file:write("}")
-
-			!!(END_OF_TYPE_INFO"TypeInfoCompound")
-
-		elseif !!(anyV(`tag`,
-			typeTags.TypeInfoAny,
-			typeTags.TypeInfoBool,
-			typeTags.TypeInfoFloat,
-			typeTags.TypeInfoInt,
-			typeTags.TypeInfoNone,
-			typeTags.TypeInfoPlaceholder,
-			typeTags.TypeInfoString,
-			typeTags.TypeInfoTable,
-			typeTags.TypeInfoType,
-			typeTags.TypeInfoVoid
-		)) then
-			-- void  No more information.
-			!!(END_OF_TYPE_INFO"TypeInfo")
-
-		else
-			errorInternal("Incomplete: %s", getFriendlyTypeInfoName(typeInfo))
-		end
 
 	elseif !!(anyV(`tag`, typeTags.TypeInfoAny,typeTags.TypeInfoNamespace,typeTags.TypeInfoCompound,typeTags.TypeInfoList)) then
 		errorInternal("Cannot write invalid value type '%s'.", TYPE_TAG_NAMES[tag])
@@ -1896,12 +1903,12 @@ function _G.writeForeignImports(state, writer, constants, asGlobals, relevantObj
 		if relevantObjects and not relevantObjects[const] then
 			-- void
 
-		elseif const.valueType.tag == !(typeTags.TypeInfoFunction) and const.value.bodyIsForeign then
+		elseif const.kind == !(CONST_KIND_NORMAL) and const.valueType.tag == !(typeTags.TypeInfoFunction) and const.value.bodyIsForeign then
 			-- @Polish: Treat function constants pointing to the same foreign function as the same constant.
 			local lambda = const.value
 			writeForeignImportIfNew(state, writer, const.valueType, lambda.foreignSource, lambda.foreignSourceName, lambda.foreignSourceId, lambda.token, asGlobals)
 
-		elseif const.valueType.tag == !(typeTags.TypeInfoForeignDummy) then
+		elseif const.kind == !(CONST_KIND_FOREIGN) then
 			local foreign = const.value
 			writeForeignImportIfNew(state, writer, foreign.inferredType, foreign.source, foreign.sourceName, foreign.sourceId, foreign.token, asGlobals)
 		end
@@ -1916,7 +1923,7 @@ function _G.writeConstantObjectsExceptFunctions(state, writer, constants, asGlob
 		if relevantObjects and not relevantObjects[const] then
 			-- void
 
-		elseif const.isObject and const.valueType.tag ~= !(typeTags.TypeInfoFunction) then
+		elseif const.isObject and not (const.kind == !(CONST_KIND_NORMAL) and const.valueType.tag == !(typeTags.TypeInfoFunction)) then
 			file:write("\t")
 			if not asGlobals then  file:write("local ")  end
 			file:write(const.name, " = ")
@@ -1933,7 +1940,7 @@ function _G.writeFunctionObjects(state, writer, constants, relevantObjects)
 	for _, const in ipairs(constants) do
 		if relevantObjects and not relevantObjects[const] then
 			--void
-		elseif const.valueType.tag == !(typeTags.TypeInfoFunction) then
+		elseif const.kind == !(CONST_KIND_NORMAL) and const.valueType.tag == !(typeTags.TypeInfoFunction) then
 			local lambda = const.value
 			-- @Cleanup: Don't generate constants for polymorphic functions. (It's probably declarations doing this.) (I guess don't generate constants for foreign methods either.)
 			if not (lambda.isPolymorphic or (lambda.bodyIsForeign and lambda.foreignSource == "method")) then
@@ -2102,7 +2109,7 @@ function _G.writeProgram(state, writer)
 		for _, const in ipairs(state.constants) do
 			if relevantObjects and not relevantObjects[const] then
 				-- void
-			elseif const.valueType.tag == !(typeTags.TypeInfoFunction) then
+			elseif const.kind == !(CONST_KIND_NORMAL) and const.valueType.tag == !(typeTags.TypeInfoFunction) then
 				local lambda = const.value
 				if not (lambda.isPolymorphic or (lambda.bodyIsForeign and lambda.foreignSource == "method")) then
 					if not first then  file:write(", ")  end
@@ -2268,7 +2275,7 @@ function _G.validateForeignSource(state, foreignSource, foreignSourceName, nodeF
 	-- @UX: Make error arrow always point at the !foreign token.
 
 	if foreignSource == "lua" then
-		if not loadstring(F("return(%s)", foreignSourceName)) then
+		if not (foreignSourceName:find"^[%w_]+$" or foreignSourceName:find"^[%w_]+%.[%w_]+$" or loadstring(F("return(%s)", foreignSourceName))) then
 			nodeError(state, nodeForError, "ForeignValidator", "This is not a valid Lua symbol: '%s'", foreignSourceName)
 		end
 
