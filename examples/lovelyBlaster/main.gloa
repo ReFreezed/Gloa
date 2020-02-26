@@ -24,7 +24,7 @@ global DISABLE_SOUNDS :: DEV and true
 !import "love/math"
 
 !load "entities.gloa"
-!load "levels.gloa"
+!load "enemyWaves.gloa"
 
 !run {
 	!import "compiler"
@@ -48,6 +48,14 @@ global SpawnInstruction :: struct {
 	data:table,
 }
 
+
+
+global EnemyWave :: struct {
+	difficulty: int,
+	outroTime: float,
+	spawns: []SpawnInstruction,
+}
+
 global Level :: struct {
 	time        = 0.00,
 	timeSpeed   = 1.0,
@@ -56,19 +64,24 @@ global Level :: struct {
 	entities: []Entity,
 	player: Player = NULL,
 
-	cameraShake = 0.0,
+	currentWave: EnemyWave = NULL,
 
-	entitySpawnQueue: []SpawnInstruction = NULL,
 	nextIndexToSpawn = 1,
 	lastSpawnTime    = 0.00,
+	completedWaves   = 0,
+
+	difficulty     = 0,
+	difficultyTime = -9999.00,
 
 	lightsToDraw: []Light,
+
+	cameraShake = 0.0,
 }
 
 
 
-local currentLevel: Level    = NULL
-local lightImage: LoveImage  = NULL
+local currentLevel: Level   = NULL
+local lightImage: LoveImage = NULL
 
 
 
@@ -116,8 +129,8 @@ global playSound :: (name:string, volumeScale=1.0) {
 
 
 
-local startLevel :: (levelId:int) {
-	currentLevel        = {entitySpawnQueue=LEVEL1_SPAWN_QUEUE}
+local startNewGame :: () {
+	currentLevel        = {currentWave=getRandomWave(0)}
 
 	local player        = newEntity(currentLevel, Player, LEVEL_WIDTH/2, .8*CAMERA_HEIGHT)
 	currentLevel.player = player
@@ -135,7 +148,7 @@ local onLoad :: (args:[]string, argsRaw:[]string) {
 	loadSounds()
 
 	setRandomSeed(getTime())
-	startLevel(1)
+	startNewGame()
 }
 
 
@@ -144,7 +157,7 @@ local onKeyPressed :: (key:LoveKey, scancode:LoveScancode, isRepeat:bool) {
 	local player = currentLevel.player
 	if key == {
 		case "escape": loveQuit(0)
-		case "f10": if loveIsKeyDown("lctrl","rctrl") loveRestart() else startLevel(1)
+		case "f10": if loveIsKeyDown("lctrl","rctrl") loveRestart() else startNewGame()
 	}
 	if scancode == {
 		case "x": player.wantsToShoot = true
@@ -174,6 +187,28 @@ local onKeyPressed :: (key:LoveKey, scancode:LoveScancode, isRepeat:bool) {
 
 local uiTime = 0.00
 
+local getRandomWave :: (difficultyMax:int) -> EnemyWave {
+	local difficultyMin = min(1, difficultyMax)
+
+	local i1 = #ENEMY_WAVES
+	local i2 = i1
+
+	for ENEMY_WAVES {
+		if it.difficulty == difficultyMin {
+			i1 = itIndex
+			break
+		}
+	}
+	for < ENEMY_WAVES {
+		if it.difficulty == difficultyMax {
+			i2 = itIndex
+			break
+		}
+	}
+
+	return ENEMY_WAVES[getRandom(i1, i2)]
+}
+
 local onUpdate :: (dt:float) {
 	!if DEV {
 		if loveIsKeyDown("lctrl","rctrl")
@@ -189,11 +224,31 @@ local onUpdate :: (dt:float) {
 	currentLevel.cameraShake = max(currentLevel.cameraShake-dt/.60, 0)
 
 	while true {
-		local ent = currentLevel.entitySpawnQueue[currentLevel.nextIndexToSpawn]
-		if ent == NULL or currentLevel.progression < currentLevel.lastSpawnTime + ent.timeRelative  break
+		local ent = currentLevel.currentWave.spawns[currentLevel.nextIndexToSpawn]
+
+		if ent == NULL {
+			if currentLevel.progression < currentLevel.lastSpawnTime + currentLevel.currentWave.outroTime  break
+
+			currentLevel.completedWaves += 1
+			local newDifficulty          = DIFFICULTY_AT_WAVES[currentLevel.completedWaves]
+
+			if newDifficulty ~= nil {
+				currentLevel.difficulty     = cast(int) newDifficulty
+				currentLevel.difficultyTime = currentLevel.time
+			}
+
+			currentLevel.progression      = 0
+			currentLevel.currentWave      = getRandomWave(currentLevel.difficulty)
+			currentLevel.nextIndexToSpawn = 1
+			currentLevel.lastSpawnTime    = 0
+
+			ent = currentLevel.currentWave.spawns[1]
+		}
+
+		if currentLevel.progression < currentLevel.lastSpawnTime + ent.timeRelative  break
 
 		spawnNextEntity(currentLevel)
-		currentLevel.lastSpawnTime = currentLevel.lastSpawnTime + ent.timeRelative
+		currentLevel.lastSpawnTime += ent.timeRelative
 	}
 
 	for currentLevel.entities  updateEntity(currentLevel, it, dt)
@@ -206,20 +261,22 @@ local onUpdate :: (dt:float) {
 
 
 local onDraw :: () {
-	local ww, wh = loveGetWindowDimensions()
-	local player = currentLevel.player
-	local scale  = min(ww/LEVEL_WIDTH, wh/CAMERA_HEIGHT)
+	local ww, wh    = loveGetWindowDimensions()
+	local viewScale = min(ww/LEVEL_WIDTH, wh/CAMERA_HEIGHT)
+	local player    = currentLevel.player
 
 	loveGraphicsReset()
 	loveClear(.1, .1, .1)
 
 	loveCoordinateSystemTranslate(ww/2, wh/2)
-	loveCoordinateSystemScale(scale)
+	loveCoordinateSystemScale(viewScale)
 	loveCoordinateSystemTranslate(-LEVEL_WIDTH/2, -CAMERA_HEIGHT/2)
 
 	local viewX1, viewY1 = loveGlobalToScreen(0, 0)
 	local viewX2, viewY2 = loveGlobalToScreen(LEVEL_WIDTH, CAMERA_HEIGHT)
-	loveSetScissor(viewX1, viewY1, viewX2-viewX1, viewY2-viewY1)
+	local viewWidth      = viewX2-viewX1
+	local viewHeight     = viewY2-viewY1
+	loveSetScissor(viewX1, viewY1, viewWidth, viewHeight)
 	loveClear(.5, .05, .1)
 
 	-- World.
@@ -244,6 +301,12 @@ local onDraw :: () {
 	loveCoordinateSystemTranslate(-shakeX, -shakeY)
 
 	-- HUD.
+	local font  = loveGetFont()
+	local fontH = loveGetHeight(font)
+
+	loveGraphicsReset()
+	loveCoordinateSystemTranslate(round(viewX1), round(viewY1))
+
 	for i = 1, player.healthMax {
 		if i > player.health
 			loveSetColor(0, 0, 0)
@@ -255,14 +318,33 @@ local onDraw :: () {
 		loveDrawCircleFill(SPACING+RADIUS + (i-1)*(SPACING+2*RADIUS), SPACING+RADIUS, RADIUS, 32)
 	}
 
+	do {
+		local EDGE_SPACING       :: 5
+		local HIGHLIGHT_TIME     :: .70
+		local HIGHLIGHT_MOVEMENT :: 10
+
+		local timeSinceDifficultyIncreased = currentLevel.time - currentLevel.difficultyTime
+		local highlight                    = max(1-timeSinceDifficultyIncreased/HIGHLIGHT_TIME, 0) ^ 1.5
+
+		local text      = format("DIFFICULTY %d", currentLevel.difficulty)
+		local textScale = 1+.5*highlight
+		local textWidth = loveGetWidth(font, text) * textScale
+
+		local r = lerp(1.0, 1.0, highlight)
+		local g = lerp(0.8, 1.0, highlight)
+		local b = lerp(0.5, 1.0, highlight)
+
+		local x = round(viewWidth) - EDGE_SPACING - textWidth - HIGHLIGHT_MOVEMENT*highlight
+		local y = EDGE_SPACING + HIGHLIGHT_MOVEMENT * highlight
+
+		loveSetColor(r, g, b)
+		loveDrawText(text, x, y, 0, 1+.5*highlight)
+	}
+
 	!if DEV {
 		if loveIsKeyDown("tab") {
+			local y = viewY2-fontH
 			loveGraphicsReset()
-
-			local font  = loveGetFont()
-			local fontH = loveGetHeight(font)
-			local y     = viewY2-fontH
-
 			loveSetColor(1, 1, 1)
 			loveDrawText(format("Entities: %d", #currentLevel.entities), viewX1, y) ; y -= fontH
 		}
