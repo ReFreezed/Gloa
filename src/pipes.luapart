@@ -46,8 +46,7 @@ function _G.addDependency(state, dependent, dependType, dependOn, extraData)
 
 	--[[ WARNING: getExistingDependency() takes a lot of time to call here! @Robustness: @Optimize this into O(1) and uncomment.
 	if getExistingDependency(state, dependent, dependType, dependOn) then
-		printTraceback(io.stderr, 2)
-		printerr()
+		!TRACE()
 
 		!ifDEBUG `astPrint(dependent)`
 		nodeMessage(io.stderr, state, dependent, "Error", "Pipes", "Internal compiler error: Trying to add dependency twice.")
@@ -65,7 +64,7 @@ function _G.addDependency(state, dependent, dependType, dependOn, extraData)
 
 	if !!(anyV(`dependType`, DEPEND_NODE_INFERRED,DEPEND_NODE_INFERRED_FULLY,DEPEND_NODE_EMITTED)) then
 		assert(dependent ~= dependOn.node)
-		dependOn = dependOn.queued
+		dependOn = dependOn.queued or errorInternal(state, dependOn)
 	end
 
 	local dependency      = Dependency()
@@ -431,94 +430,8 @@ end
 
 
 function _G.errorPipesAreStuck(state)
-	!if PLANTUML_PATH ~= "" then
-		--[=[ Dependency graph.
-		!local PATH_UML = "local/dependencies.plantuml"
-		!local PATH_PNG = "local/dependencies.png"
-		!local MAX_SIZE = 8192
-		local file, err = io.open(!(PATH_UML), "wb")
-
-		if not file then
-			printerr(!("Could not open '"..PATH_UML.."' for writing: ")..err)
-
-		else
-			local function writeNode(node)
-				file:write("(", AST_NODE_TYPE_NAMES[node.nodeType], " ", node.s)
-
-				if node.nodeType == !(nodeTypes.AstIdentifier) then
-					file:write("\\n", node.name)
-				elseif node.nodeType == !(nodeTypes.AstDeclaration) then
-					file:write("\\n", node.name.name)
-				elseif node.nodeType == !(nodeTypes.AstAssignment) then
-					if #node.targets == 1 and node.targets[1].nodeType == !(nodeTypes.AstIdentifier) then
-						file:write("\\n", node.targets[1].name)
-					end
-				end
-
-				local token = node.token
-				local path  = state.tokens.file[token]
-				file:write("\\n@", (path:match"([^/]+)%.%w+$" or "?"), ":", state.tokens.line1[token])
-
-				file:write(")")
-			end
-
-			file:write("@startuml\n")
-			file:write(!("scale max "..MAX_SIZE.."*"..MAX_SIZE.."\n"))
-
-			for _, queued in ipairs(state.queue) do
-				local dependency = not queued.unqueued and queued.waitingOn
-
-				if dependency then
-					local known = true
-					writeNode(queued.node)
-
-					if dependency.dependType == !(DEPEND_DECLARATION) then
-						local name = dependency.dependOn
-						file:write(" --|> (Name ", name, ")")
-
-					elseif !!(anyV(`dependency.dependType`, DEPEND_NODE_INFERRED,DEPEND_NODE_INFERRED_FULLY,DEPEND_NODE_EMITTED)) then
-						local nodeOther = dependency.dependOn.node
-						file:write(" --|> ")
-						writeNode(nodeOther)
-
-					elseif dependency.dependType == !(DEPEND_STRUCT_MEMBERS_READY) then
-						local structInfo = dependency.dependOn
-						file:write(" --|> ")
-						writeNode(structInfo.astNode)
-
-					elseif dependency.dependType == !(DEPEND_CONSTANT_READY) then
-						local const = dependency.dependOn
-						if const.valueType.tag == XXX_TYPE_TAG_FUNCTION then
-							local lambda = const.value
-							file:write(" --|> ")
-							writeNode(lambda)
-						else
-							file:write(" --|> (Const ", const.name, ")")
-						end
-
-					else
-						known = false
-					end
-
-					if known then
-						file:write(" : ", DEPEND_TITLES[dependency.dependType])
-					end
-					file:write("\n")
-				end
-			end
-
-			file:write("@enduml\n")
-			file:close()
-
-			local cmd = !(F([["SET PLANTUML_LIMIT_SIZE=%d & SET "GRAPHVIZ_DOT=%s" & java -jar "%s" "%s""]], MAX_SIZE, GRAPHVIZ_PATH, PLANTUML_PATH, PATH_UML))
-			if os.execute(cmd) ~= 0 then
-				printerr("Failed running command: "..cmd)
-			else
-				os.execute!(F([["START "" /W "%s""]], PATH_PNG))
-			end
-		end
-		--]=]
-	!end
+	!TRACE()
+	-- outputDependencyGraph(state)
 
 	-- [[ Report undeclared identifier.
 	local function getDeclaredIdentifierWaitingToBeDeclaredWithName(name, queuedToIgnore) -- @Cleanup: What is this even?!?!
@@ -674,7 +587,7 @@ function _G.errorPipesAreStuck(state)
 			!ifDEBUG`astPrint(expr)`
 			typeMessage(io.stderr, state, expr,        "Error", "Failed inferring the type of this expression.")
 			!ifDEBUG`astPrint(queued.node)`
-			typeMessage(io.stderr, state, queued.node, "Info",  "...this thing is waiting for the above to finish.")
+			typeMessage(io.stderr, state, queued.node, "Info",  "...this thing is waiting for the above to finish. (This whole error message is probably not very helpful. Sorry!)")
 			exitFailure()
 		end
 	end
@@ -698,6 +611,99 @@ function _G.errorPipesAreStuck(state)
 	--]]
 
 	errorInternal("Pipes are stuck. Also failed to figure out where the issue actually is. Oops...")
+end
+
+
+
+function _G.outputDependencyGraph(state)
+	!if PLANTUML_PATH ~= "" then
+		-- [=[ Dependency graph.
+		!local PATH_UML = "local/dependencies.plantuml"
+		!local PATH_PNG = "local/dependencies.png"
+		!local MAX_SIZE = 8192
+		local file, err = io.open(!(PATH_UML), "wb")
+
+		if not file then
+			printerr(!("Could not open '"..PATH_UML.."' for writing: ")..err)
+
+		else
+			local function writeNode(node)
+				file:write("(", AST_NODE_TYPE_NAMES[node.nodeType], " ", node.s)
+
+				if node.nodeType == !(nodeTypes.AstIdentifier) then
+					file:write("\\n", node.name)
+				elseif node.nodeType == !(nodeTypes.AstDeclaration) then
+					file:write("\\n", node.name.name)
+				elseif node.nodeType == !(nodeTypes.AstAssignment) then
+					if #node.targets == 1 and node.targets[1].nodeType == !(nodeTypes.AstIdentifier) then
+						file:write("\\n", node.targets[1].name)
+					end
+				end
+
+				local token = node.token
+				local path  = state.tokens.file[token]
+				file:write("\\n@", (path:match"([^/]+)%.%w+$" or "?"), ":", state.tokens.line1[token])
+
+				file:write(")")
+			end
+
+			file:write("@startuml\n")
+			file:write(!("scale max "..MAX_SIZE.."*"..MAX_SIZE.."\n"))
+
+			for _, queued in ipairs(state.queue) do
+				local dependency = not queued.unqueued and queued.waitingOn
+
+				if dependency then
+					local known = true
+					writeNode(queued.node)
+
+					if dependency.dependType == !(DEPEND_DECLARATION) then
+						local name = dependency.dependOn
+						file:write(" --|> (Name ", name, ")")
+
+					elseif !!(anyV(`dependency.dependType`, DEPEND_NODE_INFERRED,DEPEND_NODE_INFERRED_FULLY,DEPEND_NODE_EMITTED)) then
+						local nodeOther = dependency.dependOn.node
+						file:write(" --|> ")
+						writeNode(nodeOther)
+
+					elseif dependency.dependType == !(DEPEND_STRUCT_MEMBERS_READY) then
+						local structInfo = dependency.dependOn
+						file:write(" --|> ")
+						writeNode(structInfo.astNode)
+
+					elseif dependency.dependType == !(DEPEND_CONSTANT_READY) then
+						local const = dependency.dependOn
+						if const.valueType.tag == XXX_TYPE_TAG_FUNCTION then
+							local lambda = const.value
+							file:write(" --|> ")
+							writeNode(lambda)
+						else
+							file:write(" --|> (Const ", const.name, ")")
+						end
+
+					else
+						known = false
+					end
+
+					if known then
+						file:write(" : ", DEPEND_TITLES[dependency.dependType])
+					end
+					file:write("\n")
+				end
+			end
+
+			file:write("@enduml\n")
+			file:close()
+
+			local cmd = !(F([["SET PLANTUML_LIMIT_SIZE=%d & SET "GRAPHVIZ_DOT=%s" & java -jar "%s" "%s""]], MAX_SIZE, GRAPHVIZ_PATH, PLANTUML_PATH, PATH_UML))
+			if os.execute(cmd) ~= 0 then
+				printerr("Failed running command: "..cmd)
+			else
+				os.execute!(F([["START "" /W "%s""]], PATH_PNG))
+			end
+		end
+		--]=]
+	!end
 end
 
 

@@ -179,8 +179,9 @@ _G.!struct"TableField"{
 	{`keyIsGenerated`, false},
 }
 _G.!structAst"AstTable:_AstExpression"{
-	{`fields`, {},  ast="fields"}, -- []TableField
-	{`vararg`, nil, ast="node"},   -- AstVararg
+	{`fields`,                {},  ast="fields"}, -- []TableField
+	{`trailingExpression`,    nil, ast="node"},   -- AstVararg|AstCall  This expression potentially expands to multiple values in any resulting Lua table.
+	{`highestGeneratedIndex`, 0},
 }
 _G.!structAst"AstCall:_AstExpression"{
 	{`callee`,                    nil, ast="node"},  -- AstExpression
@@ -346,7 +347,7 @@ _G.!structAst"AstFor:_AstScope"{
 	_scopeType = "imperative",
 	{`expressions`,    {},  ast="array"},   -- []AstExpression  @Cleanup: Move these into AstFor.statements?
 	{`names`,          {},  ast=nil    },   -- []AstIdentifier  These are never inferred, but instead copied to declarations. @Cleanup: Can we get rid of this in favor of the copy we currently make?
-	{`forType`,        FOR_NUMERIC},
+	{`forType`,        FOR_NUMERIC},        -- @Cleanup: Rename to "kind"?
 	{`body`,           nil, astRef="node"}, -- AstBlock
 	{`reverse`,        false},
 	{`hasNamedBreaks`, false},
@@ -361,6 +362,9 @@ _G.!structAst"AstStruct:_AstScopeExpression"{
 
 	{`inherits`,              {},  astRef="array"}, -- []AstExpression
 
+	{`keyType`,               nil, ast="node"},     -- AstExpression
+	{`valueType`,             nil, ast="node"},     -- AstExpression
+
 	{`isPolymorphic`,         false},
 	{`polymorphs`,            {},  astRef="array"}, -- []AstDeclaration
 	{`polymorphSourceStruct`, nil, astRef="node"},  -- AstStruct
@@ -372,6 +376,7 @@ _G.!structAst"AstStruct:_AstScopeExpression"{
 _G.!structAst"AstEnum:_AstScopeExpression"{
 	_scopeType = "declarative",
 	{`memberType`, nil, ast="node"}, -- AstType
+	{`autoValue`,  0},
 }
 _G.!structAst"AstLambda:_AstScopeExpression"{
 	_scopeType = "imperative",
@@ -530,7 +535,7 @@ function _G.parseTable(state, parentNode)
 	local tableStartToken = state.nextToken-1
 	local tableNode       = astNewNode(AstTable, tableStartToken, parentNode)
 	local fields          = tableNode.fields
-	local listIndex       = 0
+	local generatedIndex  = 0
 
 	while true do
 		local tokType, tokValue, token = peekNextToken(state)
@@ -576,10 +581,10 @@ function _G.parseTable(state, parentNode)
 
 		-- v
 		else
-			listIndex           = listIndex+1
+			generatedIndex      = generatedIndex+1
 			local literal       = astNewNode(AstLiteral, token, tableNode) -- Note: The token position of the key and value will be the same.
 			literal.literalType = !(LITERAL_INTEGER)
-			literal.value       = listIndex
+			literal.value       = generatedIndex
 			tableKey            = literal
 
 			tableField.keyIsGenerated = true
@@ -604,13 +609,15 @@ function _G.parseTable(state, parentNode)
 
 	local lastField = fields[#fields]
 
-	if lastField and lastField.keyIsGenerated and lastField.value.nodeType == !(nodeTypes.AstVararg) then
-		local vararg     = lastField.value
-		vararg.parent    = tableNode
-		tableNode.vararg = vararg
-		fields[#fields]  = nil
+	if lastField and lastField.keyIsGenerated and lastField.value.nodeType == !(nodeTypes.AstVararg) and not lastField.value.surroundedByParentheses then
+		local vararg    = lastField.value
+		vararg.parent   = tableNode
+		fields[#fields] = nil
+		generatedIndex  = generatedIndex-1
+		tableNode.trailingExpression = vararg
 	end
 
+	tableNode.highestGeneratedIndex = generatedIndex
 	return tableNode
 end
 
@@ -971,7 +978,7 @@ function _G.parseStruct(state, parentNode)
 			break
 
 		elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"assert","print") then
-			!SET_OR_RETURN_FALSE `local debugNode = parseDebugNode(state, struct)`
+			!SET_OR_RETURN `local debugNode = parseDebugNode(state, struct)`
 			table.insert(struct.statements, debugNode)
 
 		elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"using") and not (
@@ -982,6 +989,28 @@ function _G.parseStruct(state, parentNode)
 			!SET_OR_RETURN `local expr = parseExpression(state, struct)`
 			table.insert(struct.statements, expr)
 			table.insert(struct.inherits,   expr)
+
+		elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"key","value") then
+			eatNextToken(state)
+
+			local what = tokValue
+			local k    = what == "key" and "keyType" or "valueType"
+
+			tokType, tokValue = eatNextToken(state)
+			if not isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),":") then
+				!ERROR_OR_RETURN `errorParsingAfterPrevious(state, "Expected ':'.")`
+			end
+
+			if struct[k] then
+				!ERROR_OR_RETURN `
+					printerr()
+					parserMessage(io.stderr, state, state.nextToken-2, "Error", "Duplicate !%s in struct.",      what)
+					parserMessage(io.stderr, state, struct[k].token-2, "Info",  "...previous !%s defined here.", what)
+					exitFailure()
+				`
+			end
+
+			!SET_OR_RETURN `struct[k] = parseExpression(state, struct)`
 
 		else
 			local declType = !(DECLARATION_STRUCT)
@@ -1023,8 +1052,6 @@ function _G.parseEnum(state, parentNode)
 			!ERROR_OR_RETURN `errorParsingAfterPrevious(state, "Expected '{'.")`
 		end
 	end
-
-	tokType, tokValue = peekNextToken(state)
 
 	-- Note: We allow a trailing comma/semicolon after the members.
 	while true do
@@ -1131,7 +1158,7 @@ function _G.parseDeclarationStatement(state, block, imperative, declType)
 	else
 		local decl              = astNewNode(AstDeclaration, declStartToken, block)
 		decl.isGlobalOrExported = isGlobalOrExported
-		table.insert(declarations, decl)
+		declarations[1]         = decl
 
 		!SET_OR_RETURN `local ident = parseIdentifier(state, decl)`
 		ident.declaration           = decl
@@ -1170,6 +1197,10 @@ function _G.parseDeclarationStatement(state, block, imperative, declType)
 
 	-- local x = value
 	elseif isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"=") then
+		-- void
+
+	-- enum { NAME1, NAME2 }
+	elseif declType == !(DECLARATION_ENUM) and isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),",","}") then
 		-- void
 
 	else
@@ -1228,6 +1259,21 @@ function _G.parseDeclarationStatement(state, block, imperative, declType)
 				decl.value = parseExpression(state, decl)
 			end
 		end
+
+	elseif declType == !(DECLARATION_ENUM) then
+		local enum = block
+		!ASSERT("enum.nodeType == "..nodeTypes.AstEnum) -- Note: We don't support !if or anything in enums, so the parent block should always be the enum.
+
+		enum.autoValue = enum.autoValue+1
+
+		local literal         = astNewNode(AstLiteral, nameListStartToken, declarations[1])
+		literal.literalType   = !(LITERAL_INTEGER)
+		literal.value         = enum.autoValue
+		declarations[1].value = literal
+
+		isConst                    = true
+		imperative                 = false
+		declarations[1].isConstant = true
 	end
 
 	-- Set if shadowing is allowed.
@@ -2931,6 +2977,7 @@ function _G.errorParsing(state, i, s, ...)
 		or tokens.count > 0 and tokens.position2[tokens.count]+1
 		or #buffer
 
+	!TRACE(2)
 	errorInFile(buffer, path, ptr, "Parser", s, ...)
 end
 
@@ -2978,6 +3025,7 @@ function _G.errorParsingAfter(state, i, s, ...)
 		or tokens.count > 0 and tokens.position2[tokens.count]+1
 		or #buffer
 
+	!TRACE(2)
 	errorInFile(buffer, path, ptr, "Parser", s, ...)
 end
 
@@ -3000,11 +3048,8 @@ end
 function _G.errorUnhandledNodeType(state, node)
 	!if DEBUG then
 		printerr()
-		printTraceback(io.stderr, 2)
-		printerr()
 		astPrintTree(io.stderr, node)
 		-- !ifDEBUG `astPrintTree(io.stderr, state.globalScope)`
-		printerr()
 	!end
 	nodeError(state, node, "Debug", "Internal compiler error: Incomplete: Unhandled node type '%s'.", (AST_NODE_TYPE_NAMES[node.nodeType] or node.nodeType))
 end
@@ -3012,10 +3057,7 @@ end
 function _G.errorUnhandledType(state, node, typeInfo)
 	!if DEBUG then
 		printerr()
-		printTraceback(io.stderr, 2)
-		printerr()
 		astPrintTree(io.stderr, node)
-		printerr()
 	!end
 	nodeError(state, node, "Debug", "Internal compiler error: Incomplete: Unhandled type '%s'.", getFriendlyTypeInfoName(typeInfo))
 end
@@ -3028,6 +3070,7 @@ function _G.nodeError(state, node, agent, s, ...)
 	local token  = node.token
 	local path   = tokens.file[token]      or errorInternal("No tokens.")
 	local buffer = state.fileBuffers[path] or errorInternal("No file buffer for '%s'.", path)
+	!TRACE(2)
 	errorInFile(buffer, path, tokens.position1[token], agent, s, ...)
 end
 
@@ -3037,6 +3080,7 @@ function _G.nodeErrorAfter(state, node, agent, s, ...)
 	local token  = node.token
 	local path   = tokens.file[token]      or errorInternal("No tokens.")
 	local buffer = state.fileBuffers[path] or errorInternal("No file buffer for '%s'.", path)
+	!TRACE(2)
 	errorInFile(buffer, path, tokens.position2[token]+1, agent, s, ...)
 end
 

@@ -64,8 +64,8 @@ local !structTypeInfo"TypeInfoString:_TypeInfo"{_overrides={{`tag`,6}}}
 local !structTypeInfo"TypeInfoTable:_TypeInfo" {_overrides={{`tag`,7}}}
 local !structTypeInfo"TypeInfoType:_TypeInfo"  {_overrides={{`tag`,8}}}
 
-local !structTypeInfo"TypeInfoVoid:_TypeInfo"       {_overrides={{`tag`,9}}}
-local !structTypeInfo"TypeInfoPlaceholder:_TypeInfo"{_overrides={{`tag`,10}}}
+local !structTypeInfo"TypeInfoVoid:_TypeInfo"       {_overrides={{`tag`,0}}}
+local !structTypeInfo"TypeInfoPlaceholder:_TypeInfo"{_overrides={{`tag`,9}}}
 
 _G.!(local )!!SIMPLE_TYPE_TAG = {
 	-- These small type infos don't have any extra information.
@@ -80,17 +80,17 @@ _G.!(local )!!SIMPLE_TYPE_TAG = {
 }
 
 local !structTypeInfo"TypeInfoArray:_TypeInfo"{
-	_overrides={{`tag`,12}},
+	_overrides={{`tag`,10}},
 	{`itemType`, nil}, -- TypeInfo
 }
 
 local !structTypeInfo"TypeInfoVararg:_TypeInfo"{
-	_overrides={{`tag`,13}},
+	_overrides={{`tag`,11}},
 	{`itemType`, nil}, -- TypeInfo
 }
 
 local !structTypeInfo"TypeInfoFunction:_TypeInfo"{ -- AKA function signature.
-	_overrides={{`tag`,14}},
+	_overrides={{`tag`,12}},
 	{`argumentTypesIn`,      {}}, -- []TypeInfo  @Cleanup: Use TypeInfoList here?
 	{`argumentTypesOut`,     {}}, -- []TypeInfo  @Cleanup: Use TypeInfoList here?
 	{`requiredArgumentsIn`,  {}}, -- []bool
@@ -103,10 +103,14 @@ local !struct"TypeInfoStructMember"{
 	{`typeInfo`, nil},
 }
 local !structTypeInfo"TypeInfoStruct:_TypeInfo"{
-	_overrides={{`tag`,15}},
+	_overrides={{`tag`,13}},
 
 	{`astNode`,       nil}, -- AstStruct
 	{`name`,          ""},  -- Filled in during definition.
+
+	{`kind`,          STRUCT_KIND_NORMAL}, -- STRUCT_KIND_NORMAL|STRUCT_KIND_TABLE|STRUCT_KIND_ARRAY
+	{`keyType`,       nil}, -- TypeInfo  Used if kind==STRUCT_KIND_TABLE.
+	{`valueType`,     nil}, -- TypeInfo  Used if kind==STRUCT_KIND_TABLE or kind==STRUCT_KIND_ARRAY.
 
 	{`members`,       {}},  -- []TypeInfoStructMember
 	{`hasMembers`,    false},
@@ -118,7 +122,7 @@ local !struct"TypeInfoEnumMember"{
 	{`name`, ""},
 }
 local !structTypeInfo"TypeInfoEnum:_TypeInfo"{
-	_overrides={{`tag`,16}},
+	_overrides={{`tag`,14}},
 	{`astNode`,        nil}, -- AstEnum
 	{`name`,           ""},
 	{`memberTypeInfo`, nil}, -- Must be one of these primitive types: int, string, type, bool or float.
@@ -126,17 +130,17 @@ local !structTypeInfo"TypeInfoEnum:_TypeInfo"{
 }
 
 local !structTypeInfo"TypeInfoNamespace:_TypeInfo"{
-	_overrides={{`tag`,17}},
+	_overrides={{`tag`,15}},
 	{`scope`, nil}, -- AstScope
 }
 
 local !structTypeInfo"TypeInfoCompound:_TypeInfo"{
-	_overrides={{`tag`,18}},
+	_overrides={{`tag`,16}},
 	-- [1]=typeInfo1, ...
 }
 
 local !structTypeInfo"TypeInfoList:_TypeInfo"{ -- Special type used for returns from calls (both when sending and receiving).
-	_overrides={{`tag`,19}},
+	_overrides={{`tag`,17}},
 	-- [1]=typeInfo1, ...
 }
 
@@ -215,9 +219,9 @@ local function doesLambdaHaveSignature(lambda, funcSig)
 	local argsTypesIn = funcSig.argumentTypesIn
 	if (argsIn  and #argsIn .arguments or 0) ~= #argsTypesIn  then  return false  end
 
-	local argsOut      = lambda.argumentsOut
-	local argsTypesOut = funcSig.argumentTypesOut
-	if (argsOut and #argsOut.arguments or 0) ~= #argsTypesOut then  return false  end
+	local argsOut     = lambda.argumentsOut
+	local argTypesOut = funcSig.argumentTypesOut
+	if (argsOut and #argsOut.arguments or 0) ~= #argTypesOut then  return false  end
 
 	if argsIn then
 		local requiredArgsIn = funcSig.requiredArgumentsIn
@@ -228,7 +232,7 @@ local function doesLambdaHaveSignature(lambda, funcSig)
 	end
 	if argsOut then
 		for i, arg in ipairs(argsOut.arguments) do
-			if arg.declaration.name.inferredType ~= argsTypesOut[i] then  return false  end
+			if arg.declaration.name.inferredType ~= argTypesOut[i] then  return false  end
 		end
 	end
 
@@ -617,6 +621,7 @@ function _G.typeErrorAfter(state, node, s, ...)
 end
 
 function _G.typeError2(state, node1, s1, node2, s2)
+	!TRACE(2)
 	printerr()
 	!ifDEBUG `astPrint(node1)`
 	typeMessage(io.stderr, state, node1, "Error", "%s", s1)
@@ -951,6 +956,7 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 				!DEPEND_AND_RETURN(`ident`, DEPEND_NODE_INFERRED, `declBase.name`)
 			end
 
+			!TRACE()
 			printerr()
 			typeMessage(io.stderr, state, ident, "Error", "'%s' has multiple overloads and we don't know which one this is referring to.", ident.name)
 			for i, declOverload in ipairs(declBase.overloads) do
@@ -1022,7 +1028,6 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 
 	if not scope then
 		astPrint(identOrVararg)
-		printTraceback(io.stderr)
 		typeError(state, identOrVararg, "Internal compiler error: Could not find what scope '%s' is in.", identOrVararg.name)
 	end
 
@@ -1446,6 +1451,7 @@ end
 		end
 
 		if typeInfo.tag ~= !(typeTags.TypeInfoType) then
+			!TRACE()
 			printerr()
 			typeMessage(io.stderr, state, typeNode, "Error", "'%s' is not a type. (It is %s)", typeNode.typeName, getFriendlyTypeInfoName(typeInfo))
 			printDeclarationChain(io.stderr, state, decl, typeNode.typeName)
@@ -1739,6 +1745,7 @@ local function getBestMatchOrTriggerError(state, call, matches, matchTerm, error
 		return matches[1].declaration
 	end
 
+	!TRACE()
 	printerr()
 	typeMessage(io.stderr, state, call.callee, "Error", errorTextOnDraw)
 	for i, matchData in ipairs(matches) do
@@ -2060,6 +2067,7 @@ local function handleOverloadedCall(state, call, realArguments, realArgumentType
 	local matchingOverloads = getMatchingFunctions(state, call, realArguments, realArgumentTypes, declBase.overloads)
 
 	if not matchingOverloads then
+		!TRACE()
 		printerr()
 		typeMessage(io.stderr, state, ident, "Error", "Did not find any matching overload to call.") -- @UX: Show expected signature.
 		for i, declOverload in ipairs(declBase.overloads) do
@@ -2150,7 +2158,7 @@ local function handlePolymorphicStruct(state, call)
 
 		if isMatch then
 			-- Change the call into a type node.
-			local morphTypeNode       = astNewNode(AstType, morphDecl.name.token, call.parent)
+			local morphTypeNode       = astNewNode(AstType, typeNode.token, call.parent)
 			morphTypeNode.kind        = !(TYPE_KIND_SIMPLE_USER)
 			morphTypeNode.typeName    = morphDecl.name.name
 			morphTypeNode.declaration = morphDecl
@@ -2208,7 +2216,7 @@ local function handlePolymorphicStruct(state, call)
 	addToQueueRecursively(state, morphDecl, struct.statements, i, !(PIPE_INFER))
 
 	-- Change the call into a type node.
-	local morphTypeNode       = astNewNode(AstType, morphDecl.name.token, call.parent)
+	local morphTypeNode       = astNewNode(AstType, typeNode.token, call.parent)
 	morphTypeNode.kind        = !(TYPE_KIND_SIMPLE_USER)
 	morphTypeNode.typeName    = morphDecl.name.name
 	morphTypeNode.declaration = morphDecl
@@ -2726,6 +2734,59 @@ function _G.getConstantNameOrTriggerError(state, node)
 	return name
 end
 
+function _G.validateStructKey(state, keyExpr, structInfo, isLvalue)
+	local keyExprType = keyExpr.inferredType
+	local memberName  = ""
+	local memberValueType, constDecl
+
+	if structInfo.kind == !(STRUCT_KIND_TABLE) and (keyExprType.tag ~= !(typeTags.TypeInfoString) or structInfo.keyType.tag == !(typeTags.TypeInfoString)) then
+		if not isTypeCompatibleWith(keyExprType, structInfo.keyType) then
+			typeError(state, keyExpr, "Expected struct member name or %s. (Got %s)", getFriendlyTypeInfoName(structInfo.keyType), getFriendlyTypeInfoName(keyExprType))
+		end
+		memberValueType = structInfo.valueType
+
+	elseif structInfo.kind == !(STRUCT_KIND_ARRAY) and keyExprType.tag ~= !(typeTags.TypeInfoString) then
+		if keyExprType.tag ~= !(typeTags.TypeInfoInt) then
+			typeError(state, keyExpr, "Expected struct member name or array index. (Got %s)", getFriendlyTypeInfoName(keyExprType))
+		end
+		memberValueType = structInfo.valueType
+
+	else
+		if keyExprType.tag ~= !(typeTags.TypeInfoString) then
+			typeError(
+				state, astGetExpressionVisuallyFurthestToTheLeft(keyExpr),
+				"Member names in struct constructors must be strings. (This is %s)",
+				getFriendlyTypeInfoName(keyExprType)
+			)
+		elseif keyExpr.nodeType ~= !(nodeTypes.AstLiteral) then
+			typeError(
+				state, astGetExpressionVisuallyFurthestToTheLeft(keyExpr),
+				"Member names in struct constructors must be constant. (Type is string)"
+			)
+		end
+
+		local memberLiteral = keyExpr
+		memberName          = memberLiteral.value
+		local member        = itemWith1(structInfo.members, "name", memberName)
+
+		if member then
+			memberValueType = member.typeInfo
+		else
+			constDecl = findDeclarationInScope(state, structInfo.astNode, memberName, false)
+			if not constDecl then
+				typeError(state, memberLiteral, "'%s' is not a member of %s.", memberName, getFriendlyTypeInfoName(structInfo))
+			elseif isLvalue then
+				typeError(state, memberLiteral, "Cannot assign value to constant member %s.%s", getFriendlyTypeInfoName(structInfo), memberName)
+			else
+				assert(constDecl.isConstant)
+				memberValueType = constDecl.name.inferredType
+			end
+		end
+	end
+
+	return memberName, memberValueType, constDecl
+end
+
 local function checkForStaticAccessThatUsesWhatLooksLikeRuntimeCode(state, topNodeToCheck, staticObjectNode)
 	astVisitAllNodes(topNodeToCheck, function(node)
 		if not (
@@ -2748,34 +2809,34 @@ local function checkForStaticAccessThatUsesWhatLooksLikeRuntimeCode(state, topNo
 end
 
 !NODE_INFERRER `function nodeInferrers.AstAccess(state, access)`
-	local typeInfoObject = access.object.inferredType
-	local typeInfoMember = access.member.inferredType
+	local typeObject = access.object.inferredType
+	local typeMember = access.member.inferredType
 
-	if not typeInfoObject then
+	if not typeObject then
 		!DEPEND_AND_RETURN(`access`, DEPEND_NODE_INFERRED, `access.object`)
 	end
-	if not typeInfoMember then
+	if not typeMember then
 		!DEPEND_AND_RETURN(`access`, DEPEND_NODE_INFERRED, `access.member`)
 	end
 
-	typeInfoObject = adjustTypeToOne(state, access.object, typeInfoObject, true)
-	typeInfoMember = adjustTypeToOne(state, access.member, typeInfoMember, true)
+	typeObject            = adjustTypeToOne(state, access.object, typeObject, true)
+	typeMember            = adjustTypeToOne(state, access.member, typeMember, true)
 
-	local isDirectObj    = access.object.inferredType == typeInfoObject
-	local isDirectMember = access.member.inferredType == typeInfoMember
+	local isDirectObject  = access.object.inferredType == typeObject
+	local isDirectMember  = access.member.inferredType == typeMember
 
-	local isLeftValue         = access.parent.nodeType == !(nodeTypes.AstAssignment) and indexOf(access.parent.targets, access) ~= nil
-	local typeInfoRepresented = getTypeRepresentedByExpression(access.object)
+	local isLvalue        = access.parent.nodeType == !(nodeTypes.AstAssignment) and access.queued.container == access.parent.targets
+	local typeRepresented = getTypeRepresentedByExpression(access.object)
 
-	if typeInfoObject.tag == !(typeTags.TypeInfoTable) then
-		if typeInfoMember.tag == !(typeTags.TypeInfoNone) then
+	if typeObject.tag == !(typeTags.TypeInfoTable) then
+		if typeMember.tag == !(typeTags.TypeInfoNone) then
 			typeError(state, access.member, "Table keys cannot be nil.")
 
-		elseif typeInfoMember.tag == !(typeTags.TypeInfoCompound) and indexOf(typeInfoMember, getTypeInfoForBuiltinType(state, "none")) then
-			typeError(state, access.member, "Table keys cannot be nil. (Type is %s)", getFriendlyTypeInfoName(typeInfoMember))
+		elseif typeMember.tag == !(typeTags.TypeInfoCompound) and indexOf(typeMember, getTypeInfoForBuiltinType(state, "none")) then
+			typeError(state, access.member, "Table keys cannot be nil. (Type is %s)", getFriendlyTypeInfoName(typeMember))
 
 		--[[ This warning message may be too noisy in some programs.
-		elseif typeInfoMember.tag == !(typeTags.TypeInfoAny) then
+		elseif typeMember.tag == !(typeTags.TypeInfoAny) then
 			-- @Incomplete: Add a setting to suppress warnings.
 			typeMessage(
 				io.stderr, state, astGetExpressionVisuallyFurthestToTheLeft(access.member),
@@ -2787,11 +2848,11 @@ end
 		access.inferredType = getTypeInfoForBuiltinType(state, "any")
 		moveToNextRelevantPipe(state, access)
 
-	elseif typeInfoObject.tag == !(typeTags.TypeInfoArray) then
-		local arraySig = typeInfoObject
+	elseif typeObject.tag == !(typeTags.TypeInfoArray) then
+		local arraySig = typeObject
 
-		if typeInfoMember.tag == !(typeTags.TypeInfoInt) then
-			-- @Incomplete: Check for isLeftValue and constantness.
+		if typeMember.tag == !(typeTags.TypeInfoInt) then
+			-- @Incomplete: Check for isLvalue and constantness.
 
 			if access.member.nodeType == !(nodeTypes.AstLiteral) and access.member.value < 1 then
 				local indexLiteral = access.member
@@ -2828,35 +2889,26 @@ end
 
 			moveToNextRelevantPipe(state, access)
 
-		-- elseif not isLeftValue and typeInfoMember.tag == !(typeTags.TypeInfoString) then
+		-- elseif not isLvalue and typeMember.tag == !(typeTags.TypeInfoString) then
 		-- 	local abstractMemberLiteral = access.member
 		-- 	local abstractMemberName    = getConstantNameOrTriggerError(state, abstractMemberLiteral)
 		-- 	if abstractMemberName == ? then ... end
 
 		else
-			typeError(state, access.member, "Expected an array index of type int. (Got %s)", getFriendlyTypeInfoName(typeInfoMember))
+			typeError(state, access.member, "Expected an array index of type int. (Got %s)", getFriendlyTypeInfoName(typeMember))
 		end
 
-	elseif typeInfoObject.tag == !(typeTags.TypeInfoStruct) or (typeInfoRepresented and typeInfoRepresented.tag == !(typeTags.TypeInfoStruct)) then
-		local structInfo = typeInfoRepresented or typeInfoObject
+	elseif typeObject.tag == !(typeTags.TypeInfoStruct) or (typeRepresented and typeRepresented.tag == !(typeTags.TypeInfoStruct)) then
+		local structInfo = typeRepresented or typeObject
 		if not structInfo.hasMembers then
 			!DEPEND_AND_RETURN(`access`, DEPEND_STRUCT_MEMBERS_READY, `structInfo`)
 		end
 
-		local memberLiteral = access.member
-		local memberName    = getConstantNameOrTriggerError(state, memberLiteral)
-		local decl          = findDeclarationInScope(state, structInfo.astNode, memberName, false)
+		local memberName, memberValueType, constDecl = validateStructKey(state, access.member, structInfo, isLvalue)
+		if not memberValueType then  errorInternal(state, access.member)  end
 
-		if not decl then
-			typeError(state, memberLiteral, "'%s' is not a member of %s.", memberName, getFriendlyTypeInfoName(structInfo))
-		elseif isLeftValue and decl.isConstant then
-			typeError(state, memberLiteral, "Cannot assign value to constant member %s.%s", getFriendlyTypeInfoName(structInfo), memberName)
-		end
-
-		if not decl.isConstant then
-			access.inferredType    = decl.name.inferredType or errorInternal()
-			access.representedType = decl.valueTypeInfo -- May be nil.
-
+		if not constDecl then
+			access.inferredType = memberValueType
 			moveToNextRelevantPipe(state, access)
 			return
 		end
@@ -2865,22 +2917,22 @@ end
 			checkForStaticAccessThatUsesWhatLooksLikeRuntimeCode(state, access.object, access.member)
 		end
 
-		local valueExpr = decl.value
+		local valueExpr = constDecl.value
 		local nodeType  = valueExpr.nodeType
 		local replacement
 
 		if nodeType == !(nodeTypes.AstLiteral) then
-			replacement = astCopy(valueExpr, memberLiteral.token)
+			replacement = astCopy(valueExpr, access.member.token)
 
 		elseif nodeType == !(nodeTypes.AstType) then
-			replacement = astCopy(valueExpr, memberLiteral.token)
+			replacement = astCopy(valueExpr, access.member.token)
 			addUnqueuedChildrenToQueueRecursively(state, replacement, !(PIPE_DONE))
 
 		elseif nodeType == !(nodeTypes.AstIdentifier) and valueExpr.inferredType.tag == !(typeTags.TypeInfoEnum) then
-			replacement = astCopy(valueExpr, memberLiteral.token)
+			replacement = astCopy(valueExpr, access.member.token)
 
 		elseif nodeType == !(nodeTypes.AstEnum) or nodeType == !(nodeTypes.AstEnum) then
-			replacement = createTypeNodeFromInfo(state, valueExpr.representedType, memberLiteral.token, access.parent) -- Parent is temp and will change in a moment.
+			replacement = createTypeNodeFromInfo(state, valueExpr.representedType, access.member.token, access.parent) -- Parent is temp and will change in a moment.
 
 		elseif nodeType == !(nodeTypes.AstLambda) then
 			if access.parent.nodeType == !(nodeTypes.AstCall) and access == access.parent.callee and access.parent.isMethod then
@@ -2912,10 +2964,10 @@ end
 				end
 
 				-- Update callee using access. (Note: access==callee)
-				local ident        = astNewNode(AstIdentifier, memberLiteral.token, call)
-				ident.name         = decl.name.name
-				ident.declaration  = decl
-				ident.inferredType = decl.name.inferredType
+				local ident        = astNewNode(AstIdentifier, access.member.token, call)
+				ident.name         = constDecl.name.name
+				ident.declaration  = constDecl
+				ident.inferredType = constDecl.name.inferredType
 				replaceQueuedNode(state, access, ident)
 				moveToNextRelevantPipe(state, ident)
 
@@ -2923,16 +2975,16 @@ end
 				call.isMethod = false
 
 				-- Unqueue now unused nodes.
-				unqueue(memberLiteral)
+				unqueue(access.member)
 
 				astPrintTree(call)
 				return
 
 			else
-				local ident        = astNewNode(AstIdentifier, memberLiteral.token, access.parent)
-				ident.name         = decl.name.name
-				ident.declaration  = decl
-				ident.inferredType = decl.name.inferredType
+				local ident        = astNewNode(AstIdentifier, access.member.token, access.parent)
+				ident.name         = constDecl.name.name
+				ident.declaration  = constDecl
+				ident.inferredType = constDecl.name.inferredType
 				replacement        = ident
 			end
 
@@ -2945,16 +2997,16 @@ end
 		replaceQueuedNodeAndUnqueueOldTree(state, access, replacement)
 		moveToNextRelevantPipe(state, replacement, !(PIPE_INFER))
 
-	elseif typeInfoObject.tag == !(typeTags.TypeInfoEnum) or (typeInfoRepresented and typeInfoRepresented.tag == !(typeTags.TypeInfoEnum)) then
+	elseif typeObject.tag == !(typeTags.TypeInfoEnum) or (typeRepresented and typeRepresented.tag == !(typeTags.TypeInfoEnum)) then
 		local memberLiteral = access.member
 		local memberName    = getConstantNameOrTriggerError(state, memberLiteral)
 
-		local enumInfo      = typeInfoRepresented or typeInfoObject
+		local enumInfo      = typeRepresented or typeObject
 		local decl          = findDeclarationInScope(state, enumInfo.astNode, memberName, false)
 
 		if not decl then
 			typeError(state, memberLiteral, "'%s' is not a member of %s.", memberName, getFriendlyTypeInfoName(enumInfo))
-		elseif isLeftValue then
+		elseif isLvalue then
 			typeError(state, memberLiteral, "Cannot assign values to enum members. (Enum is %s)", getFriendlyTypeInfoName(enumInfo))
 		end
 
@@ -2964,13 +3016,13 @@ end
 		replaceQueuedNodeAndUnqueueOldTree(state, access, ident)
 		-- Stay in the current pipe so we get simplified. (Needed? Or maybe we can @Speed things up here?)
 
-	elseif typeInfoObject.tag == !(typeTags.TypeInfoNamespace) then
-		assert(isDirectObj)
+	elseif typeObject.tag == !(typeTags.TypeInfoNamespace) then
+		assert(isDirectObject)
 
 		local memberLiteral = access.member
 		local memberName    = getConstantNameOrTriggerError(state, memberLiteral)
 
-		local namespace     = typeInfoObject
+		local namespace     = typeObject
 		local decl          = findDeclarationInScope(state, namespace.scope, memberName, true)
 
 		if not decl then
@@ -2984,197 +3036,207 @@ end
 		-- Stay in the current pipe so we get simplified. (Needed? Or maybe we can @Speed things up here?)
 
 	else
-		typeError(state, access, "Values of type '%s' do not have members.", getFriendlyTypeInfoName(typeInfoObject))
+		typeError(state, access, "Values of type '%s' do not have members.", getFriendlyTypeInfoName(typeObject))
 	end
 end
 
-!NODE_INFERRER `function nodeInferrers.AstTable(state, tableNode)`
-	-- Note: tableNode.inferredType may get set before all child nodes are inferred.
-	local typeInfoExpected = tableNode.inferredType or getExpectedTypeInfo(state, tableNode, false, "constructor", tableNode)
-	if not typeInfoExpected then  return  end
+local function inferTableArray(state, tableNode, arraySig)
+	for _, tableField in ipairs(tableNode.fields) do
+		local indexLiteral = tableField.key
 
-	if typeInfoExpected.tag == !(typeTags.TypeInfoAny) and tableNode.parent.nodeType == !(nodeTypes.AstTable) then
-		typeInfoExpected = getTypeInfoForBuiltinType(state, "table")
-	end
-
-	if typeInfoExpected.tag == !(typeTags.TypeInfoTable) then
-		-- @Incomplete: Check for duplicate fields (among constant keys).
-		-- @Incomplete: Check for nil keys.
-		tableNode.inferredType = typeInfoExpected
-		-- Note: We don't need to validate tableNode.vararg as we accept anything.
-
-	elseif typeInfoExpected.tag == !(typeTags.TypeInfoArray) then
-		local arraySig = typeInfoExpected
-
-		if tableNode.vararg and not tableNode.vararg.inferredType then
-			!DEPEND_AND_RETURN(`tableNode`, DEPEND_NODE_INFERRED, `tableNode.vararg`)
-		end
-
-		-- @Incomplete: Handle 'arr = { getVararg() }' (and maybe depricate tableNode.vararg as that situation is very similar).
-		for _, tableField in ipairs(tableNode.fields) do
-			local indexLiteral = tableField.key
-
-			if not indexLiteral.inferredType then
-				!DEPEND_AND_RETURN(`tableNode`, DEPEND_NODE_INFERRED, `indexLiteral`)
-			elseif indexLiteral.inferredType.tag ~= !(typeTags.TypeInfoInt) then
-				typeError(
-					state, astGetExpressionVisuallyFurthestToTheLeft(indexLiteral),
-					"Array indices must be integers. (This is %s)",
-					getFriendlyTypeInfoName(indexLiteral.inferredType)
-				)
-			elseif indexLiteral.nodeType ~= !(nodeTypes.AstLiteral) then
-				typeError(
-					state, astGetExpressionVisuallyFurthestToTheLeft(indexLiteral),
-					"Indices must be constant in array constructors."
-				)
-			end
-
-			local itemExpr     = tableField.value
-			local itemTypeInfo = itemExpr.inferredType
-
-			if itemTypeInfo then
-				if not isTypeCompatibleWith(adjustTypeToOne(state, itemExpr, itemTypeInfo, true), arraySig.itemType) then
-					typeError(
-						state, astGetExpressionVisuallyFurthestToTheLeft(itemExpr),
-						"Array item type mismatch. (Wanted %s, got %s)",
-						getFriendlyTypeInfoName(arraySig.itemType),
-						getFriendlyTypeInfoName(adjustTypeToOne(state, itemExpr, itemTypeInfo, true))
-					)
-				end
-			elseif itemExpr.nodeType == !(nodeTypes.AstTable) then
-				if isTypeTableLike(arraySig.itemType) then
-					-- void  (Wait with validation.)
-				else
-					typeError(
-						state, astGetExpressionVisuallyFurthestToTheLeft(itemExpr),
-						"Expected array item to be %s.",
-						getFriendlyTypeInfoName(arraySig.itemType)
-					)
-				end
-			else
-				!DEPEND_AND_RETURN(`tableNode`, DEPEND_NODE_INFERRED, `itemExpr`)
-			end
-		end
-
-		tableNode.inferredType = arraySig
-
-		-- Validate indices and sequence.
-		local indexLiterals       = {}
-		local highestLiteralIndex = 0
-
-		for _, tableField in ipairs(tableNode.fields) do
-			local literal    = tableField.key
-			local arrayIndex = literal.value
-
-			if indexLiterals[arrayIndex] then
-				typeError2(state,
-					literal,                   F("Duplicate index %d.", arrayIndex),
-					indexLiterals[arrayIndex], F("...first occurance is here.")
-				)
-			end
-
-			indexLiterals[arrayIndex] = literal
-			highestLiteralIndex       = math.max(highestLiteralIndex, arrayIndex)
-		end
-
-		for arrayIndex = 1, highestLiteralIndex do
-			if not indexLiterals[arrayIndex] then
-				typeError(state, tableNode, "Array is not a sequence. Missing item at index %d.", arrayIndex)
-			end
-		end
-
-		-- Validate vararg.
-		if tableNode.vararg and not isTypeCompatibleWith(tableNode.vararg.inferredType.itemType, arraySig.itemType) then
+		if not indexLiteral.inferredType then
+			!DEPEND_AND_RETURN(`tableNode`, DEPEND_NODE_INFERRED, `indexLiteral`)
+		elseif indexLiteral.inferredType.tag ~= !(typeTags.TypeInfoInt) then
 			typeError(
-				state, tableNode.vararg,
-				"Type mismatch between vararg and array. (Wanted %s, got %s)",
-				getFriendlyTypeInfoName(arraySig.itemType),
-				getFriendlyTypeInfoName(tableNode.vararg.inferredType.itemType)
+				state, astGetExpressionVisuallyFurthestToTheLeft(indexLiteral),
+				"Array indices must be integers. (This is %s)",
+				getFriendlyTypeInfoName(indexLiteral.inferredType)
+			)
+		elseif indexLiteral.nodeType ~= !(nodeTypes.AstLiteral) then
+			-- @Incomplete: Allow indices to be variable? :VariableArrayIndices
+			typeError(
+				state, astGetExpressionVisuallyFurthestToTheLeft(indexLiteral),
+				"Indices must be constant in array constructors."
 			)
 		end
 
-	elseif typeInfoExpected.tag == !(typeTags.TypeInfoStruct) then
-		local structInfo = typeInfoExpected
+		local itemExpr     = tableField.value
+		local itemTypeInfo = itemExpr.inferredType
 
-		if structInfo.astNode.isForeign then
-			printerr()
-			nodeMessage(io.stderr, state, tableNode, "Error", "Typer", "Cannot instantiate foreign struct '%s'.", getFriendlyTypeInfoName(structInfo))
-			if structInfo.astNode.foreignThroughNode then
-				nodeMessage(io.stderr, state, structInfo.astNode.foreignThroughNode, "Info", "Typer", "...the struct got its foreign state through this.")
-			end
-			exitFailure()
-		end
-
-		-- @Incomplete: This dependency is problematic in these cases:
-		-- local Struct :: struct{ bad:Struct = {} }
-		-- local Struct :: struct{ bad = cast(Struct) {} }
-		if not structInfo.hasMembers then
-			!DEPEND_AND_RETURN(`tableNode`, DEPEND_STRUCT_MEMBERS_READY, `structInfo`)
-		end
-
-		for _, tableField in ipairs(tableNode.fields) do
-			local memberLiteral = tableField.key
-
-			if not memberLiteral.inferredType then
-				!DEPEND_AND_RETURN(`tableNode`, DEPEND_NODE_INFERRED, `memberLiteral`)
-			elseif memberLiteral.inferredType.tag ~= !(typeTags.TypeInfoString) then
+		if itemTypeInfo then
+			if not isTypeCompatibleWith(adjustTypeToOne(state, itemExpr, itemTypeInfo, true), arraySig.itemType) then
 				typeError(
-					state, astGetExpressionVisuallyFurthestToTheLeft(memberLiteral),
-					"Struct constructor keys must be strings. (This is %s)",
-					getFriendlyTypeInfoName(memberLiteral.inferredType)
-				)
-			elseif memberLiteral.nodeType ~= !(nodeTypes.AstLiteral) then
-				typeError(
-					state, astGetExpressionVisuallyFurthestToTheLeft(memberLiteral),
-					"Keys must be constant in struct constructors."
+					state, astGetExpressionVisuallyFurthestToTheLeft(itemExpr),
+					"Array item type mismatch. (Wanted %s, got %s)",
+					getFriendlyTypeInfoName(arraySig.itemType),
+					getFriendlyTypeInfoName(adjustTypeToOne(state, itemExpr, itemTypeInfo, true))
 				)
 			end
-
-			local memberName = memberLiteral.value
-			local member     = itemWith1(structInfo.members, "name", memberName)
-
-			if member then
-				-- void
-			elseif findDeclarationInScope(state, structInfo.astNode, memberName, false) then
-				typeError(state, memberLiteral, "'%s' is a static member in %s.", memberName, getFriendlyTypeInfoName(structInfo))
+		elseif itemExpr.nodeType == !(nodeTypes.AstTable) then
+			if isTypeTableLike(arraySig.itemType) then
+				-- void  (Wait with validation.)
 			else
-				typeError(state, memberLiteral, "'%s' is not a member of %s.", memberName, getFriendlyTypeInfoName(structInfo))
+				typeError(
+					state, astGetExpressionVisuallyFurthestToTheLeft(itemExpr),
+					"Expected array item to be %s.",
+					getFriendlyTypeInfoName(arraySig.itemType)
+				)
 			end
+		else
+			!DEPEND_AND_RETURN(`tableNode`, DEPEND_NODE_INFERRED, `itemExpr`)
+		end
+	end
 
-			local fieldValue    = tableField.value
-			local valueTypeInfo = fieldValue.inferredType
+	tableNode.inferredType = arraySig
 
-			if valueTypeInfo then
-				if not isTypeCompatibleWith(adjustTypeToOne(state, fieldValue, valueTypeInfo, true), member.typeInfo) then
-					typeError(
-						state, astGetExpressionVisuallyFurthestToTheLeft(fieldValue),
-						"Type mismatch for struct field '%s'. (Wanted %s, got %s)",
-						memberName,
-						getFriendlyTypeInfoName(member.typeInfo),
-						getFriendlyTypeInfoName(valueTypeInfo)
-					)
-				end
-			elseif fieldValue.nodeType == !(nodeTypes.AstTable) then
-				if isTypeTableLike(member.typeInfo) then
-					-- void  (Wait with validation.)
-				else
-					typeError(
-						state, astGetExpressionVisuallyFurthestToTheLeft(itemExpr),
-						"Expected value for struct field '%s' to be %s.",
-						memberName, getFriendlyTypeInfoName(member.typeInfo)
-					)
-				end
-			else
-				!DEPEND_AND_RETURN(`tableNode`, DEPEND_NODE_INFERRED, `fieldValue`)
+	local trailingExpr = tableNode.trailingExpression
+	if trailingExpr then
+		adjustTypeToOne(state, trailingExpr, trailingExpr.inferredType) -- Ensure this is not a call that returns nothing.
+	end
+
+	-- Validate indices and sequence. :ConstructorTrailingCall
+	local indexLiterals       = {}
+	local highestLiteralIndex = 0
+
+	for _, tableField in ipairs(tableNode.fields) do
+		local literal    = tableField.key
+		local arrayIndex = literal.value
+
+		if indexLiterals[arrayIndex] then
+			typeError2(state,
+				literal,                   F("Duplicate index %d.", arrayIndex),
+				indexLiterals[arrayIndex], F("...first occurance is here.")
+			)
+		end
+
+		indexLiterals[arrayIndex] = literal
+		highestLiteralIndex       = math.max(highestLiteralIndex, arrayIndex)
+	end
+
+	if trailingExpr and highestLiteralIndex > tableNode.highestGeneratedIndex then
+		-- We get here if explicit indices are combined with a trailing expression.
+		for i = tableNode.highestGeneratedIndex+1, highestLiteralIndex do
+			local overlap = indexLiterals[i]
+			if overlap then
+				typeError2(state,
+					trailingExpr, F("Potentially overlapping value(s) at or after array index %d because of this expression.", tableNode.highestGeneratedIndex+1),
+					overlap,      F("...first overlap would be here.")
+				)
+			end
+		end
+		errorInternal() -- highestLiteralIndex would be incorrect if we're here.
+	end
+
+	for arrayIndex = 1, highestLiteralIndex do
+		if not indexLiterals[arrayIndex] then
+			typeError(state, tableNode, "Array is not a sequence. Missing item at index %d.", arrayIndex)
+		end
+	end
+
+	-- Validate trailing expression.
+	if not trailingExpr then
+		-- void
+
+	elseif trailingExpr.nodeType == !(nodeTypes.AstVararg) then
+		if not isTypeCompatibleWith(trailingExpr.inferredType.itemType, arraySig.itemType) then
+			typeError(
+				state, trailingExpr,
+				"Array item type mismatch for vararg. (Wanted %s, got %s)",
+				getFriendlyTypeInfoName(arraySig.itemType),
+				getFriendlyTypeInfoName(trailingExpr.inferredType.itemType)
+			)
+		end
+
+	elseif trailingExpr.nodeType == !(nodeTypes.AstCall) then
+		local call        = trailingExpr
+		local argTypesOut = call.callee.inferredType.argumentTypesOut
+
+		for i, argTypeInfo in ipairs(argTypesOut) do
+			argTypeInfo = adjustTypeToOne(state, call, argTypeInfo)
+
+			if not isTypeCompatibleWith(argTypeInfo, arraySig.itemType) then
+				typeError(
+					state, call,
+					"Array item type mismatch for return value #%d from call. (Wanted %s, got %s)",
+					i,
+					getFriendlyTypeInfoName(arraySig.itemType),
+					getFriendlyTypeInfoName(argTypeInfo)
+				)
 			end
 		end
 
-		tableNode.inferredType = structInfo
+	else
+		errorUnhandledNodeType(state, trailingExpr)
+	end
+end
 
-		-- Validate keys.
-		local keyLiterals = {}
+local function inferTableStruct(state, tableNode, structInfo)
+	if structInfo.astNode.isForeign then
+		!TRACE()
+		printerr()
+		nodeMessage(io.stderr, state, tableNode, "Error", "Typer", "Cannot instantiate foreign struct '%s'.", getFriendlyTypeInfoName(structInfo))
+		if structInfo.astNode.foreignThroughNode then
+			nodeMessage(io.stderr, state, structInfo.astNode.foreignThroughNode, "Info", "Typer", "...the struct got its foreign state through this.")
+		end
+		exitFailure()
+	end
 
-		for _, tableField in ipairs(tableNode.fields) do
+	-- @Incomplete: This dependency is problematic in these cases:
+	-- local Struct :: struct{ bad:Struct = {} }
+	-- local Struct :: struct{ bad = cast(Struct) {} }
+	if not structInfo.hasMembers then
+		!DEPEND_AND_RETURN(`tableNode`, DEPEND_STRUCT_MEMBERS_READY, `structInfo`)
+	end
+
+	for _, tableField in ipairs(tableNode.fields) do
+		local fieldKey     = tableField.key
+		local fieldKeyType = fieldKey.inferredType
+
+		if not fieldKeyType then
+			!DEPEND_AND_RETURN(`tableNode`, DEPEND_NODE_INFERRED, `fieldKey`)
+		end
+
+		local memberName, memberValueType = validateStructKey(state, fieldKey, structInfo, true)
+		if not memberValueType then  errorInternal(state, fieldKey)  end
+
+		!local TARGET_NAME   = `memberName ~= "" and F("value for struct field '%s'", memberName) or "value"`
+		local fieldValue     = tableField.value
+		local fieldValueType = fieldValue.inferredType
+
+		if fieldValueType then
+			if not isTypeCompatibleWith(adjustTypeToOne(state, fieldValue, fieldValueType, true), memberValueType) then
+				typeError(
+					state, astGetExpressionVisuallyFurthestToTheLeft(fieldValue),
+					"Type mismatch for %s. (Wanted %s, got %s)",
+					!!(TARGET_NAME),
+					getFriendlyTypeInfoName(memberValueType),
+					getFriendlyTypeInfoName(fieldValueType)
+				)
+			end
+		elseif fieldValue.nodeType == !(nodeTypes.AstTable) then
+			if isTypeTableLike(memberValueType) then
+				-- void  (Wait with validation.)
+			else
+				typeError(
+					state, astGetExpressionVisuallyFurthestToTheLeft(itemExpr),
+					"Expected %s to be %s.",
+					!!(TARGET_NAME),
+					getFriendlyTypeInfoName(memberValueType)
+				)
+			end
+		else
+			!DEPEND_AND_RETURN(`tableNode`, DEPEND_NODE_INFERRED, `fieldValue`)
+		end
+	end
+
+	tableNode.inferredType = structInfo
+
+	-- Check for duplicate keys.
+	-- @Incomplete: Check non-string keys.
+	local keyLiterals = {}
+
+	for _, tableField in ipairs(tableNode.fields) do
+		if tableField.key.nodeType == !(nodeTypes.AstLiteral) and tableField.key.literalType == !(LITERAL_STRING) then
 			local memberLiteral = tableField.key
 			local memberName    = memberLiteral.value
 
@@ -3187,19 +3249,78 @@ end
 
 			keyLiterals[memberName] = memberLiteral
 		end
+	end
+
+	if tableNode.trailingExpression then
+		errorInternal(state, tableNode.trailingExpression, "@Incomplete: Handle trailing expression in struct constructors.") -- :ConstructorTrailingCall (and vararg)
+	end
+end
+
+!NODE_INFERRER `function nodeInferrers.AstTable(state, tableNode)`
+	-- Note: tableNode.inferredType may get set before all child nodes are inferred.
+	local typeExpected = tableNode.inferredType or getExpectedTypeInfo(state, tableNode, false, "constructor", tableNode)
+	if not typeExpected then  return  end
+
+	if typeExpected.tag == !(typeTags.TypeInfoAny) and tableNode.parent.nodeType == !(nodeTypes.AstTable) then
+		typeExpected = getTypeInfoForBuiltinType(state, "table")
+	end
+
+	local trailingExpr   = tableNode.trailingExpression
+	local lastTableField = not trailingExpr and getLast(tableNode.fields) or nil
+
+	if lastTableField and lastTableField.keyIsGenerated then
+		local valueExpr = lastTableField.value
+
+		-- Note: We don't need to check for vararg as the parser should have handled that.
+		if valueExpr.nodeType == !(nodeTypes.AstCall) and not valueExpr.surroundedByParentheses then
+			if not valueExpr.inferredType then
+				!DEPEND_AND_RETURN(`tableNode`, DEPEND_NODE_INFERRED, `valueExpr`)
+			end
+
+			trailingExpr                        = valueExpr
+
+			valueExpr.parent                    = tableNode
+			valueExpr.queued.container          = tableNode
+			valueExpr.queued.key                = "trailingExpression"
+
+			tableNode.trailingExpression        = valueExpr
+			tableNode.fields[#tableNode.fields] = nil
+			tableNode.highestGeneratedIndex     = tableNode.highestGeneratedIndex-1
+
+			unqueue(lastTableField.key) -- Note: The key should be an int literal as it's generated.
+		end
+	end
+
+	if trailingExpr and not trailingExpr.inferredType then
+		!DEPEND_AND_RETURN(`tableNode`, DEPEND_NODE_INFERRED, `trailingExpr`)
+	end
+
+	if typeExpected.tag == !(typeTags.TypeInfoTable) then
+		-- @Incomplete: Check for duplicate fields (among constant keys).
+		-- @Incomplete: Check for nil keys.
+		tableNode.inferredType = typeExpected
+		-- Note: We don't need to validate any types or anything (including tableNode.trailingExpression) as generic tables accept anything.
+
+	elseif typeExpected.tag == !(typeTags.TypeInfoArray) then
+		inferTableArray(state, tableNode, typeExpected)
+		if tableNode.queued.waitingOn then  return  end
+
+	elseif typeExpected.tag == !(typeTags.TypeInfoStruct) then
+		inferTableStruct(state, tableNode, typeExpected)
+		if tableNode.queued.waitingOn then  return  end
 
 	else
 		typeError(
 			state, tableNode,
 			"This constructor is trying to get inferred as %s (type group '%s') which is illegal. (The inferred type must be array, struct or table.)",
-			getFriendlyTypeInfoName(typeInfoExpected),
-			TYPE_TAG_NAMES[typeInfoExpected.tag]
+			getFriendlyTypeInfoName(typeExpected),
+			TYPE_TAG_NAMES[typeExpected.tag]
 		)
 	end
 
 	!ASSERT `tableNode.inferredType`
 
-	-- Make sure all children, including table-likes, are inferred before we advance to the next pipe.
+	-- Make sure all children (including table-likes) are inferred before we advance to the next pipe.
 	for _, tableField in ipairs(tableNode.fields) do
 		if not tableField.value.inferredType then
 			!DEPEND_AND_RETURN(`tableNode`, DEPEND_NODE_INFERRED, `tableField.value`)
@@ -3991,7 +4112,8 @@ end
 				addDeclarationInForLoop(state, forLoop, name1, typeInfo)
 
 			elseif objType.tag == !(typeTags.TypeInfoStruct) then
-				-- We need custom iterators to work AND default iterators for structs before we can do this!
+				-- We need custom iterators to work AND default iterators for structs before we can do this! @Incomplete
+				-- @Incomplete: Fall back to array-like behavior if structInfo.kind==STRUCT_KIND_ARRAY and there's no default iterator.
 				typeError(state, objExpr, "@Incomplete: Iterate over struct instances using custom default iterators.")
 
 			else
@@ -4144,10 +4266,16 @@ local function checkForRecursiveStruct(state, declThatWeAreChecking, memberPath,
 	memberPath[memberPathIndex] = nil
 end
 
+local function getEarlyAndLateExpression(expr1, expr2)
+	if expr1.token < expr2.token then  return expr1, expr2  end
+	return expr2, expr1
+end
+
 !NODE_INFERRER `function nodeInferrers.AstStruct(state, struct)`
 	if struct.isPolymorphic then
 		local structInfo         = newTypeInfo(state, TypeInfoStruct)
 		structInfo.astNode       = struct
+		-- structInfo.kind          = ?
 		structInfo.isPolymorphic = true
 		structInfo.hasMembers    = true -- Probably doesn't matter.
 
@@ -4166,6 +4294,15 @@ end
 		structInfo         = newTypeInfo(state, TypeInfoStruct)
 		structInfo.astNode = struct
 
+		if struct.valueType then
+			structInfo.kind = struct.keyType and !(STRUCT_KIND_TABLE) or !(STRUCT_KIND_ARRAY)
+			if structInfo.kind == !(STRUCT_KIND_ARRAY) then
+				typeError(state, struct.valueType, "Array-like structs are not supported yet.")
+			end
+		elseif struct.keyType then
+			typeError(state, struct.keyType, "Missing a corresponding !value type for structured table.")
+		end
+
 		-- Note: We don't populate structInfo.members just yet. (Is this gonna a problem?)
 
 		table.insert(state.allTypeInfos, structInfo)
@@ -4179,21 +4316,43 @@ end
 			!DEPEND_AND_RETURN(`struct`, DEPEND_NODE_INFERRED, `statement`)
 		end
 	end
+	if struct.keyType and not struct.keyType.inferredType then
+		!DEPEND_AND_RETURN(`struct`, DEPEND_NODE_INFERRED, `struct.keyType`)
+	end
+	if struct.valueType and not struct.valueType.inferredType then
+		!DEPEND_AND_RETURN(`struct`, DEPEND_NODE_INFERRED, `struct.valueType`)
+	end
 
+	for i, typeExpr in ipairs(struct.inherits) do
+		while typeExpr.replacedBy do  typeExpr = typeExpr.replacedBy  end
+		struct.inherits[i] = typeExpr
+
+		local structInfoToInherit = requireTypeRepresentedByExpression(state, typeExpr)
+		if structInfoToInherit.tag ~= !(typeTags.TypeInfoStruct) then
+			typeError(state, typeExpr, "Expected the type of a struct to inherit members from.")
+		elseif doesStructInherit(structInfoToInherit, structInfo) then
+			typeError(state, typeExpr, "Struct is trying to inherit members from itself.")
+		end
+
+		if not structInfoToInherit.hasMembers then
+			!DEPEND_AND_RETURN(`struct`, DEPEND_STRUCT_MEMBERS_READY, `structInfoToInherit`)
+		end
+	end
+
+	--
+	-- No more dependencies for this struct after this point!
+	--
+
+	local typeSourceNodeK = struct.keyType
+	local typeSourceNodeV = struct.valueType
+
+	if typeSourceNodeK then  structInfo.keyType   = requireTypeRepresentedByExpression(state, typeSourceNodeK)  end
+	if typeSourceNodeV then  structInfo.valueType = requireTypeRepresentedByExpression(state, typeSourceNodeV)  end
+
+	-- Inherit (dynamic) members from other structs.
 	if struct.inherits[1] then
 		for i, typeExpr in ipairs(struct.inherits) do
-			while typeExpr.replacedBy do  typeExpr = typeExpr.replacedBy  end
-			struct.inherits[i] = typeExpr
-
-			local structInfoToInherit = requireTypeRepresentedByExpression(state, typeExpr)
-			if structInfoToInherit.tag ~= !(typeTags.TypeInfoStruct) then
-				typeError(state, typeExpr, "Expected the type of a struct to inherit members from.")
-			end
-
-			if not structInfoToInherit.hasMembers then
-				!DEPEND_AND_RETURN(`struct`, DEPEND_STRUCT_MEMBERS_READY, `structInfoToInherit`)
-			end
-
+			local structInfoToInherit  = requireTypeRepresentedByExpression(state, typeExpr)
 			local insertIndexStatement = indexOf(struct.statements, typeExpr) or errorInternal(state, typeExpr)
 			table.remove(struct.statements, insertIndexStatement)
 
@@ -4222,7 +4381,7 @@ end
 					insertIndexStatement = insertIndexStatement+1
 					insertIndexDecl      = insertIndexDecl+1
 
-					addToQueueRecursively(state, decl, struct.statements, 0, !(PIPE_INFER)) -- Note: We'll update all keys in a moment.
+					addToQueueRecursively(state, decl, struct.statements, 0, !(PIPE_INFER)) -- Note: We'll update all queued.key values in a moment.
 
 					moveChildrenToNextRelevantPipe(state, decl)
 					moveToNextRelevantPipe(state, decl)
@@ -4233,6 +4392,28 @@ end
 				struct.isForeign          = true
 				struct.foreignThroughNode = typeExpr
 			end
+
+			if structInfoToInherit.keyType then
+				if structInfo.keyType then
+					local ealy, late = getEarlyAndLateExpression(typeExpr, typeSourceNodeK)
+					typeError2(state, late, "Key type is already defined.", ealy, "...key type was defined here.")
+				end
+				typeSourceNodeK    = typeExpr
+				structInfo.keyType = structInfoToInherit.keyType
+			end
+			if structInfoToInherit.valueType then
+				if structInfo.valueType then
+					local ealy, late = getEarlyAndLateExpression(typeExpr, typeSourceNodeV)
+					typeError2(state, late, "Value type is already defined.", ealy, "...value type was defined here.")
+				end
+				typeSourceNodeV      = typeExpr
+				structInfo.valueType = structInfoToInherit.valueType
+			end
+			-- @Incomplete: Handle structInfo.kind==STRUCT_KIND_ARRAY and structInfoToInherit.kind==STRUCT_KIND_TABLE, and vice versa.
+			if structInfoToInherit.kind ~= !(STRUCT_KIND_NORMAL) then
+				assert(structInfo.kind == !(STRUCT_KIND_NORMAL))
+				structInfo.kind = structInfoToInherit.kind
+			end
 		end
 
 		for i, expr in ipairs(struct.statements) do
@@ -4240,6 +4421,7 @@ end
 		end
 	end
 
+	-- Add members to structInfo.
 	for _, decl in ipairs(struct.declarations) do
 		if not decl.isConstant then
 			local member          = TypeInfoStructMember()
@@ -4248,6 +4430,8 @@ end
 			table.insert(structInfo.members, member)
 
 			checkForRecursiveStruct(state, decl, {member}, member, structInfo, structInfo)
+
+			-- Inherit foreign state from foreign-marked members in certain situations.
 
 			if struct.isForeign then
 				-- void
@@ -4273,6 +4457,11 @@ end
 		end
 	end
 	structInfo.hasMembers = true
+
+	if structInfo.keyType and (structInfo.members[1] or struct.declarations[1]) and structInfo.keyType.tag == !(typeTags.TypeInfoString) then
+		-- Note: We trigger this error for static members too, not just dynamic, as some lookups would otherwise be ambigous.
+		typeError(state, typeSourceNodeK, "Strongly typed tables with string keys cannot also have members.")
+	end
 
 	moveToNextRelevantPipe(state, struct)
 end
@@ -4349,7 +4538,6 @@ end
 			!DEPEND_AND_RETURN(`fileScope`, DEPEND_NODE_INFERRED, `statement`)
 		end
 	end
-
 	moveToNextRelevantPipe(state, fileScope)
 end
 
@@ -4359,7 +4547,6 @@ end
 			!DEPEND_AND_RETURN(`globalScope`, DEPEND_NODE_INFERRED, `statement`)
 		end
 	end
-
 	moveToNextRelevantPipe(state, globalScope)
 end
 

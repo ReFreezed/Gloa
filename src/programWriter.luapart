@@ -10,7 +10,7 @@
 --==============================================================
 
 	doesTypeHaveAnyDefaultValue
-	unicodeToLuaIdentifier, isExpressionLiteralStringAndValidLuaIdentifier
+	unicodeToLuaIdentifier
 	validateForeignSource
 	writeProgram, write*
 
@@ -42,29 +42,30 @@ local foreignApiCompilerSymbols = {
 	-- (See utils.gloa, io.gloa and other modules for declarations.)
 	-- (See compiler.gloa for things only available during compile-time.)
 
-	appPath            = `(debug.getinfo(1, "S").source:match"^@(.+)" or error("Could not get application path.")) :gsub("\\", "/")`,
-	appDirectory       = `(debug.getinfo(1, "S").source:match"^@(.+)" or error("Could not get application path.")) :gsub("\\", "/"):gsub("/?[^/]+$", ""):gsub("^$", ".")`,
-	compilerPath       = F("%q", COMPILER_PATH),
-	compilerDirectory  = F("%q", COMPILER_DIRECTORY),
+	appPath           = `(debug.getinfo(1, "S").source:match"^@(.+)" or error("Could not get application path.")) :gsub("\\", "/")`,
+	appDirectory      = `(debug.getinfo(1, "S").source:match"^@(.+)" or error("Could not get application path.")) :gsub("\\", "/"):gsub("/?[^/]+$", ""):gsub("^$", ".")`,
+	compilerPath      = F("%q", COMPILER_PATH),
+	compilerDirectory = F("%q", COMPILER_DIRECTORY),
 
-	typeTagAny         = !(toLua(typeTags.TypeInfoAny)),
-	typeTagArray       = !(toLua(typeTags.TypeInfoArray)),
-	typeTagBool        = !(toLua(typeTags.TypeInfoBool)),
-	typeTagCompound    = !(toLua(typeTags.TypeInfoCompound)),
-	typeTagEnum        = !(toLua(typeTags.TypeInfoEnum)),
-	typeTagFloat       = !(toLua(typeTags.TypeInfoFloat)),
-	typeTagFunction    = !(toLua(typeTags.TypeInfoFunction)),
-	typeTagInt         = !(toLua(typeTags.TypeInfoInt)),
-	typeTagNone        = !(toLua(typeTags.TypeInfoNone)),
-	typeTagPlaceholder = !(toLua(typeTags.TypeInfoPlaceholder)),
-	typeTagString      = !(toLua(typeTags.TypeInfoString)),
-	typeTagStruct      = !(toLua(typeTags.TypeInfoStruct)),
-	typeTagTable       = !(toLua(typeTags.TypeInfoTable)),
-	typeTagType        = !(toLua(typeTags.TypeInfoType)),
-	typeTagVararg      = !(toLua(typeTags.TypeInfoVararg)),
-	typeTagVoid        = !(toLua(typeTags.TypeInfoVoid)),
+	-- @Cleanup: Move these to a special !compiler directive. (Maybe move the above paths, directories and any other simple value as well?)
+	-- typeTagAny         = !(toLua(typeTags.TypeInfoAny)),
+	-- typeTagArray       = !(toLua(typeTags.TypeInfoArray)),
+	-- typeTagBool        = !(toLua(typeTags.TypeInfoBool)),
+	-- typeTagCompound    = !(toLua(typeTags.TypeInfoCompound)),
+	-- typeTagEnum        = !(toLua(typeTags.TypeInfoEnum)),
+	-- typeTagFloat       = !(toLua(typeTags.TypeInfoFloat)),
+	-- typeTagFunction    = !(toLua(typeTags.TypeInfoFunction)),
+	-- typeTagInt         = !(toLua(typeTags.TypeInfoInt)),
+	-- typeTagNone        = !(toLua(typeTags.TypeInfoNone)),
+	-- typeTagPlaceholder = !(toLua(typeTags.TypeInfoPlaceholder)),
+	-- typeTagString      = !(toLua(typeTags.TypeInfoString)),
+	-- typeTagStruct      = !(toLua(typeTags.TypeInfoStruct)),
+	-- typeTagTable       = !(toLua(typeTags.TypeInfoTable)),
+	-- typeTagType        = !(toLua(typeTags.TypeInfoType)),
+	-- typeTagVararg      = !(toLua(typeTags.TypeInfoVararg)),
+	-- typeTagVoid        = !(toLua(typeTags.TypeInfoVoid)),
 
-	ipairsr            = `_IPAIRSR`,
+	ipairsr = `_IPAIRSR`,
 
 	wrapFunctionInGloaErrorHandler = !(trimTemplate`
 		function(cb)
@@ -156,7 +157,6 @@ function _G.writeIdentifierName(state, writer, ident)
 
 	if name == "" then
 		astPrint(ident)
-		printTraceback(io.stderr)
 		nodeError(state, ident, "ProgramWriter", "Internal compiler error: Missing name to write for '%s'.", ident.name)
 	end
 
@@ -238,6 +238,14 @@ function _G.writeBinaryOperation(state, writer, left, right, binOp, token, binar
 		!WRITE_OPERAND `right`
 		if addParens then  file:write(")")  end
 	end
+end
+
+local function isExpressionLiteralStringAndValidLuaIdentifier(expr)
+	return
+		expr.nodeType == !(nodeTypes.AstLiteral)
+		and expr.literalType == !(LITERAL_STRING)
+		and expr.value:find"^[%a_][%w_]*$" ~= nil
+		and not LUA_KEYWORDS[expr.value]
 end
 
 function _G.writeAccess(state, writer, access)
@@ -362,6 +370,16 @@ function _G.writeTableConstructorKeyName(writer, name)
 		writer.file:write("]")
 	end
 end
+function _G.writeTableConstructorKey(state, writer, keyExpr)
+	if keyExpr.nodeType == !(nodeTypes.AstLiteral) and keyExpr.literalType == !(LITERAL_STRING) then
+		local stringLiteral = keyExpr
+		writeTableConstructorKeyName(writer, stringLiteral.value)
+	else
+		writer.file:write("[")
+		writeExpression(state, writer, keyExpr)
+		writer.file:write("]")
+	end
+end
 
 function _G.writeDefaultValueForStructMember(state, writer, structInfo, member, nodeForError)
 	local decl = findDynamicMemberDeclaration(state, structInfo.astNode, member.name) or errorInternal(state, structInfo.astNode, "Did not find member '%s'.", member.name)
@@ -372,11 +390,10 @@ function _G.writeDefaultValueForStructMember(state, writer, structInfo, member, 
 	end
 end
 
-local function findTableFieldInStructConstructor(tableNode, memberName)
+local function findTableFieldByNameInStructConstructor(state, tableNode, memberName)
 	for _, tableField in ipairs(tableNode.fields) do
-		!ASSERT("tableField.key.nodeType == "..nodeTypes.AstLiteral)
-
-		if tableField.key.value == memberName then
+		local keyExpr = tableField.key
+		if keyExpr.nodeType == !(nodeTypes.AstLiteral) and keyExpr.literalType == !(LITERAL_STRING) and keyExpr.value == memberName then
 			return tableField
 		end
 	end
@@ -586,76 +603,91 @@ function _G.writeExpression(state, writer, expr)
 
 	elseif expr.nodeType == !(nodeTypes.AstTable) then
 		local tableNode = expr
+		local first     = true
 		file:write("{")
 
+		local function writeGenericTableFieldIfValueIsNotNil(tableField)
+			local valueExpr = tableField.value
+			if valueExpr.nodeType == !(nodeTypes.AstNull) then  return  end
+			if valueExpr.nodeType == !(nodeTypes.AstLiteral) and valueExpr.literalType == !(LITERAL_NIL) then  return  end
+
+			if not first then  file:write(", ")  end
+			first = false
+
+			-- @Polish: Output sequence values without key in 'table' type tables.
+			writeTableConstructorKey(state, writer, tableField.key)
+			file:write("=")
+			writeExpression(state, writer, valueExpr)
+		end
+
 		if tableNode.inferredType.tag == !(typeTags.TypeInfoTable) then
-			for i, tableField in ipairs(tableNode.fields) do
-				if i > 1 then  file:write(", ")  end
-
-				if isExpressionLiteralStringAndValidLuaIdentifier(tableField.key) then
-					local stringLiteral = tableField.key
-					file:write(stringLiteral.value)
-				else
-					-- @Polish: Output sequence values without key in 'table' type tables.
-					file:write("[")
-					writeExpression(state, writer, tableField.key)
-					file:write("]")
-				end
-				file:write("=")
-				writeExpression(state, writer, tableField.value)
-			end
-
-			if tableNode.vararg then
-				if tableNode.fields[1] then  file:write(", ")  end
-				file:write("...")
+			for _, tableField in ipairs(tableNode.fields) do
+				writeGenericTableFieldIfValueIsNotNil(tableField)
 			end
 
 		elseif tableNode.inferredType.tag == !(typeTags.TypeInfoArray) then
 			local items = {}
 
 			for _, tableField in ipairs(tableNode.fields) do
-				!ASSERT("tableField.key.nodeType == "..nodeTypes.AstLiteral)
+				!ASSERT("tableField.key.nodeType == "..nodeTypes.AstLiteral) -- :VariableArrayIndices
 
 				local literal     = tableField.key
 				local arrayIndex  = literal.value
 				items[arrayIndex] = tableField.value
 			end
 
-			for arrayIndex, expr in ipairs(items) do
-				if arrayIndex > 1 then  file:write(", ")  end
+			for _, expr in ipairs(items) do
+				if not first then  file:write(", ")  end
+				first = false
 				writeExpression(state, writer, expr)
 			end
 
-			if tableNode.vararg then
-				if tableNode.fields[1] then  file:write(", ")  end
-				file:write("...")
-			end
-
 		elseif tableNode.inferredType.tag == !(typeTags.TypeInfoStruct) then
-			local structInfo = tableNode.inferredType
-			local first      = true
+			local structInfo    = tableNode.inferredType
+			local writtenFields = {}
 			!ASSERT `not structInfo.isPolymorphic`
 
 			for _, member in ipairs(structInfo.members) do
-				local tableField = findTableFieldInStructConstructor(tableNode, member.name)
+				local tableField = findTableFieldByNameInStructConstructor(state, tableNode, member.name)
+				if tableField then  writtenFields[tableField] = true  end
 
-				if not (tableField and tableField.value.nodeType == !(nodeTypes.AstNull)) then -- @Incomplete: Also check if the default value is NULL.
+				if not (
+					tableField and (
+						tableField.value.nodeType == !(nodeTypes.AstNull)
+						or (tableField.value.nodeType == !(nodeTypes.AstLiteral) and tableField.value.literalType == !(LITERAL_NIL))
+					)
+					-- or (default value is NULL/nil) -- @Polish
+				) then
 					if not first then  file:write(", ")  end
 					first = false
 
-					writeTableConstructorKeyName(writer, member.name)
-					file:write("=")
-
 					if tableField then
+						writeTableConstructorKey(state, writer, tableField.key)
+						file:write("=")
 						writeExpression(state, writer, tableField.value)
 					else
+						writeTableConstructorKeyName(writer, member.name)
+						file:write("=")
 						writeDefaultValueForStructMember(state, writer, structInfo, member, tableNode) -- @UX: Maybe use a better nodeForError.
 					end
 				end
 			end
 
+			if structInfo.kind ~= !(STRUCT_KIND_NORMAL) then
+				for _, tableField in ipairs(tableNode.fields) do
+					if not writtenFields[tableField] then
+						writeGenericTableFieldIfValueIsNotNil(tableField)
+					end
+				end
+			end
+
 		else
-			errorUnhandledNodeType(state, tableNode)
+			errorUnhandledType(state, tableNode, tableNode.inferredType)
+		end
+
+		if tableNode.trailingExpression then
+			if not first then  file:write(", ")  end
+			writeExpression(state, writer, tableNode.trailingExpression)
 		end
 
 		file:write("}")
@@ -773,6 +805,7 @@ function _G.writeDefaultValueForType(state, writer, typeInfo, nodeForError)
 
 		if structInfo.astNode.isForeign then
 			-- @Speed: Detect this sooner (probably when inferring AstDeclaration).
+			!TRACE()
 			printerr()
 			nodeMessage(io.stderr, state, nodeForError, "Error", "Typer", "Cannot instantiate foreign struct '%s'.", getFriendlyTypeInfoName(structInfo))
 			if structInfo.astNode.foreignThroughNode then
@@ -1205,7 +1238,8 @@ function _G.writeBlock(state, writer, block, indent, nextLocalN, localsStack, is
 				elseif objType.tag == !(typeTags.TypeInfoStruct) then
 					assert(not forLoop.reverse)
 					errorUnhandledNodeType(state, objExpr)
-					-- writeConstantValueOrReference(state, writer, interatorFuncConst?, objExpr) -- @Incomplete: Output default iterator for the struct.
+					-- @Incomplete: Output default iterator for the struct. Also handle array-like structs and structured tables.
+					-- writeConstantValueOrReference(state, writer, interatorFuncConst?, objExpr)
 
 				else
 					errorInternal(state, objExpr)
@@ -1554,6 +1588,7 @@ local function writeTypeInfo(state, writer, typeInfo)
 		!!(END_OF_TYPE_INFO"TypeInfoFunction")
 
 	elseif tag == !(typeTags.TypeInfoStruct) then
+		-- @Incomplete: Output struct kind and key/value types. (Remember to update preload.gloa)
 		local structInfo = typeInfo
 
 		file:write(", members={")
@@ -1663,68 +1698,9 @@ function _G.writeConstantValue(state, writer, const)
 		local lambda = const.value
 		writeFunction(state, writer, lambda)
 
-	elseif tag == !(typeTags.TypeInfoTable) then
+	elseif !!(anyV(`tag`, typeTags.TypeInfoTable,typeTags.TypeInfoArray,typeTags.TypeInfoStruct)) then
 		local tableNode = const.value
-
-		file:write("{")
-		for i, tableField in ipairs(tableNode.fields) do
-			if i > 1 then  file:write(", ")  end
-			if isExpressionLiteralStringAndValidLuaIdentifier(tableField.key) then
-				local stringLiteral = tableField.key
-				file:write(stringLiteral.value)
-			else
-				file:write("[")
-				writeExpression(state, writer, tableField.key)
-				file:write("]")
-			end
-			file:write("=")
-			writeExpression(state, writer, tableField.value)
-		end
-		file:write("}")
-
-	elseif tag == !(typeTags.TypeInfoArray) then
-		local arraySig      = const.valueType
-		local tableNode     = const.value
-		local indexedValues = {}
-
-		for _, tableField in ipairs(tableNode.fields) do
-			indexedValues[tableField.key.value] = tableField.value
-		end
-
-		file:write("{")
-		for i, valueExpr in ipairs(indexedValues) do
-			if i > 1 then  file:write(", ")  end
-			writeExpression(state, writer, valueExpr)
-		end
-		file:write("}")
-
-	elseif tag == !(typeTags.TypeInfoStruct) then
-		local structInfo = const.valueType
-		local tableNode  = const.value
-		!ASSERT `not structInfo.isPolymorphic`
-
-		local first = true
-		file:write("{")
-
-		for _, member in ipairs(structInfo.members) do
-			local tableField = findTableFieldInStructConstructor(tableNode, member.name)
-
-			if not (tableField and tableField.value.nodeType == !(nodeTypes.AstNull)) then
-				if not first then  file:write(", ")  end
-				first = false
-
-				writeTableConstructorKeyName(writer, member.name)
-				file:write("=")
-
-				if tableField then
-					writeExpression(state, writer, tableField.value)
-				else
-					writeDefaultValueForStructMember(state, writer, structInfo, member, tableNode) -- @UX: Maybe use a better nodeForError.
-				end
-			end
-		end
-
-		file:write("}")
+		writeExpression(state, writer, tableNode)
 
 	elseif !!(anyV(`tag`, typeTags.TypeInfoAny,typeTags.TypeInfoNamespace,typeTags.TypeInfoCompound,typeTags.TypeInfoList)) then
 		errorInternal("Cannot write invalid value type '%s'.", TYPE_TAG_NAMES[tag])
@@ -1737,7 +1713,9 @@ function _G.writeConstantValueOrReference(state, writer, const, nodeForError)
 	if const.isObject then
 		if const.valueType.tag == !(typeTags.TypeInfoFunction) then
 			local lambda = const.value
+
 			if lambda.bodyIsForeign and lambda.foreignSource == "method" then
+				!TRACE()
 				printerr()
 				nodeMessage(io.stderr, state, nodeForError, "Error", "ProgramWriter", "Cannot output references to foreign methods.")
 				if nodeForError ~= lambda then
@@ -2061,9 +2039,9 @@ function _G.writeProgram(state, writer)
 					if not relevantObjects[decl] then
 						crawl(decl)
 
-						local valueExpr = getDeclarationValue(decl)
-						if valueExpr then
-							crawl(valueExpr)
+						if not decl.value then
+							local valueExpr = getDeclarationValue(decl)
+							if valueExpr then  crawl(valueExpr)  end
 						end
 					end
 
@@ -2071,7 +2049,18 @@ function _G.writeProgram(state, writer)
 					local typeInfoNode = node
 					relevantObjects[typeInfoNode.valueConstant] = true
 
-				elseif !!(anyV(`node.nodeType`, nodeTypes.AstDeclaration,nodeTypes.AstLiteral,nodeTypes.AstLambda,nodeTypes.AstForeign)) then
+				elseif node.nodeType == !(nodeTypes.AstDeclaration) then
+					local decl = node
+					if not decl.isConstant then  return  end
+
+					if decl ~= unit then -- decl is unit if we followed an identifier.
+						relevantObjects[decl] = nil
+						return !(VISIT_IGNORE_CHILDREN)
+					end
+
+					relevantObjects[decl.valueConstant] = true
+
+				elseif !!(anyV(`node.nodeType`, nodeTypes.AstLiteral,nodeTypes.AstLambda,nodeTypes.AstForeign)) then
 					if node.valueConstant then
 						relevantObjects[node.valueConstant] = true
 					end
@@ -2242,14 +2231,6 @@ function _G.unicodeToLuaIdentifier(name)
 		name = name.."_"
 	end
 	return name
-end
-
-function _G.isExpressionLiteralStringAndValidLuaIdentifier(expr)
-	return
-		expr.nodeType == !(nodeTypes.AstLiteral)
-		and expr.literalType == !(LITERAL_STRING)
-		and expr.value:find"^[%a_][%w_]*$" ~= nil
-		and not LUA_KEYWORDS[expr.value]
 end
 
 
