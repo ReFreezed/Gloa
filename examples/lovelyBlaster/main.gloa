@@ -91,8 +91,7 @@ local Sound :: struct {
 	pitchVariation:  float,
 }
 
-local sounds: table
--- local sounds: struct { !key:string, !value:Sound } -- @Compiler @Incomplete: Structured hash tables.
+local sounds: struct { !key:string, !value:Sound }
 
 local loadSounds :: () {
 	local loadSound :: (name:string, path:string, loop:bool, volume,volumeVar:float, pitch,pitchVar:float) {
@@ -116,7 +115,7 @@ local loadSounds :: () {
 }
 
 global playSound :: (name:string, volumeScale=1.0) {
-	local sound = cast(Sound) sounds[name]
+	local sound = sounds[name]
 	if sound == NULL {
 		writeLine(STDERR, format("Error: No sound '%s'.", name))
 		return
@@ -232,13 +231,19 @@ local onUpdate :: (dt:float) {
 			currentLevel.completedWaves += 1
 			local newDifficulty          = DIFFICULTY_AT_WAVES[currentLevel.completedWaves]
 
-			if newDifficulty ~= nil {
-				currentLevel.difficulty     = cast(int) newDifficulty
+			if newDifficulty ~= NULL {
+				currentLevel.difficulty     = newDifficulty
 				currentLevel.difficultyTime = currentLevel.time
 			}
 
+			local wave: EnemyWave = NULL
+			while true {
+				wave = getRandomWave(currentLevel.difficulty)
+				if wave ~= currentLevel.currentWave  break
+			}
+			currentLevel.currentWave = wave
+
 			currentLevel.progression      = 0
-			currentLevel.currentWave      = getRandomWave(currentLevel.difficulty)
 			currentLevel.nextIndexToSpawn = 1
 			currentLevel.lastSpawnTime    = 0
 
@@ -313,8 +318,8 @@ local onDraw :: () {
 		else
 			loveSetColor(0, 1, 0)
 
-		local RADIUS  :: 1
-		local SPACING :: .5
+		local RADIUS  :: 10
+		local SPACING :: 5
 		loveDrawCircleFill(SPACING+RADIUS + (i-1)*(SPACING+2*RADIUS), SPACING+RADIUS, RADIUS, 32)
 	}
 

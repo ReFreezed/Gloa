@@ -71,17 +71,22 @@ global Carrier :: struct {
 	using Enemy,
 }
 global Fly :: struct {
-	Phase :: enum {
-		ENTER :: 1,
-		SHOOT :: 2,
-		EXIT  :: 3,
-	},
 	using Enemy,
 
+	Phase :: enum { ENTER, SHOOT, EXIT },
 	phase = Phase.ENTER,
 
 	targetX: float,
 	targetY: float,
+
+	weaponCooldown: float,
+	shootCount: int,
+}
+global Heavy :: struct {
+	using Enemy,
+
+	Phase :: enum { ENTER, SHOOT, BEAM, EXIT },
+	phase = Phase.ENTER,
 
 	weaponCooldown: float,
 	shootCount: int,
@@ -96,7 +101,7 @@ global Follower :: struct {
 }
 global isEnemy :: (ent:Entity) -> bool {
 	local entityType = ent.entityType
-	return entityType == Carrier or entityType == Fly or entityType == Follower
+	return entityType == Carrier or entityType == Fly or entityType == Heavy or entityType == Follower
 }
 
 global Fx :: struct {
@@ -184,6 +189,11 @@ global newEntity :: (level:Level, $T:type, initX,initY:float) -> T {
 		ent.targetX   = targetX
 		ent.targetY   = getRandom(.1*CAMERA_HEIGHT, .4*CAMERA_HEIGHT)
 
+	} elseif T == Heavy {
+		ent.width     = 7
+		ent.height    = 5.5
+		ent.healthMax = 20
+
 	} elseif T == Follower {
 		ent.width     = 1.6
 		ent.height    = 2
@@ -217,6 +227,7 @@ global spawnNextEntity :: (level:Level) {
 	if instr.entity == {
 		case Carrier:  ent = newEntity(level, Carrier,  instr.x, instr.y)
 		case Fly:      ent = newEntity(level, Fly,      instr.x, instr.y)
+		case Heavy:    ent = newEntity(level, Heavy,    instr.x, instr.y)
 		case Follower: ent = newEntity(level, Follower, instr.x, instr.y)
 		case:          printf("Error: Unhandled entity type %s.", toString(instr.entity))
 	}
@@ -435,7 +446,7 @@ global updateEntity :: (level:Level, ent:Entity, dt:float) {
 			if fly.shootCount < 5 {
 				if fly.weaponCooldown <= 0 {
 					fly.weaponCooldown  = 1/3
-					fly.shootCount += 1
+					fly.shootCount     += 1
 					spawnBullet(level, fly.x, fly.y, TAU/4, nil)
 					playSound("shot2")
 				}
@@ -446,6 +457,60 @@ global updateEntity :: (level:Level, ent:Entity, dt:float) {
 		case EXIT:
 			fly.y += MOVE_SPEED*dt
 			if fly.y > CAMERA_HEIGHT+20  destroy(fly)
+		}
+
+	case Heavy:
+		local MOVE_SPEED :: 15.0
+
+		local heavy = cast(Heavy) ent
+		using heavy.Phase
+
+		if !complete heavy.phase == {
+		case ENTER:
+			heavy.y += MOVE_SPEED*dt
+
+			if heavy.y >= .2*CAMERA_HEIGHT {
+				heavy.phase          = SHOOT
+				heavy.weaponCooldown = .60
+			}
+
+		case SHOOT:
+			heavy.weaponCooldown -= dt
+
+			if heavy.shootCount < 4 {
+				if heavy.weaponCooldown <= 0 {
+					heavy.weaponCooldown  = 1/3
+					heavy.shootCount     += 1
+					spawnBullet(level, heavy.x-3, heavy.y+3, TAU/4+.1*TAU, nil)
+					spawnBullet(level, heavy.x-2, heavy.y+3, TAU/4,        nil)
+					spawnBullet(level, heavy.x+2, heavy.y+3, TAU/4,        nil)
+					spawnBullet(level, heavy.x+3, heavy.y+3, TAU/4-.1*TAU, nil)
+					playSound("shot2")
+				}
+			} else {
+				if heavy.weaponCooldown < -0.50 {
+					heavy.phase      = BEAM
+					heavy.shootCount = 0
+				}
+			}
+
+		case BEAM:
+			heavy.weaponCooldown -= dt
+
+			if heavy.shootCount < 20 {
+				if heavy.weaponCooldown <= 0 {
+					heavy.weaponCooldown  = .06
+					heavy.shootCount     += 1
+					spawnBullet(level, heavy.x, heavy.y+3, TAU/4, nil) -- @Incomplete: Make this an actual beam.
+					playSound("shot2")
+				}
+			} else {
+				if heavy.weaponCooldown < -1.00  heavy.phase = EXIT
+			}
+
+		case EXIT:
+			heavy.y += MOVE_SPEED*dt
+			if heavy.y > CAMERA_HEIGHT+20  destroy(heavy)
 		}
 
 	case Follower:
@@ -548,6 +613,11 @@ global drawEntity :: (level:Level, ent:Entity) {
 		setColorWithEffects(damageEffect, 1, .9, .4)
 		loveDrawRectangleFill(fly.x-fly.width/2, fly.y-fly.height/2, fly.width, fly.height)
 
+	case Heavy:
+		local heavy = cast(Heavy) ent
+		setColorWithEffects(damageEffect, .6, .2, 1)
+		loveDrawRectangleFill(heavy.x-heavy.width/2, heavy.y-heavy.height/2, heavy.width, heavy.height)
+
 	case Follower:
 		local follower = cast(Follower) ent
 		setColorWithEffects(damageEffect, 1, .4, .1)
@@ -632,10 +702,8 @@ global damage :: (level:Level, ent:Entity, amount:int, damagePointX,damagePointY
 	}
 
 	-- We're dead!
-	local explosionScale = ent.width*ent.height / (5*3)
-	if explosionScale < 1  explosionScale ^= .7
-
-	local effectScale = min(explosionScale, 1) -- Limit all effects except the explosion visuals (because explosions look cool!)
+	local explosionScale = max(ent.width, ent.height) / 5
+	local effectScale    = min(explosionScale, 1) -- Limit all effects except the explosion visuals (because explosions look cool!)
 
 	if ent.entityType == Player {
 		explosionScale = 1
