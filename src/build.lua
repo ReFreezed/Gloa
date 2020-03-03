@@ -113,6 +113,7 @@ pp.processFile{
 
 	debug           = false,
 	backtickStrings = true,
+	canOutputNil    = false,
 
 	onInsert = function(path)
 		if not silent then  print("Inserting "..path)  end
