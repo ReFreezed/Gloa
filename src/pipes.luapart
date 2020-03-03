@@ -159,7 +159,8 @@ function _G.addToQueue(state, node, container, key, pipe)
 	queued.pipe      = pipe or errorInternal()
 
 	node.queued = queued
-	table.insert(state.queue, queued)
+	table.insert(state.queueActive, queued)
+	table.insert(state.allQueueds,  queued)
 
 	-- Make assignment targets in declaration statements wait for their declaration.
 	if
@@ -431,11 +432,13 @@ end
 
 function _G.errorPipesAreStuck(state)
 	!TRACE()
+
 	-- outputDependencyGraph(state)
+	-- !ifDEBUG `astPrintTree(state.globalScope)`
 
 	-- [[ Report undeclared identifier.
 	local function getDeclaredIdentifierWaitingToBeDeclaredWithName(name, queuedToIgnore) -- @Cleanup: What is this even?!?!
-		for _, queued in ipairs(state.queue) do
+		for _, queued in ipairs(state.allQueueds) do
 			if queued ~= queuedToIgnore and not queued.unqueued and queued.waitingOn and queued.node.nodeType == !(nodeTypes.AstIdentifier) then
 				local ident = queued.node
 				if ident.parent == ident.declaration and ident.name == name then  return queued  end
@@ -446,7 +449,7 @@ function _G.errorPipesAreStuck(state)
 
 	local generatedIdent = nil
 
-	for _, queued in ipairs(state.queue) do
+	for _, queued in ipairs(state.allQueueds) do
 		local dependency = not queued.unqueued and queued.waitingOn
 
 		if dependency and dependency.dependType == !(DEPEND_DECLARATION) then
@@ -494,7 +497,7 @@ function _G.errorPipesAreStuck(state)
 	--]]
 
 	-- [[
-	for _, queued in ipairs(state.queue) do
+	for _, queued in ipairs(state.allQueueds) do
 		local dependency = not queued.unqueued and queued.waitingOn
 
 		if dependency and dependency.dependType == !(DEPEND_CONSTANT_READY) then
@@ -516,7 +519,7 @@ function _G.errorPipesAreStuck(state)
 	--]]
 
 	-- [[
-	for _, queued in ipairs(state.queue) do
+	for _, queued in ipairs(state.allQueueds) do
 		local dependency = not queued.unqueued and queued.waitingOn
 
 		if dependency and dependency.dependType == !(DEPEND_STRUCT_MEMBERS_READY) then
@@ -533,7 +536,7 @@ function _G.errorPipesAreStuck(state)
 	--]]
 
 	-- [[ Report identifier waiting for declaration to be inferred.
-	for _, queued in ipairs(state.queue) do
+	for _, queued in ipairs(state.allQueueds) do
 		local dependency = not queued.unqueued and queued.waitingOn
 
 		if
@@ -555,7 +558,7 @@ function _G.errorPipesAreStuck(state)
 	--]]
 
 	-- [[ Report about-to-be-declared identifier waiting for something.
-	for _, queued in ipairs(state.queue) do
+	for _, queued in ipairs(state.allQueueds) do
 		local dependency = not queued.unqueued and queued.waitingOn
 
 		if
@@ -577,7 +580,7 @@ function _G.errorPipesAreStuck(state)
 	--]]
 
 	-- [[ Report something waiting for something else to be inferred.
-	for _, queued in ipairs(state.queue) do
+	for _, queued in ipairs(state.allQueueds) do
 		local dependency = not queued.unqueued and queued.waitingOn
 
 		if dependency and (dependency.dependType == !(DEPEND_NODE_INFERRED) or dependency.dependType == !(DEPEND_NODE_INFERRED_FULLY)) then
@@ -594,7 +597,7 @@ function _G.errorPipesAreStuck(state)
 	--]]
 
 	-- [[ Report something waiting for something else to emit code.
-	for _, queued in ipairs(state.queue) do
+	for _, queued in ipairs(state.allQueueds) do
 		local dependency = not queued.unqueued and queued.waitingOn
 
 		if dependency and dependency.dependType == !(DEPEND_NODE_EMITTED) then
@@ -650,7 +653,8 @@ function _G.outputDependencyGraph(state)
 			file:write("@startuml\n")
 			file:write(!("scale max "..MAX_SIZE.."*"..MAX_SIZE.."\n"))
 
-			for _, queued in ipairs(state.queue) do
+			for _, queued in ipairs(state.allQueueds) do
+			-- for _, queued in ipairs(state.queueWaiting) do
 				local dependency = not queued.unqueued and queued.waitingOn
 
 				if dependency then

@@ -201,11 +201,15 @@ xpcall(function()
 		{`nextToken`,         1},
 		{`soft`,              false}, -- Enabling this will make parsing functions return nil on error instead of triggering an actual error.
 
+		-- Pipes:
+		{`queueActive`,       {}},
+		{`queueWaiting`,      {}},
+		{`allQueueds`,        {}},
+		{`dependencies`,      {}},
+
 		-- Typer:
 		{`lastTypeId`,        0},
 		{`allTypeInfos`,      {}},
-		{`queue`,             {}},
-		{`dependencies`,      {}},
 
 		-- Bytecode:
 		{`constants`,         {}},
@@ -266,13 +270,12 @@ xpcall(function()
 		local timeStartPipes = os.clock()
 
 		!if DEBUG then
-		local queuedUpdates  = 0
-		local pipeCycles     = 0
-		local maxQueueSize   = 0
+		local queuedUpdates      = 0
+		local queueActiveMaxSize = 0
+		local pipeCycles         = 0
 		!end
 
 		!ifDEBUG`if not debug_onlyParse then`
-			local queue     = state.queue
 			local finalPipe = !(PIPE_DONE-1)
 
 			!if DEBUG then
@@ -283,74 +286,69 @@ xpcall(function()
 
 			for cycle = 1, math.huge do
 				-- print("cycle", cycle)
+
 				!if DEBUG then
-					pipeCycles   = pipeCycles+1
-					maxQueueSize = math.max(maxQueueSize, #queue)
+					queueActiveMaxSize = math.max(queueActiveMaxSize, #state.queueActive)
+					pipeCycles         = cycle
 				!end
 
-				local waitCount    = 0
-				local didSomething = false
-				local i            = 1
+				local nextQueueActive = {}
+				local didSomething    = false
+				local i               = 1
 
 				while true do
-					local queued
-
-					while true do
-						queued = queue[i]
-						if not (queued and queued.unqueued) then  break  end
-						removeUnordered(queue, i)
-					end
+					local queued = state.queueActive[i] -- Note: New nodes (or nodes to reinfer) may be inserted into queueActive during this loop.
 					if not queued then  break  end
 
-					!if DEBUG then
-						queuedUpdates = queuedUpdates+1
-					!end
-
-					if queued.waitingOn then
-						waitCount = waitCount+1
-
-					!if DEBUG then
-					elseif queued.pipe > finalPipe then
+					if queued.unqueued then
 						-- void
-					!end
-
+					elseif queued.waitingOn then
+						table.insert(state.queueWaiting, queued)
 					else
 						if queued.pipe == !(PIPE_INFER) then
-							didSomething = true
 							inferNode(state, queued.node)
-						elseif queued.pipe == !(PIPE_BYTECODE) then
 							didSomething = true
+							!ifDEBUG `queuedUpdates = queuedUpdates+1`
+						elseif queued.pipe == !(PIPE_BYTECODE) then
 							bcEmit(state, queued.node)
+							didSomething = true
+							!ifDEBUG `queuedUpdates = queuedUpdates+1`
 						end
 
-						if queued.waitingOn then
-							waitCount = waitCount+1
+						if queued.unqueued then
+							-- void
+						elseif queued.waitingOn then
+							table.insert(state.queueWaiting, queued)
+						elseif queued.pipe <= finalPipe then
+							table.insert(nextQueueActive, queued)
+						else
+							-- void
 						end
 					end
 
 					i = i+1
 				end
 
-				if waitCount == 0 then
-					-- Pipes may have completed.
-					local allDone = true
+				state.queueActive = nextQueueActive
 
-					for _, queued in ipairs(queue) do
-						if queued.unqueued then
-							-- void
-						elseif queued.pipe <= finalPipe then
-							allDone = false
-							break
+				if not (state.queueWaiting[1] or state.queueActive[1]) then
+					!if DEBUG then
+						for _, queued in ipairs(state.allQueueds) do
+							if not (queued.pipe > finalPipe or queued.unqueued) then
+								errorInternal(state, queued.node)
+							end
 						end
-					end
+					!end
 
-					if allDone then  break  end
-
-				elseif not didSomething then
-					errorPipesAreStuck(state)
+					break
 				end
 
-				for _, queued in ipairs(queue) do
+				if not didSomething then  errorPipesAreStuck(state)  end
+
+				local currentQueueWaiting = state.queueWaiting
+				state.queueWaiting        = {}
+
+				for _, queued in ipairs(currentQueueWaiting) do
 					local dependencyCurrent = not queued.unqueued and queued.waitingOn
 
 					while dependencyCurrent do
@@ -404,6 +402,14 @@ xpcall(function()
 							errorInternal("%d", dependency.dependType)
 						end
 					end
+
+					if queued.unqueued then
+						-- void
+					elseif queued.waitingOn then
+						table.insert(state.queueWaiting, queued)
+					else
+						table.insert(state.queueActive, queued)
+					end
 				end
 
 				!if DEBUG then
@@ -414,7 +420,7 @@ xpcall(function()
 						local printCount = 0
 						printerr()
 
-						for _, queued in ipairs(queue) do
+						for _, queued in ipairs(state.queueWaiting) do
 							if not queued.unqueued and queued.pipe <= finalPipe then
 								printCount = printCount+1
 
@@ -444,7 +450,7 @@ xpcall(function()
 						end
 
 						-- outputDependencyGraph(state)
-						errorInternal("[DEBUG] Pipes ran for too long. (waiting:%d)", waitCount)
+						errorInternal("[DEBUG] Pipes ran for too long. (waiting:%d)", #state.queueWaiting)
 					end
 				!end
 			end--for cycle
@@ -516,7 +522,11 @@ xpcall(function()
 					depencyCountTexts[dependType] = F("%s:%d", title, (dependencyCount[dependType] or 0))
 				end
 
-				printf(!((DEBUG and OK[7] or "").."Updates:%d Cycles:%d Queue:%d Deps:%d (%s)"), queuedUpdates, pipeCycles, maxQueueSize, #state.dependencies, table.concat(depencyCountTexts, " "))
+				printf(
+					!((DEBUG and OK[7] or "").."Updates:%d Cycles:%d Queue:%d/%d Deps:%d (%s)"),
+					queuedUpdates, pipeCycles, queueActiveMaxSize, #state.allQueueds, #state.dependencies,
+					table.concat(depencyCountTexts, " ")
+				)
 			!end
 
 			print()

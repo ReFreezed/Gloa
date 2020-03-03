@@ -18,7 +18,7 @@
 	getClosestScope, getClosestScopeForDeclaration, isScope, isScopeDeclarative, isScopeImperative
 	getDeclarationValue
 	getLambda
-	inferNode
+	inferNode, queueForReinfer
 	isExpressionConstant
 	isPartOfAnyDeclaration
 	isTypeSimple, isTypeNumeric, isTypeTableLike, isTypeCompatibleWith, doesStructInherit, adjustTypeToOne
@@ -1876,7 +1876,7 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 		ident.declaration  = morphDecl
 		ident.inferredType = nil
 
-		moveToPipe(state, ident, !(PIPE_INFER)) -- Re-infer callee.
+		queueForReinfer(state, ident) -- Re-infer callee.
 
 		local dependency = getExistingDependency(state, call, !(DEPEND_NODE_INFERRED), ident)
 		if dependency then
@@ -2047,7 +2047,7 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 	ident.declaration  = morphDecl
 	ident.inferredType = nil
 
-	moveToPipe(state, ident, !(PIPE_INFER)) -- Re-infer callee.
+	queueForReinfer(state, ident) -- Re-infer callee.
 
 	local dependency = getExistingDependency(state, call, !(DEPEND_NODE_INFERRED), ident)
 	if dependency then
@@ -3320,14 +3320,17 @@ end
 
 	!ASSERT `tableNode.inferredType`
 
-	-- Make sure all children (including table-likes) are inferred before we advance to the next pipe.
+	-- Make sure all children (including table-likes) are fully(!) inferred before we advance to the next pipe.
 	for _, tableField in ipairs(tableNode.fields) do
-		if not tableField.value.inferredType then
-			!DEPEND_AND_RETURN(`tableNode`, DEPEND_NODE_INFERRED, `tableField.value`)
+		if tableField.value.queued.pipe <= !(PIPE_INFER) then
+			!DEPEND_AND_RETURN(`tableNode`, DEPEND_NODE_INFERRED_FULLY, `tableField.value`)
 		end
-		if not tableField.key.inferredType then
-			!DEPEND_AND_RETURN(`tableNode`, DEPEND_NODE_INFERRED, `tableField.key`)
+		if tableField.key.queued.pipe <= !(PIPE_INFER) then
+			!DEPEND_AND_RETURN(`tableNode`, DEPEND_NODE_INFERRED_FULLY, `tableField.key`)
 		end
+	end
+	if trailingExpr and trailingExpr.queued.pipe <= !(PIPE_INFER) then
+		!DEPEND_AND_RETURN(`tableNode`, DEPEND_NODE_INFERRED_FULLY, `trailingExpr`)
 	end
 
 	moveToNextRelevantPipe(state, tableNode)
@@ -4901,6 +4904,12 @@ end
 function _G.inferNode(state, node)
 	local nodeInferrer = nodeInferrers[node.nodeType] or errorUnhandledNodeType(state, node)
 	return nodeInferrer(state, node)
+end
+
+function _G.queueForReinfer(state, node)
+	!ASSERT `node.queued`
+	moveToPipe(state, node, !(PIPE_INFER))
+	table.insert(state.queueActive, node.queued)
 end
 
 

@@ -532,16 +532,15 @@ end
 function _G.parseTable(state, parentNode)
 	-- Note: We assume the '{' has been eaten already.
 
-	local tableStartToken = state.nextToken-1
-	local tableNode       = astNewNode(AstTable, tableStartToken, parentNode)
-	local fields          = tableNode.fields
-	local generatedIndex  = 0
+	local tableNode      = astNewNode(AstTable, state.nextToken-1, parentNode)
+	local fields         = tableNode.fields
+	local generatedIndex = 0
 
 	while true do
 		local tokType, tokValue, token = peekNextToken(state)
 
 		if not tokType then
-			!ERROR_OR_RETURN `errorParsing(state, tableStartToken, "Unfinished table.")`
+			!ERROR_OR_RETURN `errorParsing(state, tableNode.token, "Unfinished table.")`
 		elseif isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"}") then
 			eatNextToken(state)
 			break
@@ -1098,9 +1097,8 @@ function _G.parseDeclarationStatement(state, block, imperative, declType)
 
 	declType = declType or !(DECLARATION_NORMAL)
 
-	local declStartToken = state.nextToken
-	local declarations   = {}
-	local declNames      = {}
+	local declarations = {}
+	local declNames    = {}
 
 	local isGlobalOrExported = false
 	local isUsing            = false
@@ -1145,7 +1143,7 @@ function _G.parseDeclarationStatement(state, block, imperative, declType)
 		!DO_OR_RETURN `parseNameList(state, block, declNames, true)` -- Note: We update parent here below.
 
 		for i, ident in ipairs(declNames) do
-			local decl              = astNewNode(AstDeclaration, declStartToken, block)
+			local decl              = astNewNode(AstDeclaration, ident.token, block)
 			decl.isGlobalOrExported = isGlobalOrExported
 			declarations[i]         = decl
 
@@ -1156,12 +1154,13 @@ function _G.parseDeclarationStatement(state, block, imperative, declType)
 		end
 
 	else
-		local decl              = astNewNode(AstDeclaration, declStartToken, block)
+		local decl              = astNewNode(AstDeclaration, 1, block)
 		decl.isGlobalOrExported = isGlobalOrExported
 		declarations[1]         = decl
 
 		!SET_OR_RETURN `local ident = parseIdentifier(state, decl)`
 		ident.declaration           = decl
+		decl.token                  = ident.token
 		decl.name                   = ident
 		table.insert(declNames, ident)
 	end
@@ -1226,7 +1225,7 @@ function _G.parseDeclarationStatement(state, block, imperative, declType)
 		end
 
 		if imperative then
-			assignment                = astNewNode(AstAssignment, declStartToken, block)
+			assignment                = astNewNode(AstAssignment, state.nextToken-1, block)
 			assignment.forDeclaration = true
 			assignment.declarations   = {}
 
@@ -1351,8 +1350,7 @@ function _G.parseDeclarationStatement(state, block, imperative, declType)
 end
 
 function _G.parseAssignment(state, parentNode)
-	local assignmentStartToken = state.nextToken
-	local assignment           = astNewNode(AstAssignment, assignmentStartToken, parentNode)
+	local assignment = astNewNode(AstAssignment, 1, parentNode)
 
 	!DO_OR_RETURN `parseExpressionList(state, assignment, assignment.targets, true)`
 
@@ -1366,6 +1364,7 @@ function _G.parseAssignment(state, parentNode)
 	if not isTokenAssigning(tokType, tokValue) then
 		!ERROR_OR_RETURN `errorParsingAfterPrevious(state, "Expected '='.")`
 	end
+	assignment.token           = state.nextToken-1
 	assignment.operation       = tokValue
 	assignment.binaryOperation = tokValue:sub(1, -2) -- All assignments with extra operations end with '=' (e.g. '+='). Here we just strip away the '='.
 
@@ -3134,7 +3133,11 @@ do
 		if node.parent then  write(" ^", node.parent.s)  end
 
 		local queued = node.queued
-		if queued then
+		if not queued then
+			-- void
+		elseif queued.unqueued then
+			write(" uq:", PIPE_TITLES[queued.pipe])
+		else
 			write(" p:", PIPE_TITLES[queued.pipe])
 			local dependency = queued.waitingOn
 			if dependency then
@@ -3223,6 +3226,7 @@ do
 					if tableField.key   then  printNode(tableField.key,   indent+1, printed, printChildren, i.."K")  end
 					if tableField.value then  printNode(tableField.value, indent+1, printed, printChildren, i.."V")  end
 				end
+				if tableNode.trailingExpression then  printNode(tableNode.trailingExpression, indent+1, printed, printChildren, "...")  end
 				!!(CHILD_PRINT_END)
 
 			elseif node.nodeType == !(nodeTypes.AstCall) then
