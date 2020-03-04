@@ -1959,16 +1959,21 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 				for _, loc in ipairs(getPathToNode(state, declTypeExpr, bake)) do
 					if loc.node.nodeType == !(nodeTypes.AstType) then
 						if loc.node.kind == !(TYPE_KIND_ARRAY) then
-							if valueTypeInfo.tag ~= !(typeTags.TypeInfoArray) then
+							if valueTypeInfo.tag == !(typeTags.TypeInfoArray) then
+								local arraySig   = valueTypeInfo
+								valueTypeInfo    = arraySig.itemType or errorInternal(state, valueExpr)
+
+							elseif valueTypeInfo.tag == !(typeTags.TypeInfoStruct) and valueTypeInfo.kind == !(STRUCT_KIND_ARRAY) then
+								local structInfo = valueTypeInfo
+								valueTypeInfo    = structInfo.valueType or errorInternal(state, valueExpr)
+
+							else
 								typeError(
 									state, valueExpr,
 									"Polymorphic call: Unexpected type. (Wanted an array, got %s)",
 									getFriendlyTypeInfoName(valueTypeInfo)
 								)
 							end
-							local arraySig = valueTypeInfo
-							valueTypeInfo  = arraySig.itemType or errorInternal(state, valueExpr)
-
 						else
 							errorUnhandledNodeType(state, loc.node)
 						end
@@ -3530,13 +3535,13 @@ end
 		return
 
 	elseif isTypeCompatibleWith(exprType, castType) or exprTypeTag == !(typeTags.TypeInfoAny) then
-		-- void  (Valid cast.)
+		-- void  Valid cast.
 
 	elseif isTypeNumeric(castType) and isTypeNumeric(exprType) then
-		-- void  (Valid cast.)
+		-- void  Valid cast.
 
 	elseif exprTypeTag == !(typeTags.TypeInfoStruct) and castTypeTag == !(typeTags.TypeInfoStruct) and doesStructInherit(castType, exprType) then
-		-- void  (Valid cast.)
+		-- void  Valid cast.
 
 	elseif castTypeTag == !(typeTags.TypeInfoBool) and !!(anyV(
 		`exprTypeTag`,
@@ -3545,10 +3550,13 @@ end
 		typeTags.TypeInfoString,
 		typeTags.TypeInfoArray
 	)) then
-		-- void  (Valid cast.)
+		-- void  Valid cast.
+
+	elseif castTypeTag == !(typeTags.TypeInfoBool) and exprTypeTag == !(typeTags.TypeInfoStruct) and exprType.kind == !(STRUCT_KIND_ARRAY) then
+		-- void  Array-like structs can pass as arrays.
 
 	elseif exprTypeTag == !(typeTags.TypeInfoEnum) and isTypeCompatibleWith(castType, exprType.memberTypeInfo) then
-		-- void  (Enum members can cast to the real member type.)
+		-- void  Enum members can cast to the real member type.
 
 	elseif exprTypeTag == !(typeTags.TypeInfoEnum) and isTypeNumeric(castType) and isTypeNumeric(exprType.memberTypeInfo) then
 		-- We need two casts to happen in sequence here so we wrap ourselves in another cast.
@@ -4299,9 +4307,6 @@ end
 
 		if struct.valueType then
 			structInfo.kind = struct.keyType and !(STRUCT_KIND_TABLE) or !(STRUCT_KIND_ARRAY)
-			if structInfo.kind == !(STRUCT_KIND_ARRAY) then
-				typeError(state, struct.valueType, "Array-like structs are not supported yet.")
-			end
 		elseif struct.keyType then
 			typeError(state, struct.keyType, "Missing a corresponding !value type for structured table.")
 		end
@@ -5804,8 +5809,12 @@ function _G.isTypeCompatibleWith(typeToCheck, otherType)
 	end
 
 	-- Array compatability completely depends on the item type.
-	if typeToCheck.tag == !(typeTags.TypeInfoArray) and otherType.tag == !(typeTags.TypeInfoArray) then
-		return isTypeCompatibleWith(typeToCheck.itemType, otherType.itemType)
+	if otherType.tag == !(typeTags.TypeInfoArray) then
+		if typeToCheck.tag == !(typeTags.TypeInfoArray) then
+			return isTypeCompatibleWith(typeToCheck.itemType, otherType.itemType)
+		elseif typeToCheck.tag == !(typeTags.TypeInfoStruct) and typeToCheck.kind == !(STRUCT_KIND_ARRAY) then
+			return isTypeCompatibleWith(typeToCheck.valueType, otherType.itemType)
+		end
 	end
 
 	return false, 0
