@@ -269,7 +269,7 @@ _G.!structAst"AstDeclaration:_AstNode"{
 	{`value`,                nil, ast="node"},  -- AstExpression  (Either this or assignment should be set, or neither for getting the default value for the type.)
 	{`notes`,                {},  ast="array"}, -- []AstNote  @Incomplete: Notes.
 
-	{`isGlobalOrExported`,   false},
+	{`isExported`,           false}, -- Note: Globals are exports.
 	{`isConstant`,           false},
 	{`canShadow`,            false},
 	{`addedByPolymorph`,     false},
@@ -403,6 +403,9 @@ _G.!structAst"AstLambda:_AstScopeExpression"{
 	-- Bytecode phase:
 	{`valueConstant`,     nil}, -- Constant
 	{`bytecodes`,         {}, doNotCopy=true}, -- Filled if we're not a function signature.
+}
+_G.!structAst"AstNamespace:_AstScopeExpression"{
+	_scopeType = "declarative",
 }
 
 _G.!structAst"AstIf:_AstNode"{
@@ -1078,9 +1081,9 @@ function _G.parseEnum(state, parentNode)
 	return enum
 end
 
--- success = parseDeclarationStatement( compilationState, parentBlock, inImperativeScope [, declarationType=DECLARATION_NORMAL ] )
+-- success = parseDeclarationStatement( compilationState, parentScope, inImperativeScope [, declarationType=DECLARATION_NORMAL ] )
 -- declarationType = DECLARATION_NORMAL|DECLARATION_STRUCT|DECLARATION_ENUM
-function _G.parseDeclarationStatement(state, block, imperative, declType)
+function _G.parseDeclarationStatement(state, scope, imperative, declType)
 	--[[
 	local a := 0        -- Variable, inferred type.
 	local a  = 0        -- Variable, inferred type (same as the above).
@@ -1100,8 +1103,8 @@ function _G.parseDeclarationStatement(state, block, imperative, declType)
 	local declarations = {}
 	local declNames    = {}
 
-	local isGlobalOrExported = false
-	local isUsing            = false
+	local isExported   = false
+	local isUsing      = false
 
 	local tokType, tokValue = peekNextToken(state)
 
@@ -1119,17 +1122,8 @@ function _G.parseDeclarationStatement(state, block, imperative, declType)
 		elseif tokValue == "local" then
 			-- void
 
-		elseif tokValue == "global" then
-			if astIsOrIsInModule(block) then
-				!ERROR_OR_RETURN `errorParsingLast(state, "Modules cannot declare globals.")`
-			end
-			isGlobalOrExported = true
-
 		elseif tokValue == "export" then
-			if not astIsOrIsInModule(block) then
-				!ERROR_OR_RETURN `errorParsingLast(state, "Only modules can export declarations.")`
-			end
-			isGlobalOrExported = true
+			isExported = true
 
 		else
 			!ERROR_OR_RETURN `errorParsingLast(state, "Expected 'local'.")`
@@ -1140,23 +1134,23 @@ function _G.parseDeclarationStatement(state, block, imperative, declType)
 	local takenNames = {}
 
 	if declType == !(DECLARATION_NORMAL) then
-		!DO_OR_RETURN `parseNameList(state, block, declNames, true)` -- Note: We update parent here below.
+		!DO_OR_RETURN `parseNameList(state, scope, declNames, true)` -- Note: We update parent here below.
 
 		for i, ident in ipairs(declNames) do
-			local decl              = astNewNode(AstDeclaration, ident.token, block)
-			decl.isGlobalOrExported = isGlobalOrExported
-			declarations[i]         = decl
+			local decl        = astNewNode(AstDeclaration, ident.token, scope)
+			decl.isExported   = isExported
+			declarations[i]   = decl
 
-			ident.parent            = decl
-			ident.declaration       = decl
+			ident.parent      = decl
+			ident.declaration = decl
 
-			decl.name               = ident
+			decl.name         = ident
 		end
 
 	else
-		local decl              = astNewNode(AstDeclaration, 1, block)
-		decl.isGlobalOrExported = isGlobalOrExported
-		declarations[1]         = decl
+		local decl      = astNewNode(AstDeclaration, 1, scope)
+		decl.isExported = isExported
+		declarations[1] = decl
 
 		!SET_OR_RETURN `local ident = parseIdentifier(state, decl)`
 		ident.declaration           = decl
@@ -1225,7 +1219,7 @@ function _G.parseDeclarationStatement(state, block, imperative, declType)
 		end
 
 		if imperative then
-			assignment                = astNewNode(AstAssignment, state.nextToken-1, block)
+			assignment                = astNewNode(AstAssignment, state.nextToken-1, scope)
 			assignment.forDeclaration = true
 			assignment.declarations   = {}
 
@@ -1260,8 +1254,8 @@ function _G.parseDeclarationStatement(state, block, imperative, declType)
 		end
 
 	elseif declType == !(DECLARATION_ENUM) then
-		local enum = block
-		!ASSERT("enum.nodeType == "..nodeTypes.AstEnum) -- Note: We don't support !if or anything in enums, so the parent block should always be the enum.
+		local enum = scope
+		!ASSERT("enum.nodeType == "..nodeTypes.AstEnum) -- Note: We don't support !if or anything in enums, so the parent scope should always be the enum.
 
 		enum.autoValue = enum.autoValue+1
 
@@ -1320,29 +1314,29 @@ function _G.parseDeclarationStatement(state, block, imperative, declType)
 	if declType == !(DECLARATION_NORMAL) then  eatTrailingSemicolon(state)  end
 
 	--
-	-- Everything's done! Now we can modify the block.
+	-- Everything's done! Now we can modify the scope.
 	--
 
 	for i = 1, #declarations do
-		table.insert(block.statements,   declarations[i])
-		table.insert(block.declarations, declarations[i])
+		table.insert(scope.statements,   declarations[i])
+		table.insert(scope.declarations, declarations[i])
 	end
 
 	if assignment then
-		table.insert(block.statements, assignment)
+		table.insert(scope.statements, assignment)
 	end
 
 	if isUsing then
 		for _, decl in ipairs(declarations) do
-			local using       = astNewNode(AstUsing, decl.token, block)
+			local using       = astNewNode(AstUsing, decl.token, scope)
 
 			local ident       = astNewNode(AstIdentifier, decl.token, using)
 			ident.name        = decl.name.name
 			ident.declaration = decl
 			using.expression  = ident
 
-			table.insert(block.statements, using)
-			table.insert(block.usings,     using)
+			table.insert(scope.statements, using)
+			table.insert(scope.usings,     using)
 		end
 	end
 
@@ -1574,11 +1568,11 @@ function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 	local statementStartToken = state.nextToken
 	local statement
 
-	if isToken(tokType,tokValue, !(TOKEN_KEYWORD),"global","export") then
-		!ERROR_OR_RETURN_FALSE `errorParsingNext(state, "%s can only be declared in file scope.", (tokValue  == "global" and "Globals" or "Exports"))`
-	elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"using") and isToken(tokType2,tokValue2, !(TOKEN_KEYWORD),"global","export") then
+	if isToken(tokType,tokValue, !(TOKEN_KEYWORD),"export") then
+		!ERROR_OR_RETURN_FALSE `errorParsingNext(state, "Exports can only be declared in file scope.")`
+	elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"using") and isToken(tokType2,tokValue2, !(TOKEN_KEYWORD),"export") then
 		eatNextToken(state)
-		!ERROR_OR_RETURN_FALSE `errorParsingNext(state, "%s can only be declared in file scope.", (tokValue2 == "global" and "Globals" or "Exports"))`
+		!ERROR_OR_RETURN_FALSE `errorParsingNext(state, "Exports can only be declared in file scope.")`
 
 	elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"return") then
 		local returnNode = astNewNode(AstReturn, state.nextToken, block)
@@ -2059,9 +2053,9 @@ function _G.parseFileScopeStatements(state, block, isTopLevel, singleStatement)
 			break
 
 		elseif
-			isToken(tokType,tokValue, !(TOKEN_KEYWORD),"local","global","export") or (
+			isToken(tokType,tokValue, !(TOKEN_KEYWORD),"local","export") or (
 				isToken(tokType, tokValue,  !(TOKEN_KEYWORD),"using") and
-				isToken(tokType2,tokValue2, !(TOKEN_KEYWORD),"local","global","export")
+				isToken(tokType2,tokValue2, !(TOKEN_KEYWORD),"local","export")
 			)
 		then
 			!DO_OR_RETURN_FALSE `parseDeclarationStatement(state, block, false)`
@@ -2142,7 +2136,7 @@ function _G.astMoveRelevantThingsFromFileScopeToGlobalScope(state, fileScope)
 	local globalScope = state.globalScope
 
 	for i, decl in ipairsr(fileScope.declarations) do
-		if decl.isGlobalOrExported then
+		if decl.isExported then
 			removeUnordered(fileScope.declarations, i)
 			table.insert(globalScope.declarations, decl)
 		end
@@ -2742,6 +2736,18 @@ function _G.parseExpression(state, parentNode, prevOpPrecedence, expectLeftValue
 	elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"NULL") then
 		expr = astNewNode(AstNull, exprStartToken, parentNode)
 
+	-- Namespace.
+	elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"namespace") then
+		tokType, tokValue = eatNextToken(state)
+		if not isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"{") then
+			!ERROR_OR_RETURN `errorParsingAfterPrevious(state, "Expected '{'.")`
+		end
+
+		local namespace = astNewNode(AstNamespace, exprStartToken, parentNode)
+		!DO_OR_RETURN `parseFileScopeStatements(state, namespace, false, false)` -- Note: This should eat the ending '}'.
+
+		expr = namespace
+
 	elseif isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"_") then
 		!ERROR_OR_RETURN `errorParsingLast(state, "Invalid place for a blank name.")`
 	else
@@ -3204,12 +3210,12 @@ do
 				local decl = node
 				if decl.addedByPolymorph then  write(" (addedByPolymorph)")  end
 				if decl.assignment       then  write(" (assignment ", decl.assignment.s, " i=", decl.assignmentIndex, ")")  end
-				if decl.isConstant and decl.isGlobalOrExported then
-					write(" (global/exported const)")
+				if decl.isConstant and decl.isExported then
+					write(" (exported const)")
 				elseif decl.isConstant then
 					write(" (const)")
-				elseif decl.isGlobalOrExported then
-					write(" (global/exported)")
+				elseif decl.isExported then
+					write(" (exported)")
 				end
 				if decl.valueTypeInfo then  write(" (typeRepresented=", getFriendlyTypeInfoName(decl.valueTypeInfo), ")")  end
 
@@ -3494,7 +3500,10 @@ end
 
 
 
--- parent, childClosestToParent = astFindParent( node, parentNodeType1, ... )
+-- parent, childClosestToParent = astFindParent ( node, parentNodeType1, ... )
+-- parent, childClosestToParent = astFindParent1( node, parentNodeType )
+-- parent, childClosestToParent = astFindParent2( node, parentNodeType1, parentNodeType2 )
+-- parent, childClosestToParent = astFindParent3( node, parentNodeType1, parentNodeType2, parentNodeType3 )
 function _G.astFindParent(node, ...)
 	local lastNode = node
 
@@ -3506,7 +3515,6 @@ function _G.astFindParent(node, ...)
 		lastNode = node
 	end
 end
--- parent, childClosestToParent = astFindParent1( node, parentNodeType )
 function _G.astFindParent1(node, parentNodeType)
 	local lastNode = node
 
@@ -3518,7 +3526,20 @@ function _G.astFindParent1(node, parentNodeType)
 		lastNode = node
 	end
 end
--- parent, childClosestToParent = astFindParent3( node, parentNodeType1, parentNodeType2, parentNodeType3 )
+function _G.astFindParent2(node, parentNodeType1, parentNodeType2)
+	local lastNode = node
+	local _nodeType
+
+	while true do
+		node = node.parent
+		if not node  then  return nil, nil end
+
+		_nodeType = node.nodeType
+		if _nodeType == parentNodeType1 or _nodeType == parentNodeType2 then  return node, lastNode  end
+
+		lastNode = node
+	end
+end
 function _G.astFindParent3(node, parentNodeType1, parentNodeType2, parentNodeType3)
 	local lastNode = node
 	local _nodeType

@@ -16,7 +16,7 @@
 	followIdentifiersToConstantValue
 	getAssignmentValue
 	getClosestScope, getClosestScopeForDeclaration, isScope, isScopeDeclarative, isScopeImperative
-	getDeclarationValue
+	getDeclarationValue, isDeclarationGlobal
 	getLambda
 	inferNode, queueForReinfer
 	isExpressionConstant
@@ -337,11 +337,11 @@ function _G.getTypeInfoForNamespace(state, scope)
 		end
 	end
 
-	local namespace = newTypeInfo(state, TypeInfoNamespace)
-	namespace.scope = scope
-	table.insert(state.allTypeInfos, namespace)
+	local namespaceInfo = newTypeInfo(state, TypeInfoNamespace)
+	namespaceInfo.scope = scope
+	table.insert(state.allTypeInfos, namespaceInfo)
 
-	return namespace
+	return namespaceInfo
 end
 
 
@@ -424,11 +424,7 @@ end
 -- returns the correct scope for global declarations.
 function _G.getClosestScopeForDeclaration(state, decl)
 	-- do return getClosestScope(decl) end
-	if decl.isGlobalOrExported then
-		local fileScope = astFindParent1(decl, !(nodeTypes.AstFileScope))
-		if fileScope and not fileScope.isModule then  return state.globalScope  end
-	end
-	return (getClosestScope(decl))
+	return isDeclarationGlobal(decl) and state.globalScope or getClosestScope(decl)
 end
 
 function _G.isScope           (node)   return SCOPE_SET            [node .nodeType] or false  end
@@ -459,7 +455,7 @@ function _G.findDeclaration(state, startNode, name, declToIgnore)
 		for _, import in ipairs(scope.imports) do
 			if import.fileScope then
 				for _, decl in ipairs(import.fileScope.declarations) do
-					if decl ~= declToIgnore and decl.isGlobalOrExported and decl.name.name == name then
+					if decl ~= declToIgnore and decl.isExported and decl.name.name == name then
 						return decl, nil
 					end
 				end
@@ -468,9 +464,15 @@ function _G.findDeclaration(state, startNode, name, declToIgnore)
 
 		for _, using in ipairs(scope.usings) do
 			if using.scope then
+				local nodeType    = using.scope.nodeType
+				local onlyExports = !!(anyV(`nodeType`, nodeTypes.AstNamespace,nodeTypes.AstFileScope,nodeTypes.AstGlobalScope))
+
 				for _, decl in ipairs(using.scope.declarations) do
 					if
-						decl ~= declToIgnore and decl.name.name == name and (
+						decl ~= declToIgnore
+						and decl.name.name == name
+						and not (onlyExports and not decl.isExported)
+						and (
 							decl.isConstant or (
 								using.variableDeclaration
 								and isDeclarationVisibleToNode(using.variableDeclaration, startNode)
@@ -500,10 +502,10 @@ function _G.findDeclaration(state, startNode, name, declToIgnore)
 	return nil, nil
 end
 
-function _G.findDeclarationInScope(state, scope, name, onlyLookInExportsIfScopeIsModule)
-	if onlyLookInExportsIfScopeIsModule and scope.nodeType == !(nodeTypes.AstFileScope) and scope.isModule then
+function _G.findDeclarationInScope(state, scope, name, onlyLookInExportsIfScopeIsModuleOrNamespace)
+	if onlyLookInExportsIfScopeIsModuleOrNamespace and ((scope.nodeType == !(nodeTypes.AstFileScope) and scope.isModule) or scope.nodeType == !(nodeTypes.AstNamespace)) then
 		for _, decl in ipairs(scope.declarations) do
-			if decl.isGlobalOrExported and decl.name.name == name then  return decl  end
+			if decl.isExported and decl.name.name == name then  return decl  end
 		end
 	else
 		for _, decl in ipairs(scope.declarations) do
@@ -528,7 +530,7 @@ function _G.findDynamicMemberDeclaration(state, scope, name)
 end
 
 function _G.isDeclarationVisibleToNode(decl, node)
-	if decl.isGlobalOrExported then  return true  end
+	if isDeclarationGlobal(decl) then  return true  end
 
 	local nodeScope, nodeScopeChild = getClosestScope(node)
 	local canSeeImperativeVariables = not decl.isConstant -- It doesn't matter if this is true and we're in a declarative scope because we check that in the loop below.
@@ -723,6 +725,17 @@ function _G.getFriendlyTypeInfoName(typeInfo)
 	elseif typeInfo.tag == !(typeTags.TypeInfoVararg) then
 		local varargSig = typeInfo
 		name            = "..."..getFriendlyTypeInfoName(varargSig.itemType)
+
+	elseif typeInfo.tag == !(typeTags.TypeInfoNamespace) then
+		local namespaceInfo = typeInfo
+		local scope         = namespaceInfo.scope
+		local scopeParent   = scope.parent
+
+		if scopeParent.nodeType == !(nodeTypes.AstDeclaration) and scopeParent.isConstant and scope == scopeParent.value then
+			name = 'namespace("'..scopeParent.name.name..'")'
+		else
+			name = 'namespace'
+		end
 	end
 
 	if name == "" then
@@ -782,8 +795,8 @@ local function getEarlyAndLateForRedeclarationError(state, identEarly, identLate
 	local extraMessageLate  = ""
 
 	-- Globals before locals.
-	if identEarly.declaration.isGlobalOrExported ~= identLate.declaration.isGlobalOrExported then
-		if identLate.declaration.isGlobalOrExported then
+	if isDeclarationGlobal(identEarly.declaration) ~= isDeclarationGlobal(identLate.declaration) then
+		if isDeclarationGlobal(identLate.declaration) then
 			identEarly, identLate = identLate, identEarly
 		end
 
@@ -908,14 +921,6 @@ local function isPolymorphicLambda(node)
 end
 local function isPolymorphicStruct(node)
 	return node.nodeType == !(nodeTypes.AstStruct) and node.isPolymorphic
-end
-
--- valueExpression = getDeclarationValue( declaration [, fallBackToLastAssignmentValue=false ] )
-function _G.getDeclarationValue(decl, fallBackToLastAssignmentValue)
-	return decl.value or decl.assignment and (
-		decl.assignment.values[decl.assignmentIndex]
-		or (fallBackToLastAssignmentValue and getLast(decl.assignment.values) or nil)
-	)
 end
 
 local function inferIdentifierOrVararg(state, identOrVararg)
@@ -3027,11 +3032,11 @@ end
 		local memberLiteral = access.member
 		local memberName    = getConstantNameOrTriggerError(state, memberLiteral)
 
-		local namespace     = typeObject
-		local decl          = findDeclarationInScope(state, namespace.scope, memberName, true)
+		local namespaceInfo = typeObject
+		local decl          = findDeclarationInScope(state, namespaceInfo.scope, memberName, true)
 
 		if not decl then
-			!DEPEND_AND_RETURN(`access`, DEPEND_DECLARATION, `memberName`, `namespace.scope`)
+			!DEPEND_AND_RETURN(`access`, DEPEND_DECLARATION, `memberName`, `namespaceInfo.scope`)
 		elseif not decl.name.inferredType then
 			!DEPEND_AND_RETURN(`access`, DEPEND_NODE_INFERRED, `decl.name`)
 		end
@@ -3703,6 +3708,10 @@ end
 			-- Using an enum value is the same as using the enum type. Is this good?
 			local enumInfo = typeInfo
 			usingScope     = enumInfo.astNode
+
+		elseif typeInfo.tag == !(typeTags.TypeInfoNamespace) then
+			local namespaceInfo = typeInfo
+			usingScope          = namespaceInfo.scope
 
 		else
 			typeError(state, ident, "Invalid or unsupported type group (%s) in 'using' expression.", TYPE_TAG_NAMES[typeInfo.tag])
@@ -4906,6 +4915,11 @@ end
 	moveToNextRelevantPipe(state, null)
 end
 
+!NODE_INFERRER `function nodeInferrers.AstNamespace(state, namespace)`
+	namespace.inferredType = getTypeInfoForNamespace(state, namespace)
+	moveToNextRelevantPipe(state, namespace)
+end
+
 function _G.inferNode(state, node)
 	local nodeInferrer = nodeInferrers[node.nodeType] or errorUnhandledNodeType(state, node)
 	return nodeInferrer(state, node)
@@ -4996,6 +5010,9 @@ function _G.isExpressionConstant(state, expr)
 		return false
 
 	elseif nodeType == !(nodeTypes.AstNull) then
+		return true
+
+	elseif nodeType == !(nodeTypes.AstNamespace) then
 		return true
 
 	else
@@ -6185,6 +6202,20 @@ function _G.areTreesEqual(state, expr1, expr2)
 	else
 		errorUnhandledNodeType(state, expr1)
 	end
+end
+
+
+
+-- valueExpression = getDeclarationValue( declaration [, fallBackToLastAssignmentValue=false ] )
+function _G.getDeclarationValue(decl, fallBackToLastAssignmentValue)
+	return decl.value or decl.assignment and (
+		decl.assignment.values[decl.assignmentIndex]
+		or (fallBackToLastAssignmentValue and getLast(decl.assignment.values) or nil)
+	)
+end
+
+function _G.isDeclarationGlobal(decl)
+	return decl.isExported and decl.parent.nodeType == !(nodeTypes.AstFileScope) and not decl.parent.isModule
 end
 
 
