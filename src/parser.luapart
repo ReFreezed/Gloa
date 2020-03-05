@@ -2675,35 +2675,6 @@ function _G.parseExpression(state, parentNode, prevOpPrecedence, expectLeftValue
 			!SET_OR_RETURN `expr = parseForeign(state, parentNode)`
 		end
 
-	-- Conditional.
-	elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"if") then
-		local conditional = astNewNode(AstConditional, exprStartToken, parentNode)
-
-		!SET_OR_RETURN_FALSE `conditional.condition = parseExpression(state, conditional)`
-
-		tokType, tokValue = peekNextToken(state)
-
-		if isToken(tokType,tokValue, !(TOKEN_KEYWORD),"then") then
-			eatNextToken(state)
-			!SET_OR_RETURN_FALSE `conditional.branchTrue = parseExpression(state, conditional)`
-
-		else
-			if not isToken(tokType,tokValue, !(TOKEN_KEYWORD),"else") then
-				!SET_OR_RETURN_FALSE `conditional.branchTrue = parseExpression(state, conditional)`
-			else
-				conditional.conditionAndBranchTrue = conditional.condition
-			end
-		end
-
-		tokType, tokValue = eatNextToken(state)
-		if not isToken(tokType,tokValue, !(TOKEN_KEYWORD),"else") then
-			!ERROR_OR_RETURN `errorParsingLast(state, "Expected 'else'.")`
-		end
-
-		!SET_OR_RETURN_FALSE `conditional.branchFalse = parseExpression(state, conditional)`
-
-		expr = conditional
-
 	-- Baked parameter.
 	elseif isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"$") then
 		local bake                = astNewNode(AstBake, exprStartToken, parentNode)
@@ -2713,7 +2684,7 @@ function _G.parseExpression(state, parentNode, prevOpPrecedence, expectLeftValue
 	-- Run directive.
 	elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"run") then
 		putBackLastToken(state)
-		!SET_OR_RETURN_FALSE `expr = parseRun(state, parentNode, true)` -- @Incomplete: Allow a block here.
+		!SET_OR_RETURN `expr = parseRun(state, parentNode, true)` -- @Incomplete: Allow a block here.
 
 	-- Type information.
 	elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"type_info") then
@@ -2754,36 +2725,7 @@ function _G.parseExpression(state, parentNode, prevOpPrecedence, expectLeftValue
 		!ERROR_OR_RETURN `errorParsingLast(state, "Expected an expression.")`
 	end
 
-	-- Compound type.
-	tokType, tokValue = peekNextToken(state)
-
-	if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"|") and !(OPERATOR_PRECEDENCE.compound) > prevOpPrecedence then
-		eatNextToken(state)
-
-		local typeNodeCompound = astNewNode(AstType, exprStartToken, parentNode)
-		typeNodeCompound.kind  = !(TYPE_KIND_COMPOUND)
-
-		table.insert(typeNodeCompound.components, expr)
-		expr.parent = typeNodeCompound
-
-		while true do
-			!SET_OR_RETURN `local typeExpr = parseExpression(state, parentNode, OPERATOR_PRECEDENCE.compound)`
-			table.insert(typeNodeCompound.components, typeExpr)
-
-			tokType, tokValue = peekNextToken(state)
-
-			if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"|") then
-				eatNextToken(state)
-				tokType, tokValue = peekNextToken(state)
-			else
-				break
-			end
-		end
-
-		expr = typeNodeCompound
-	end
-
-	-- Binary operations.
+	-- Expressions involving several things next to each other.
 	local nextCanBeMethodCall = false
 
 	while true do
@@ -2796,7 +2738,7 @@ function _G.parseExpression(state, parentNode, prevOpPrecedence, expectLeftValue
 		if not tokType then
 			break
 
-		-- Left-associative operations.
+		-- Left-associative binary operations.
 		elseif
 			(
 				isToken(tokType,tokValue, !(TOKEN_KEYWORD),"and","or") or
@@ -2817,7 +2759,7 @@ function _G.parseExpression(state, parentNode, prevOpPrecedence, expectLeftValue
 			expr.parent                 = binOp
 			expr                        = binOp
 
-		-- Right-associative operations.
+		-- Right-associative binary operations.
 		-- @Incomplete: Combine string concatenations in some way?
 		elseif
 			isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"^","..")
@@ -2903,6 +2845,63 @@ function _G.parseExpression(state, parentNode, prevOpPrecedence, expectLeftValue
 
 			eatNextToken(state)
 			!SET_OR_RETURN `expr = parseCall(state, parentNode, false, expr, true)`
+
+		-- Compound type.
+		elseif
+			isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"|")
+			and !(OPERATOR_PRECEDENCE.compound) > prevOpPrecedence
+		then
+			eatNextToken(state)
+
+			local typeNodeCompound = astNewNode(AstType, token, parentNode)
+			typeNodeCompound.kind  = !(TYPE_KIND_COMPOUND)
+
+			table.insert(typeNodeCompound.components, expr)
+
+			while true do
+				!SET_OR_RETURN `local typeExpr = parseExpression(state, parentNode, OPERATOR_PRECEDENCE.compound)`
+				table.insert(typeNodeCompound.components, typeExpr)
+
+				tokType, tokValue = peekNextToken(state)
+
+				if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"|") then
+					eatNextToken(state)
+					tokType, tokValue = peekNextToken(state)
+				else
+					break
+				end
+			end
+
+			expr.parent = typeNodeCompound
+			expr        = typeNodeCompound
+
+		-- Conditional.
+		elseif
+			isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"?")
+			and !(OPERATOR_PRECEDENCE.conditional) > prevOpPrecedence
+		then
+			eatNextToken(state)
+
+			local conditional = astNewNode(AstConditional, token, parentNode)
+
+			!SET_OR_RETURN `conditional.condition = expr`
+			tokType, tokValue                     = peekNextToken(state)
+
+			if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),":") then
+				conditional.conditionAndBranchTrue = conditional.condition
+			else
+				!SET_OR_RETURN `conditional.branchTrue = parseExpression(state, conditional, OPERATOR_PRECEDENCE.conditional-1)` -- The -1 makes this right-associative.
+			end
+
+			tokType, tokValue = eatNextToken(state)
+			if not isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),":") then
+				!ERROR_OR_RETURN `errorParsingLast(state, "Expected ':'.")`
+			end
+
+			!SET_OR_RETURN `conditional.branchFalse = parseExpression(state, conditional, OPERATOR_PRECEDENCE.conditional-1)` -- The -1 makes this right-associative.
+
+			expr.parent = conditional
+			expr        = conditional
 
 		else
 			break
@@ -3975,6 +3974,10 @@ function _G.astGetExpressionVisuallyFurthestToTheLeft(expr, onlyFollowCalls)
 		local access = expr
 		return astGetExpressionVisuallyFurthestToTheLeft(access.object, false)
 
+	elseif expr.nodeType == !(nodeTypes.AstConditional) then
+		local conditional = expr
+		return astGetExpressionVisuallyFurthestToTheLeft(conditional.condition, false)
+
 	else
 		return expr
 	end
@@ -4019,6 +4022,10 @@ function _G.astGetExpressionVisuallyFurthestToTheRight(expr)
 	elseif expr.nodeType == !(nodeTypes.AstAssignment) then
 		local assignment = expr
 		return astGetExpressionVisuallyFurthestToTheRight(getLast(assignment.values))
+
+	elseif expr.nodeType == !(nodeTypes.AstConditional) then
+		local conditional = expr
+		return astGetExpressionVisuallyFurthestToTheLeft(conditional.branchFalse, false)
 
 	-- @Incomplete: Handle many more nodes...
 
