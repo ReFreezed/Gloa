@@ -558,62 +558,65 @@ end
 
 
 
-function _G.readAndTokenizeFile(state, path)
-	!ifDEBUG `profilerPause()`
-	assert(not state.fileBuffers[path], path)
+do
+	local BRACKETS = {["("]=")", ["{"]="}", ["["]="]"}
 
-	local s, err = getFileContents(path, true)
-	if not s then
-		errorLine(nil, "Could not read file '%s'. (%s)", path, err)
-	end
-	s = s:gsub("\r\n?", "\n") -- Normalize line endings.  @Robustness: Handle the uncommon occurrence of \n\r.
+	function _G.readAndTokenizeFile(state, path)
+		!ifDEBUG `profilerPause()`
+		assert(not state.fileBuffers[path], path)
 
-	state.fileBuffers[path] = s
+		local s, err = getFileContents(path, true)
+		if not s then
+			errorLine(nil, "Could not read file '%s'. (%s)", path, err)
+		end
+		s = s:gsub("\r\n?", "\n") -- Normalize line endings.  @Robustness: Handle the uncommon occurrence of \n\r.
 
-	local tokens     = state.tokens
-	local startToken = tokens.count+1
+		state.fileBuffers[path] = s
 
-	local startTime = os.clock()
-	tokenize(s, path, tokens)
-	local endTime = os.clock()
+		local tokens     = state.tokens
+		local startToken = tokens.count+1
 
-	-- Quickly check for stray/unmatched brackets.
+		local startTime = os.clock()
+		tokenize(s, path, tokens)
+		local endTime = os.clock()
 
-	-- Note: Sometimes an error message here isn't very helpful, so we
-	-- sometimes continue with parsing despite getting an error here.
+		-- Quickly check for stray/unmatched brackets.
 
-	local BRACKETS            = {["("]=")", ["{"]="}", ["["]="]"}
-	local bracketTokenIndices = {}
+		-- Note: Sometimes an error message here isn't very helpful, so we
+		-- sometimes continue with parsing despite getting an error here.
 
-	for i = startToken, tokens.count do
-		if isToken(tokens.type[i],tokens.value[i], !(TOKEN_PUNCTUATION),"(","{","[") then
-			table.insert(bracketTokenIndices, i)
+		local bracketTokenIndices = {}
 
-		elseif isToken(tokens.type[i],tokens.value[i], !(TOKEN_PUNCTUATION),")","}","]") then
-			local iStart   = table.remove(bracketTokenIndices)
-			local expected = BRACKETS[tokens.value[iStart]]
+		for i = startToken, tokens.count do
+			if isToken(tokens.type[i],tokens.value[i], !(TOKEN_PUNCTUATION),"(","{","[") then
+				table.insert(bracketTokenIndices, i)
 
-			if not iStart then
-				reportMessageInFile(io.stderr, s, path, tokens.position1[i], "Error", "BracketChecker", "Stray bracket.")
-				bracketTokenIndices[1] = nil
-				break
+			elseif isToken(tokens.type[i],tokens.value[i], !(TOKEN_PUNCTUATION),")","}","]") then
+				local iStart   = table.remove(bracketTokenIndices)
+				local expected = BRACKETS[tokens.value[iStart]]
 
-			elseif tokens.value[i] ~= expected then
-				printerr()
-				reportMessageInFile(io.stderr, s, path, tokens.position1[i],      "Error", "BracketChecker", "Expected '%s'.", expected)
-				reportMessageInFile(io.stderr, s, path, tokens.position1[iStart], "Info",  "BracketChecker", "...here is the unmatched bracket.")
-				exitFailure()
+				if not iStart then
+					reportMessageInFile(io.stderr, s, path, tokens.position1[i], "Error", "BracketChecker", "Stray bracket.")
+					bracketTokenIndices[1] = nil
+					break
+
+				elseif tokens.value[i] ~= expected then
+					printerr()
+					reportMessageInFile(io.stderr, s, path, tokens.position1[i],      "Error", "BracketChecker", "Expected '%s'.", expected)
+					reportMessageInFile(io.stderr, s, path, tokens.position1[iStart], "Info",  "BracketChecker", "...here is the unmatched bracket.")
+					exitFailure()
+				end
 			end
 		end
-	end
 
-	if bracketTokenIndices[1] then
-		local i = bracketTokenIndices[1]
-		errorInFile(s, path, tokens.position1[i], "BracketChecker", "Missing end bracket.", BRACKETS[tokens.value[i]])
-	end
+		if bracketTokenIndices[1] then
+			local i = bracketTokenIndices[1]
+			errorInFile(s, path, tokens.position1[i], "BracketChecker", "Missing end bracket.", BRACKETS[tokens.value[i]])
+		end
 
-	!ifDEBUG `profilerUnpause()`
-	return startTime, endTime
+		!ifDEBUG `profilerUnpause()`
+		return startTime, endTime
+	end
 end
 
 

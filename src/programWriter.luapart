@@ -1669,8 +1669,13 @@ function _G.writeConstantValue(state, writer, const)
 	elseif const.kind == !(CONST_KIND_NULL) then
 		file:write("nil")
 
+	elseif const.kind == !(CONST_KIND_VIEW) then
+		-- Note: The constants must be written in the same order as they were allocated for these
+		-- views to work (which is what should happen naturally because of how dependencies work).
+		writeAccess(state, writer, const.value)
+
 	elseif const.kind ~= !(CONST_KIND_NORMAL) then
-		errorInternal("Incomplete: Handle constant kind '%s'.", (CONST_KIND_TITLES[const.tag] or "?"))
+		errorInternal("Incomplete: Handle constant kind '%s'.", (CONST_KIND_TITLES[const.kind] or "?"))
 
 	elseif not const.isObject then
 		if tag ~= !(typeTags.TypeInfoEnum) then
@@ -2240,19 +2245,19 @@ end
 
 
 
+local HAS_DEFAULT_VALUE = !(Set{
+	typeTags.TypeInfoBool,
+	typeTags.TypeInfoInt,
+	typeTags.TypeInfoNone,
+	typeTags.TypeInfoFloat,
+	typeTags.TypeInfoString,
+	typeTags.TypeInfoArray,
+	typeTags.TypeInfoTable,
+	typeTags.TypeInfoStruct,
+	typeTags.TypeInfoVararg, -- Varargs never have any default value(s), but because it's a list we can just say that the default value is "nothing".
+})
 function _G.doesTypeHaveAnyDefaultValue(typeInfo)
-	local tag = typeInfo.tag
-	return !!(anyV(`tag`,
-		typeTags.TypeInfoBool,
-		typeTags.TypeInfoInt,
-		typeTags.TypeInfoNone,
-		typeTags.TypeInfoFloat,
-		typeTags.TypeInfoString,
-		typeTags.TypeInfoArray,
-		typeTags.TypeInfoTable,
-		typeTags.TypeInfoStruct,
-		typeTags.TypeInfoVararg -- Varargs never have any default value(s), but because it's a list we can just say that the default value is "nothing".
-	))
+	return HAS_DEFAULT_VALUE[typeInfo.tag] or false
 end
 
 

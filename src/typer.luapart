@@ -4922,7 +4922,7 @@ end
 
 function _G.inferNode(state, node)
 	local nodeInferrer = nodeInferrers[node.nodeType] or errorUnhandledNodeType(state, node)
-	return nodeInferrer(state, node)
+	nodeInferrer(state, node)
 end
 
 function _G.queueForReinfer(state, node)
@@ -4934,25 +4934,33 @@ end
 
 
 -- Note: It's assumed that the expression tree has all types figured out.
+local ALWAYS_CONST = !(Set{
+	nodeTypes.AstImport, -- Namespaces, just like types, are always constant.
+	nodeTypes.AstLambda, -- Lambdas (which are function signatures) are types too, thus constant.
+	nodeTypes.AstLiteral,
+	nodeTypes.AstNamespace,
+	nodeTypes.AstNull,
+	nodeTypes.AstStruct, nodeTypes.AstEnum,   -- Structs and enums are types (which are constant).
+	nodeTypes.AstType,   nodeTypes.AstTypeOf, -- All types are constant, just like literals.
+})
+local NEVER_CONST = !(Set{
+	nodeTypes.AstCall,
+	nodeTypes.AstForeign,  -- Technically foreign values are seen as constant at runtime, but since we don't know what they are at compile-time we (usually) treat them as runtime values.
+	nodeTypes.AstTypeInfo, -- @Incomplete: Make type_info() a constant expression.
+	nodeTypes.AstVararg,
+})
 function _G.isExpressionConstant(state, expr)
 	local nodeType = expr.nodeType
 
-	if nodeType == !(nodeTypes.AstLiteral) then
+	if ALWAYS_CONST[nodeType] then
 		return true
+	elseif NEVER_CONST[nodeType] then
+		return false
 
 	elseif nodeType == !(nodeTypes.AstIdentifier) then
 		local ident = expr
 		local decl  = ident.declaration or errorInternal(state, ident)
 		return decl.isConstant and isExpressionConstant(state, decl.value)
-
-	elseif !!(anyV(`nodeType`, nodeTypes.AstType,nodeTypes.AstTypeOf)) then
-		return true--, expr.representedType.id -- All types are constant, just like literals.
-
-	elseif !!(anyV(`nodeType`, nodeTypes.AstStruct,nodeTypes.AstEnum)) then
-		return true--, expr.representedType.id -- Structs and enums are types (which are constant, just like literals).
-	elseif nodeType == !(nodeTypes.AstLambda) then
-		local lambda = expr
-		return true--, lambda.inferredType.id -- Lambdas (which are function signatures) are types too, thus constant.
 
 	elseif nodeType == !(nodeTypes.AstCast) then
 		local cast = expr
@@ -4961,10 +4969,9 @@ function _G.isExpressionConstant(state, expr)
 	elseif nodeType == !(nodeTypes.AstUnary) then
 		local unary = expr
 		return isExpressionConstant(state, unary.expression)
-
 	elseif nodeType == !(nodeTypes.AstBinary) then
 		local binary = expr
-		return (isExpressionConstant(state, binary.left) and isExpressionConstant(state, binary.right))
+		return isExpressionConstant(state, binary.left) and isExpressionConstant(state, binary.right)
 
 	elseif nodeType == !(nodeTypes.AstConditional) then
 		local conditional = expr
@@ -4974,45 +4981,19 @@ function _G.isExpressionConstant(state, expr)
 			and isExpressionConstant(state, conditional.branchFalse)
 		)
 
-	elseif nodeType == !(nodeTypes.AstCall) then
-		return false -- Calls are always a runtime operation.
-
 	elseif nodeType == !(nodeTypes.AstAccess) then
-		local access              = expr
-		local typeInfoRepresented = getTypeRepresentedByExpression(access.object)
-
-		if typeInfoRepresented and typeInfoRepresented.tag == !(typeTags.TypeInfoEnum) then
-			return true
-		else
-			return false -- Other accesses resolving to constants should have simplified to something else already (I think).
-		end
-
-	elseif nodeType == !(nodeTypes.AstImport) then
-		return true -- Namespaces, just like types, are always constant.
+		local access = expr
+		return isExpressionConstant(state, access.object) and isExpressionConstant(state, access.member)
 
 	elseif nodeType == !(nodeTypes.AstTable) then
 		local tableNode = expr
+		if tableNode.trailingExpression then  return false  end
+
 		for _, tableField in ipairs(tableNode.fields) do
 			if not isExpressionConstant(state, tableField.key)   then  return false  end
 			if not isExpressionConstant(state, tableField.value) then  return false  end
 		end
-		return true
 
-	elseif nodeType == !(nodeTypes.AstVararg) then
-		return false
-
-	elseif nodeType == !(nodeTypes.AstTypeInfo) then
-		return false -- @Incomplete: Make type_info() a constant expression.
-
-	elseif nodeType == !(nodeTypes.AstForeign) then
-		-- Technically foreign values are seen as constant at runtime, but since we don't know
-		-- what they are at compile-time we (usually) treat them as runtime values.
-		return false
-
-	elseif nodeType == !(nodeTypes.AstNull) then
-		return true
-
-	elseif nodeType == !(nodeTypes.AstNamespace) then
 		return true
 
 	else
@@ -5300,6 +5281,8 @@ function _G.simplifyTypeExpression(state, expr, typeRepresented)
 end
 
 local function simplifyCast(state, cast)
+	if cast.expression.nodeType == !(nodeTypes.AstAccess) then  return  end -- Cannot simplify views.
+
 	local exprTypeInfo = cast.expression.inferredType
 	local castTypeInfo = cast.inferredType
 
@@ -5457,6 +5440,9 @@ end
 
 local function simplifyUnary(state, unary)
 	-- @Incomplete: Simplify these kinds of expressions (including implicit casts): not (str ~= "") => str == ""
+
+	if unary.expression.nodeType == !(nodeTypes.AstAccess) then  return  end -- Cannot simplify views.
+
 	local typeInfo = unary.inferredType
 
 	if nil then
@@ -5526,6 +5512,8 @@ local function simplifyBinary(state, binary)
 	local l  = binary.left
 	local r  = binary.right
 	local op = binary.operation
+
+	if l.nodeType == !(nodeTypes.AstAccess) or r.nodeType == !(nodeTypes.AstAccess) then  return  end -- Cannot simplify views.
 
 	!local ASSERT_BOTH_OPERANDS_NUMERIC_LITERALS = templateToLua(
 		`
@@ -5702,6 +5690,7 @@ function _G.simplifyExpressionIfConstant(state, expr)
 
 		if typeInfo.tag == !(typeTags.TypeInfoEnum) then
 			if ident.name ~= decl.name.name then
+				-- @Cleanup: Is this necessary? Can't we just do ident.name=decl.name.name?
 				local copy = astCopy(decl.name, ident.token, ident.parent)
 				replaceQueuedNodeAndUnqueueOldTree(state, ident, copy)
 				moveToNextRelevantPipe(state, copy, !(PIPE_INFER))
@@ -5718,6 +5707,8 @@ function _G.simplifyExpressionIfConstant(state, expr)
 
 		!ASSERT("typeInfo.tag ~= "..typeTags.TypeInfoType)
 		if not isTypeSimple(typeInfo) then  return  end
+
+		if decl.value.nodeType == !(nodeTypes.AstAccess) then  return  end -- This will create a constant lookup (AKA view).
 
 		-- At this point we should have a literal to copy. Hopefully the expression we copy
 		-- has been simplified into a literal if it wasn't a literal to begin with.

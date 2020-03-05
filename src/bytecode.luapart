@@ -87,7 +87,7 @@ local !struct"Constant"{
 	{`name`,       ""},  -- Only used for constants that are objects.  @Incomplete: Separate name for metaprogram (which may be limited) and final name.
 	{`nameLocked`, false},
 
-	{`kind`,       CONST_KIND_NORMAL}, -- CONST_KIND_NORMAL|CONST_KIND_FOREIGN|CONST_KIND_TYPE_INFO|CONST_KIND_NULL
+	{`kind`,       CONST_KIND_NORMAL}, -- CONST_KIND_NORMAL|CONST_KIND_FOREIGN|CONST_KIND_TYPE_INFO|CONST_KIND_NULL|CONST_KIND_VIEW
 	{`valueType`,  nil}, -- TypeInfo
 	{`value`,      nil},
 
@@ -103,6 +103,7 @@ local !struct"Constant"{
 -- constant, isNew = bcAllocateConstantValueIfNew( state, CONST_KIND_FOREIGN,   dummyTypeInfo,     foreign,         nodeForError )
 -- constant, isNew = bcAllocateConstantValueIfNew( state, CONST_KIND_TYPE_INFO, dummyTypeInfo,     typeInfo,        nodeForError )
 -- constant, isNew = bcAllocateConstantValueIfNew( state, CONST_KIND_NULL,      dummyTypeInfo,     nil,             nodeForError )
+-- constant, isNew = bcAllocateConstantValueIfNew( state, CONST_KIND_VIEW,      dummyTypeInfo,     access,          nodeForError )
 function _G.bcAllocateConstantValueIfNew(state, kind, typeInfo, v, nodeForError)
 	local tag          = typeInfo.tag
 	local kindIsNormal = kind == !(CONST_KIND_NORMAL)
@@ -156,6 +157,9 @@ function _G.bcAllocateConstantValueIfNew(state, kind, typeInfo, v, nodeForError)
 		elseif kind == !(CONST_KIND_NULL) then
 			return const, false -- NULL is always the same value (nil).
 
+		elseif kind == !(CONST_KIND_VIEW) then
+			if const.value == v then  return const, false  end
+
 		else
 			errorInternal(state, nodeForError, "Incomplete: Unhandled constant kind '%s'.", (CONST_KIND_TITLES[kind] or "?"))
 		end
@@ -192,9 +196,10 @@ end
 -- constant, isNew = bcAllocateConstantValueForExpressionIfNew( state, expression, dependent )
 -- Returns nil on failure and the dependent is now waiting.
 function _G.bcAllocateConstantValueForExpressionIfNew(state, expr, dependent)
+	local nodeType = expr.nodeType
 	local typeInfo = expr.inferredType
 
-	if expr.nodeType == !(nodeTypes.AstLiteral) then
+	if nodeType == !(nodeTypes.AstLiteral) then
 		local literal = expr
 		local const   = literal.valueConstant
 
@@ -204,7 +209,7 @@ function _G.bcAllocateConstantValueForExpressionIfNew(state, expr, dependent)
 
 		return const, false
 
-	elseif expr.nodeType == !(nodeTypes.AstLambda) then
+	elseif nodeType == !(nodeTypes.AstLambda) then
 		local lambda = expr
 		assert(lambda.body) -- We should never get here for lambdas without bodies as those would have been AstTypes.
 		assert(not lambda.isPolymorphic)
@@ -214,12 +219,12 @@ function _G.bcAllocateConstantValueForExpressionIfNew(state, expr, dependent)
 
 		return lambda.valueConstant, isNew
 
-	elseif expr.nodeType == !(nodeTypes.AstType) then
+	elseif nodeType == !(nodeTypes.AstType) then
 		local typeNode = expr
 		typeInfo       = getTypeInfoForBuiltinType(state, "type")
 		return bcAllocateConstantValueIfNew(state, !(CONST_KIND_NORMAL), typeInfo, typeNode.representedType, dependent)
 
-	elseif expr.nodeType == !(nodeTypes.AstStruct) then
+	elseif nodeType == !(nodeTypes.AstStruct) then
 		local struct     = expr
 		local structInfo = struct.representedType
 
@@ -233,7 +238,7 @@ function _G.bcAllocateConstantValueForExpressionIfNew(state, expr, dependent)
 
 		return const, isNew
 
-	elseif expr.nodeType == !(nodeTypes.AstEnum) then
+	elseif nodeType == !(nodeTypes.AstEnum) then
 		local enum         = expr
 		local enumInfo     = enum.representedType
 		local const, isNew = bcAllocateConstantValueIfNew(state, !(CONST_KIND_NORMAL), typeInfo, enumInfo, dependent)
@@ -244,7 +249,7 @@ function _G.bcAllocateConstantValueForExpressionIfNew(state, expr, dependent)
 
 		return const, isNew
 
-	elseif expr.nodeType == !(nodeTypes.AstIdentifier) then
+	elseif nodeType == !(nodeTypes.AstIdentifier) then
 		local ident = expr
 
 		if typeInfo.tag == !(typeTags.TypeInfoEnum) then
@@ -259,16 +264,16 @@ function _G.bcAllocateConstantValueForExpressionIfNew(state, expr, dependent)
 			return bcAllocateConstantValueForExpressionIfNew(state, decl.value, dependent)
 		end
 
-	elseif expr.nodeType == !(nodeTypes.AstCast) then
+	elseif nodeType == !(nodeTypes.AstCast) then
 		-- The cast is probably from/to 'any'.
 		local cast = expr
 		return bcAllocateConstantValueForExpressionIfNew(state, cast.expression, dependent)
 
-	elseif expr.nodeType == !(nodeTypes.AstForeign) then
+	elseif nodeType == !(nodeTypes.AstForeign) then
 		local foreign = expr
 		return bcAllocateConstantValueIfNew(state, !(CONST_KIND_FOREIGN), typeInfo, foreign, dependent) -- Note: What typeInfo is doesn't matter here.
 
-	elseif expr.nodeType == !(nodeTypes.AstTable) then
+	elseif nodeType == !(nodeTypes.AstTable) then
 		local tableNode    = expr
 		local const, isNew = bcAllocateConstantValueIfNew(state, !(CONST_KIND_NORMAL), typeInfo, tableNode, dependent)
 
@@ -286,8 +291,11 @@ function _G.bcAllocateConstantValueForExpressionIfNew(state, expr, dependent)
 
 		return const, isNew
 
-	elseif expr.nodeType == !(nodeTypes.AstNull) then
+	elseif nodeType == !(nodeTypes.AstNull) then
 		return bcAllocateConstantValueIfNew(state, !(CONST_KIND_NULL), typeInfo, nil, dependent) -- Note: What typeInfo is doesn't matter here.
+
+	elseif nodeType == !(nodeTypes.AstAccess) then
+		return bcAllocateConstantValueIfNew(state, !(CONST_KIND_VIEW), typeInfo, expr, dependent) -- Note: What typeInfo is doesn't matter here.
 
 	else
 		errorUnhandledNodeType(state, expr)
