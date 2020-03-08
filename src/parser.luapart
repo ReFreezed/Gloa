@@ -941,12 +941,15 @@ function _G.parseStruct(state, parentNode)
 				if node.autobake ~= !(AUTOBAKE_DISABLED) and not state.soft then
 					parserMessageLine(io.stderr, state, node.token, "Warning", "Struct arguments are always auto-baked and thus don't need any $.")
 				end
+
+			elseif node.nodeType == !(nodeTypes.AstBake) then
+				!ERROR_OR_RETURN(`errorParsing(state, node.token, "Placeholder types are not supported in struct arguments.")`, toLua(VISIT_BREAK))
 			end
 		end)
 
 		if gotError then  return nil  end
 
-		-- Move declarations from arguments into the struct for later baking.
+		-- Move declarations from the temporary args node into the struct for later baking.
 		for _, arg in ipairs(args.arguments) do
 			local decl      = arg.declaration
 			decl.parent     = struct
@@ -2260,10 +2263,8 @@ function _G.parseLambda(state, parentNode, allowBody)
 				decl.name         = astCopy(ident, nil, decl)
 				decl.isConstant   = true
 
-				local typeNode    = astNewNode(AstType, bake.token, decl)
-				typeNode.kind     = !(TYPE_KIND_SIMPLE_BUILTIN)
-				typeNode.typeName = "placeholder"
-				decl.value        = typeNode
+				-- Note: We're not setting decl.type nor decl.value, leaving the declaration unfinished.
+				-- It should be ok as polymorphic functions shouldn't get inferred.
 
 				table.insert(lambda.statements,       decl)
 				table.insert(lambda.declarations,     decl)
@@ -3163,6 +3164,7 @@ do
 				write(" (", ident.name)
 				if ident.inferredType then  write(", type=", getFriendlyTypeInfoName(ident.inferredType))  end
 				if ident.inferredType and getTypeRepresentedByExpression(ident) then  write(", typeRepresented=", getFriendlyTypeInfoName(getTypeRepresentedByExpression(ident)))  end
+				if ident.declaration  then  write(", decl=", ident.declaration.s)  end
 				write(")\n")
 
 			elseif node.nodeType == !(nodeTypes.AstUnary) then

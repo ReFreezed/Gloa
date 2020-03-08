@@ -215,9 +215,9 @@ do
 end
 
 local function doesLambdaHaveSignature(lambda, funcSig)
-	local argsIn      = lambda.argumentsIn
-	local argsTypesIn = funcSig.argumentTypesIn
-	if (argsIn  and #argsIn .arguments or 0) ~= #argsTypesIn  then  return false  end
+	local argsIn     = lambda.argumentsIn
+	local argTypesIn = funcSig.argumentTypesIn
+	if (argsIn and #argsIn.arguments or 0) ~= #argTypesIn then  return false  end
 
 	local argsOut     = lambda.argumentsOut
 	local argTypesOut = funcSig.argumentTypesOut
@@ -226,7 +226,7 @@ local function doesLambdaHaveSignature(lambda, funcSig)
 	if argsIn then
 		local requiredArgsIn = funcSig.requiredArgumentsIn
 		for i, arg in ipairs(argsIn.arguments) do
-			if arg.declaration.name.inferredType ~= argsTypesIn[i]     then  return false  end
+			if arg.declaration.name.inferredType ~= argTypesIn[i]      then  return false  end
 			if arg.isRequired                    ~= requiredArgsIn[i]  then  return false  end
 		end
 	end
@@ -242,14 +242,19 @@ local function doesLambdaHaveSignature(lambda, funcSig)
 end
 
 function _G.getTypeInfoForLambda(state, lambda)
-	if lambda.argumentsIn then
-		for _, arg in ipairs(lambda.argumentsIn.arguments) do
-			if not arg.declaration.name.inferredType then  return nil  end
+	local argsIn  = lambda.argumentsIn
+	local argsOut = lambda.argumentsOut
+
+	if not lambda.isPolymorphic then
+		if argsIn then
+			for _, arg in ipairs(argsIn.arguments) do
+				if not arg.declaration.name.inferredType then  return nil  end
+			end
 		end
-	end
-	if lambda.argumentsOut then
-		for _, arg in ipairs(lambda.argumentsOut.arguments) do
-			if not arg.declaration.name.inferredType then  return nil  end
+		if argsOut then
+			for _, arg in ipairs(argsOut.arguments) do
+				if not arg.declaration.name.inferredType then  return nil  end
+			end
 		end
 	end
 
@@ -262,15 +267,24 @@ function _G.getTypeInfoForLambda(state, lambda)
 	local funcSig         = newTypeInfo(state, TypeInfoFunction)
 	funcSig.isPolymorphic = lambda.isPolymorphic
 
-	if lambda.argumentsIn then
-		for i, arg in ipairs(lambda.argumentsIn.arguments) do
-			funcSig.argumentTypesIn[i]      = arg.declaration.name.inferredType
+	local placeholderType       = lambda.isPolymorphic and getTypeInfoForBuiltinType(state, "placeholder"  ) or nil
+	local placeholderTypeVararg = lambda.isPolymorphic and getTypeInfoForVararg     (state, placeholderType) or nil
+
+	if argsIn then
+		for i, arg in ipairs(argsIn.arguments) do
+			funcSig.argumentTypesIn[i]
+				=   placeholderType
+				and (arg.declaration.name.nodeType == !(nodeTypes.AstVararg) and placeholderTypeVararg or placeholderType)
+				or  arg.declaration.name.inferredType
 			funcSig.requiredArgumentsIn[i]  = arg.isRequired
 		end
 	end
-	if lambda.argumentsOut then
-		for i, arg in ipairs(lambda.argumentsOut.arguments) do
-			funcSig.argumentTypesOut[i]     = arg.declaration.name.inferredType
+	if argsOut then
+		for i, arg in ipairs(argsOut.arguments) do
+			funcSig.argumentTypesOut[i]
+				=   placeholderType
+				and (arg.declaration.name.nodeType == !(nodeTypes.AstVararg) and placeholderTypeVararg or placeholderType)
+				or  arg.declaration.name.inferredType
 			funcSig.requiredArgumentsOut[i] = arg.isRequired
 		end
 	end
@@ -394,7 +408,9 @@ function _G.requireTypeRepresentedByExpression(state, expr)
 
 	local typeInfo = expr.inferredType
 
-	if typeInfo.tag ~= !(typeTags.TypeInfoType) then
+	if typeInfo.tag == !(typeTags.TypeInfoList) then
+		typeError(state, expr, "Expected a type. This is a function call.")
+	elseif typeInfo.tag ~= !(typeTags.TypeInfoType) then
 		typeError(state, expr, "Expected a type. (Got %s)", getFriendlyTypeInfoName(typeInfo))
 	elseif not isExpressionConstant(state, expr) then
 		typeError(state, expr, "Expected a constant. (Got variable of type '%s')", getFriendlyTypeInfoName(typeInfo))
@@ -889,6 +905,8 @@ local function checkRedeclaration(state, ident, decl, isMember, scope)
 	-- Non-shadow.
 	elseif not decl.canShadow then
 		local identEarly, identLate, extraMessageEarly, extraMessageLate = getEarlyAndLateForRedeclarationError(state, declExisting.name, ident)
+		-- !ifDEBUG `identEarly, identLate = declExisting.name, ident`
+		-- !ifDEBUG `astPrintTree(astFindCommonParent(identEarly, identLate))`
 		typeError2(state,
 			identLate,  F("'%s' has already been declared.%s", ident.name, extraMessageLate),
 			identEarly, F("...it was declared here.%s", extraMessageEarly)
@@ -1700,6 +1718,7 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 
 			if not isCompatible then
 				if softCheck then  return false, 0  end
+				!ifDEBUG `astPrintTree(callOrReturnNode)`
 				typeError(
 					state, getArgumentNodeForError(callOrReturnNode, valueIndex, valueExpr),
 					"Type mismatch for %s #%d. (Wanted %s, got %s)",
@@ -1760,13 +1779,19 @@ local function getBestMatchOrTriggerError(state, call, matches, matchTerm, error
 	exitFailure()
 end
 
-local function getPathToNode(state, topNode, node)
+local function getPathToNode(state, topNode, node, nodeContainers, nodeKeys)
 	!ASSERT `topNode`
 	local locations = {}
 
+	-- while true do
 	while node ~= topNode do
-		local loc = {node=node.parent, container=node.queued.container, key=node.queued.key}
+		local loc = {
+			containerNode = node.parent,
+			container     = nodeContainers[node] or errorInternal(state, node),
+			key           = nodeKeys[node]       or errorInternal(state, node),
+		}
 		table.insert(locations, loc)
+		-- if node == topNode then  break  end
 		node = node.parent or errorInternal(state, topNode)
 	end
 
@@ -1916,6 +1941,10 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 				table.remove(morphLambda.statements, i) -- Should be fast enough. There shouldn't be that many statements in lambdas.
 			end
 		end
+
+		for _, declBaked in ipairs(morphLambda.bakeDeclarations) do
+			declBaked.checkedRedeclaration = true -- @Hack to prevent redeclaration errors between polymorphed lambda and base lambda.
+		end
 	end
 
 	table.insert(lambda.polymorphs, morphDecl)
@@ -1945,7 +1974,13 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 		local declTypeExpr = arg.declaration.type -- This is probably an AstType, if anything.
 
 		if declTypeExpr then
-			astVisitAllNodes(declTypeExpr, function(node)
+			local nodeContainers = {}
+			local nodeKeys       = {}
+
+			astVisitAllNodes(declTypeExpr, function(node, container, key)
+				nodeContainers[node] = container or arg.declaration
+				nodeKeys      [node] = key       or "type"
+
 				if node.nodeType ~= !(nodeTypes.AstBake) then  return  end
 
 				local bake = node
@@ -1956,46 +1991,109 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 				end
 
 				-- @Incomplete: Handle optional arguments.
-				local valueExpr     = realArguments    [argIndex] or errorInternal(state, call)
-				local valueTypeInfo = realArgumentTypes[argIndex] or errorInternal(state, valueExpr)
+				local valueExpr     = realArguments[argIndex] or errorInternal(state, call)
+				local bakeValueExpr = nil
+				local bakeValueType = realArgumentTypes[argIndex] or errorInternal(state, valueExpr)
+				bakeValueType       = adjustTypeToOne(state, valueExpr, bakeValueType)
 
-				valueTypeInfo = adjustTypeToOne(state, valueExpr, valueTypeInfo)
+				!(
+				local function BAKE_ERROR(messageAndParamsCode)
+					TRACE()
+					__LUA(templateToLua(
+						trimTemplate`
+							printerr()
+							typeMessage(io.stderr, state, valueExpr, "Error", $message)
+							if bakeValueExpr then
+								typeMessage(
+									io.stderr, state, bakeValueExpr, "Info",
+									"...here is the current value being looked at. (Type is '%s')",
+									getFriendlyTypeInfoName(bakeValueExpr.inferredType))
+							end
+							exitFailure()
+						`,
+						{message=messageAndParamsCode}
+					))
+				end
+				)
 
-				for _, loc in ipairs(getPathToNode(state, declTypeExpr, bake)) do
-					if loc.node.nodeType == !(nodeTypes.AstType) then
-						if loc.node.kind == !(TYPE_KIND_ARRAY) then
-							if valueTypeInfo.tag == !(typeTags.TypeInfoArray) then
-								local arraySig   = valueTypeInfo
-								valueTypeInfo    = arraySig.itemType or errorInternal(state, valueExpr)
+				for _, patternLoc in ipairs(getPathToNode(state, declTypeExpr, bake, nodeContainers, nodeKeys)) do
+					if patternLoc.containerNode.nodeType == !(nodeTypes.AstType) then
+						local patternTypeNode = patternLoc.containerNode
 
-							elseif valueTypeInfo.tag == !(typeTags.TypeInfoStruct) and valueTypeInfo.kind == !(STRUCT_KIND_ARRAY) then
-								local structInfo = valueTypeInfo
-								valueTypeInfo    = structInfo.valueType or errorInternal(state, valueExpr)
+						if patternTypeNode.kind == !(TYPE_KIND_ARRAY) then
+							if bakeValueType.tag == !(typeTags.TypeInfoArray) then
+								local arraySig = bakeValueType
+								bakeValueExpr  = nil
+								bakeValueType  = arraySig.itemType or errorInternal(state, valueExpr)
+
+							elseif bakeValueType.tag == !(typeTags.TypeInfoStruct) and bakeValueType.kind == !(STRUCT_KIND_ARRAY) then
+								local structInfo = bakeValueType
+								bakeValueExpr    = nil
+								bakeValueType    = structInfo.valueType or errorInternal(state, valueExpr)
 
 							else
-								typeError(
-									state, valueExpr,
-									"Polymorphic call: Unexpected type. (Wanted an array, got %s)",
-									getFriendlyTypeInfoName(valueTypeInfo)
-								)
+								!BAKE_ERROR`"Polymorphic call: Unexpected type. (Wanted an array, got %s)", getFriendlyTypeInfoName(bakeValueType)`
 							end
+
 						else
-							errorUnhandledNodeType(state, loc.node)
+							errorUnhandledNodeType(state, patternTypeNode)
 						end
+
+					elseif patternLoc.containerNode.nodeType == !(nodeTypes.AstCall) then
+						local patternCall = patternLoc.containerNode
+
+						if bakeValueType.tag == !(typeTags.TypeInfoStruct) then
+							-- void
+						elseif bakeValueType.tag == !(typeTags.TypeInfoType) then
+							-- Note sure if this is bullet proof or sane in any way...
+							assert(bakeValueExpr)
+							bakeValueType = requireTypeRepresentedByExpression(state, bakeValueExpr)
+						else
+							!BAKE_ERROR`"Polymorphic call: Expected a type to be a (polymorphic) struct. (Got %s)", getFriendlyTypeInfoName(bakeValueType)`
+						end
+
+						local structInfo = bakeValueType
+						if structInfo.tag ~= !(typeTags.TypeInfoStruct) then
+							!BAKE_ERROR`"Polymorphic call: Expected a type to be a (polymorphic) struct. (Got %s)", getFriendlyTypeInfoName(structInfo)`
+						elseif not structInfo.astNode.polymorphSourceStruct then
+							bakeValueExpr = structInfo.astNode
+							!BAKE_ERROR`"Polymorphic call: Expected a type to be a polymorphic struct. (%s is not polymorphic)", getFriendlyTypeInfoName(structInfo)`
+						end
+
+						-- @Incomplete: Handle optional arguments.
+						if #patternCall.arguments ~= #structInfo.astNode.bakeDeclarations then
+							bakeValueExpr = structInfo.astNode
+							!BAKE_ERROR`
+								"Polymorphic call: Expected an argument value type to be a polymorphic struct that takes %d argument%s. (%s takes %d)  (Note: Optional arguments are not handled properly yet.)",
+								#patternCall.arguments,
+								patternCall.arguments[2] and "s" or "",
+								getFriendlyTypeInfoName(structInfo),
+								#structInfo.astNode.bakeDeclarations
+							`
+						end
+
+						local declBakedOther = structInfo.astNode.bakeDeclarations[patternLoc.key] or errorInternal(state, valueExpr)
+
+						bakeValueExpr = declBakedOther.value or errorInternal(state, declBakedOther)
+						bakeValueType = bakeValueExpr.inferredType -- Note: declBakedOther.name may not be inferred yet.
+
+						if not bakeValueType then
+							!BAKE_ERROR`"Internal compiler error: Polymorphic call: Expected this to be inferred."` -- 'this' is referring to bakeValueExpr. (See BAKE_ERROR)
+						end
+
 					else
-						errorUnhandledNodeType(state, loc.node)
+						errorUnhandledNodeType(state, patternLoc.containerNode)
 					end
-				end
+				end--for getPathToNode
 
 				local declBaked = morphLambda.bakeDeclarations[bakeIndex] or errorInternal(state, bake)
-				local typeNode  = declBaked.value                         or errorInternal(state, bake)
+				if bakeValueExpr then
+					declBaked.value = astCopy(bakeValueExpr, declBaked.token, declBaked)
+				else
+					declBaked.value = createTypeNodeFromInfo(state, bakeValueType, declBaked.token, declBaked)
+				end
 
-				typeNode.inferredType    = getTypeInfoForBuiltinType(state, "type")
-				typeNode.representedType = valueTypeInfo or errorInternal(state, valueExpr)
-
-				-- For debugging:
-				typeNode.typeName = ":generatedAutoInferredTypeNode:"
-				typeNode.kind     = !(TYPE_KIND_UNSET)
+				return !(VISIT_IGNORE_CHILDREN) -- There should only be an identifier inside AstBake.
 			end)
 		end
 	end
@@ -2010,6 +2108,7 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 				--
 				local declBaked  = arg.declaration
 				declBaked.parent = morphLambda
+				declBaked.checkedRedeclaration = true -- @Hack to prevent redeclaration errors between polymorphed lambda and base lambda.
 				table.insert(morphLambda.statements,   declBaked)
 				table.insert(morphLambda.declarations, declBaked)
 				-- table.insert(morphLambda.bakeDeclarations, declBaked) -- Should we do this? It may be useless.
@@ -3363,6 +3462,12 @@ end
 end
 
 !NODE_INFERRER `function nodeInferrers.AstLambda(state, lambda)`
+	if lambda.isPolymorphic then
+		lambda.inferredType = getTypeInfoForLambda(state, lambda) or errorInternal(state, lambda)
+		moveToNextRelevantPipe(state, lambda)
+		return
+	end
+
 	local argsIn  = lambda.argumentsIn
 	local argsOut = lambda.argumentsOut
 
@@ -3383,7 +3488,7 @@ end
 		end
 	end
 
-	local funcSig       = getTypeInfoForLambda(state, lambda) or errorInternal()
+	local funcSig       = getTypeInfoForLambda(state, lambda) or errorInternal(state, lambda)
 	lambda.inferredType = funcSig
 
 	if lambda.bodyIsForeign then
@@ -3785,7 +3890,12 @@ end
 	end
 
 	local scope, statement = getClosestScope(bake)
-	if not (scope and scope.nodeType == !(nodeTypes.AstLambda) and statement == scope.argumentsIn) then
+	if not (scope and (
+		(scope.nodeType == !(nodeTypes.AstLambda) and statement == scope.argumentsIn)
+		-- or (scope.nodeType == !(nodeTypes.AstStruct) and indexOf(scope.bakeDeclarations, statement))
+	)) then
+		astPrintTree(bake)
+		astPrintTree(scope)
 		errorParsing(state, bake.token, "Unexpected '$'.")
 	end
 
@@ -4939,6 +5049,7 @@ end
 
 -- Note: It's assumed that the expression tree has all types figured out.
 local ALWAYS_CONST = !(Set{
+	nodeTypes.AstBake,
 	nodeTypes.AstImport, -- Namespaces, just like types, are always constant.
 	nodeTypes.AstLambda, -- Lambdas (which are function signatures) are types too, thus constant.
 	nodeTypes.AstLiteral,

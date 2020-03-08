@@ -182,23 +182,15 @@ do
 		astVisitAllNodes(topNode, function(node)
 			nodesToAdd[node] = true
 
+			-- :SelectiveQueuing
+
 			if node.nodeType == !(nodeTypes.AstStaticIf) then
 				local staticIf = node
 				registerNodesToAddToQueue(state, staticIf.condition, nodesToAdd)
 				return !(VISIT_IGNORE_CHILDREN)
 
-			elseif node.nodeType == !(nodeTypes.AstLambda) and node.isPolymorphic then
-				local lambda = node
-				-- Do we really need to queue any children? 2020-02-02 @Speed @Cleanup
-				for _, statement in ipairs(lambda.statements) do
-					if statement ~= lambda.body then
-						registerNodesToAddToQueue(state, statement, nodesToAdd)
-					end
-				end
-				return !(VISIT_IGNORE_CHILDREN)
-
-			elseif node.nodeType == !(nodeTypes.AstStruct) and node.isPolymorphic then
-				return !(VISIT_IGNORE_CHILDREN) -- We don't need to queue anything inside polymorphic structs (I think).
+			elseif !!(anyV(`node.nodeType`, nodeTypes.AstLambda,nodeTypes.AstStruct)) and node.isPolymorphic then
+				return !(VISIT_IGNORE_CHILDREN) -- We don't need to queue anything inside polymorphic functions or structs (I think).
 			end
 		end)
 	end
@@ -232,6 +224,8 @@ do
 			else
 				nodesToAdd[node] = true
 
+				-- :SelectiveQueuing
+
 				if node.nodeType == !(nodeTypes.AstStaticIf) then
 					local staticIf = node
 					if not staticIf.condition.queued then
@@ -240,19 +234,8 @@ do
 					end
 					return !(VISIT_IGNORE_CHILDREN)
 
-				elseif node.nodeType == !(nodeTypes.AstLambda) and node.isPolymorphic then
-					local lambda = node
-					-- Do we really need to add any children? 2020-02-02 @Cleanup @Speed
-					for _, statement in ipairs(lambda.statements) do
-						if not statement.queued and statement ~= lambda.body then
-							nodesToAdd[statement] = true
-							registerNodesToAddToQueue(state, statement, nodesToAdd)
-						end
-					end
-					return !(VISIT_IGNORE_CHILDREN)
-
-				elseif node.nodeType == !(nodeTypes.AstStruct) and node.isPolymorphic then
-					return !(VISIT_IGNORE_CHILDREN) -- We don't need to queue anything inside polymorphic structs (I think).
+				elseif !!(anyV(`node.nodeType`, nodeTypes.AstLambda,nodeTypes.AstStruct)) and node.isPolymorphic then
+					return !(VISIT_IGNORE_CHILDREN) -- We don't need to queue anything inside polymorphic functions or structs (I think).
 				end
 			end
 		end)
