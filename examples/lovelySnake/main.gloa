@@ -35,7 +35,7 @@ local INITIAL_TAIL_LENGTH :: 1
 
 
 local Direction :: enum { NONE::-1, RIGHT::0, DOWN::1, LEFT::2, UP::3 }
-local FruitKind :: enum { APPLE::0 }
+local FruitKind :: enum { APPLE }
 
 local Coords :: struct { x=0, y=0 }
 
@@ -90,26 +90,29 @@ local loadHighscore :: () {
 }
 
 local randomizeFruitPosition :: () {
+	-- @Robustness: This will loop forever if there's no empty spot left for the fruit to spawn at.
 	while true {
-		local isPlayerAt :: (x,y:int) -> bool {
-			if player.x == x or player.y == y  return true
-
+		local isPlayerTailAt :: (x,y:int) -> bool {
 			for player.tail {
 				if it.x == x and it.y == y  return true
 			}
 			return false
 		}
 
-		fruit.x = getRandom(0, LEVEL_WIDTH-1)
-		fruit.y = getRandom(0, LEVEL_HEIGHT-1)
+		fruit.x = getRandom(0, LEVEL_WIDTH  - 2)
+		fruit.y = getRandom(0, LEVEL_HEIGHT - 2)
 
-		if not isPlayerAt(fruit.x, fruit.y)  break
+		-- Never spawn in front of/behind/to the side of the player.
+		if fruit.x == player.x  fruit.x += 1
+		if fruit.y == player.y  fruit.y += 1
+
+		if not isPlayerTailAt(fruit.x, fruit.y)  break
 	}
 	fruit.spawnTime = uiTime
 }
 
 local startNewGame :: ()   {
-	if score >= 2 { -- Don't save scores below 2.
+	if score > 0 {
 		lastScore = score
 		highscore = max(score, highscore)
 		saveHighscore()
