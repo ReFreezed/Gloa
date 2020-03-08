@@ -3216,6 +3216,8 @@ local function inferTableArray(state, tableNode, arraySig)
 				literal,                   F("Duplicate index %d.", arrayIndex),
 				indexLiterals[arrayIndex], F("...first occurance is here.")
 			)
+		elseif arrayIndex <= 0 then
+			typeError(state, literal, "Array index is not positive. (It is %d)", arrayIndex)
 		end
 
 		indexLiterals[arrayIndex] = literal
@@ -6006,20 +6008,50 @@ end
 
 
 
--- Returns nil if we're now waiting for something. Errors on failure.
-function _G.getExpectedTypeInfo(state, node, strict, expectantTerm, nodeForError)
+local function getExpectedTypeInfoUsingContents(state, node, strict, expectantTerm, nodeForError)
 	!(
 	local NO_EXPECTATION = 'typeError(state, nodeForError, "Could not determine the type of this %s.", expectantTerm)'
 	if DEBUG then
 		NO_EXPECTATION = 'astPrintTree(node) ; '..NO_EXPECTATION
 	end
 	)
-	local parentNodeType  = node.parent.nodeType
+
+	if node.nodeType == !(nodeTypes.AstTable) then
+		-- Detect constructors that look like arrays.
+		local tableNode   = node
+		local tableField1 = tableNode.fields[1]
+		if not tableField1 then  !!(NO_EXPECTATION)  end
+
+		local fieldKey = tableField1.key
+
+		if fieldKey.nodeType == !(nodeTypes.AstLiteral) and fieldKey.literalType == !(LITERAL_INTEGER) then
+			local fieldValue = tableField1.value
+			if fieldValue.nodeType == !(nodeTypes.AstTable) then  !!(NO_EXPECTATION)  end
+
+			if not fieldValue.inferredType then
+				!DEPEND_AND_RETURN(`node`, DEPEND_NODE_INFERRED, `fieldValue`, nil, `nil`)
+			end
+
+			return getTypeInfoForArray(state, fieldValue.inferredType)
+
+		elseif not fieldKey.inferredType then
+			if fieldKey.nodeType ~= !(nodeTypes.AstTable) then
+				!DEPEND_AND_RETURN(`node`, DEPEND_NODE_INFERRED, `fieldKey`, nil, `nil`)
+			end
+		end
+	end
+
+	!!(NO_EXPECTATION)
+end
+
+-- Returns nil if we're now waiting for something. Errors on failure.
+function _G.getExpectedTypeInfo(state, node, strict, expectantTerm, nodeForError)
+	local parentNodeType = node.parent.nodeType
 
 	if parentNodeType == !(nodeTypes.AstAssignment) then
 		local assignment = node.parent
 		local i          = indexOf(assignment.values, node)
-		if not i then  !!(NO_EXPECTATION)  end
+		if not i then  return (getExpectedTypeInfoUsingContents(state, node, strict, expectantTerm, nodeForError))  end
 
 		if assignment.forDeclaration then
 			local decl = assignment.declarations[i] or errorInternal()
@@ -6027,7 +6059,7 @@ function _G.getExpectedTypeInfo(state, node, strict, expectantTerm, nodeForError
 			if decl.name.inferredType then
 				return decl.name.inferredType
 			elseif not decl.type then
-				!!(NO_EXPECTATION)
+				return (getExpectedTypeInfoUsingContents(state, node, strict, expectantTerm, nodeForError))
 			elseif not decl.type.inferredType then
 				!DEPEND_AND_RETURN(`node`, DEPEND_NODE_INFERRED, `decl.type`, nil, `nil`)
 			else
@@ -6043,7 +6075,7 @@ function _G.getExpectedTypeInfo(state, node, strict, expectantTerm, nodeForError
 
 	elseif parentNodeType == !(nodeTypes.AstDeclaration) then
 		local decl = node.parent
-		if node ~= decl.value then  !!(NO_EXPECTATION)  end
+		if node ~= decl.value then  return (getExpectedTypeInfoUsingContents(state, node, strict, expectantTerm, nodeForError))  end
 
 		if decl.name.inferredType then
 			return decl.name.inferredType
@@ -6057,28 +6089,74 @@ function _G.getExpectedTypeInfo(state, node, strict, expectantTerm, nodeForError
 				-- @Incomplete: This doesn't work right now as enums wait for their members. Enums need to be more like structs!
 				!DEPEND_AND_RETURN(`node`, DEPEND_NODE_INFERRED, `enum`, nil, `nil`)
 			else
-				!!(NO_EXPECTATION)
+				return (getExpectedTypeInfoUsingContents(state, node, strict, expectantTerm, nodeForError))
 			end
 
-		elseif not decl.type then
-			!!(NO_EXPECTATION)
+		elseif decl.type then
+			if not decl.type.inferredType then
+				!DEPEND_AND_RETURN(`node`, DEPEND_NODE_INFERRED, `decl.type`, nil, `nil`)
+			else
+				return getTypeRepresentedByExpression(decl.type) or errorInternal(state, decl.type)
+			end
 
-		elseif not decl.type.inferredType then
-			!DEPEND_AND_RETURN(`node`, DEPEND_NODE_INFERRED, `decl.type`, nil, `nil`)
+		elseif node.nodeType == !(nodeTypes.AstTable) then
+			return (getExpectedTypeInfoUsingContents(state, node, strict, expectantTerm, nodeForError))
 
 		else
-			return getTypeRepresentedByExpression(decl.type) or errorInternal()
+			return (getExpectedTypeInfoUsingContents(state, node, strict, expectantTerm, nodeForError))
+		end
+
+	elseif parentNodeType == !(nodeTypes.AstAssignment) then
+		local assignment = node.parent
+		local i          = indexOf(assignment.values, node)
+		if not i then  return (getExpectedTypeInfoUsingContents(state, node, strict, expectantTerm, nodeForError))  end
+
+		if assignment.forDeclaration then
+			local decl = assignment.declarations[i] or errorInternal(state, node)
+
+			if decl.name.inferredType then
+				return decl.name.inferredType
+
+			elseif decl.parent.nodeType == !(nodeTypes.AstEnum) then
+				local enum     = decl.parent
+				local enumInfo = enum.representedType
+				if enumInfo then
+					return enumInfo
+				elseif enum.memberType or decl ~= enum.declarations[1] then
+					-- @Incomplete: This doesn't work right now as enums wait for their members. Enums need to be more like structs!
+					!DEPEND_AND_RETURN(`node`, DEPEND_NODE_INFERRED, `enum`, nil, `nil`)
+				else
+					return (getExpectedTypeInfoUsingContents(state, node, strict, expectantTerm, nodeForError))
+				end
+
+			elseif decl.type then
+				if not decl.type.inferredType then
+					!DEPEND_AND_RETURN(`node`, DEPEND_NODE_INFERRED, `decl.type`, nil, `nil`)
+				else
+					return getTypeRepresentedByExpression(decl.type) or errorInternal(state, decl.type)
+				end
+
+			elseif node.nodeType == !(nodeTypes.AstTable) then
+				return (getExpectedTypeInfoUsingContents(state, node, strict, expectantTerm, nodeForError))
+
+			else
+				return (getExpectedTypeInfoUsingContents(state, node, strict, expectantTerm, nodeForError))
+			end
+
+		else
+			-- @Incomplete: Get type from assignment target.
+			return (getExpectedTypeInfoUsingContents(state, node, strict, expectantTerm, nodeForError))
 		end
 
 	elseif parentNodeType == !(nodeTypes.AstCast) then
 		local cast = node.parent
-		if node ~= cast.expression then  !!(NO_EXPECTATION)  end
+		if node ~= cast.expression then  return (getExpectedTypeInfoUsingContents(state, node, strict, expectantTerm, nodeForError))  end
 
 		if not cast.targetType.inferredType then
 			!DEPEND_AND_RETURN(`node`, DEPEND_NODE_INFERRED, `cast.targetType`, nil, `nil`)
 		end
 
-		return getTypeRepresentedByExpression(cast.targetType) or errorInternal()
+		return getTypeRepresentedByExpression(cast.targetType) or errorInternal(state, cast.targetType)
 
 	elseif parentNodeType == !(nodeTypes.AstBinary) then
 		local binary = node.parent
@@ -6150,7 +6228,7 @@ function _G.getExpectedTypeInfo(state, node, strict, expectantTerm, nodeForError
 		end
 
 		local i = indexOf(returnNode.values, node)
-		if not i then  !!(NO_EXPECTATION)  end
+		if not i then  return (getExpectedTypeInfoUsingContents(state, node, strict, expectantTerm, nodeForError))  end
 
 		local lambda  = getLambda(returnNode)
 		local funcSig = lambda.inferredType
@@ -6178,12 +6256,12 @@ function _G.getExpectedTypeInfo(state, node, strict, expectantTerm, nodeForError
 		return argTypeInfo
 
 	elseif strict then
-		!!(NO_EXPECTATION)
+		return (getExpectedTypeInfoUsingContents(state, node, strict, expectantTerm, nodeForError))
 
 	elseif parentNodeType == !(nodeTypes.AstCall) then
 		local call = node.parent
 		local i    = indexOf(call.arguments, node)
-		if not i then  !!(NO_EXPECTATION)  end
+		if not i then  return (getExpectedTypeInfoUsingContents(state, node, strict, expectantTerm, nodeForError))  end
 
 		local calleeTypeInfo = call.callee.inferredType
 
@@ -6194,7 +6272,7 @@ function _G.getExpectedTypeInfo(state, node, strict, expectantTerm, nodeForError
 		if not call.inferredType and call.callee.nodeType == !(nodeTypes.AstIdentifier) and call.callee.declaration.overloadOf then
 			-- We have a circular dependency here. Overloaded calls must have all args inferred
 			-- before being valid and constructors etc. must know the correct overload.
-			!!(NO_EXPECTATION)
+			return (getExpectedTypeInfoUsingContents(state, node, strict, expectantTerm, nodeForError))
 		end
 
 		local argTypesIn  = calleeTypeInfo.argumentTypesIn
@@ -6217,7 +6295,7 @@ function _G.getExpectedTypeInfo(state, node, strict, expectantTerm, nodeForError
 		return argTypeInfo
 
 	else
-		!!(NO_EXPECTATION)
+		return (getExpectedTypeInfoUsingContents(state, node, strict, expectantTerm, nodeForError))
 	end
 	errorInternal()
 end

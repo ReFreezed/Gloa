@@ -901,14 +901,28 @@ function _G.parseNamelessArguments(state, parentNode)
 		arg.group = groupN
 		table.insert(args.arguments, arg)
 
-		local decl                = astNewNode(AstDeclaration, arg.token, arg)
-		arg.declaration           = decl
-		!SET_OR_RETURN `decl.type = parseExpression(state, decl)`
+		local decl      = astNewNode(AstDeclaration, arg.token, arg)
+		arg.declaration = decl
 
-		local ident       = astNewNode(AstIdentifier, decl.token, decl)
-		ident.name        = "_UNNAMED"..groupN
-		ident.declaration = decl
-		decl.name         = ident
+		local tokType, tokValue = peekNextToken(state)
+
+		if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"...") then
+			eatNextToken(state)
+
+			local vararg       = astNewNode(AstVararg, decl.token, decl)
+			vararg.declaration = decl
+			decl.name          = vararg
+
+			!SET_OR_RETURN `decl.type = parseExpression(state, decl)`
+
+		else
+			!SET_OR_RETURN `decl.type = parseExpression(state, decl)`
+
+			local ident       = astNewNode(AstIdentifier, decl.token, decl)
+			ident.name        = "_"..groupN
+			ident.declaration = decl
+			decl.name         = ident
+		end
 
 		tokType, tokValue = peekNextToken(state)
 
@@ -916,6 +930,10 @@ function _G.parseNamelessArguments(state, parentNode)
 			eatNextToken(state)
 		else
 			break
+		end
+
+		if decl.name.nodeType == !(nodeTypes.AstVararg) then
+			!ERROR_OR_RETURN `errorParsingLast(state, "Vararg must be the last argument.")`
 		end
 	end
 
