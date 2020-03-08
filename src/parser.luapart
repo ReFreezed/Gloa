@@ -1864,6 +1864,7 @@ function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 		state.soft     = false
 
 		if not exprTest then
+			-- !TRACE() -- This fixes the position of the traceback in the console, but we don't want the traceback to here!
 			!ERROR_OR_RETURN_FALSE `
 				printerr()
 				parserMessage(io.stderr, state, statementStartToken, "Error", "Could not parse statement starting here.")
@@ -2002,10 +2003,8 @@ function _G.parseRun(state, parentNode, mustBeExpression)
 	end
 
 	local runNode  = astNewNode(AstRun,    token, parentNode)
-	local lambda   = astNewNode(AstLambda, token, parentNode) -- @Incomplete: Don't output this function in the final program.
+	local lambda   = astNewNode(AstLambda, token, parentNode) -- @Incomplete: Never output this function (or inner functions) in the final program (even if --nostrip is set)?
 	runNode.lambda = lambda
-
-	local body
 
 	tokType, tokValue = peekNextToken(state)
 
@@ -2035,7 +2034,7 @@ function _G.parseRun(state, parentNode, mustBeExpression)
 			arg.declaration   = decl
 
 			local ident       = astNewNode(AstIdentifier, token, decl)
-			ident.name        = "_UNNAMED1"
+			ident.name        = "_1"
 			ident.declaration = decl
 			decl.name         = ident
 
@@ -2049,6 +2048,8 @@ function _G.parseRun(state, parentNode, mustBeExpression)
 		lambda.body = block
 		table.insert(lambda.statements, block)
 
+		local exprStartToken = state.nextToken
+
 		if expectValue then
 			local returnNode        = astNewNode(AstReturn, token, block)
 			returnNode.runDirective = runNode
@@ -2056,6 +2057,25 @@ function _G.parseRun(state, parentNode, mustBeExpression)
 			!SET_OR_RETURN `returnNode.values[1] = parseExpression(state, returnNode)`
 		else
 			!SET_OR_RETURN `block.statements[1]  = parseExpression(state, block)`
+		end
+
+		-- Catch situations like these which are probably errors:
+		--   local v = !run func
+		--   local v = !run foo.func
+		local exprIsOnlyIdents = true
+
+		for token = exprStartToken, state.nextToken-1 do
+			tokType, tokValue = getToken(state.tokens, token)
+			if not (tokType == !(TOKEN_IDENTIFIER) or isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),".")) then
+				exprIsOnlyIdents = false
+				break
+			end
+		end
+
+		if exprIsOnlyIdents then
+			tokType, tokValue = getToken(state.tokens, state.nextToken-1)
+			assert(tokType == !(TOKEN_IDENTIFIER))
+			!ERROR_OR_RETURN `errorParsingAfterLast(state, "Ambiguity in !run expression: Did you mean to call %s()?", tokValue)`
 		end
 	end
 
@@ -4095,6 +4115,12 @@ function _G.isNodeAt(state, node, targetPath, targetLn)
 	local ln         = nlCount+1
 
 	return ln == targetLn
+end
+
+
+
+function _G.isLiteral(node, literalType)
+	return node.nodeType == !(nodeTypes.AstLiteral) and node.literalType == literalType
 end
 
 
