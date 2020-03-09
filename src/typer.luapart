@@ -412,7 +412,8 @@ function _G.requireTypeRepresentedByExpression(state, expr)
 		typeError(state, expr, "Expected a type. This is a function call.")
 	elseif typeInfo.tag ~= !(typeTags.TypeInfoType) then
 		typeError(state, expr, "Expected a type. (Got %s)", getFriendlyTypeInfoName(typeInfo))
-	elseif not isExpressionConstant(state, expr) then
+	elseif not isExpressionConstant(state, expr, false) then
+		-- @UX: Better message for foreign values.
 		typeError(state, expr, "Expected a constant. (Got variable of type '%s')", getFriendlyTypeInfoName(typeInfo))
 	else
 		!ifDEBUG `print(getFriendlyTypeInfoName(typeInfo))`
@@ -1851,7 +1852,8 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 			local valueExpr     = realArguments    [argIndex] or errorInternal(state, call)
 			local valueTypeInfo = realArgumentTypes[argIndex] or errorInternal(state, valueExpr)
 
-			if not isExpressionConstant(state, valueExpr) then
+			if not isExpressionConstant(state, valueExpr, false) then
+				-- @UX: Better message for foreign values.
 				typeError(state, valueExpr, "Argument must be constant for baking.")
 			end
 
@@ -2217,7 +2219,8 @@ local function handlePolymorphicStruct(state, call)
 
 	-- Check arguments.
 	for argIndex, argExpr in ipairs(call.arguments) do
-		if not isExpressionConstant(state, argExpr) then
+		if not isExpressionConstant(state, argExpr, false) then
+			-- @UX: Better message for foreign values.
 			typeError(state, astGetExpressionVisuallyFurthestToTheLeft(argExpr), "Struct argument #%d is not constant.", argIndex)
 		end
 	end
@@ -2555,7 +2558,7 @@ end
 		end
 
 		if scopeIsDeclarative or decl.isConstant then
-			if isExpressionConstant(state, valueExpr) then
+			if isExpressionConstant(state, valueExpr, false) then
 				-- void
 
 			elseif valueExpr.nodeType == !(nodeTypes.AstForeign) then
@@ -2970,7 +2973,7 @@ end
 
 			access.inferredType = arraySig.itemType
 
-			if not (isExpressionConstant(state, access.object) and isExpressionConstant(state, access.member)) then
+			if not (isExpressionConstant(state, access.object, false) and isExpressionConstant(state, access.member, false)) then
 				moveToNextRelevantPipe(state, access)
 				return
 			end
@@ -3022,7 +3025,7 @@ end
 			return
 		end
 
-		if not isExpressionConstant(state, access.object) then
+		if not isExpressionConstant(state, access.object, false) then
 			checkForStaticAccessThatUsesWhatLooksLikeRuntimeCode(state, access.object, access.member)
 		end
 
@@ -3484,7 +3487,7 @@ end
 
 	if argsIn then
 		for _, arg in ipairs(argsIn.arguments) do
-			if arg.declaration.value and not isExpressionConstant(state, arg.declaration.value) then
+			if arg.declaration.value and not isExpressionConstant(state, arg.declaration.value, true) then
 				typeError(state, astGetExpressionVisuallyFurthestToTheLeft(arg.declaration.value), "Non-constant default values for arguments are not supported yet.")
 			end
 		end
@@ -3919,7 +3922,7 @@ end
 			return
 		end
 
-		if not isExpressionConstant(state, expr) then
+		if not isExpressionConstant(state, expr, true) then
 			typeError(state, astGetExpressionVisuallyFurthestToTheLeft(expr), "Expression is not constant.")
 		elseif not (expr.nodeType == !(nodeTypes.AstLiteral) and expr.literalType == !(LITERAL_BOOLEAN)) then
 			errorInternal(state, astGetExpressionVisuallyFurthestToTheLeft(expr), "Constant expression did not result in a boolean literal.")
@@ -3980,7 +3983,7 @@ end
 		return
 	end
 
-	if not isExpressionConstant(state, cond) then
+	if not isExpressionConstant(state, cond, false) then
 		typeError(state, astGetExpressionVisuallyFurthestToTheLeft(cond), "Static if: The condition must be a constant expression.")
 	elseif not (cond.nodeType == !(nodeTypes.AstLiteral) and cond.literalType == !(LITERAL_BOOLEAN)) then
 		errorInternal(state, astGetExpressionVisuallyFurthestToTheLeft(cond), "Constant condition expression did not result in a boolean literal.")
@@ -4109,7 +4112,7 @@ end
 	for i, case in ipairs(switch.cases) do
 		if not case.value then
 			-- void
-		elseif not isExpressionConstant(state, case.value) then
+		elseif not isExpressionConstant(state, case.value, true) then
 			typeError(state, astGetExpressionVisuallyFurthestToTheLeft(case.value), "Case expression must be constant.")
 		elseif not isTypeCompatibleWith(case.value.inferredType, typeInfo) then
 			typeError(
@@ -4489,6 +4492,21 @@ end
 			local insertIndexStatement = indexOf(struct.statements, typeExpr) or errorInternal(state, typeExpr)
 			table.remove(struct.statements, insertIndexStatement)
 
+			for j = 1, i-1 do
+				local typeExprPrevious   = struct.inherits[j]
+				local structInfoPrevious = requireTypeRepresentedByExpression(state, typeExprPrevious)
+				if
+					structInfoToInherit == structInfoPrevious
+					or doesStructInherit(structInfoToInherit, structInfoPrevious) -- @Speed
+					or doesStructInherit(structInfoPrevious, structInfoToInherit)
+				then
+					typeError2(state,
+						typeExpr,         F("Two inherited structs are the same or share a base struct."),
+						typeExprPrevious, F("...here is the other inheritance.")
+					)
+				end
+			end
+
 			local insertIndexDecl = 1
 
 			for i, decl in ipairs(struct.declarations) do
@@ -4502,7 +4520,7 @@ end
 					if decl then
 						typeError2(state,
 							typeExpr, F("Trying to inherit a member called '%s' but the struct already has a member with that name.", decl.name.name),
-							decl,     F("Previous member was added here.") -- This may be an inherited member too.
+							decl,     F("...previous member was added here.") -- This may be an inherited member too.
 						)
 					end
 
@@ -4638,7 +4656,7 @@ end
 		if valueExpr.nodeType == !(nodeTypes.AstForeign) then
 			-- @UX @Bug: This should be possible but something swaps the enum type with the member type somewhere.
 			typeError(state, valueExpr, "Enum values cannot be foreign.")
-		elseif not isExpressionConstant(state, valueExpr) then
+		elseif not isExpressionConstant(state, valueExpr, false) then
 			typeError(state, valueExpr, "Enum value is not constant.")
 		elseif not isTypeCompatibleWith(valueExpr.inferredType, enumMemberInfo) then
 			typeError(state, valueExpr,
@@ -5062,11 +5080,10 @@ local ALWAYS_CONST = !(Set{
 })
 local NEVER_CONST = !(Set{
 	nodeTypes.AstCall,
-	nodeTypes.AstForeign,  -- Technically foreign values are seen as constant at runtime, but since we don't know what they are at compile-time we (usually) treat them as runtime values.
 	nodeTypes.AstTypeInfo, -- @Incomplete: Make type_info() a constant expression.
 	nodeTypes.AstVararg,
 })
-function _G.isExpressionConstant(state, expr)
+function _G.isExpressionConstant(state, expr, foreignIsConst)
 	local nodeType = expr.nodeType
 
 	if ALWAYS_CONST[nodeType] then
@@ -5077,41 +5094,46 @@ function _G.isExpressionConstant(state, expr)
 	elseif nodeType == !(nodeTypes.AstIdentifier) then
 		local ident = expr
 		local decl  = ident.declaration or errorInternal(state, ident)
-		return decl.isConstant and isExpressionConstant(state, decl.value)
+		return decl.isConstant and isExpressionConstant(state, decl.value, foreignIsConst)
 
 	elseif nodeType == !(nodeTypes.AstCast) then
 		local cast = expr
-		return isExpressionConstant(state, cast.expression)
+		return isExpressionConstant(state, cast.expression, foreignIsConst)
 
 	elseif nodeType == !(nodeTypes.AstUnary) then
 		local unary = expr
-		return isExpressionConstant(state, unary.expression)
+		return isExpressionConstant(state, unary.expression, foreignIsConst)
 	elseif nodeType == !(nodeTypes.AstBinary) then
 		local binary = expr
-		return isExpressionConstant(state, binary.left) and isExpressionConstant(state, binary.right)
+		return isExpressionConstant(state, binary.left, foreignIsConst) and isExpressionConstant(state, binary.right, foreignIsConst)
 
 	elseif nodeType == !(nodeTypes.AstConditional) then
 		local conditional = expr
 		return (
-			isExpressionConstant(state, conditional.condition)
-			and (conditional.branchTrue == nil or isExpressionConstant(state, conditional.branchTrue))
-			and isExpressionConstant(state, conditional.branchFalse)
+			isExpressionConstant(state, conditional.condition, foreignIsConst)
+			and (conditional.branchTrue == nil or isExpressionConstant(state, conditional.branchTrue, foreignIsConst))
+			and isExpressionConstant(state, conditional.branchFalse, foreignIsConst)
 		)
 
 	elseif nodeType == !(nodeTypes.AstAccess) then
 		local access = expr
-		return isExpressionConstant(state, access.object) and isExpressionConstant(state, access.member)
+		return isExpressionConstant(state, access.object, foreignIsConst) and isExpressionConstant(state, access.member, foreignIsConst)
 
 	elseif nodeType == !(nodeTypes.AstTable) then
 		local tableNode = expr
 		if tableNode.trailingExpression then  return false  end
 
 		for _, tableField in ipairs(tableNode.fields) do
-			if not isExpressionConstant(state, tableField.key)   then  return false  end
-			if not isExpressionConstant(state, tableField.value) then  return false  end
+			if not isExpressionConstant(state, tableField.key,   foreignIsConst) then  return false  end
+			if not isExpressionConstant(state, tableField.value, foreignIsConst) then  return false  end
 		end
 
 		return true
+
+	elseif nodeType == !(nodeTypes.AstForeign) then
+		-- Technically foreign values are seen as constant at runtime, but since we don't
+		-- know what they are at compile-time we (usually) treat them as runtime values.
+		return foreignIsConst
 
 	else
 		errorUnhandledNodeType(state, expr)
@@ -5782,7 +5804,7 @@ local function simplifyBinary(state, binary)
 end
 
 function _G.simplifyExpressionIfConstant(state, expr)
-	if not isExpressionConstant(state, expr) then
+	if not isExpressionConstant(state, expr, false) then
 		if
 			-- :SpecialForeignValueRules
 			expr.nodeType == !(nodeTypes.AstIdentifier)

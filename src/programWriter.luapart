@@ -2090,6 +2090,25 @@ function _G.writeProgram(state, writer)
 	file:write('#!/bin/sh\n_=[[\nexec lua "$0" "$@"\n]] and nil\n')
 	writer.currentOutputLine = 5
 
+	for _, luaPreload in ipairs(state.luaPreloads) do
+		file:write("do\n", luaPreload.lua, "\nend\n")
+
+		local _, nlCount = luaPreload.lua:gsub("\n", "\0")
+
+		local trimmedInitialNewline = state.tokens.extra[luaPreload.token]
+		local stringTokenFile       = state.tokens.file [luaPreload.token] or errorInternal()
+		local stringTokenLn         = state.tokens.line1[luaPreload.token] + luaPreload.lineOffset - 2 + (trimmedInitialNewline and 1 or 0)
+
+		local outputOffsetLn = writer.currentOutputLine-1
+
+		for ln = 2, nlCount+2 do
+			writer.lineMappingFiles[outputOffsetLn+ln] = stringTokenFile
+			writer.lineMappingLines[outputOffsetLn+ln] = stringTokenLn+ln
+		end
+
+		writer.currentOutputLine = writer.currentOutputLine+nlCount+3
+	end
+
 	writeCompilerSymbols(state, writer)
 
 	-- Start of user code.

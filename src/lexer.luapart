@@ -83,6 +83,7 @@ local directiveWords = Set{
 	"key",            -- For strongly typed table structs.
 	"load",           -- For loading .gloa files by path.
 	"must",           -- For return arguments that must be received by the caller (e.g. file handles).
+	"preload",        -- For running Lua code before any Glóa code runs.
 	"print",          -- For printing out what some expression refers to during compilation. (For debugging.)
 	"run",            -- For running code at compile-time.
 	"shadow",         -- For allowing name shadowing (which is normally disallowed) for a declared name.
@@ -102,6 +103,7 @@ _G.!struct"Tokens"{ -- SOA
 	{`count`,     0},
 	{`type`,      {}}, -- One of TOKEN_*.
 	{`value`,     {}}, -- Depends on the type.
+	{`extra`,     {}}, -- Depends on the type.
 	{`file`,      {}},
 	{`position1`, {}}, -- Start byte.
 	{`position2`, {}}, -- End byte.
@@ -114,6 +116,7 @@ function _G.tokenize(s, path, tokens)
 
 	local tokTypes      = tokens.type
 	local tokValues     = tokens.value
+	local tokExtras     = tokens.extra
 	local tokFiles      = tokens.file
 	local tokPositions1 = tokens.position1
 	local tokPositions2 = tokens.position2
@@ -145,8 +148,8 @@ function _G.tokenize(s, path, tokens)
 
 		if ptr > #s then  break  end -- EOF
 
-		local tokenPos          = ptr
-		local tokType, tokValue = nil
+		local tokenPos = ptr
+		local tokType, tokValue, tokExtra = nil
 
 		-- Identifier/keyword/blank.
 		if s:find("^[%a_\194-\244]", ptr) then
@@ -402,6 +405,7 @@ function _G.tokenize(s, path, tokens)
 
 			tokType  = !(TOKEN_STRING)
 			tokValue = string.char(unpack(bytes)) -- @Robustness: Make sure this works for very long strings.
+			tokExtra = false--trimmedInitialNewline
 
 		-- String (long-form).
 		elseif s:find("^%[=*%[", ptr) then
@@ -410,9 +414,12 @@ function _G.tokenize(s, path, tokens)
 
 			ptr = ptr + 2 + #longEqualSigns
 
-			local stringPos1 = ptr
+			local stringPos1            = ptr
+			local trimmedInitialNewline = false
+
 			if getByte(s, stringPos1) == !(BYTE_NL) then
-				stringPos1 = stringPos1+1
+				stringPos1            = stringPos1+1
+				trimmedInitialNewline = true
 			end
 
 			local i1, i2 = s:find("%]"..longEqualSigns.."%]", ptr)
@@ -425,6 +432,7 @@ function _G.tokenize(s, path, tokens)
 
 			tokType  = !(TOKEN_STRING)
 			tokValue = s:sub(stringPos1, stringPos2)
+			tokExtra = trimmedInitialNewline
 
 		-- Comment.
 		elseif s:find("^%-%-", ptr) then
@@ -487,6 +495,7 @@ function _G.tokenize(s, path, tokens)
 
 			tokTypes[tokens.count]      = tokType
 			tokValues[tokens.count]     = tokValue
+			tokExtras[tokens.count]     = tokExtra
 			tokFiles[tokens.count]      = path
 			tokPositions1[tokens.count] = tokenPos
 			tokPositions2[tokens.count] = ptr-1

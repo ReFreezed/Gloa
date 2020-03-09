@@ -2083,9 +2083,9 @@ function _G.parseRun(state, parentNode, mustBeExpression)
 	return runNode
 end
 
--- success = parseFileScopeStatements( state, parentBlock, isTopLevel, singleStatement )
--- WARNING: parentBlock is currently modified even if success==false!
-function _G.parseFileScopeStatements(state, block, isTopLevel, singleStatement)
+-- success = parseFileScopeStatements( state, parentScope, isTopLevel, singleStatement )
+-- WARNING: parentScope is currently modified even if success==false!
+function _G.parseFileScopeStatements(state, scope, isTopLevel, singleStatement)
 	while true do
 		local tokType,  tokValue, token = peekNextToken(state, 1)
 		local tokType2, tokValue2       = peekNextToken(state, 2)
@@ -2093,42 +2093,82 @@ function _G.parseFileScopeStatements(state, block, isTopLevel, singleStatement)
 		if not tokType and isTopLevel then
 			break
 
+		----------------------------------------------------------------
+
 		elseif
 			isToken(tokType,tokValue, !(TOKEN_KEYWORD),"local","export") or (
 				isToken(tokType, tokValue,  !(TOKEN_KEYWORD),"using") and
 				isToken(tokType2,tokValue2, !(TOKEN_KEYWORD),"local","export")
 			)
 		then
-			!DO_OR_RETURN_FALSE `parseDeclarationStatement(state, block, false)`
+			!DO_OR_RETURN_FALSE `parseDeclarationStatement(state, scope, false)`
 
 		elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"import","load") then
 			-- @Incomplete: Warn about duplicate imports? Maybe not necessay as things will only ever be imported once anyway.
-			!SET_OR_RETURN_FALSE `local import = parseImportOrLoad(state, block)`
+			!SET_OR_RETURN_FALSE `local import = parseImportOrLoad(state, scope)`
 			statement                          = import
 
-			table.insert(block.statements, import)
+			table.insert(scope.statements, import)
 			if not import.isLoad then
-				table.insert(block.imports, import)
+				table.insert(scope.imports, import)
 			end
 
 		elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"using") then
-			!SET_OR_RETURN_FALSE `local using = parseUsing(state, block)`
+			!SET_OR_RETURN_FALSE `local using = parseUsing(state, scope)`
 			statement                         = using
 
-			table.insert(block.statements, using)
-			table.insert(block.usings,     using)
+			table.insert(scope.statements, using)
+			table.insert(scope.usings,     using)
 
 		elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"assert","print") then
-			!SET_OR_RETURN_FALSE `local debugNode = parseDebugNode(state, block)`
-			table.insert(block.statements, debugNode)
+			!SET_OR_RETURN_FALSE `local debugNode = parseDebugNode(state, scope)`
+			table.insert(scope.statements, debugNode)
 
 		elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"if") then
-			!SET_OR_RETURN_FALSE `local ifOrStaticIf = parseIfOrStaticIf(state, block, true)`
-			table.insert(block.statements, ifOrStaticIf)
+			!SET_OR_RETURN_FALSE `local ifOrStaticIf = parseIfOrStaticIf(state, scope, true)`
+			table.insert(scope.statements, ifOrStaticIf)
 
 		elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"run") then
-			!SET_OR_RETURN_FALSE `local runNode = parseRun(state, block, false)`
-			table.insert(block.statements, runNode)
+			!SET_OR_RETURN_FALSE `local runNode = parseRun(state, scope, false)`
+			table.insert(scope.statements, runNode)
+
+		elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"preload") then
+			eatNextToken(state)
+			if not isTopLevel then
+				!ERROR_OR_RETURN_FALSE `errorParsingNext(state, "!preload statements are only supported directly in file-scope.")`
+			end
+
+			tokType, tokValue, token = eatNextToken(state)
+			if tokType ~= !(TOKEN_STRING) then
+				!ERROR_OR_RETURN_FALSE `errorParsingLast(state, "Expected a string containing Lua code.")`
+			end
+
+			local lua = tokValue:gsub("\n%s*$", "")
+			if not lua:find"[^%s]" then
+				!ERROR_OR_RETURN_FALSE `errorParsingLast(state, "String with Lua code must not be empty.")`
+			end
+
+			local spaceBefore = lua:match"^%s*\n"
+			local lineOffset  = 0
+
+			if spaceBefore then
+				local _, nlCount = spaceBefore:gsub("\n", "\0")
+				lineOffset       = nlCount
+				lua              = lua:sub(#spaceBefore+1)
+			end
+
+			local chunk, err = loadstring(lua, "@(lua)")
+			if not chunk then
+				!ERROR_OR_RETURN_FALSE `errorParsingLast(state, "This string does not contain valid Lua code: %s", err)`
+			end
+
+			table.insert(state.luaPreloads, {
+				lua        = lua,
+				token      = token,
+				lineOffset = lineOffset,
+			})
+
+		----------------------------------------------------------------
 
 		elseif isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),";") then
 			eatNextToken(state)
