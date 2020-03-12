@@ -486,7 +486,7 @@ function _G.writeExpression(state, writer, expr)
 			writeExpression(state, writer, call.arguments[i])
 		end
 
-		-- Write default values for arguments.
+		-- Write default values for arguments (if the function isn't foreign).
 		if callee.nodeType == !(nodeTypes.AstIdentifier) then
 			local calleeDecl = callee.declaration
 
@@ -494,41 +494,43 @@ function _G.writeExpression(state, writer, expr)
 				local lambda = calleeDecl.value or errorInternal(state, calleeDecl)
 				lambda       = followIdentifiersToConstantValue(lambda)
 
-				!ASSERT("lambda.nodeType == "..nodeTypes.AstLambda, nil, "lambda")
+				!ASSERT("lambda.nodeType == "..nodeTypes.AstLambda, nil, `lambda`)
 
-				-- Only write a value if the last non-vararg argument is optional.
-				local argLast = lambda.argumentsIn and getLast(lambda.argumentsIn.arguments)
-				if argLast and argLast.declaration.name.nodeType == !(nodeTypes.AstVararg) then
-					argLast = getLast(lambda.argumentsIn.arguments, 2)
-				end
-
-				if argLast and not argLast.isRequired then
-					local argExprLast = getLast(call.arguments)
-					if
-						argExprLast and (
-							(
-								argExprLast.inferredType.tag == !(typeTags.TypeInfoVararg)
-								and not argExprLast.surroundedByParentheses
-							)
-							or (
-								argExprLast.inferredType.tag == !(typeTags.TypeInfoList)
-								and not argExprLast.surroundedByParentheses
-								and argExprLast.inferredType[2]
-							)
-						)
-					then
-						-- :DisallowListAsLastValueToFunctionWithOptionalArguments
-						nodeError(state, callee, "ProgramWriter", "@Incomplete: Handle optional arguments if the last value in a call is a list of things.")
+				if not lambda.bodyIsForeign then
+					-- Only write a value if the last non-vararg argument is optional.
+					local argLast = lambda.argumentsIn and getLast(lambda.argumentsIn.arguments)
+					if argLast and argLast.declaration.name.nodeType == !(nodeTypes.AstVararg) then
+						argLast = getLast(lambda.argumentsIn.arguments, 2)
 					end
 
-					for i = #call.arguments+1, #lambda.argumentsIn.arguments do
-						if not first then  file:write(", ")  end
-						first = false
+					if argLast and not argLast.isRequired then
+						local argExprLast = getLast(call.arguments)
+						if
+							argExprLast and (
+								(
+									argExprLast.inferredType.tag == !(typeTags.TypeInfoVararg)
+									and not argExprLast.surroundedByParentheses
+								)
+								or (
+									argExprLast.inferredType.tag == !(typeTags.TypeInfoList)
+									and not argExprLast.surroundedByParentheses
+									and argExprLast.inferredType[2]
+								)
+							)
+						then
+							-- :DisallowListAsLastValueToFunctionWithOptionalArguments
+							nodeError(state, callee, "ProgramWriter", "@Incomplete: Handle optional arguments if the last value in a call is a list of things.")
+						end
 
-						local arg = lambda.argumentsIn.arguments[i]
+						for i = #call.arguments+1, #lambda.argumentsIn.arguments do
+							if not first then  file:write(", ")  end
+							first = false
 
-						if arg.declaration.value then -- Varargs are optional but have no default value (or zero default values, since it's a list).
-							writeExpression(state, writer, arg.declaration.value)
+							local arg = lambda.argumentsIn.arguments[i]
+
+							if arg.declaration.value then -- Varargs are optional but have no default value (or zero default values, since it's a list).
+								writeExpression(state, writer, arg.declaration.value)
+							end
 						end
 					end
 				end

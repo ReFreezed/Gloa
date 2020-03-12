@@ -11,22 +11,26 @@
 
 	addDependency, getExistingDependency
 	addToQueueRecursively, pokeAndQueueUnqueuedNodeIntoTree, unqueue, unqueueChildrenRecursively, replaceQueuedNode, replaceQueuedNodeAndUnqueueOldTree, cutOutPartOfNodeTree
-	errorPipesAreStuck
+	errorPipesAreStuck, errorPipesAreInfiniteLooping
 	moveToPipe, moveToNextRelevantPipe, moveTreeToNextRelevantPipe, moveChildrenToNextRelevantPipe
+	outputDependencyGraph
 
 --============================================================]]
+
+!local OUTPUT_DEPENDENCY_GRAPH = false
 
 
 
 local !struct"Dependency"{ -- @Cleanup: Rename to something with "wait"?
 	{`dependent`,  nil}, -- Queued
-	{`dependType`, 0},   -- DEPEND_DECLARATION|DEPEND_NODE_INFERRED|DEPEND_NODE_INFERRED_FULLY|DEPEND_NODE_EMITTED|DEPEND_STRUCT_MEMBERS_READY|DEPEND_CONSTANT_READY
+	{`dependType`, 0},   -- DEPEND_DECLARATION|DEPEND_MEMBER_DECLARATION|DEPEND_NODE_INFERRED|DEPEND_NODE_INFERRED_FULLY|DEPEND_NODE_EMITTED|DEPEND_STRUCT_MEMBERS_READY|DEPEND_CONSTANT_READY
 	{`dependOn`,   nil}, -- string|Queued  (The value depends on what dependType is.)
 	{`extraData`,  nil}, -- AstScope|nil
 	{`next`,       nil}, -- Dependency  (This is for chaining multiple dependencies.)
 }
 
 -- addDependency( state, dependent, DEPEND_DECLARATION,          name [, scope ] )
+-- addDependency( state, dependent, DEPEND_MEMBER_DECLARATION,   name, scope )
 -- addDependency( state, dependent, DEPEND_NODE_INFERRED,        astNode )
 -- addDependency( state, dependent, DEPEND_NODE_INFERRED_FULLY,  astNode )
 -- addDependency( state, dependent, DEPEND_NODE_EMITTED,         astNode )
@@ -35,10 +39,13 @@ local !struct"Dependency"{ -- @Cleanup: Rename to something with "wait"?
 function _G.addDependency(state, dependent, dependType, dependOn, extraData)
 	!if DEBUG then
 		if dependType == !(DEPEND_DECLARATION) then
-			!ASSERT `type(dependOn) == "string"`
+			!ASSERT `type(dependOn)  == "string"`
 			!ASSERT `extraData == nil or type(extraData) == "table"`
+		elseif dependType == !(DEPEND_MEMBER_DECLARATION) then
+			!ASSERT `type(dependOn)  == "string"`
+			!ASSERT `type(extraData) == "table"`
 		elseif !!(anyV(`dependType`, DEPEND_NODE_INFERRED,DEPEND_NODE_INFERRED_FULLY,DEPEND_NODE_EMITTED,DEPEND_STRUCT_MEMBERS_READY,DEPEND_CONSTANT_READY)) then
-			!ASSERT `type(dependOn) == "table"`
+			!ASSERT `type(dependOn)  == "table"`
 		else
 			errorInternal("%d", dependType)
 		end
@@ -49,7 +56,7 @@ function _G.addDependency(state, dependent, dependType, dependOn, extraData)
 		!TRACE()
 
 		!ifDEBUG `astPrint(dependent)`
-		nodeMessage(io.stderr, state, dependent, "Error", "Pipes", "Internal compiler error: Trying to add dependency twice.")
+		nodeMessage(io.stderr, state, dependent, "Error", "Pipes", "Internal compiler error: Trying to add dependency twice. (%s)", (DEPEND_TITLES[dependType] or "?"))
 
 		if !!(anyV(`dependType`, DEPEND_NODE_INFERRED,DEPEND_NODE_INFERRED_FULLY,DEPEND_NODE_EMITTED)) then
 			!ifDEBUG `astPrint(dependOn)`
@@ -93,6 +100,8 @@ function _G.addDependency(state, dependent, dependType, dependOn, extraData)
 
 			io.stdout:write("    ON ", DEPEND_TITLES[dependType], " ")
 			if dependType == !(DEPEND_DECLARATION) then
+				print(dependOn)
+			elseif dependType == !(DEPEND_MEMBER_DECLARATION) then
 				print(dependOn)
 			elseif dependType == !(DEPEND_NODE_INFERRED) then
 				astPrint(dependOn.node)
@@ -414,8 +423,10 @@ end
 function _G.errorPipesAreStuck(state)
 	!TRACE()
 
-	-- outputDependencyGraph(state)
-	-- !ifDEBUG `astPrintTree(state.globalScope)`
+	!if DEBUG and OUTPUT_DEPENDENCY_GRAPH then
+		outputDependencyGraph(state)
+		astPrintTree(state.globalScope)
+	!end
 
 	-- [[ Report undeclared identifier.
 	local function getDeclaredIdentifierWaitingToBeDeclaredWithName(name, queuedToIgnore) -- @Cleanup: What is this even?!?!
@@ -433,7 +444,7 @@ function _G.errorPipesAreStuck(state)
 	for _, queued in ipairs(state.allQueueds) do
 		local dependency = not queued.unqueued and queued.waitingOn
 
-		if dependency and dependency.dependType == !(DEPEND_DECLARATION) then
+		if dependency and (dependency.dependType == !(DEPEND_DECLARATION) or dependency.dependType == !(DEPEND_MEMBER_DECLARATION)) then
 			local name = dependency.dependOn
 
 			if not getDeclaredIdentifierWaitingToBeDeclaredWithName(name, queued) then
@@ -445,7 +456,7 @@ function _G.errorPipesAreStuck(state)
 				elseif node.nodeType == !(nodeTypes.AstAccess) then
 					local access = node
 
-					if access.object.inferredType.scope.nodeType == !(nodeTypes.AstFileScope) then
+					if access.object.inferredType.tag == XXX_TYPE_TAG_NAMESPACE and access.object.inferredType.scope.nodeType == !(nodeTypes.AstFileScope) then
 						local fileScope = access.object.inferredType.scope
 						typeError(
 							state, node.member,
@@ -455,9 +466,22 @@ function _G.errorPipesAreStuck(state)
 							fileScope.isModule and fileScope.moduleName or fileScope.path
 						)
 					else
+						local scope = nil
+						local tag   = access.object.inferredType.tag
+
+						if tag == XXX_TYPE_TAG_NAMESPACE then
+							scope = access.object.inferredType.scope
+						elseif tag == XXX_TYPE_TAG_STRUCT or tag == XXX_TYPE_TAG_ENUM then
+							scope = access.object.inferredType.astNode
+						else
+							-- What could this be?
+						end
+
 						printerr()
-						typeMessage(io.stderr, state, access.member,                    "Error", "Undeclared identifier '%s'.", name)
-						typeMessage(io.stderr, state, access.object.inferredType.scope, "Info",  "...here is the accessed namespace.")
+						typeMessage(io.stderr, state, access.member, "Error", "Undeclared identifier '%s'.", name)
+						if scope then
+							typeMessage(io.stderr, state, scope, "Info", "...here is the accessed scope.")
+						end
 						exitFailure()
 					end
 
@@ -597,6 +621,46 @@ function _G.errorPipesAreStuck(state)
 	errorInternal("Pipes are stuck. Also failed to figure out where the issue actually is. Oops...")
 end
 
+!if DEBUG then
+function _G.errorPipesAreInfiniteLooping(state, finalPipe)
+	-- astPrintTree(state.globalScope)
+
+	local printCount = 0
+	printerr()
+
+	for _, queued in ipairs(state.queueWaiting) do
+		if not queued.unqueued and queued.pipe <= finalPipe then
+			printCount = printCount+1
+
+			if printCount > 10 then
+				printerr("(...)")
+				break
+			end
+
+			local dependency = queued.waitingOn
+
+			astPrint(queued.node)
+			nodeMessage(
+				io.stderr, state, queued.node, "Debug", nil,
+				"pipe=%s%s",
+				PIPE_TITLES[queued.pipe],
+				dependency and ", waiting" or ""
+			)
+
+			if dependency and !!(anyV(`dependency.dependType`, DEPEND_NODE_INFERRED,DEPEND_NODE_INFERRED_FULLY,DEPEND_NODE_EMITTED)) then
+				astPrint(dependency.dependOn.node)
+				nodeMessage(io.stderr, state, dependency.dependOn.node, "Debug", nil, "...waiting on this.")
+			end
+		end
+	end
+
+	!if OUTPUT_DEPENDENCY_GRAPH then
+		outputDependencyGraph(state)
+	!end
+	errorInternal("[DEBUG] Pipes ran for too long. (waiting:%d)", #state.queueWaiting)
+end
+!end
+
 
 
 function _G.outputDependencyGraph(state)
@@ -642,7 +706,7 @@ function _G.outputDependencyGraph(state)
 					local known = true
 					writeNode(queued.node)
 
-					if dependency.dependType == !(DEPEND_DECLARATION) then
+					if dependency.dependType == !(DEPEND_DECLARATION) or dependency.dependType == !(DEPEND_MEMBER_DECLARATION) then
 						local name = dependency.dependOn
 						file:write(" --|> (Name ", name, ")")
 

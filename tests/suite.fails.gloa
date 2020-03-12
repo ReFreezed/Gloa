@@ -392,11 +392,18 @@ export TESTS_THAT_SHOULD_FAIL : []string : {
 		local Struct1::struct{s2:Struct2}
 		local Struct2::struct{s1bad:Struct1} -- Recursive struct.
 	]=],
+	[=[
+		local Struct::struct{bad:Struct={}} -- Recursive struct.
+	]=],
+	[=[
+		local Struct::struct{bad=cast(Struct){}} -- Recursive struct.
+	]=],
+	-- @Incomplete (Currently causing a stack overflow in ProgramWriter, 2020-03-12):
 	-- [=[
-	-- 	-- @Incomplete: The actual error message we want here.
-	-- 	local Struct::struct{bad:Struct={}} -- Recursive struct.
-	-- 	local Struct::struct{bad=cast(Struct){}} -- Recursive struct.
-	-- 	local Struct::struct{bad:Struct|none=cast(Struct){}} -- Recursive struct.
+	-- 	local main :: () {
+	-- 		local Struct::struct{bad:Struct|none=cast(Struct){}} -- Recursive struct.
+	-- 		local bad:Struct
+	-- 	}
 	-- ]=],
 
 	-- Operations
@@ -1061,11 +1068,8 @@ export TESTS_THAT_SHOULD_FAIL : []string : {
 		local Struct2 :: struct { using Struct1, BAD::5 } -- Cannot have both string keys and members.
 	]=],
 	[=[
-		local main :: () {
-			local Struct1 :: struct { CONST::5 }
-			local Struct2 :: struct { using Struct1 }
-			local bad = Struct2.CONST -- Member does not exist. (Static members are not inherited.)
-		}
+		local ParentWithMember :: struct { CONST::5 }
+		local StructuredTable  :: struct { using ParentWithMember, !key:string, !value:int } -- All members (including static ones) are inherited, making the key type valid.
 	]=],
 	[=[
 		local func :: (...:float) {  local bad: []int = {5, ...}  } -- Type mismatch.

@@ -12,7 +12,7 @@
 	areTreesEqual
 	checkBinaryOperation
 	createTypeNodeFromInfo
-	findDeclaration, findDeclarationInScope, findMemberDeclaration, findDynamicMemberDeclaration, isDeclarationVisibleToNode, printDeclarationChain
+	findDeclaration, findPublicDeclarationInScope, findMemberDeclaration, findDynamicMemberDeclaration, isDeclarationVisibleToNode, printDeclarationChain
 	followIdentifiersToConstantValue
 	getAssignmentValue
 	getClosestScope, getClosestScopeForDeclaration, isScope, isScopeDeclarative, isScopeImperative
@@ -146,6 +146,8 @@ local !structTypeInfo"TypeInfoList:_TypeInfo"{ -- Special type used for returns 
 
 _G.TYPE_TAG_NAMES         = !(typeTagNames)
 _G.XXX_TYPE_TAG_FUNCTION  = !(typeTags.TypeInfoFunction)
+_G.XXX_TYPE_TAG_STRUCT    = !(typeTags.TypeInfoStruct)
+_G.XXX_TYPE_TAG_ENUM      = !(typeTags.TypeInfoEnum)
 _G.XXX_TYPE_TAG_NAMESPACE = !(typeTags.TypeInfoNamespace)
 
 
@@ -519,8 +521,9 @@ function _G.findDeclaration(state, startNode, name, declToIgnore)
 	return nil, nil
 end
 
-function _G.findDeclarationInScope(state, scope, name, onlyLookInExportsIfScopeIsModuleOrNamespace)
-	if onlyLookInExportsIfScopeIsModuleOrNamespace and ((scope.nodeType == !(nodeTypes.AstFileScope) and scope.isModule) or scope.nodeType == !(nodeTypes.AstNamespace)) then
+function _G.findPublicDeclarationInScope(state, scope, name)
+	!ASSERT `name`
+	if (scope.nodeType == !(nodeTypes.AstFileScope) and scope.isModule) or scope.nodeType == !(nodeTypes.AstNamespace) then
 		for _, decl in ipairs(scope.declarations) do
 			if decl.isExported and decl.name.name == name then  return decl  end
 		end
@@ -532,14 +535,15 @@ function _G.findDeclarationInScope(state, scope, name, onlyLookInExportsIfScopeI
 
 	return nil
 end
-
 function _G.findMemberDeclaration(state, scope, name)
+	!ASSERT `name`
 	for _, decl in ipairs(scope.declarations) do
 		if decl.name.name == name then  return decl  end
 	end
 	return nil
 end
 function _G.findDynamicMemberDeclaration(state, scope, name)
+	!ASSERT `name`
 	for _, decl in ipairs(scope.declarations) do
 		if not decl.isConstant and decl.name.name == name then  return decl  end
 	end
@@ -1062,11 +1066,19 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 		not isMember
 		and scope.nodeType == !(nodeTypes.AstLambda)
 		and scope.argumentsOut ~= nil
-		and indexOf(scope.argumentsOut.arguments, astFindParent1(decl, !(nodeTypes.AstArgument))) ~= nil
+		and decl.parent.parent == scope.argumentsOut
+	)
+
+	local isForeignLambdaArgIn = (
+		not isLambdaArgOut and not isMember
+		and scope.nodeType == !(nodeTypes.AstLambda)
+		and scope.bodyIsForeign
+		and scope.argumentsIn ~= nil
+		and decl.parent.parent == scope.argumentsIn
 	)
 
 	-- Check for redeclaration/shadowing (before we DEPEND_AND_RETURN).
-	if not (isLambdaArgOut or vararg or decl.checkedRedeclaration) then
+	if not (decl.checkedRedeclaration or vararg or isLambdaArgOut or isForeignLambdaArgIn) then
 		checkRedeclaration(state, ident, decl, isMember, scope)
 	end
 
@@ -2527,13 +2539,12 @@ end
 
 	-- @Incomplete: decl.notes (if we make them structured, which we should!)
 
+	local scope = getClosestScope(decl)
+
 	if valueExpr then
 		if valueExpr.inferredType.tag == !(typeTags.TypeInfoNamespace) and not decl.isConstant then
 			typeError(state, valueExpr, "References to namespaces must be constant.")
 		end
-
-		local scope              = getClosestScope(decl) or errorInternal()
-		local scopeIsDeclarative = isScopeDeclarative(scope)
 
 		-- Validate that the assigned value is the same type as the declared name.
 		--
@@ -2557,7 +2568,7 @@ end
 			end
 		end
 
-		if scopeIsDeclarative or decl.isConstant then
+		if decl.isConstant or isScopeDeclarative(scope) then
 			if isExpressionConstant(state, valueExpr, false) then
 				-- void
 
@@ -2578,12 +2589,18 @@ end
 					"Value for declared %s '%s' is not a constant expression.%s",
 					(decl.isConstant and "constant" or "variable"),
 					identOrVararg.name,
-					(scopeIsDeclarative and not decl.isConstant and " (All values in declarative scopes must be constant.)" or "")
+					(not decl.isConstant and isScopeDeclarative(scope) and " (All values in declarative scopes must be constant.)" or "")
 				)
 			end
 		end
 
-	elseif identOrVararg.parent.parent.nodeType ~= !(nodeTypes.AstArgument) and not doesTypeHaveAnyDefaultValue(identOrVararg.inferredType) then
+	elseif not (
+		doesTypeHaveAnyDefaultValue(identOrVararg.inferredType)
+		-- Ignore missing values for arguments (which are then required arguments).
+		or decl.parent.nodeType == !(nodeTypes.AstArgument)
+		-- Variables in foreign structs do not need initial values since those structs never get constructed locally anyway. (This also makes method declarations look nicer.)
+		or (not decl.isConstant and decl.parent == scope and scope.nodeType == !(nodeTypes.AstStruct) and scope.isForeign)
+	) then
 		!ASSERT `not decl.isConstant` -- This should have been detected in inferIdentifierOrVararg() (I think).
 		typeError(state, identOrVararg, "Variables in type group '%s' must have a specified initial value.", TYPE_TAG_NAMES[identOrVararg.inferredType.tag])
 	end
@@ -2846,10 +2863,15 @@ function _G.getConstantNameOrTriggerError(state, node)
 	return name
 end
 
-function _G.validateStructKey(state, keyExpr, structInfo, isLvalue)
+-- Returns nil on failure and the dependent is now waiting.
+function _G.validateStructKey(state, dependent, keyExpr, structInfo, isLvalue)
 	local keyExprType = keyExpr.inferredType
 	local memberName  = ""
 	local memberValueType, constDecl
+
+	if structInfo.kind ~= !(STRUCT_KIND_NORMAL) and not structInfo.hasMembers then
+		!DEPEND_AND_RETURN(`dependent`, DEPEND_STRUCT_MEMBERS_READY, `structInfo`, nil, `nil`)
+	end
 
 	if structInfo.kind == !(STRUCT_KIND_TABLE) and (keyExprType.tag ~= !(typeTags.TypeInfoString) or structInfo.keyType.tag == !(typeTags.TypeInfoString)) then
 		if not isTypeCompatibleWith(keyExprType, structInfo.keyType) then
@@ -2879,21 +2901,20 @@ function _G.validateStructKey(state, keyExpr, structInfo, isLvalue)
 
 		local memberLiteral = keyExpr
 		memberName          = memberLiteral.value
-		local member        = itemWith1(structInfo.members, "name", memberName)
 
-		if member then
-			memberValueType = member.typeInfo
-		else
-			constDecl = findDeclarationInScope(state, structInfo.astNode, memberName, false)
-			if not constDecl then
-				typeError(state, memberLiteral, "'%s' is not a member of %s.", memberName, getFriendlyTypeInfoName(structInfo))
-			elseif isLvalue then
-				typeError(state, memberLiteral, "Cannot assign value to constant member %s.%s", getFriendlyTypeInfoName(structInfo), memberName)
-			else
-				assert(constDecl.isConstant)
-				memberValueType = constDecl.name.inferredType
-			end
+		local decl = findMemberDeclaration(state, structInfo.astNode, memberName)
+		if not decl then
+			!DEPEND_AND_RETURN(`dependent`, DEPEND_MEMBER_DECLARATION, `memberName`, `structInfo.astNode`, `nil`)
+		elseif isLvalue and decl.isConstant then
+			typeError(state, memberLiteral, "Cannot assign value to constant member %s.%s", getFriendlyTypeInfoName(structInfo), memberName)
 		end
+
+		memberValueType = decl.name.inferredType
+		if not memberValueType then
+			!DEPEND_AND_RETURN(`dependent`, DEPEND_NODE_INFERRED, `decl.name`, nil, `nil`)
+		end
+
+		if decl.isConstant then  constDecl = decl  end
 	end
 
 	return memberName, memberValueType, constDecl
@@ -2901,17 +2922,22 @@ end
 
 local function checkForStaticAccessThatUsesWhatLooksLikeRuntimeCode(state, topNodeToCheck, staticObjectNode)
 	astVisitAllNodes(topNodeToCheck, function(node)
-		if not (
+		if
 			node.nodeType == !(nodeTypes.AstAccess)
 			or (
 				node.nodeType == !(nodeTypes.AstIdentifier)
-				and node == node.parent.object -- We know this is an access because astVisitAllNodes() visit parents first.
+				and node.parent.nodeType == !(nodeTypes.AstAccess)
+				and node == node.parent.object
 			)
 			or (
 				node.nodeType == !(nodeTypes.AstLiteral)
-				and node == node.parent.member -- We know this is an access because astVisitAllNodes() visit parents first.
+				and node.parent.nodeType == !(nodeTypes.AstAccess)
+				and node == node.parent.member
 			)
-		) then
+		then
+			-- void
+
+		else
 			typeError2(state,
 				staticObjectNode, F("Trying to access a static object using code that looks like it's supposed to do something at runtime. Ambigous intension."),
 				node,             F("...this looks like a runtime expression.")
@@ -3011,12 +3037,10 @@ end
 		end
 
 	elseif typeObject.tag == !(typeTags.TypeInfoStruct) or (typeRepresented and typeRepresented.tag == !(typeTags.TypeInfoStruct)) then
-		local structInfo = typeRepresented or typeObject
-		if not structInfo.hasMembers then
-			!DEPEND_AND_RETURN(`access`, DEPEND_STRUCT_MEMBERS_READY, `structInfo`)
-		end
+		local structInfo                             = typeRepresented or typeObject
+		local memberName, memberValueType, constDecl = validateStructKey(state, access, access.member, structInfo, isLvalue)
 
-		local memberName, memberValueType, constDecl = validateStructKey(state, access.member, structInfo, isLvalue)
+		if not memberName      then  return  end
 		if not memberValueType then  errorInternal(state, access.member)  end
 
 		if not constDecl then
@@ -3025,7 +3049,10 @@ end
 			return
 		end
 
-		if not isExpressionConstant(state, access.object, false) then
+		if not (
+			isExpressionConstant(state, access.object, false)
+			or (access.parent.nodeType == !(nodeTypes.AstCall) and access.parent.isMethod) -- It's ok to do e.g. getObject().staticMethod!()
+		) then
 			checkForStaticAccessThatUsesWhatLooksLikeRuntimeCode(state, access.object, access.member)
 		end
 
@@ -3033,7 +3060,7 @@ end
 		local nodeType  = valueExpr.nodeType
 		local replacement
 
-		if nodeType == !(nodeTypes.AstLiteral) then
+		if !!(anyV(`nodeType`, nodeTypes.AstLiteral,nodeTypes.AstForeign)) then
 			replacement = astCopy(valueExpr, access.member.token)
 
 		elseif nodeType == !(nodeTypes.AstType) then
@@ -3043,7 +3070,7 @@ end
 		elseif nodeType == !(nodeTypes.AstIdentifier) and valueExpr.inferredType.tag == !(typeTags.TypeInfoEnum) then
 			replacement = astCopy(valueExpr, access.member.token)
 
-		elseif nodeType == !(nodeTypes.AstEnum) or nodeType == !(nodeTypes.AstEnum) then
+		elseif nodeType == !(nodeTypes.AstEnum) then
 			replacement = createTypeNodeFromInfo(state, valueExpr.representedType, access.member.token, access.parent) -- Parent is temp and will change in a moment.
 
 		elseif nodeType == !(nodeTypes.AstLambda) then
@@ -3089,16 +3116,14 @@ end
 				-- Unqueue now unused nodes.
 				unqueue(access.member)
 
-				astPrintTree(call)
 				return
-
-			else
-				local ident        = astNewNode(AstIdentifier, access.member.token, access.parent)
-				ident.name         = constDecl.name.name
-				ident.declaration  = constDecl
-				ident.inferredType = constDecl.name.inferredType
-				replacement        = ident
 			end
+
+			local ident        = astNewNode(AstIdentifier, access.member.token, access.parent)
+			ident.name         = constDecl.name.name
+			ident.declaration  = constDecl
+			ident.inferredType = constDecl.name.inferredType
+			replacement        = ident
 
 		else
 			errorUnhandledNodeType(state, valueExpr)
@@ -3114,7 +3139,7 @@ end
 		local memberName    = getConstantNameOrTriggerError(state, memberLiteral)
 
 		local enumInfo      = typeRepresented or typeObject
-		local decl          = findDeclarationInScope(state, enumInfo.astNode, memberName, false)
+		local decl          = findMemberDeclaration(state, enumInfo.astNode, memberName)
 
 		if not decl then
 			typeError(state, memberLiteral, "'%s' is not a member of %s.", memberName, getFriendlyTypeInfoName(enumInfo))
@@ -3135,7 +3160,7 @@ end
 		local memberName    = getConstantNameOrTriggerError(state, memberLiteral)
 
 		local namespaceInfo = typeObject
-		local decl          = findDeclarationInScope(state, namespaceInfo.scope, memberName, true)
+		local decl          = findPublicDeclarationInScope(state, namespaceInfo.scope, memberName)
 
 		if not decl then
 			!DEPEND_AND_RETURN(`access`, DEPEND_DECLARATION, `memberName`, `namespaceInfo.scope`)
@@ -3295,13 +3320,6 @@ local function inferTableStruct(state, tableNode, structInfo)
 		exitFailure()
 	end
 
-	-- @Incomplete: This dependency is problematic in these cases:
-	-- local Struct :: struct{ bad:Struct = {} }
-	-- local Struct :: struct{ bad = cast(Struct) {} }
-	if not structInfo.hasMembers then
-		!DEPEND_AND_RETURN(`tableNode`, DEPEND_STRUCT_MEMBERS_READY, `structInfo`)
-	end
-
 	for _, tableField in ipairs(tableNode.fields) do
 		local fieldKey     = tableField.key
 		local fieldKeyType = fieldKey.inferredType
@@ -3310,7 +3328,8 @@ local function inferTableStruct(state, tableNode, structInfo)
 			!DEPEND_AND_RETURN(`tableNode`, DEPEND_NODE_INFERRED, `fieldKey`)
 		end
 
-		local memberName, memberValueType = validateStructKey(state, fieldKey, structInfo, true)
+		local memberName, memberValueType = validateStructKey(state, tableNode, fieldKey, structInfo, true)
+		if not memberName      then  return  end
 		if not memberValueType then  errorInternal(state, fieldKey)  end
 
 		!local TARGET_NAME   = `memberName ~= "" and F("value for struct field '%s'", memberName) or "value"`
@@ -3485,7 +3504,7 @@ end
 
 	-- Note: We don't require the body to inferred - just the "header".
 
-	if argsIn then
+	if argsIn and not lambda.bodyIsForeign then
 		for _, arg in ipairs(argsIn.arguments) do
 			if arg.declaration.value and not isExpressionConstant(state, arg.declaration.value, true) then
 				typeError(state, astGetExpressionVisuallyFurthestToTheLeft(arg.declaration.value), "Non-constant default values for arguments are not supported yet.")
@@ -3603,7 +3622,7 @@ end
 	!ASSERT `typeInfoStructName`
 
 	local module = itemWith1(state.globalScope.fileScopes, "moduleName", "preload") or errorInternal()
-	local decl   = findDeclarationInScope(state, module, typeInfoStructName, true)  or errorInternal()
+	local decl   = findPublicDeclarationInScope(state, module, typeInfoStructName)  or errorInternal()
 
 	if not decl.name.inferredType then
 		!DEPEND_AND_RETURN(`typeInfoNode`, DEPEND_NODE_INFERRED, `decl`)
@@ -4485,7 +4504,7 @@ end
 	if typeSourceNodeK then  structInfo.keyType   = requireTypeRepresentedByExpression(state, typeSourceNodeK)  end
 	if typeSourceNodeV then  structInfo.valueType = requireTypeRepresentedByExpression(state, typeSourceNodeV)  end
 
-	-- Inherit (dynamic) members from other structs.
+	-- Inherit members from other structs.
 	if struct.inherits[1] then
 		for i, typeExpr in ipairs(struct.inherits) do
 			local structInfoToInherit  = requireTypeRepresentedByExpression(state, typeExpr)
@@ -4497,7 +4516,8 @@ end
 				local structInfoPrevious = requireTypeRepresentedByExpression(state, typeExprPrevious)
 				if
 					structInfoToInherit == structInfoPrevious
-					or doesStructInherit(structInfoToInherit, structInfoPrevious) -- @Speed
+					-- @Speed?
+					or doesStructInherit(structInfoToInherit, structInfoPrevious)
 					or doesStructInherit(structInfoPrevious, structInfoToInherit)
 				then
 					typeError2(state,
@@ -4514,32 +4534,23 @@ end
 				insertIndexDecl = i+1
 			end
 
-			for _, declToCopy in ipairs(structInfoToInherit.astNode.declarations) do
-				if not declToCopy.isConstant then
-					local decl = findMemberDeclaration(state, struct, declToCopy.name.name)
-					if decl then
-						typeError2(state,
-							typeExpr, F("Trying to inherit a member called '%s' but the struct already has a member with that name.", decl.name.name),
-							decl,     F("...previous member was added here.") -- This may be an inherited member too.
-						)
-					end
+			local structToInherit = structInfoToInherit.astNode
 
-					-- @Check @Robustness: What happens with functions (and maybe more things)? Is too much copied? Need to test! Maybe we shouldn't skip PIPE_INFER here below.
-					decl = astCopy(declToCopy, typeExpr.token, struct)
-
-					table.insert(struct.statements,   insertIndexStatement, decl)
-					table.insert(struct.declarations, insertIndexDecl,      decl)
-					insertIndexStatement = insertIndexStatement+1
-					insertIndexDecl      = insertIndexDecl+1
-
-					addToQueueRecursively(state, decl, struct.statements, 0, !(PIPE_INFER)) -- Note: We'll update all queued.key values in a moment.
-
-					moveChildrenToNextRelevantPipe(state, decl)
-					moveToNextRelevantPipe(state, decl)
+			for _, declToInherit in ipairs(structToInherit.declarations) do
+				local decl = findMemberDeclaration(state, struct, declToInherit.name.name)
+				if not decl or decl.parent ~= struct then
+					table.insert(struct.declarations, insertIndexDecl, declToInherit)
+				elseif decl.isConstant and declToInherit.isConstant then
+					-- void  Shadowing/overriding static declarations is permitted. (Should we limit this to only functions, methods, or even foreign methods?)
+				else
+					typeError2(state,
+						typeExpr, F("Trying to inherit a member called '%s' but the struct already has a member with that name.", decl.name.name),
+						decl,     F("...previous member was added here.") -- This may be an inherited member too.
+					)
 				end
 			end
 
-			if structInfoToInherit.astNode.isForeign then
+			if structToInherit.isForeign then
 				struct.isForeign          = true
 				struct.foreignThroughNode = typeExpr
 			end
@@ -6226,7 +6237,9 @@ function _G.getExpectedTypeInfo(state, node, strict, expectantTerm, nodeForError
 			if isKey then  return getTypeInfoForBuiltinType(state, "string")  end
 
 			local structInfo = tableNode.inferredType
-			assert(structInfo.hasMembers) -- Not sure if we have to wait for this here.
+			if not structInfo.hasMembers then
+				!DEPEND_AND_RETURN(`node`, DEPEND_STRUCT_MEMBERS_READY, `structInfo`)
+			end
 
 			local memberLiteral = tableField.key
 			if not memberLiteral.inferredType then

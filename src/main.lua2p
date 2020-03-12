@@ -362,16 +362,19 @@ xpcall(function()
 						`
 
 						if dependency.dependType == !(DEPEND_DECLARATION) then
-							local name = dependency.dependOn
-							-- @Speed: Only call findDeclaration*() if it's reported that a declaration with the awaited name has been added to the tree.
 							if dependency.extraData then
-								if findDeclarationInScope(state, dependency.extraData, name, true) then
+								if findPublicDeclarationInScope(state, dependency.extraData, dependency.dependOn) then
 									!!(DEPENDENCY_FULFILLED)
 								end
 							else
-								if findDeclaration(state, queued.node, name) then
+								-- @Speed: Only call findDeclaration() if it's reported that a declaration with the awaited name has been added to the tree.
+								if findDeclaration(state, queued.node, dependency.dependOn) then
 									!!(DEPENDENCY_FULFILLED)
 								end
+							end
+						elseif dependency.dependType == !(DEPEND_MEMBER_DECLARATION) then
+							if findMemberDeclaration(state, dependency.extraData, dependency.dependOn) then
+								!!(DEPENDENCY_FULFILLED)
 							end
 
 						elseif dependency.dependType == !(DEPEND_NODE_INFERRED) then
@@ -415,44 +418,7 @@ xpcall(function()
 
 				!if DEBUG then
 					-- Guard against an infinite loop.
-					if cycle == 10000 then
-						-- !ifDEBUG `astPrintTree(state.globalScope)`
-
-						local printCount = 0
-						printerr()
-
-						for _, queued in ipairs(state.queueWaiting) do
-							if not queued.unqueued and queued.pipe <= finalPipe then
-								printCount = printCount+1
-
-								if printCount > 10 then
-									printerr("(...)")
-									break
-								end
-
-								local dependency = queued.waitingOn
-
-								astPrint(queued.node)
-								nodeMessage(
-									io.stderr, state, queued.node, "Debug", nil,
-									"pipe=%s%s",
-									PIPE_TITLES[queued.pipe],
-									dependency and ", waiting" or ""
-								)
-
-								if dependency and !!(anyV(`dependency.dependType`, DEPEND_NODE_INFERRED,DEPEND_NODE_INFERRED_FULLY,DEPEND_NODE_EMITTED)) then
-									astPrint(dependency.dependOn.node)
-									nodeMessage(
-										io.stderr, state, dependency.dependOn.node, "Debug", nil,
-										"...waiting on this."
-									)
-								end
-							end
-						end
-
-						-- outputDependencyGraph(state)
-						errorInternal("[DEBUG] Pipes ran for too long. (waiting:%d)", #state.queueWaiting)
-					end
+					if cycle == 1000 then  errorPipesAreInfiniteLooping(state, finalPipe)  end
 				!end
 			end--for cycle
 		!ifDEBUG`end`
