@@ -269,7 +269,7 @@ xpcall(function()
 		insertToken(state.tokens, !(TOKEN_DIRECTIVE), "import",  pathToFirstFile)
 		insertToken(state.tokens, !(TOKEN_STRING),    "preload", pathToFirstFile)
 
-		local timeStartLexing, timeEndLexing = readAndTokenizeFile(state, pathToFirstFile)
+		local timeStartLexing, timeEndLexing = readAndTokenizeFile(state, pathToFirstFile, true)
 
 		local timeStartParsing = os.clock()
 		local globalScope      = parseGlobalScope(state, pathToFirstFile)
@@ -469,7 +469,27 @@ xpcall(function()
 		!ifNotDEBUG`if not silent then`
 			!ifDEBUG`if debug_onlyParse then  astPrintTree(globalScope)  end`
 
-			local subTime = timeDoingSubCompilations-timeDoingSubCompilationsStart
+			local tokens        = state.tokens
+			local subTime       = timeDoingSubCompilations-timeDoingSubCompilationsStart
+			local lineCountCode = 0
+			local lastFile      = ""
+			local lastLine      = 0
+
+			for token = 1, tokens.count do
+				if not tokens.inserted[token] then
+					if tokens.file[token] ~= lastFile then
+						lastFile = tokens.file[token]
+						lastLine = 0
+					end
+
+					if tokens.line1[token] ~= lastLine then
+						lineCountCode = lineCountCode+1
+					end
+
+					lineCountCode = lineCountCode+tokens.line2[token]-tokens.line1[token]
+					lastLine  = tokens.line2[token]
+				end
+			end
 
 			!local OK = {
 				"██████████████████████ ",
@@ -493,6 +513,14 @@ xpcall(function()
 			printf(!((DEBUG and OK[5] or "").."Pipes:   %.3f sec"), timeEndPipes   - timeStartPipes - subTime)
 			printf(!((DEBUG and OK[6] or "").."Output:  %.3f sec"), timeEndOutput  - timeStartOutput)
 
+			printf(
+				!((DEBUG and OK[7] or "").."%d LOC in %d file%s (%d lines including empty lines and comments)"),
+				lineCountCode,
+				#state.globalScope.fileScopes-1,
+				(state.globalScope.fileScopes[3] and "s" or ""),
+				tokens.lineCount
+			)
+
 			!if DEBUG then
 				local dependencyCount = {}
 				for _, dependency in ipairs(state.dependencies) do
@@ -505,7 +533,7 @@ xpcall(function()
 				end
 
 				printf(
-					!((DEBUG and OK[7] or "").."Updates:%d Cycles:%d Queue:%d/%d Deps:%d (%s)"),
+					!((DEBUG and OK[8] or "").."Updates:%d Cycles:%d Queue:%d/%d Deps:%d (%s)"),
 					queuedUpdates, pipeCycles, queueActiveMaxSize, #state.allQueueds, #state.dependencies,
 					table.concat(depencyCountTexts, " ")
 				)

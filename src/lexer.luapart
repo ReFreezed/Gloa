@@ -101,6 +101,7 @@ local DIRECTIVE_WORDS = !(directiveWords)
 
 _G.!struct"Tokens"{ -- SOA
 	{`count`,     0},
+
 	{`type`,      {}}, -- One of TOKEN_*.
 	{`value`,     {}}, -- Depends on the type.
 	{`extra`,     {}}, -- Depends on the type.
@@ -109,9 +110,12 @@ _G.!struct"Tokens"{ -- SOA
 	{`position2`, {}}, -- End byte.
 	{`line1`,     {}}, -- Start line.
 	{`line2`,     {}}, -- End line.
+	{`inserted`,  {}}, -- Used for compilation stats.
+
+	{`lineCount`, 0},
 }
 
-function _G.tokenize(s, path, tokens)
+function _G.tokenize(s, path, tokens, increaseTotalLineCount)
 	local getByte = string.byte
 
 	local tokTypes      = tokens.type
@@ -515,6 +519,10 @@ function _G.tokenize(s, path, tokens)
 			--]]
 		end
 	end
+
+	if increaseTotalLineCount then
+		tokens.lineCount = tokens.lineCount+ln
+	end
 end
 
 -- insertToken( tokens, tokenType, tokenValue [, path=tokens.file[1] ] )
@@ -528,6 +536,7 @@ function _G.insertToken(tokens, tokType, tokValue, path)
 	tokens.line1[count]     = 1
 	tokens.line2[count]     = 1
 	tokens.file[count]      = path or tokens.file[1]
+	tokens.inserted[count]  = true
 end
 
 
@@ -570,7 +579,7 @@ end
 do
 	local BRACKETS = {["("]=")", ["{"]="}", ["["]="]"}
 
-	function _G.readAndTokenizeFile(state, path)
+	function _G.readAndTokenizeFile(state, path, increaseTotalLineCount)
 		!ifDEBUG `profilerPause()`
 		assert(not state.fileBuffers[path], path)
 
@@ -586,7 +595,7 @@ do
 		local startToken = tokens.count+1
 
 		local startTime = os.clock()
-		tokenize(s, path, tokens)
+		tokenize(s, path, tokens, increaseTotalLineCount)
 		local endTime = os.clock()
 
 		-- Quickly check for stray/unmatched brackets.

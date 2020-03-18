@@ -3791,11 +3791,18 @@ end
 	if not state.fileBuffers[path] then
 		!ifDEBUG `profilerPause()`
 
-		insertToken(state.tokens, !(TOKEN_DIRECTIVE), "import",  path)
-		insertToken(state.tokens, !(TOKEN_STRING),    "preload", path)
+		local isPreload = not import.isLoad and import.importName == "preload"
+		local tokens    = state.tokens
 
-		-- @Incomplete: Include times in compilation stats.
-		local timeStartLexing, timeEndLexing = readAndTokenizeFile(state, path)
+		if not isPreload then
+			insertToken(tokens, !(TOKEN_DIRECTIVE), "import",  path)
+			insertToken(tokens, !(TOKEN_STRING),    "preload", path)
+		end
+
+		local startToken = tokens.count+1
+
+		-- @Incomplete: Include these times in the compilation stats.
+		local timeStartLexing, timeEndLexing = readAndTokenizeFile(state, path, (not isPreload))
 		!ASSERT(`state.fileBuffers[path]`, `path`)
 
 		local timeStartParsing = os.clock()
@@ -3804,6 +3811,12 @@ end
 
 		if peekNextToken(state) then
 			errorParsingNext(state, "Expected the end of the file.")
+		end
+
+		if isPreload then
+			for token = startToken, tokens.count do
+				tokens.inserted[token] = true
+			end
 		end
 
 		!ifDEBUG `profilerUnpause()`
