@@ -17,7 +17,10 @@
 
 --============================================================]]
 
+
+
 !local OUTPUT_DEPENDENCY_GRAPH = false
+local MAX_ERRORS_MESSAGES      = !(DEBUG and 20 or 4) -- @Incomplete: Make this a compiler option.
 
 
 
@@ -428,6 +431,31 @@ function _G.errorPipesAreStuck(state)
 		astPrintTree(state.globalScope)
 	!end
 
+	local reportCount = 0
+	!local REPORT_START = trimTemplate`
+		local _exitFailure = exitFailure
+		reportCount = reportCount+1
+		if reportCount < MAX_ERRORS_MESSAGES then  _G.exitFailure = NOOP  end
+	`
+	!local REPORT_END = trimTemplate`
+		_G.exitFailure = _exitFailure
+	`
+	!local REPORT_FINAL = trimTemplate`
+		if reportCount > 0 then  exitFailure()  end
+	`
+
+	-- queueds = findQueueds( callback [, queueds={} ] )
+	local function findQueueds(cb, queueds)
+		queueds = queueds or {}
+		for _, queued in ipairs(state.allQueueds) do
+			local dependency = not queued.unqueued and queued.waitingOn
+			if dependency and cb(queued, queued.node, dependency, dependency.dependOn) then
+				table.insert(queueds, queued)
+			end
+		end
+		return queueds
+	end
+
 	-- [[ Report undeclared identifier.
 	local function getDeclaredIdentifierWaitingToBeDeclaredWithName(name, queuedToIgnore) -- @Cleanup: What is this even?!?!
 		for _, queued in ipairs(state.allQueueds) do
@@ -439,7 +467,8 @@ function _G.errorPipesAreStuck(state)
 		return nil
 	end
 
-	local generatedIdent = nil
+	local generatedIdents = {}
+	local namesReported   = {}
 
 	for _, queued in ipairs(state.allQueueds) do
 		local dependency = not queued.unqueued and queued.waitingOn
@@ -450,7 +479,10 @@ function _G.errorPipesAreStuck(state)
 			if not getDeclaredIdentifierWaitingToBeDeclaredWithName(name, queued) then
 				local node = queued.node
 
-				if name == "..." then
+				if namesReported[name] then
+					-- void
+
+				elseif name == "..." then
 					errorParsing(state, node.token, "This is not inside a vararg function.") -- Probably an internal compiler error at this point.
 
 				elseif node.nodeType == !(nodeTypes.AstAccess) then
@@ -458,6 +490,7 @@ function _G.errorPipesAreStuck(state)
 
 					if access.object.inferredType.tag == XXX_TYPE_TAG_NAMESPACE and access.object.inferredType.scope.nodeType == !(nodeTypes.AstFileScope) then
 						local fileScope = access.object.inferredType.scope
+						!!(REPORT_START)
 						typeError(
 							state, node.member,
 							"Undeclared identifier '%s' in %s '%s'.",
@@ -465,157 +498,191 @@ function _G.errorPipesAreStuck(state)
 							fileScope.isModule and "module"             or "file",
 							fileScope.isModule and fileScope.moduleName or fileScope.path
 						)
+						!!(REPORT_END)
+
 					else
-						local scope = nil
-						local tag   = access.object.inferredType.tag
+						local scope  = nil
+						local tag    = access.object.inferredType.tag
+						local ignore = false
 
 						if tag == XXX_TYPE_TAG_NAMESPACE then
 							scope = access.object.inferredType.scope
-						elseif tag == XXX_TYPE_TAG_STRUCT or tag == XXX_TYPE_TAG_ENUM then
+						elseif tag == XXX_TYPE_TAG_ENUM then
 							scope = access.object.inferredType.astNode
+						elseif tag == XXX_TYPE_TAG_STRUCT then
+							scope = access.object.inferredType.astNode
+							if not access.object.inferredType.hasMembers then  ignore = true  end -- Better to report the next issue, probably.
 						else
 							-- What could this be?
 						end
 
-						printerr()
-						typeMessage(io.stderr, state, access.member, "Error", "Undeclared identifier '%s'.", name)
-						if scope then
-							typeMessage(io.stderr, state, scope, "Info", "...here is the accessed scope.")
+						if not ignore then
+							!!(REPORT_START)
+							printerr()
+							typeMessage(io.stderr, state, access.member, "Error", "Undeclared identifier '%s'.", name)
+							if scope then
+								typeMessage(io.stderr, state, scope, "Info", "...here is the accessed scope.")
+							end
+							exitFailure()
+							!!(REPORT_END)
 						end
-						exitFailure()
 					end
 
 				elseif name == "it" or name == "itIndex" then
-					generatedIdent = node
+					table.insert(generatedIdents, node)
 					-- Continue, as we prefer to report on user-defined identifiers first...
 
 				else
+					!!(REPORT_START)
 					typeError(state, node, "Undeclared identifier '%s'.", name)
+					!!(REPORT_END)
 				end
+
+				namesReported[name] = true
 			end
 		end
 	end
 
-	if generatedIdent then
-		typeError(state, node, "Undeclared identifier '%s'.", generatedIdent.name)
+	for _, generatedIdent in ipairs(generatedIdents) do
+		!!(REPORT_START)
+		typeError(state, node, "Undeclared identifier '%s'.", generatedIdents.name)
+		!!(REPORT_END)
 	end
-	--]]
 
-	-- [[
-	for _, queued in ipairs(state.allQueueds) do
-		local dependency = not queued.unqueued and queued.waitingOn
-
-		if dependency and dependency.dependType == !(DEPEND_CONSTANT_READY) then
-			local const = dependency.dependOn
-
-			printerr()
-			if const.valueType.tag == XXX_TYPE_TAG_FUNCTION then
-				local lambda = const.value
-				!ifDEBUG`astPrint(lambda)`
-				typeMessage(io.stderr, state, lambda, "Error", "Failed finishing the constant for this function.")
-			else
-				printerr(F("Failed finishing a constant for a value of type '%s'.", getFriendlyTypeInfoName(const.valueType)))
-			end
-			!ifDEBUG`astPrint(queued.node)`
-			typeMessage(io.stderr, state, queued.node, "Info", "...this thing is waiting for the constant to be ready.")
-			exitFailure()
-		end
-	end
-	--]]
-
-	-- [[
-	for _, queued in ipairs(state.allQueueds) do
-		local dependency = not queued.unqueued and queued.waitingOn
-
-		if dependency and dependency.dependType == !(DEPEND_STRUCT_MEMBERS_READY) then
-			local structInfo = dependency.dependOn
-
-			printerr()
-			!ifDEBUG`astPrint(structInfo.astNode)`
-			typeMessage(io.stderr, state, structInfo.astNode, "Error", "Failed generating member info for this struct.")
-			!ifDEBUG`astPrint(queued.node)`
-			typeMessage(io.stderr, state, queued.node,        "Info",  "...this thing is waiting for the members to be ready.")
-			exitFailure()
-		end
-	end
+	!!(REPORT_FINAL)
 	--]]
 
 	-- [[ Report identifier waiting for declaration to be inferred.
-	for _, queued in ipairs(state.allQueueds) do
-		local dependency = not queued.unqueued and queued.waitingOn
-
-		if
-			dependency
-			and (dependency.dependType == !(DEPEND_NODE_INFERRED) or dependency.dependType == !(DEPEND_NODE_INFERRED_FULLY))
-			and queued.node.nodeType              == !(nodeTypes.AstIdentifier)
-			and dependency.dependOn.node.nodeType == !(nodeTypes.AstDeclaration)
-		then
-			local decl = dependency.dependOn.node
-
-			printerr()
-			!ifDEBUG`astPrint(decl)`
-			typeMessage(io.stderr, state, decl,        "Error", "Failed inferring the type of this declaration.")
-			!ifDEBUG`astPrint(queued.node)`
-			typeMessage(io.stderr, state, queued.node, "Info",  "...this identifier is waiting for the above to finish.")
-			exitFailure()
-		end
+	local queueds = findQueueds(function(queued, node, dependency, dependOn)
+		return true
+			and dependency.dependType  == !(DEPEND_NODE_INFERRED)
+			and node.nodeType          == !(nodeTypes.AstIdentifier)
+			and dependOn.node.nodeType == !(nodeTypes.AstDeclaration)
+	end)
+	findQueueds(function(queued, node, dependency, dependOn)
+		return true
+			and dependency.dependType  == !(DEPEND_NODE_INFERRED_FULLY)
+			and node.nodeType          == !(nodeTypes.AstIdentifier)
+			and dependOn.node.nodeType == !(nodeTypes.AstDeclaration)
+	end, queueds)
+	for _, queued in ipairs(queueds) do
+		local decl = queued.waitingOn.dependOn.node
+		!!(REPORT_START)
+		printerr()
+		!ifDEBUG`astPrint(decl)`
+		typeMessage(io.stderr, state, decl,        "Error", "Failed inferring the type of this declaration.")
+		!ifDEBUG`astPrint(queued.node)`
+		typeMessage(io.stderr, state, queued.node, "Info",  "...this identifier is waiting for the above to finish.")
+		exitFailure()
+		!!(REPORT_END)
 	end
+	!!(REPORT_FINAL)
 	--]]
 
 	-- [[ Report about-to-be-declared identifier waiting for something.
-	for _, queued in ipairs(state.allQueueds) do
-		local dependency = not queued.unqueued and queued.waitingOn
-
-		if
-			dependency
-			and (dependency.dependType == !(DEPEND_NODE_INFERRED) or dependency.dependType == !(DEPEND_NODE_INFERRED_FULLY))
-			and queued.node.nodeType == !(nodeTypes.AstIdentifier)
-			and queued.node.parent   == queued.node.declaration
-		then
-			local expr = dependency.dependOn.node
-
-			printerr()
-			!ifDEBUG`astPrint(expr)`
-			typeMessage(io.stderr, state, expr,        "Error", "Failed inferring the type of this expression.")
-			!ifDEBUG`astPrint(queued.node)`
-			typeMessage(io.stderr, state, queued.node, "Info",  "...this identifier is waiting for the above to finish.")
-			exitFailure()
-		end
+	local queueds = findQueueds(function(queued, node, dependency, dependOn)
+		return true
+			and dependency.dependType == !(DEPEND_NODE_INFERRED)
+			and node.nodeType         == !(nodeTypes.AstIdentifier)
+			and queued.node.parent    == queued.node.declaration
+			and queued.node           ~= queued.node.declaration.value
+	end)
+	findQueueds(function(queued, node, dependency, dependOn)
+		return true
+			and dependency.dependType == !(DEPEND_NODE_INFERRED_FULLY)
+			and node.nodeType         == !(nodeTypes.AstIdentifier)
+			and queued.node.parent    == queued.node.declaration
+			and queued.node           ~= queued.node.declaration.value
+	end, queueds)
+	for _, queued in ipairs(queueds) do
+		local expr = queued.waitingOn.dependOn.node
+		!!(REPORT_START)
+		printerr()
+		!ifDEBUG`astPrint(expr)`
+		typeMessage(io.stderr, state, expr,        "Error", "Failed inferring the type of this expression.")
+		!ifDEBUG`astPrint(queued.node)`
+		typeMessage(io.stderr, state, queued.node, "Info",  "...this identifier is waiting for the above to finish.")
+		exitFailure()
+		!!(REPORT_END)
 	end
+	!!(REPORT_FINAL)
 	--]]
 
 	-- [[ Report something waiting for something else to be inferred.
-	for _, queued in ipairs(state.allQueueds) do
-		local dependency = not queued.unqueued and queued.waitingOn
-
-		if dependency and (dependency.dependType == !(DEPEND_NODE_INFERRED) or dependency.dependType == !(DEPEND_NODE_INFERRED_FULLY)) then
-			local expr = dependency.dependOn.node
-
-			printerr()
-			!ifDEBUG`astPrint(expr)`
-			typeMessage(io.stderr, state, expr,        "Error", "Failed inferring the type of this expression.")
-			!ifDEBUG`astPrint(queued.node)`
-			typeMessage(io.stderr, state, queued.node, "Info",  "...this thing is waiting for the above to finish. (This whole error message is probably not very helpful. Sorry!)")
-			exitFailure()
-		end
+	local queueds = findQueueds(function(queued, node, dependency, dependOn)
+		return dependency.dependType == !(DEPEND_NODE_INFERRED) or dependency.dependType == !(DEPEND_NODE_INFERRED_FULLY)
+	end)
+	for _, queued in ipairs(queueds) do
+		local expr = queued.waitingOn.dependOn.node
+		!!(REPORT_START)
+		printerr()
+		!ifDEBUG`astPrint(expr)`
+		typeMessage(io.stderr, state, expr,        "Error", "Failed inferring the type of this expression.")
+		!ifDEBUG`astPrint(queued.node)`
+		typeMessage(io.stderr, state, queued.node, "Info",  "...this thing is waiting for the above to finish. (This whole error message is probably not very helpful. Sorry!)")
+		exitFailure()
+		!!(REPORT_END)
 	end
+	!!(REPORT_FINAL)
+	--]]
+
+	-- [[ Report things waiting for all struct members to be ready.
+	local queueds = findQueueds(function(queued, node, dependency, dependOn)
+		return dependency.dependType == !(DEPEND_STRUCT_MEMBERS_READY)
+	end)
+	for _, queued in ipairs(queueds) do
+		local structInfo = queued.waitingOn.dependOn
+		!!(REPORT_START)
+		printerr()
+		!ifDEBUG`astPrint(structInfo.astNode)`
+		typeMessage(io.stderr, state, structInfo.astNode, "Error", "Failed generating member info for this struct.")
+		!ifDEBUG`astPrint(queued.node)`
+		typeMessage(io.stderr, state, queued.node,        "Info",  "...this thing is waiting for the members to be ready.")
+		exitFailure()
+		!!(REPORT_END)
+	end
+	!!(REPORT_FINAL)
+	--]]
+
+	-- [[
+	local queueds = findQueueds(function(queued, node, dependency, dependOn)
+		return dependency.dependType == !(DEPEND_CONSTANT_READY)
+	end)
+	for _, queued in ipairs(queueds) do
+		local const = queued.waitingOn.dependOn
+		!!(REPORT_START)
+		printerr()
+		if const.valueType.tag == XXX_TYPE_TAG_FUNCTION then
+			local lambda = const.value
+			!ifDEBUG`astPrint(lambda)`
+			typeMessage(io.stderr, state, lambda, "Error", "Failed finishing the constant for this function.")
+		else
+			printerr(F("Failed finishing a constant for a value of type '%s'.", getFriendlyTypeInfoName(const.valueType)))
+		end
+		!ifDEBUG`astPrint(queued.node)`
+		typeMessage(io.stderr, state, queued.node, "Info", "...this thing is waiting for the constant to be ready.")
+		exitFailure()
+		!!(REPORT_END)
+	end
+	!!(REPORT_FINAL)
 	--]]
 
 	-- [[ Report something waiting for something else to emit code.
-	for _, queued in ipairs(state.allQueueds) do
-		local dependency = not queued.unqueued and queued.waitingOn
-
-		if dependency and dependency.dependType == !(DEPEND_NODE_EMITTED) then
-			local expr = dependency.dependOn.node
-
-			printerr()
-			astPrint(queued.node)
-			bcMessage(io.stderr, state, queued.node, "Error", "Internal compiler error: Failed emitting code for %s.", AST_NODE_TYPE_NAMES[queued.node.nodeType])
-			astPrint(expr)
-			bcMessage(io.stderr, state, expr,        "Info",  "...it is waiting for this %s to finish.", AST_NODE_TYPE_NAMES[expr.nodeType])
-			exitFailure()
-		end
+	local queueds = findQueueds(function(queued, node, dependency, dependOn)
+		return dependency.dependType == !(DEPEND_NODE_EMITTED)
+	end)
+	for _, queued in ipairs(queueds) do
+		local expr = queued.waitingOn.dependOn.node
+		!!(REPORT_START)
+		printerr()
+		astPrint(queued.node)
+		bcMessage(io.stderr, state, queued.node, "Error", "Internal compiler error: Failed emitting code for %s.", AST_NODE_TYPE_NAMES[queued.node.nodeType])
+		astPrint(expr)
+		bcMessage(io.stderr, state, expr,        "Info",  "...it is waiting for this %s to finish.", AST_NODE_TYPE_NAMES[expr.nodeType])
+		exitFailure()
+		!!(REPORT_END)
 	end
+	!!(REPORT_FINAL)
 	--]]
 
 	errorInternal("Pipes are stuck. Also failed to figure out where the issue actually is. Oops...")

@@ -1398,19 +1398,11 @@ end
 			!(
 			local TEMPLATE_ERROR_DUPLICATE_TYPE = `
 				printerr()
-				typeMessage(io.stderr, state, typeExpr, "Error", "Duplicate type specified in $siteTitle.")
+				typeMessage(io.stderr, state, typeExpr, "Error", "Duplicate type specified in $siteTitle. (%s)", getFriendlyTypeInfoName($typeInfoVar))
 				if isFromCompound[$typeInfoVar] then
-					typeMessage(
-						io.stderr, state, duplicates[$typeInfoVar],
-						"Info", "...this sub-compound type contains the same type. (%s)",
-						getFriendlyTypeInfoName($typeInfoVar)
-					)
+					typeMessage(io.stderr, state, duplicates[$typeInfoVar], "Info", "...this sub-compound type contains the same type.")
 				else
-					typeMessage(
-						io.stderr, state, duplicates[$typeInfoVar],
-						"Info", "...this is the same type. (%s)",
-						getFriendlyTypeInfoName($typeInfoVar)
-					)
+					typeMessage(io.stderr, state, duplicates[$typeInfoVar], "Info", "...this is the same type.")
 				end
 				exitFailure()
 			`
@@ -3070,7 +3062,7 @@ end
 		elseif nodeType == !(nodeTypes.AstIdentifier) and valueExpr.inferredType.tag == !(typeTags.TypeInfoEnum) then
 			replacement = astCopy(valueExpr, access.member.token)
 
-		elseif nodeType == !(nodeTypes.AstEnum) then
+		elseif !!(anyV(`nodeType`, nodeTypes.AstEnum,nodeTypes.AstStruct)) then
 			replacement = createTypeNodeFromInfo(state, valueExpr.representedType, access.member.token, access.parent) -- Parent is temp and will change in a moment.
 
 		elseif nodeType == !(nodeTypes.AstLambda) then
@@ -3126,6 +3118,7 @@ end
 			replacement        = ident
 
 		else
+			!ifDEBUG `where(state, access)`
 			errorUnhandledNodeType(state, valueExpr)
 		end
 
@@ -3502,7 +3495,41 @@ end
 		!DEPEND_AND_RETURN(`lambda`, DEPEND_NODE_INFERRED, `argsOut`)
 	end
 
+	if lambda.bodyIsForeign and lambda.foreignSource == "method" then
+		-- Validate method.
+		local argIn1   = argsIn and argsIn.arguments[1]
+		local argType1 = argIn1 and argIn1.declaration.name.inferredType
+
+		if not argIn1 then
+			typeError(state, lambda, "Expected a struct as first argument for foreign method.")
+
+		elseif argType1.tag ~= !(typeTags.TypeInfoStruct) then
+			typeError(
+				state, argsIn.arguments[1],
+				"Expected the first arguments to be a struct. Foreign methods are only supported on structs. (Type is %s)",
+				getFriendlyTypeInfoName(argType1)
+			)
+
+		-- elseif not argType1.astNode.isForeign and not argType1.hasMembers then
+		-- 	-- @Incomplete: We create circular dependencies in some cases by doing this. No good!
+		-- 	!DEPEND_AND_RETURN(`lambda`, DEPEND_STRUCT_MEMBERS_READY, `argType1`) -- We need this for isForeign to be valid.
+
+		elseif not argType1.astNode.isForeign then
+			typeError2(state,
+				argsIn.arguments[1].declaration.type, F("%s is not a foreign struct. Foreign methods only work on foreign structs.", getFriendlyTypeInfoName(argType1)),
+				argType1.astNode,                     F("...here is the struct")
+			)
+
+		elseif not argIn1.isRequired then
+			typeError(state, argsIn.arguments[1], "The first argument must not be optional for foreign methods.")
+		end
+	end
+
 	-- Note: We don't require the body to inferred - just the "header".
+
+	--
+	-- No more dependencies for this lambda after this point!
+	--
 
 	if argsIn and not lambda.bodyIsForeign then
 		for _, arg in ipairs(argsIn.arguments) do
@@ -3516,31 +3543,6 @@ end
 	lambda.inferredType = funcSig
 
 	if lambda.bodyIsForeign then
-		if lambda.foreignSource == "method" then
-			-- Validate method.
-			local argType1 = funcSig.argumentTypesIn[1]
-
-			if not argType1 then
-				typeError(state, lambda, "Expected a struct as first argument for foreign method.")
-
-			elseif argType1.tag ~= !(typeTags.TypeInfoStruct) then
-				typeError(
-					state, argsIn.arguments[1],
-					"Expected the first arguments to be a struct. Foreign methods are only supported on structs. (Type is %s)",
-					getFriendlyTypeInfoName(argType1)
-				)
-
-			elseif not argType1.astNode.isForeign then
-				typeError2(state,
-					argsIn.arguments[1].declaration.type, F("%s is not a foreign struct. Foreign methods only work on foreign structs.", getFriendlyTypeInfoName(argType1)),
-					argType1.astNode,                     F("...here is the struct")
-				)
-
-			elseif not funcSig.requiredArgumentsIn[1] then
-				typeError(state, argsIn.arguments[1], "The first argument must not be optional for foreign methods.")
-			end
-		end
-
 		if lambda.foreignSourceName == "" then
 			errorInternal(state, lambda, "@Incomplete: Infer lambda.foreignSourceName")
 		end
@@ -3766,10 +3768,22 @@ end
 
 !NODE_INFERRER `function nodeInferrers.AstImport(state, import)`
 	local path
+
 	if import.isLoad then
 		path = isPathAbsolute(import.importName) and import.importName or state.projectDirectory.."/"..import.importName
+
 	else
 		path = COMPILER_DIRECTORY.."/modules/"..import.importName..".gloa"
+
+		if not isReadableFile(path) then
+			local pathFallback = COMPILER_DIRECTORY.."/modules/"..import.importName.."/main.gloa"
+
+			if not isReadableFile(pathFallback) then
+				typeError(state, import, "Could not read module file '%s' or '%s'.", path, pathFallback)
+			end
+
+			path = pathFallback
+		end
 	end
 
 	local globalScope = state.globalScope
@@ -4485,12 +4499,12 @@ end
 		local structInfoToInherit = requireTypeRepresentedByExpression(state, typeExpr)
 		if structInfoToInherit.tag ~= !(typeTags.TypeInfoStruct) then
 			typeError(state, typeExpr, "Expected the type of a struct to inherit members from.")
-		elseif doesStructInherit(structInfoToInherit, structInfo) then
-			typeError(state, typeExpr, "Struct is trying to inherit members from itself.")
 		end
-
 		if not structInfoToInherit.hasMembers then
 			!DEPEND_AND_RETURN(`struct`, DEPEND_STRUCT_MEMBERS_READY, `structInfoToInherit`)
+		end
+		if doesStructInherit(structInfoToInherit, structInfo) then
+			typeError(state, typeExpr, "Struct is trying to inherit members from itself.")
 		end
 	end
 
@@ -5003,6 +5017,9 @@ end
 	end
 
 	local writer = state.runnerWriter
+
+	writeLuaPreloads(state, writer, state.runnerWrittenPreloads+1)
+	state.runnerWrittenPreloads = #state.luaPreloads
 
 	writeForeignImports                (state, writer, newConstants, true)
 	writeConstantObjectsExceptFunctions(state, writer, newConstants, true)

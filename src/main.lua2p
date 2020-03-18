@@ -34,21 +34,35 @@ Options:
 
 local args = {...}
 
-local defaultGlobals = {}
-for k, v in pairs(_G) do
-	defaultGlobals[k] = v
+do
+	-- Note: We create a sandbox environment for the compiler and leave the
+	-- default environment for the metaprogram to use instead of the other way
+	-- around. Otherwise modules loaded by the metaprogram may not work if
+	-- they're expected to modify the (default) environment. The compiler
+	-- doesn't require any modules by itself so this work just fine.
+
+	local defaultGlobals      = {}
+	local compilerEnvironment = {} -- :CompilerEnvironment
+
+	for k, v in pairs(_G) do
+		defaultGlobals[k]      = v
+		compilerEnvironment[k] = v
+	end
+
+	compilerEnvironment.DEFAULT_GLOBALS     = defaultGlobals
+	compilerEnvironment.DEFAULT_ENVIRONMENT = _G
+	compilerEnvironment._G                  = compilerEnvironment
+
+	setfenv(1, compilerEnvironment)
 end
-_G.DEFAULT_GLOBALS = defaultGlobals
 
 xpcall(function()
 	local timeStartInitial = os.clock()
 
 	!if DEBUG then
-		-- This fixes a Sublime Text 2 stdout/stderr desync in build system results. Sigh... :SublimeText2Desync
-		io.stdout = io.stderr
-		io.output(io.stdout)
-
-		io.stdout:setvbuf("no") -- Note: This slows down all printing.
+		-- Note: This slows down all printing.
+		io.stdout:setvbuf("no")
+		io.stderr:setvbuf("no")
 	!end
 
 
@@ -220,9 +234,10 @@ xpcall(function()
 		{`bytecodes`,         {}},    -- Code for the interpreter to run.
 
 		-- Runner:
-		{`runnerEnvironment`,    {}},
-		{`runnerWriter`,         nil}, -- WriterState
-		{`runnerWrittenObjects`, {}},
+		{`runnerEnvironment`,     {}},
+		{`runnerWriter`,          nil}, -- WriterState
+		{`runnerWrittenObjects`,  {}},
+		{`runnerWrittenPreloads`, 0},
 	}
 
 	local timeDoingSubCompilations = 0

@@ -1744,6 +1744,31 @@ end
 
 
 
+function _G.writeLuaPreloads(state, writer, fromIndex)
+	local file = writer.file
+
+	for i = fromIndex, #state.luaPreloads do
+		local luaPreload = state.luaPreloads[i]
+
+		file:write("do\n", luaPreload.lua, "\nend\n")
+
+		local _, nlCount = luaPreload.lua:gsub("\n", "\0")
+
+		local trimmedInitialNewline = state.tokens.extra[luaPreload.token]
+		local stringTokenFile       = state.tokens.file [luaPreload.token] or errorInternal()
+		local stringTokenLn         = state.tokens.line1[luaPreload.token] + luaPreload.lineOffset - 2 + (trimmedInitialNewline and 1 or 0)
+
+		local outputOffsetLn = writer.currentOutputLine-1
+
+		for ln = 2, nlCount+2 do
+			writer.lineMappingFiles[outputOffsetLn+ln] = stringTokenFile
+			writer.lineMappingLines[outputOffsetLn+ln] = stringTokenLn+ln
+		end
+
+		writer.currentOutputLine = writer.currentOutputLine+nlCount+3
+	end
+end
+
 function _G.writeCompilerSymbols(state, writer)
 	local file = writer.file
 
@@ -1779,47 +1804,49 @@ function _G.writeCompilerSymbols(state, writer)
 				end
 			end
 
-			$outputFile:write("\n")
+			local outputFile = io.stderr
+
+			outputFile:write("\n")
 			if type(err) == "string" then
-				$outputFile:write("Error: ", err, "\n")
+				outputFile:write("Error: ", err, "\n")
 			else
-				$outputFile:write("Error!\n")
+				outputFile:write("Error!\n")
 			end
-			$outputFile:write("stack traceback:\n")
+			outputFile:write("stack traceback:\n")
 
 			for level = 2, math.huge do
 				local info = debug.getinfo(level, "nSl")
 				if not info then  break  end
 
-				$outputFile:write("\t")
+				outputFile:write("\t")
 
 				if info.what == "C" then
-					$outputFile:write("[ C ]: ")
+					outputFile:write("[ C ]: ")
 					if (info.name or "") ~= "" then
-						$outputFile:write("'", info.name, "'")
+						outputFile:write("'", info.name, "'")
 					else
-						$outputFile:write("?")
+						outputFile:write("?")
 					end
 
 				else
 					if info.source == mainSource and (lineMappingLines[info.currentline] or 0) > 0 then
-						$outputFile:write(lineMappingPaths[lineMappingFiles[info.currentline]], ":", lineMappingLines[info.currentline])
+						outputFile:write(lineMappingPaths[lineMappingFiles[info.currentline]], ":", lineMappingLines[info.currentline])
 					else
-						$outputFile:write("[Lua]")
+						outputFile:write("[Lua]")
 					end
 
-					$outputFile:write(":")
+					outputFile:write(":")
 
 					if info.what == "tail" then
-						$outputFile:write(" tail call")
+						outputFile:write(" tail call")
 					elseif info.what == "main" then
-						$outputFile:write(" main chunk")
+						outputFile:write(" main chunk")
 					elseif (info.name or "") ~= "" then
-						$outputFile:write(" ")
-						if info.namewhat == "method" or info.namewhat == "field" then  $outputFile:write(info.namewhat, " ")  end
-						$outputFile:write("'", info.name, "'")
+						outputFile:write(" ")
+						if info.namewhat == "method" or info.namewhat == "field" then  outputFile:write(info.namewhat, " ")  end
+						outputFile:write("'", info.name, "'")
 					elseif info.source == mainSource and (lineMappingLines[info.linedefined] or 0) > 0 and info.linedefined ~= info.currentline then
-						$outputFile:write(" (linedefined:", lineMappingLines[info.linedefined], ")")
+						outputFile:write(" (linedefined:", lineMappingLines[info.linedefined], ")")
 					end
 
 					local source = nil
@@ -1833,22 +1860,21 @@ function _G.writeCompilerSymbols(state, writer)
 					source = source and source..":"..info.currentline
 
 					if source then
-						$outputFile:write(" (", source)
+						outputFile:write(" (", source)
 						if info.linedefined > 0 and info.linedefined ~= info.currentline then
-							$outputFile:write(", linedefined:", info.linedefined)
+							outputFile:write(", linedefined:", info.linedefined)
 						end
-						$outputFile:write(")")
+						outputFile:write(")")
 					end
 				end
 
-				$outputFile:write("\n")
+				outputFile:write("\n")
 			end
 
 			os.exit(1)
 		end
 	`
 	local ERROR_HANDLER = templateToLua(TEMPLATE_ERROR_HANDLER.."\n", {
-		outputFile  = DEBUG and `io.stdout` or `io.stderr`, -- :SublimeText2Desync
 		errorPrefix = toLua(RUNTIME_ERROR_PREFIX),
 	})
 
@@ -2092,25 +2118,7 @@ function _G.writeProgram(state, writer)
 	file:write('#!/bin/sh\n_=[[\nexec lua "$0" "$@"\n]] and nil\n')
 	writer.currentOutputLine = 5
 
-	for _, luaPreload in ipairs(state.luaPreloads) do
-		file:write("do\n", luaPreload.lua, "\nend\n")
-
-		local _, nlCount = luaPreload.lua:gsub("\n", "\0")
-
-		local trimmedInitialNewline = state.tokens.extra[luaPreload.token]
-		local stringTokenFile       = state.tokens.file [luaPreload.token] or errorInternal()
-		local stringTokenLn         = state.tokens.line1[luaPreload.token] + luaPreload.lineOffset - 2 + (trimmedInitialNewline and 1 or 0)
-
-		local outputOffsetLn = writer.currentOutputLine-1
-
-		for ln = 2, nlCount+2 do
-			writer.lineMappingFiles[outputOffsetLn+ln] = stringTokenFile
-			writer.lineMappingLines[outputOffsetLn+ln] = stringTokenLn+ln
-		end
-
-		writer.currentOutputLine = writer.currentOutputLine+nlCount+3
-	end
-
+	writeLuaPreloads(state, writer, 1)
 	writeCompilerSymbols(state, writer)
 
 	-- Start of user code.
@@ -2297,10 +2305,12 @@ function _G.validateForeignSource(state, foreignSource, foreignSourceName, nodeF
 		end
 
 	elseif foreignSource == "method" then
+		--[[ Hmm, I think we *will* support keywords and weird names as method names actually.
 		if not (foreignSourceName:find"^[%a_][%w_]*$" ~= nil and not LUA_KEYWORDS[foreignSourceName]) then
 			-- @UX: The error arrow is way off!
 			nodeError(state, nodeForError, "ForeignValidator", "This is not a valid Lua identifier to use as method name: '%s'", foreignSourceName)
 		end
+		--]]
 
 	else
 		errorInternal(state, nodeForError, "Incomplete: Handle foreignSource=%s", foreignSource)
