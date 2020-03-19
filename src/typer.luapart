@@ -16,7 +16,7 @@
 	followIdentifiersToConstantValue
 	getAssignmentValue
 	getClosestScope, getClosestScopeForDeclaration, isScope, isScopeDeclarative, isScopeImperative
-	getDeclarationValue, isDeclarationGlobal
+	getDeclarationValue, isDeclarationGlobal, isDeclarationConstant, isDeclarationWritable, isDeclarationImperative, shouldDeclarationValueDefinitivelyBeConstant
 	getLambda
 	inferNode, queueForReinfer
 	isExpressionConstant
@@ -474,7 +474,7 @@ function _G.findDeclaration(state, startNode, name, declToIgnore)
 		for _, import in ipairs(scope.imports) do
 			if import.fileScope then
 				for _, decl in ipairs(import.fileScope.declarations) do
-					if decl ~= declToIgnore and decl.isExported and decl.name.name == name then
+					if decl ~= declToIgnore and isDeclarationExported(decl) and decl.name.name == name then
 						return decl, nil
 					end
 				end
@@ -484,15 +484,16 @@ function _G.findDeclaration(state, startNode, name, declToIgnore)
 		for _, using in ipairs(scope.usings) do
 			if using.scope then
 				local nodeType    = using.scope.nodeType
-				local onlyExports = !!(anyV(`nodeType`, nodeTypes.AstNamespace,nodeTypes.AstFileScope,nodeTypes.AstGlobalScope))
+				local onlyExports = !!(anyV(`nodeType`, nodeTypes.AstFileScope,nodeTypes.AstGlobalScope,nodeTypes.AstNamespace))
 
 				for _, decl in ipairs(using.scope.declarations) do
 					if
-						decl ~= declToIgnore
-						and decl.name.name == name
-						and not (onlyExports and not decl.isExported)
+						decl.name.name == name
+						and (not onlyExports or isDeclarationExported(decl))
+						and decl ~= declToIgnore
 						and (
-							decl.isConstant or (
+							isDeclarationConstant(decl)
+							or (
 								using.variableDeclaration
 								and isDeclarationVisibleToNode(using.variableDeclaration, startNode)
 							)
@@ -525,7 +526,7 @@ function _G.findPublicDeclarationInScope(state, scope, name)
 	!ASSERT `name`
 	if (scope.nodeType == !(nodeTypes.AstFileScope) and scope.isModule) or scope.nodeType == !(nodeTypes.AstNamespace) then
 		for _, decl in ipairs(scope.declarations) do
-			if decl.isExported and decl.name.name == name then  return decl  end
+			if isDeclarationExported(decl) and decl.name.name == name then  return decl  end
 		end
 	else
 		for _, decl in ipairs(scope.declarations) do
@@ -545,7 +546,9 @@ end
 function _G.findDynamicMemberDeclaration(state, scope, name)
 	!ASSERT `name`
 	for _, decl in ipairs(scope.declarations) do
-		if not decl.isConstant and decl.name.name == name then  return decl  end
+		if decl.name.name == name then
+			return decl.kind == !(DECL_KIND_LOCAL_VAR) and decl or nil
+		end
 	end
 	return nil
 end
@@ -553,20 +556,22 @@ end
 function _G.isDeclarationVisibleToNode(decl, node)
 	if isDeclarationGlobal(decl) then  return true  end
 
+	-- It doesn't matter if this is true and we're in a declarative scope because we check that in the loop below.
+	local canSeeImperativeVariables = (decl.kind == !(DECL_KIND_LOCAL_VAR) --[[or decl.kind == !(DECL_KIND_READ_ONLY)]])
+
 	local nodeScope, nodeScopeChild = getClosestScope(node)
-	local canSeeImperativeVariables = not decl.isConstant -- It doesn't matter if this is true and we're in a declarative scope because we check that in the loop below.
 
 	while true do
 		if not indexOf(nodeScope.declarations, decl) then
 			-- void  (Keep looking through parent scopes and update canSeeImperativeVariables as we go.)
 
-		elseif decl.isConstant or isScopeDeclarative(nodeScope) then
+		elseif not (decl.kind == !(DECL_KIND_LOCAL_VAR) --[[or decl.kind == !(DECL_KIND_READ_ONLY)]]) or isScopeDeclarative(nodeScope) then
 			return true
 
 		elseif not canSeeImperativeVariables then
 			return false
 
-		elseif !!(anyV(`nodeScope.nodeType`, nodeTypes.AstFor,nodeTypes.AstLambda)) then -- These are really a combination of declarative and imperative scopes.
+		elseif !!(anyV(`nodeScope.nodeType`, nodeTypes.AstFor,nodeTypes.AstLambda)) then -- These are really a combination of declarative and imperative scopes. (Not sure if this is good. 2020-03-19)
 			return true
 
 		elseif nodeScope.nodeType == !(nodeTypes.AstBlock) then
@@ -752,7 +757,7 @@ function _G.getFriendlyTypeInfoName(typeInfo)
 		local scope         = namespaceInfo.scope
 		local scopeParent   = scope.parent
 
-		if scopeParent.nodeType == !(nodeTypes.AstDeclaration) and scopeParent.isConstant and scope == scopeParent.value then
+		if scopeParent.nodeType == !(nodeTypes.AstDeclaration) and isDeclarationConstant(scopeParent) and scope == scopeParent.value then
 			name = 'namespace("'..scopeParent.name.name..'")'
 		else
 			name = 'namespace'
@@ -821,12 +826,11 @@ local function getEarlyAndLateForRedeclarationError(state, identEarly, identLate
 			identEarly, identLate = identLate, identEarly
 		end
 
-	-- Constants before variables.
-	elseif identEarly.declaration.isConstant ~= identLate.declaration.isConstant then
-		if identLate.declaration.isConstant then
+	-- Static before dynamic.
+	elseif isDeclarationStatic(identEarly.declaration) ~= isDeclarationStatic(identLate.declaration) then
+		if isDeclarationStatic(identLate.declaration) then
 			identEarly, identLate = identLate, identEarly
 		end
-
 		if isScopeImperative(getClosestScopeForDeclaration(state, identLate.declaration)) then
 			extraMessageEarly = " (Note that constants in imperative scopes are visible to the whole scope, unlike variables.)"
 		end
@@ -842,8 +846,12 @@ local function getEarlyAndLateForRedeclarationError(state, identEarly, identLate
 			identEarly, identLate = identLate, identEarly
 		end
 
-		if identEarly.declaration.isConstant and isScopeImperative(getClosestScopeForDeclaration(state, identEarly.declaration)) then
-			extraMessageEarly = " (Note that constants in imperative scopes are visible to the whole scope.)"
+		if isDeclarationConstant(identEarly.declaration) then
+			if isScopeImperative(getClosestScopeForDeclaration(state, identEarly.declaration)) then
+				extraMessageEarly = " (Note that constants in imperative scopes are visible to the whole scope.)"
+			end
+		elseif identEarly.declaration.kind == !(DECL_KIND_STATIC) then
+			extraMessageEarly = " (Note that static variables are visible to the whole scope.)" -- @Design: Not sure if this rule is good.
 		end
 	end
 
@@ -860,17 +868,16 @@ local function checkRedeclaration(state, ident, decl, isMember, scope)
 	local scopeExisting = getClosestScopeForDeclaration(state, declExisting)
 
 	-- Member.
-	if isMember and not decl.isConstant and scope ~= scopeExisting then
+	if isMember and decl.kind == !(DECL_KIND_LOCAL_VAR) and scope ~= scopeExisting then
 		-- void  (Variable members never shadow anything.)
 
 	-- Function overload. (Note: Overloads have to be registered before the identifier DEPEND_AND_RETURN on anything.)
 	elseif
-		decl            .isConstant
-		and declExisting.isConstant
+		isDeclarationConstant(decl) and isDeclarationConstant(declExisting)
 		and decl        .value.nodeType == !(nodeTypes.AstLambda)
 		and declExisting.value.nodeType == !(nodeTypes.AstLambda)
 	then
-		while declExisting.overloadOf and declExisting.overloadOf ~= declExisting do  declExisting = declExisting.overloadOf  end
+		declExisting = getOverloadBase(declExisting) or declExisting
 
 		if declExisting == decl then
 			-- This simplifies finding an overload later.
@@ -977,7 +984,7 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 		-- @Incomplete: Add a way to refer to a specific overload.
 		elseif decl.overloadOf then
 			local declBase = ident.declaration
-			while declBase.overloadOf and declBase.overloadOf ~= declBase do  declBase = declBase.overloadOf  end
+			declBase       = getOverloadBase(declBase) or declBase
 
 			if not declBase.name.inferredType then
 				-- This is just so we get a better overload list in the error message.
@@ -1096,7 +1103,7 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 	end
 
 	local valueExpr = getDeclarationValue(decl, true)
-	if (not typeExpr or decl.isConstant) and not valueExpr.inferredType then
+	if (not typeExpr or isDeclarationConstant(decl)) and not valueExpr.inferredType then
 		!DEPEND_AND_RETURN(`identOrVararg`, DEPEND_NODE_INFERRED, `valueExpr`)
 	end
 
@@ -1227,8 +1234,8 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 	assert(typeInfo)
 	local typeInfoForDecl = nil
 
-	-- Check if the value is constant.
-	if decl.isConstant then
+	-- Do extra stuff in constant declarations.
+	if isDeclarationConstant(decl) then
 		valueExpr       = valueExpr or getAssignmentValue(state, ident, decl.assignment.values, decl.assignmentIndex, nil, nil, nil)
 		typeInfoForDecl = getTypeRepresentedByExpression(valueExpr)
 
@@ -1289,8 +1296,7 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 
 	!if DEBUG then
 		if debug_onlyInferTypes then
-			io.stdout:write("DEFINE ", identOrVararg.name ,":", getFriendlyTypeInfoName(typeInfo))
-			if decl.isConstant then  io.stdout:write(" (CONST)")  end
+			io.stdout:write("DEFINE ", identOrVararg.name ,":", getFriendlyTypeInfoName(typeInfo), " (", DECL_KIND_TITLES[decl.kind], ")")
 			if typeInfoForDecl then  io.stdout:write(" (VALUE ", getFriendlyTypeInfoName(typeInfoForDecl), ")")  end
 			io.stdout:write(" IN ")
 			astPrint(getClosestScopeForDeclaration(state, decl))
@@ -1311,16 +1317,16 @@ end
 	if blank.parent.nodeType == !(nodeTypes.AstDeclaration) then
 		local decl = blank.parent
 
-		if decl.isConstant then
-			typeError(state, blank, "Blank names cannot be constant.")
+		if not (decl.kind == !(DECL_KIND_LOCAL_VAR) --[[or decl.kind == !(DECL_KIND_READ_ONLY)]]) then
+			typeError(state, blank, "Blank names in declarations require the declarations to be declarations of local variables.")
 		elseif not isScopeImperative(getClosestScope(decl)) then
-			typeError(state, blank, "Blank names are only allowed in imperative context.")
+			typeError(state, blank, "Blank names are only allowed in imperative contexts.")
 		end
 
 	elseif blank.parent.nodeType == !(nodeTypes.AstAssignment) then
 		local assignment = blank.parent
 		if assignment.binaryOperation ~= "" then
-			typeError(state, blank, "Blank names cannot be used in assignments with binary operations.")
+			typeError(state, blank, "Blank names cannot be used in assignments with binary operations. (The operation here is '%s')", assignment.binaryOperation)
 		end
 
 	else
@@ -1469,7 +1475,7 @@ end
 		typeInfo            = decl.name.inferredType or errorInternal()
 
 		-- Type enum members can be used as types, as a special case.
-		if decl.isConstant and typeInfo.tag == !(typeTags.TypeInfoEnum) then
+		if isDeclarationConstant(decl) and typeInfo.tag == !(typeTags.TypeInfoEnum) then
 			local enum     = typeInfo.astNode     or errorInternal()
 			local enumInfo = enum.representedType or errorInternal()
 
@@ -1613,7 +1619,7 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 	if callOrReturnNode.nodeType == !(nodeTypes.AstCall) and callOrReturnNode.callee.nodeType == !(nodeTypes.AstIdentifier) then
 		calleeDecl = (calleeDecl or callOrReturnNode.callee.declaration)
 
-		if calleeDecl.isConstant then
+		if isDeclarationConstant(calleeDecl) then
 			local lambda = getDeclarationValue(calleeDecl) or errorInternal()
 			lambda       = followIdentifiersToConstantValue(lambda)
 
@@ -1810,7 +1816,7 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 	end
 
 	local decl = ident.declaration
-	if not decl.isConstant then
+	if not isDeclarationConstant(decl) then
 		errorInternal(state, ident, "Identifier is not a constant.")
 	end
 
@@ -1925,7 +1931,7 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 
 	-- Create declaration for the morphed lambda.
 	local morphDecl            = astNewNode(AstDeclaration, lambda.token, lambda)
-	morphDecl.isConstant       = true
+	morphDecl.kind             = !(DECL_KIND_LOCAL_CONST)
 	morphDecl.addedByPolymorph = true
 
 	local morphIdent       = astNewNode(AstIdentifier, morphDecl.token, morphDecl)
@@ -2175,9 +2181,7 @@ end
 
 local function handleOverloadedCall(state, call, realArguments, realArgumentTypes)
 	local ident    = call.callee
-	local declBase = ident.declaration
-
-	while declBase.overloadOf ~= declBase do  declBase = declBase.overloadOf  end
+	local declBase = getOverloadBase(ident.declaration)
 
 	local matchingOverloads = getMatchingFunctions(state, call, realArguments, realArgumentTypes, declBase.overloads)
 
@@ -2288,7 +2292,7 @@ local function handlePolymorphicStruct(state, call)
 
 	-- Create declaration for the morphed struct.
 	local morphDecl            = astNewNode(AstDeclaration, struct.token, struct)
-	morphDecl.isConstant       = true
+	morphDecl.kind             = !(DECL_KIND_LOCAL_CONST)
 	morphDecl.addedByPolymorph = true
 
 	local morphIdent       = astNewNode(AstIdentifier, morphDecl.token, morphDecl)
@@ -2364,9 +2368,7 @@ end
 	if callee.nodeType == !(nodeTypes.AstIdentifier) and callee.declaration.overloadOf then
 		-- Wait for all overloads to get inferred.
 		local ident    = callee
-		local declBase = ident.declaration
-
-		while declBase.overloadOf ~= declBase do  declBase = declBase.overloadOf  end
+		local declBase = getOverloadBase(ident.declaration)
 
 		calleeTypeInfo = declBase.name.inferredType
 		if not calleeTypeInfo then
@@ -2514,7 +2516,7 @@ end
 			-- void  (Ignore function arguments.)
 		elseif typeInfoRepresented.tag ~= !(typeTags.TypeInfoCompound) then
 			-- void
-		elseif decl.isConstant then
+		elseif isDeclarationConstant(decl) then
 			typeError(
 				state, decl.name,
 				"Constants cannot be compound types. (Type is %s)",
@@ -2534,7 +2536,7 @@ end
 	local scope = getClosestScope(decl)
 
 	if valueExpr then
-		if valueExpr.inferredType.tag == !(typeTags.TypeInfoNamespace) and not decl.isConstant then
+		if valueExpr.inferredType.tag == !(typeTags.TypeInfoNamespace) and not isDeclarationConstant(decl) then
 			typeError(state, valueExpr, "References to namespaces must be constant.")
 		end
 
@@ -2560,7 +2562,7 @@ end
 			end
 		end
 
-		if decl.isConstant or isScopeDeclarative(scope) then
+		if shouldDeclarationValueDefinitivelyBeConstant(decl) or isScopeDeclarative(scope) then
 			if isExpressionConstant(state, valueExpr, false) then
 				-- void
 
@@ -2579,9 +2581,9 @@ end
 				typeError(
 					state, astGetExpressionVisuallyFurthestToTheLeft(valueExpr),
 					"Value for declared %s '%s' is not a constant expression.%s",
-					(decl.isConstant and "constant" or "variable"),
+					(isDeclarationConstant(decl) and "constant" or "variable"),
 					identOrVararg.name,
-					(not decl.isConstant and isScopeDeclarative(scope) and " (All values in declarative scopes must be constant.)" or "")
+					(not isDeclarationConstant(decl) and isScopeDeclarative(scope) and " (All values in declarative scopes must be constant.)" or "")
 				)
 			end
 		end
@@ -2591,9 +2593,9 @@ end
 		-- Ignore missing values for arguments (which are then required arguments).
 		or decl.parent.nodeType == !(nodeTypes.AstArgument)
 		-- Variables in foreign structs do not need initial values since those structs never get constructed locally anyway. (This also makes method declarations look nicer.)
-		or (not decl.isConstant and decl.parent == scope and scope.nodeType == !(nodeTypes.AstStruct) and scope.isForeign)
+		or (not isDeclarationConstant(decl) and decl.parent == scope and scope.nodeType == !(nodeTypes.AstStruct) and scope.isForeign)
 	) then
-		!ASSERT `not decl.isConstant` -- This should have been detected in inferIdentifierOrVararg() (I think).
+		!ASSERT `not isDeclarationConstant(decl)` -- This should have been detected in inferIdentifierOrVararg() (I think).
 		typeError(state, identOrVararg, "Variables in type group '%s' must have a specified initial value.", TYPE_TAG_NAMES[identOrVararg.inferredType.tag])
 	end
 
@@ -2855,6 +2857,7 @@ function _G.getConstantNameOrTriggerError(state, node)
 	return name
 end
 
+-- memberName, memberValueType, constDecl = validateStructKey( state, dependent, keyExpr, structInfo, isLvalue )
 -- Returns nil on failure and the dependent is now waiting.
 function _G.validateStructKey(state, dependent, keyExpr, structInfo, isLvalue)
 	local keyExprType = keyExpr.inferredType
@@ -2897,7 +2900,7 @@ function _G.validateStructKey(state, dependent, keyExpr, structInfo, isLvalue)
 		local decl = findMemberDeclaration(state, structInfo.astNode, memberName)
 		if not decl then
 			!DEPEND_AND_RETURN(`dependent`, DEPEND_MEMBER_DECLARATION, `memberName`, `structInfo.astNode`, `nil`)
-		elseif isLvalue and decl.isConstant then
+		elseif isLvalue and isDeclarationConstant(decl) then
 			typeError(state, memberLiteral, "Cannot assign value to constant member %s.%s", getFriendlyTypeInfoName(structInfo), memberName)
 		end
 
@@ -2906,7 +2909,7 @@ function _G.validateStructKey(state, dependent, keyExpr, structInfo, isLvalue)
 			!DEPEND_AND_RETURN(`dependent`, DEPEND_NODE_INFERRED, `decl.name`, nil, `nil`)
 		end
 
-		if decl.isConstant then  constDecl = decl  end
+		if isDeclarationConstant(decl) then  constDecl = decl  end
 	end
 
 	return memberName, memberValueType, constDecl
@@ -3140,7 +3143,7 @@ end
 			typeError(state, memberLiteral, "Cannot assign values to enum members. (Enum is %s)", getFriendlyTypeInfoName(enumInfo))
 		end
 
-		assert(decl.isConstant)
+		!ASSERT `isDeclarationConstant(decl)`
 
 		local ident = astCopy(decl.name, access.token, access.parent)
 		replaceQueuedNodeAndUnqueueOldTree(state, access, ident)
@@ -3856,7 +3859,7 @@ end
 			local structInfo = typeInfo
 			usingScope       = structInfo.astNode
 
-			if not decl.isConstant then
+			if not isDeclarationConstant(decl) then
 				using.variableDeclaration = decl
 			end
 
@@ -4567,8 +4570,8 @@ end
 				local decl = findMemberDeclaration(state, struct, declToInherit.name.name)
 				if not decl or decl.parent ~= struct then
 					table.insert(struct.declarations, insertIndexDecl, declToInherit)
-				elseif decl.isConstant and declToInherit.isConstant then
-					-- void  Shadowing/overriding static declarations is permitted. (Should we limit this to only functions, methods, or even foreign methods?)
+				elseif isDeclarationConstant(decl) and isDeclarationConstant(declToInherit) then
+					-- void  Shadowing/overriding static declarations is permitted. (@Design: Should we limit this to only functions, methods, or even foreign methods?)
 				else
 					typeError2(state,
 						typeExpr, F("Trying to inherit a member called '%s' but the struct already has a member with that name.", decl.name.name),
@@ -4612,7 +4615,7 @@ end
 
 	-- Add members to structInfo.
 	for _, decl in ipairs(struct.declarations) do
-		if not decl.isConstant then
+		if not isDeclarationConstant(decl) then
 			local member          = TypeInfoStructMember()
 			member.name           = decl.name.name
 			member.typeInfo       = decl.name.inferredType or errorInternal()
@@ -4748,7 +4751,7 @@ end
 	moveToNextRelevantPipe(state, block)
 end
 
-local function visitNodesForRunning(state, runNode, unit, visited)
+local function visitNodesForRunning(state, runNode, unit, visited, deepTopScopeDeclarations)
 	astVisitAllNodes(unit, function(node)
 		visited[node] = true
 
@@ -4762,15 +4765,21 @@ local function visitNodesForRunning(state, runNode, unit, visited)
 			local decl = node.declaration or errorInternal()
 
 			if not visited[decl] then
-				visitNodesForRunning(state, runNode, decl, visited)
+				visitNodesForRunning(state, runNode, decl, visited, deepTopScopeDeclarations)
 				if runNode.queued.waitingOn then  return !(VISIT_BREAK)  end
 
 				local valueExpr = getDeclarationValue(decl)
 
 				if valueExpr then
-					visitNodesForRunning(state, runNode, valueExpr, visited)
+					visitNodesForRunning(state, runNode, valueExpr, visited, deepTopScopeDeclarations)
 					if runNode.queued.waitingOn then  return !(VISIT_BREAK)  end
 				end
+			end
+
+		elseif node.nodeType == !(nodeTypes.AstDeclaration) then
+			local decl = node
+			if decl.kind == !(DECL_KIND_STATIC) or decl.parent.nodeType == !(nodeTypes.AstNamespace) then
+				table.insert(deepTopScopeDeclarations, decl)
 			end
 		end
 	end)
@@ -4989,9 +4998,10 @@ end
 	end
 	--]]
 
-	local visited = {}
+	local visited                  = {}
+	local deepTopScopeDeclarations = {}
 
-	visitNodesForRunning(state, runNode, lambda, visited)
+	visitNodesForRunning(state, runNode, lambda, visited, deepTopScopeDeclarations)
 	if runNode.queued.waitingOn then  return  end
 
 	for _, const in ipairs(state.constants) do
@@ -5026,6 +5036,12 @@ end
 				state.runnerWrittenObjects[decl] = true
 				table.insert(newTopScopeDeclarations, decl)
 			end
+		end
+	end
+	for __, decl in ipairs(deepTopScopeDeclarations) do
+		if not state.runnerWrittenObjects[decl] then
+			state.runnerWrittenObjects[decl] = true
+			table.insert(newTopScopeDeclarations, decl)
 		end
 	end
 
@@ -5135,7 +5151,7 @@ function _G.isExpressionConstant(state, expr, foreignIsConst)
 	elseif nodeType == !(nodeTypes.AstIdentifier) then
 		local ident = expr
 		local decl  = ident.declaration or errorInternal(state, ident)
-		return decl.isConstant and isExpressionConstant(state, decl.value, foreignIsConst)
+		return isDeclarationConstant(decl) and isExpressionConstant(state, decl.value, foreignIsConst)
 
 	elseif nodeType == !(nodeTypes.AstCast) then
 		local cast = expr
@@ -5555,7 +5571,7 @@ local function simplifyCast(state, cast)
 
 		assert(ident.nodeType == !(nodeTypes.AstIdentifier)) -- All enums should have been simplified to identifiers.
 
-		!ASSERT `ident.declaration.isConstant`
+		!ASSERT `isDeclarationConstant(ident.declaration)`
 		local valueExpr = ident.declaration.value
 
 		if BUILTIN_TYPE_TAG_TO_LITERAL_TYPE[castTypeInfo.tag] then
@@ -5849,7 +5865,7 @@ function _G.simplifyExpressionIfConstant(state, expr)
 		if
 			-- :SpecialForeignValueRules
 			expr.nodeType == !(nodeTypes.AstIdentifier)
-			and expr.declaration.isConstant
+			and isDeclarationConstant(expr.declaration)
 			and expr.declaration.value.nodeType == !(nodeTypes.AstForeign)
 		then
 			local ident       = expr
@@ -5863,8 +5879,7 @@ function _G.simplifyExpressionIfConstant(state, expr)
 	elseif expr.nodeType == !(nodeTypes.AstIdentifier) then
 		local ident = expr
 		local decl  = ident.declaration or errorInternal(state, ident)
-
-		if not decl.isConstant then  return  end
+		if not isDeclarationConstant(decl) then  return  end
 
 		local typeInfo = ident.inferredType
 
@@ -6415,6 +6430,7 @@ local EXPRESSION_NOT_EXPECTED = !(Set{
 	nodeTypes.AstStruct,
 	nodeTypes.AstEnum,
 	nodeTypes.AstLambda,
+	nodeTypes.AstNamespace,
 })
 
 function _G.isAnExpressionExpected(state, node)
@@ -6464,7 +6480,42 @@ function _G.getDeclarationValue(decl, fallBackToLastAssignmentValue)
 end
 
 function _G.isDeclarationGlobal(decl)
-	return decl.isExported and decl.parent.nodeType == !(nodeTypes.AstFileScope) and not decl.parent.isModule
+	return decl.kind == !(DECL_KIND_EXPORT_CONST) and decl.parent.nodeType == !(nodeTypes.AstFileScope) and not decl.parent.isModule
+end
+
+function _G.isDeclarationConstant(decl)
+	return decl.kind == !(DECL_KIND_LOCAL_CONST) or decl.kind == !(DECL_KIND_EXPORT_CONST)
+end
+function _G.isDeclarationImperative(decl)
+	return not isDeclarationConstant(decl)
+end
+function _G.isDeclarationStatic(decl)
+	return decl.kind == !(DECL_KIND_LOCAL_CONST) or decl.kind == !(DECL_KIND_EXPORT_CONST) or decl.kind == !(DECL_KIND_STATIC)
+end
+function _G.isDeclarationWritable(decl)
+	return decl.kind == !(DECL_KIND_LOCAL_VAR) or decl.kind == !(DECL_KIND_EXPORT_VAR) or decl.kind == !(DECL_KIND_STATIC)
+end
+function _G.isDeclarationExported(decl)
+	return decl.kind == !(DECL_KIND_EXPORT_VAR) or decl.kind == !(DECL_KIND_EXPORT_CONST)
+end
+
+-- Note: This function does not check what scope the declaration is in!
+-- The scope may require the value to be constant even if this function returns false.
+function _G.shouldDeclarationValueDefinitivelyBeConstant(decl)
+	return not isDeclarationWritable(decl)
+end
+
+
+
+function _G.getOverloadBase(decl)
+	decl = decl.overloadOf
+	if not decl then  return nil  end
+
+	while decl.overloadOf and decl.overloadOf ~= decl do
+		decl = decl.overloadOf
+	end
+
+	return decl
 end
 
 

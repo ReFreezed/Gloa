@@ -269,8 +269,7 @@ _G.!structAst"AstDeclaration:_AstNode"{
 	{`value`,                nil, ast="node"},  -- AstExpression  (Either this or assignment should be set, or neither for getting the default value for the type.)
 	{`notes`,                {},  ast="array"}, -- []AstNote  @Incomplete: Notes.
 
-	{`isExported`,           false}, -- Note: Globals are exports.
-	{`isConstant`,           false},
+	{`kind`,                 DECL_KIND_LOCAL_VAR}, -- DECL_KIND_LOCAL_VAR|DECL_KIND_LOCAL_CONST|DECL_KIND_EXPORT_VAR|DECL_KIND_EXPORT_CONST|DECL_KIND_STATIC  @Incomplete: DECL_KIND_READ_ONLY  Note: Globals are exports.
 	{`canShadow`,            false},
 	{`addedByPolymorph`,     false},
 
@@ -278,7 +277,7 @@ _G.!structAst"AstDeclaration:_AstNode"{
 	{`assignmentIndex`,      1},
 
 	-- Type phase:
-	{`valueTypeInfo`,        nil}, -- TypeInfo  Type represented by the assigned value if isConstant. If this is set then the declared identifier can be used in places where a type is expected. Can be nil.
+	{`valueTypeInfo`,        nil}, -- TypeInfo  Type represented by the assigned value if the declaration is constant. If this is set then the declared identifier can be used in places where a type is expected. Can be nil.
 	{`checkedRedeclaration`, false},
 	{`overloads`,            {}},
 	{`overloadOf`,           nil, astRef="node"}, -- AstDeclaration  (If this is self then we're the base declaration for the overloads and the overloads array should be filled.)
@@ -969,9 +968,9 @@ function _G.parseStruct(state, parentNode)
 
 		-- Move declarations from the temporary args node into the struct for later baking.
 		for _, arg in ipairs(args.arguments) do
-			local decl      = arg.declaration
-			decl.parent     = struct
-			decl.isConstant = true
+			local decl  = arg.declaration
+			decl.parent = struct
+			decl.kind   = !(DECL_KIND_LOCAL_CONST)
 
 			table.insert(struct.statements,       decl)
 			table.insert(struct.declarations,     decl)
@@ -1123,9 +1122,8 @@ function _G.parseDeclarationStatement(state, scope, imperative, declType)
 
 	local declarations = {}
 	local declNames    = {}
-
-	local isExported   = false
 	local isUsing      = false
+	local declKind
 
 	local tokType, tokValue = peekNextToken(state)
 
@@ -1134,21 +1132,27 @@ function _G.parseDeclarationStatement(state, scope, imperative, declType)
 		isUsing = true
 	end
 
+	-- local kindToken = state.nextToken
+
 	if declType == !(DECLARATION_NORMAL) then
 		tokType, tokValue = eatNextToken(state)
 
 		if tokType ~= !(TOKEN_KEYWORD) then
 			!ERROR_OR_RETURN `errorParsingLast(state, "Expected 'local'.")`
-
 		elseif tokValue == "local" then
-			-- void
-
+			declKind = !(DECL_KIND_LOCAL_VAR)
 		elseif tokValue == "export" then
-			isExported = true
-
+			declKind = !(DECL_KIND_EXPORT_VAR)
+		elseif tokValue == "static" then
+			declKind = !(DECL_KIND_STATIC) ; imperative = false
+		-- elseif tokValue == "read_only" then
+		-- 	declKind = !(DECL_KIND_READ_ONLY)
 		else
 			!ERROR_OR_RETURN `errorParsingLast(state, "Expected 'local'.")`
 		end
+
+	else
+		declKind = !(DECL_KIND_LOCAL_VAR)
 	end
 
 	local nameListStartToken = state.nextToken
@@ -1159,7 +1163,6 @@ function _G.parseDeclarationStatement(state, scope, imperative, declType)
 
 		for i, ident in ipairs(declNames) do
 			local decl        = astNewNode(AstDeclaration, ident.token, scope)
-			decl.isExported   = isExported
 			declarations[i]   = decl
 
 			ident.parent      = decl
@@ -1170,7 +1173,6 @@ function _G.parseDeclarationStatement(state, scope, imperative, declType)
 
 	else
 		local decl      = astNewNode(AstDeclaration, 1, scope)
-		decl.isExported = isExported
 		declarations[1] = decl
 
 		!SET_OR_RETURN `local ident = parseIdentifier(state, decl)`
@@ -1200,9 +1202,10 @@ function _G.parseDeclarationStatement(state, scope, imperative, declType)
 			-- void
 
 		-- Specified type.
-		elseif declType == !(DECLARATION_ENUM) then
-			!ERROR_OR_RETURN `errorParsingNext(state, "The type of the members must be specified after the 'enum' keyword.")`
 		else
+			if declType == !(DECLARATION_ENUM) then
+				!ERROR_OR_RETURN `errorParsingNext(state, "The type of the members must be specified after the 'enum' keyword.")`
+			end
 			for _, decl in ipairs(declarations) do
 				state.nextToken           = typesStartToken
 				!SET_OR_RETURN `decl.type = parseExpression(state, decl)` -- @Speed: Parse once then just copy the first one.
@@ -1232,9 +1235,10 @@ function _G.parseDeclarationStatement(state, scope, imperative, declType)
 
 		if isConst then
 			imperative = false
-			for _, decl in ipairs(declarations) do
-				decl.isConstant = true
-			end
+			if     declKind == !(DECL_KIND_LOCAL_VAR)  then  declKind = !(DECL_KIND_LOCAL_CONST)
+			elseif declKind == !(DECL_KIND_EXPORT_VAR) then  declKind = !(DECL_KIND_EXPORT_CONST)
+			elseif declKind == !(DECL_KIND_STATIC)     then  !ERROR_OR_RETURN `errorParsingLast(state, "Static names cannot be constant.")`
+			else                                             errorInternal("%s", declKind)  end
 		elseif declType == !(DECLARATION_ENUM) then
 			!ERROR_OR_RETURN `errorParsingLast(state, "Enum members must be constant.")`
 		end
@@ -1278,16 +1282,18 @@ function _G.parseDeclarationStatement(state, scope, imperative, declType)
 		local enum = scope
 		!ASSERT("enum.nodeType == "..nodeTypes.AstEnum) -- Note: We don't support !if or anything in enums, so the parent scope should always be the enum.
 
-		enum.autoValue = enum.autoValue+1
+		enum.autoValue        = enum.autoValue+1
+		declarations[1].value = newLiteral(declarations[1], nameListStartToken, !(LITERAL_INTEGER), enum.autoValue)
 
-		local literal         = astNewNode(AstLiteral, nameListStartToken, declarations[1])
-		literal.literalType   = !(LITERAL_INTEGER)
-		literal.value         = enum.autoValue
-		declarations[1].value = literal
+		!ASSERT("declKind == "..DECL_KIND_LOCAL_VAR)
 
-		isConst                    = true
-		imperative                 = false
-		declarations[1].isConstant = true
+		declKind   = !(DECL_KIND_LOCAL_CONST)
+		isConst    = true
+		imperative = false
+	end
+
+	for _, decl in ipairs(declarations) do
+		decl.kind = declKind
 	end
 
 	-- Set if shadowing is allowed.
@@ -1455,9 +1461,9 @@ local function parseIfBranch(state, ifOrStaticIf, isFileScope)
 
 		if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"{") then
 			eatNextToken(state) -- '{'
-			!DO_OR_RETURN `parseFileScopeStatements(state, block, false, false)` -- @Cleanup: Make a parseBlockOrScopedStatement() equivalent for file scope.
+			!DO_OR_RETURN `parseFileScopeOrNamespaceStatements(state, block, false, false)` -- @Cleanup: Make a parseBlockOrScopedStatement() equivalent for file scope/namepaces.
 		else
-			!DO_OR_RETURN `parseFileScopeStatements(state, block, false, true)`
+			!DO_OR_RETURN `parseFileScopeOrNamespaceStatements(state, block, false, true)`
 		end
 
 	else
@@ -1576,12 +1582,10 @@ function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 	local tokType3, tokValue3 = peekNextToken(state, 3)
 	local tokType4, tokValue4 = peekNextToken(state, 4)
 
-	if
-		isToken(tokType,tokValue, !(TOKEN_KEYWORD),"local") or (
-			isToken(tokType, tokValue,  !(TOKEN_KEYWORD),"using") and
-			isToken(tokType2,tokValue2, !(TOKEN_KEYWORD),"local")
-		)
-	then
+	if isToken(tokType,tokValue, !(TOKEN_KEYWORD),"local","static") or (
+		isToken(tokType, tokValue,  !(TOKEN_KEYWORD),"using") and
+		isToken(tokType2,tokValue2, !(TOKEN_KEYWORD),"local","static")
+	) then
 		!DO_OR_RETURN_FALSE `parseDeclarationStatement(state, block, true)`
 		return true
 	end
@@ -1589,11 +1593,12 @@ function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 	local statementStartToken = state.nextToken
 	local statement
 
-	if isToken(tokType,tokValue, !(TOKEN_KEYWORD),"export") then
-		!ERROR_OR_RETURN_FALSE `errorParsingNext(state, "Exports can only be declared in file scope.")`
-	elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"using") and isToken(tokType2,tokValue2, !(TOKEN_KEYWORD),"export") then
-		eatNextToken(state)
-		!ERROR_OR_RETURN_FALSE `errorParsingNext(state, "Exports can only be declared in file scope.")`
+	if isToken(tokType,tokValue, !(TOKEN_KEYWORD),"export") or (
+		isToken(tokType, tokValue,  !(TOKEN_KEYWORD),"using") and
+		isToken(tokType2,tokValue2, !(TOKEN_KEYWORD),"export")
+	) then
+		if tokValue == "using" then  eatNextToken(state)  end
+		!ERROR_OR_RETURN_FALSE `errorParsingNext(state, "Exports can only be declared in file scope or in namespaces.")`
 
 	elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"return") then
 		local returnNode = astNewNode(AstReturn, state.nextToken, block)
@@ -2083,9 +2088,9 @@ function _G.parseRun(state, parentNode, mustBeExpression)
 	return runNode
 end
 
--- success = parseFileScopeStatements( state, parentScope, isTopLevel, singleStatement )
+-- success = parseFileScopeOrNamespaceStatements( state, parentScope, isTopLevel, singleStatement )
 -- WARNING: parentScope is currently modified even if success==false!
-function _G.parseFileScopeStatements(state, scope, isTopLevel, singleStatement)
+function _G.parseFileScopeOrNamespaceStatements(state, scope, isTopLevel, singleStatement)
 	while true do
 		local tokType,  tokValue, token = peekNextToken(state, 1)
 		local tokType2, tokValue2       = peekNextToken(state, 2)
@@ -2095,13 +2100,18 @@ function _G.parseFileScopeStatements(state, scope, isTopLevel, singleStatement)
 
 		----------------------------------------------------------------
 
-		elseif
-			isToken(tokType,tokValue, !(TOKEN_KEYWORD),"local","export") or (
-				isToken(tokType, tokValue,  !(TOKEN_KEYWORD),"using") and
-				isToken(tokType2,tokValue2, !(TOKEN_KEYWORD),"local","export")
-			)
-		then
+		elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"local","export") or (
+			isToken(tokType, tokValue,  !(TOKEN_KEYWORD),"using") and
+			isToken(tokType2,tokValue2, !(TOKEN_KEYWORD),"local","export")
+		) then
 			!DO_OR_RETURN_FALSE `parseDeclarationStatement(state, scope, false)`
+
+		elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"static") or (
+			isToken(tokType, tokValue,  !(TOKEN_KEYWORD),"using") and
+			isToken(tokType2,tokValue2, !(TOKEN_KEYWORD),"static")
+		) then
+			if tokValue == "using" then  eatNextToken(state)  end
+			!ERROR_OR_RETURN_FALSE `errorParsingNext(state, "Static variables cannot be declared in file scope or in namespaces.")`
 
 		elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"import","load") then
 			-- @Incomplete: Warn about duplicate imports? Maybe not necessay as things will only ever be imported once anyway.
@@ -2205,7 +2215,7 @@ function _G.parseFileScope(state, parentNode, path, isModule, moduleName)
 		eatNextToken(state)
 	end
 
-	!DO_OR_RETURN `parseFileScopeStatements(state, fileScope, true, false)`
+	!DO_OR_RETURN `parseFileScopeOrNamespaceStatements(state, fileScope, true, false)`
 
 	return fileScope
 end
@@ -2217,7 +2227,7 @@ function _G.astMoveRelevantThingsFromFileScopeToGlobalScope(state, fileScope)
 	local globalScope = state.globalScope
 
 	for i, decl in ipairsr(fileScope.declarations) do
-		if decl.isExported then
+		if isDeclarationExported(decl) then
 			removeUnordered(fileScope.declarations, i)
 			table.insert(globalScope.declarations, decl)
 		end
@@ -2339,7 +2349,7 @@ function _G.parseLambda(state, parentNode, allowBody)
 				local decl        = astNewNode(AstDeclaration, bake.token, lambda)
 				ident.declaration = decl
 				decl.name         = astCopy(ident, nil, decl)
-				decl.isConstant   = true
+				decl.kind         = !(DECL_KIND_LOCAL_CONST)
 
 				-- Note: We're not setting decl.type nor decl.value, leaving the declaration unfinished.
 				-- It should be ok as polymorphic functions shouldn't get inferred.
@@ -2363,11 +2373,11 @@ function _G.parseLambda(state, parentNode, allowBody)
 			if arg.autobake == !(AUTOBAKE_REQUIRED) then
 				lambda.isPolymorphic = true
 
-				decl.isConstant      = true
-
 				local typeNode       = astNewNode(AstType, decl.token, decl)
 				typeNode.kind        = !(TYPE_KIND_SIMPLE_BUILTIN)
 				typeNode.typeName    = "placeholder"
+
+				decl.kind            = !(DECL_KIND_LOCAL_CONST)
 				decl.value           = typeNode -- During baking this may end up being replaced with something that's not a type, but we don't care about that at this moment!
 			end
 
@@ -2801,7 +2811,7 @@ function _G.parseExpression(state, parentNode, prevOpPrecedence, expectLeftValue
 		end
 
 		local namespace = astNewNode(AstNamespace, exprStartToken, parentNode)
-		!DO_OR_RETURN `parseFileScopeStatements(state, namespace, false, false)` -- Note: This should eat the ending '}'.
+		!DO_OR_RETURN `parseFileScopeOrNamespaceStatements(state, namespace, false, false)` -- Note: This should eat the ending '}'.
 
 		expr = namespace
 
@@ -3296,14 +3306,9 @@ do
 				local decl = node
 				if decl.addedByPolymorph then  write(" (addedByPolymorph)")  end
 				if decl.assignment       then  write(" (assignment ", decl.assignment.s, " i=", decl.assignmentIndex, ")")  end
-				if decl.isConstant and decl.isExported then
-					write(" (exported const)")
-				elseif decl.isConstant then
-					write(" (const)")
-				elseif decl.isExported then
-					write(" (exported)")
-				end
-				if decl.valueTypeInfo then  write(" (typeRepresented=", getFriendlyTypeInfoName(decl.valueTypeInfo), ")")  end
+				write(" (", (DECL_KIND_TITLES[decl.kind] or "?"))
+				if decl.valueTypeInfo    then  write(", typeRepresented=", getFriendlyTypeInfoName(decl.valueTypeInfo))  end
+				write(")")
 
 				!!(CHILD_PRINT_START)
 				if decl.name  then  printNode(decl.name,  indent+1, printed, printChildren)           end
@@ -4168,6 +4173,15 @@ end
 
 function _G.isLiteral(node, literalType)
 	return node.nodeType == !(nodeTypes.AstLiteral) and node.literalType == literalType
+end
+
+
+
+function _G.newLiteral(parent, token, literalType, value)
+	local literal       = astNewNode(AstLiteral, token, parent)
+	literal.literalType = literalType
+	literal.value       = value
+	return literal
 end
 
 

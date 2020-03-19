@@ -2,6 +2,8 @@
 --=
 --=  Bytecode
 --=
+--=  @Cleanup: Rename all bytecode stuff as there's no actual bytecode anywhere!
+--=
 --=-------------------------------------------------------------
 --=
 --=  Glóa - a language that compiles into Lua
@@ -438,7 +440,9 @@ function _G.bcEmitForLambda(state, lambda)
 end
 
 function _G.bcEmitForDeclaration(state, decl)
-	if decl.isConstant then
+	-- @Robustness: We should probably use shouldDeclarationValueDefinitivelyBeConstant() here somewhere.
+
+	if isDeclarationConstant(decl) then
 		local valueExpr = decl.value or errorInternal(state, decl)
 		if valueExpr.nodeType == !(nodeTypes.AstLambda) and valueExpr.isPolymorphic then
 			-- @Cleanup: moveToNextRelevantPipe() should prevent us from getting here.
@@ -461,6 +465,18 @@ function _G.bcEmitForDeclaration(state, decl)
 			bcMaybeSetConstantName(state, const, decl.name.name)
 		end
 
+	elseif decl.kind == !(DECL_KIND_STATIC) then
+		local valueExpr = decl.value
+
+		if valueExpr then
+			local const = bcAllocateConstantValueForExpressionIfNew(state, valueExpr, decl)
+			if not const then  return  end -- A dependency was added and we're now waiting.
+
+			decl.valueConstant = const
+		end
+
+		decl.topScopeName = bcAllocateTopScopeName(state, decl.name.name)
+
 	else
 		local scope = getClosestScope(decl)
 
@@ -474,7 +490,7 @@ function _G.bcEmitForDeclaration(state, decl)
 				decl.valueConstant = const
 			end
 
-			if !!(anyV(`scope.nodeType`, nodeTypes.AstFileScope,nodeTypes.AstGlobalScope)) then
+			if !!(anyV(`scope.nodeType`, nodeTypes.AstFileScope,nodeTypes.AstGlobalScope,nodeTypes.AstNamespace)) then
 				decl.topScopeName = bcAllocateTopScopeName(state, decl.name.name)
 			end
 		end

@@ -490,7 +490,7 @@ function _G.writeExpression(state, writer, expr)
 		if callee.nodeType == !(nodeTypes.AstIdentifier) then
 			local calleeDecl = callee.declaration
 
-			if calleeDecl.isConstant then
+			if isDeclarationConstant(calleeDecl) then
 				local lambda = calleeDecl.value or errorInternal(state, calleeDecl)
 				lambda       = followIdentifiersToConstantValue(lambda)
 
@@ -573,10 +573,10 @@ function _G.writeExpression(state, writer, expr)
 		!ASSERT `ident.inferredType`
 		!ASSERT `decl`
 
-		if not decl.isConstant then
-			writeIdentifierName(state, writer, ident)
-		else
+		if isDeclarationConstant(decl) then
 			writeConstantValueOrReference(state, writer, decl.valueConstant, ident)
+		else
+			writeIdentifierName(state, writer, ident)
 		end
 
 	elseif expr.nodeType == !(nodeTypes.AstVararg) then
@@ -880,8 +880,10 @@ end
 local function writeDefers(state, writer, indent, nextLocalN, localsStack, indentStr, defers)
 	for i = #defers, 1, -1 do
 		local block = defers[i].body
-
-		if itemWith1(block.declarations, `isConstant`, false) then
+		if
+			itemWith1(block.declarations, `kind`, !(DECL_KIND_LOCAL_VAR))
+			-- or itemWith1(block.declarations, `kind`, !(DECL_KIND_READ_ONLY))
+		then
 			writer.file:write(indentStr, "do")
 			writeEol(state, writer)
 			writeBlock(state, writer, block, indent+1, nextLocalN, localsStack)
@@ -966,11 +968,11 @@ function _G.writeBlock(state, writer, block, indent, nextLocalN, localsStack, is
 		if nodeType == !(nodeTypes.AstDeclaration) then
 			local decl = statement
 
-			if not decl.isConstant then
+			if decl.kind == !(DECL_KIND_LOCAL_VAR) --[[or decl.kind == !(DECL_KIND_READ_ONLY)]] then
 				decl.localName, nextLocalN = allocateLocalName(state, writer, localsStack, decl.name.name, nextLocalN)
 
 				if decl.assignment then
-					-- The (initial) assignment should be written as the next statement (or after several declarations).
+					-- The (initial) assignment should be written as the next statement (or after several consecutive declarations).
 					inDecl = true
 
 				else
@@ -1012,7 +1014,7 @@ function _G.writeBlock(state, writer, block, indent, nextLocalN, localsStack, is
 
 				file:write(";") -- This removes ambiguity is some cases.
 				if hasBlank and not isNameAllocated(state, writer, localsStack, "_") then
-					file:write(" _=nil") -- We don't want to accidentally store an object that is subject to garbage collection as a global.
+					file:write(" _=nil;") -- We don't want to accidentally store an object that is subject to garbage collection as a global.
 				end
 				writeEol(state, writer)
 
@@ -2015,7 +2017,7 @@ function _G.writeProgram(state, writer)
 	local entryPointName = state.settings.entryPointName
 	local mainFuncDecl   = nil
 
-	for _, decl in ipairs(topScopeDeclarations) do
+	for _, decl in ipairs(topScopeDeclarations) do -- Note: topScopeDeclarations does not include static declarations or declarations in namespaces yet.
 		if decl.name.name == entryPointName then
 			mainFuncDecl = decl
 			break
@@ -2033,7 +2035,7 @@ function _G.writeProgram(state, writer)
 			entryPointName, table.concat(filePaths, "\n- ")
 		)
 
-	elseif not mainFuncDecl.isConstant then
+	elseif not isDeclarationConstant(mainFuncDecl) then
 		nodeError(state, mainFuncDecl.name, "ProgramWriter", "Declared name '%s' must be a constant.", entryPointName)
 	end
 
@@ -2055,6 +2057,19 @@ function _G.writeProgram(state, writer)
 	elseif mainLambda.inferredType.argumentTypesOut[1] then
 		nodeError(state, mainLambda.argumentsOut, "ProgramWriter", "Program entry point function must not return any values.")
 	end
+
+	astVisitAllNodes(globalScope, function(node)
+		if node.nodeType == !(nodeTypes.AstDeclaration) then
+			local decl = node
+			if decl.kind == !(DECL_KIND_STATIC) then
+				table.insert(topScopeDeclarations, decl)
+			end
+
+		elseif node.nodeType == !(nodeTypes.AstNamespace) then
+			local namespace = node
+			insertArrayItems(topScopeDeclarations, namespace.declarations)
+		end
+	end)
 
 	local relevantObjects = nil
 
