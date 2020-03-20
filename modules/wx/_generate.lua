@@ -212,7 +212,6 @@ local GLOA_KEYWORDS = {
 	["return"]    = true,
 	["static"]    = true,
 	["struct"]    = true,
-	["then"]      = true,
 	["type_info"] = true,
 	["type_of"]   = true,
 	["using"]     = true,
