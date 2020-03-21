@@ -559,6 +559,7 @@ function _G.isDeclarationVisibleToNode(decl, node)
 	-- It doesn't matter if this is true and we're in a declarative scope because we check that in the loop below.
 	local canSeeImperativeVariables = (decl.kind == !(DECL_KIND_LOCAL_VAR) --[[or decl.kind == !(DECL_KIND_READ_ONLY)]])
 
+	local name                      = decl.name.name
 	local nodeScope, nodeScopeChild = getClosestScope(node)
 
 	while true do
@@ -599,7 +600,7 @@ function _G.isDeclarationVisibleToNode(decl, node)
 			errorUnhandledNodeType(state, nodeScope)
 		end
 
-		if canSeeImperativeVariables and nodeScope.nodeType == !(nodeTypes.AstLambda) then
+		if canSeeImperativeVariables and nodeScope.nodeType == !(nodeTypes.AstLambda) and not itemWith1(nodeScope.captures, `name`, name) then
 			-- Lambdas act as the only boundary between imperative and declarative
 			-- scopes right now. Maybe this will change in the future? 2019-12-07
 			canSeeImperativeVariables = false
@@ -2583,7 +2584,11 @@ end
 					"Value for declared %s '%s' is not a constant expression.%s",
 					(isDeclarationConstant(decl) and "constant" or "variable"),
 					identOrVararg.name,
-					(not isDeclarationConstant(decl) and isScopeDeclarative(scope) and " (All values in declarative scopes must be constant.)" or "")
+					(
+						(valueExpr.nodeType == !(nodeTypes.AstLambda) and valueExpr.captures[1] and " (Functions with captures are not constant.)") or
+						(not isDeclarationConstant(decl) and isScopeDeclarative(scope) and " (All values in declarative scopes must be constant.)") or
+						""
+					)
 				)
 			end
 		end
@@ -4326,29 +4331,30 @@ end
 			!ASSERT `#names >= 1`
 			!ASSERT `values[1]`
 
-			-- @Incomplete: Support 'for' loops/iterators that don't require an iterator value or
-			-- even a state (e.g. if values are read from somewhere else, like an event queue).
-
-			-- @Incomplete: Complain if getAssignmentValue() can return a fourth value.
-
 			local iterExpr, iterTypeInfo = getAssignmentValue(state, forLoop, values, 1, nil, nil, "loop value")
 
 			if iterTypeInfo.tag ~= !(typeTags.TypeInfoFunction) then
-				typeError(state, iterExpr, "Expected a function. (Got %s)", getFriendlyTypeInfoName(iterTypeInfo))
+				typeError(state, iterExpr, "For loop: Expected a function. (Got %s)", getFriendlyTypeInfoName(iterTypeInfo))
 
 			elseif #iterTypeInfo.argumentTypesIn ~= 2 then
 				-- @Incomplete: Consider optional arguments.
 				typeError(
-					state, iterExpr,
-					"Iterators must take two arguments - an invariant state object and a control value. (The signature of this function is %s)",
+					state, astGetExpressionVisuallyFurthestToTheLeft(iterExpr),
+					"For loop: Iterators must take two arguments - an invariant state object and a control value. (The signature of this function is %s)",
 					getFriendlyTypeInfoName(iterTypeInfo)
 				)
 
 			elseif not iterTypeInfo.argumentTypesOut[1] then
-				typeError(state, iterExpr, "Iterator does not return anything.")
+				typeError(
+					state, astGetExpressionVisuallyFurthestToTheLeft(iterExpr),
+					"For loop: Iterator does not return anything."
+				)
 
 			elseif iterTypeInfo.argumentTypesOut[1].tag == !(typeTags.TypeInfoNone) then
-				typeError(state, iterExpr, "The type of the first returned value from iterators cannot be simply nil. It must be a compound type where nil is included.")
+				typeError(
+					state, astGetExpressionVisuallyFurthestToTheLeft(iterExpr),
+					"For loop: The type of the first returned value from iterators cannot be simply nil. It must be a compound type where nil is included."
+				)
 
 			elseif not (
 				iterTypeInfo.argumentTypesOut[1].tag == !(typeTags.TypeInfoAny)
@@ -4358,8 +4364,8 @@ end
 				)
 			) then
 				typeError(
-					state, iterExpr,
-					"The type of the first returned value from iterators must be a compound type where nil is included. (This function returns %s)",
+					state, astGetExpressionVisuallyFurthestToTheLeft(iterExpr),
+					"For loop: The type of the first returned value from iterators must be a compound type where nil is included. (This function returns %s)",
 					getFriendlyTypeInfoName(iterTypeInfo.argumentTypesOut[1])
 				)
 
@@ -4367,19 +4373,25 @@ end
 				-- @Incomplete: Consider !must and make everything else optional.
 				typeError(
 					state, names[math.min(#iterTypeInfo.argumentTypesOut+1, #names)],
-					"Incorrect number of names specified for iterator. (Expected %d, got %d)",
+					"For loop: Incorrect number of names specified for iterator. (Expected %d, got %d)",
 					#iterTypeInfo.argumentTypesOut,
 					#names
 				)
 			end
 
+			--
+			-- @Incomplete: Support 'for' loops/iterators that don't require an iterator value or
+			-- even a state (e.g. if values are read from somewhere else, like an event queue).
+			--
+			-- @Incomplete: Complain if getAssignmentValue() can return a fourth value.
+			--
 			local stateExpr, stateTypeInfo = getAssignmentValue(state, forLoop, values, 2, nil, nil, "loop value")
 			local initExpr,  initTypeInfo  = getAssignmentValue(state, forLoop, values, 3, nil, nil, "loop value")
 
 			if not isTypeCompatibleWith(adjustTypeToOne(state, stateExpr, stateTypeInfo, true), iterTypeInfo.argumentTypesIn[1]) then
 				typeError(
 					state, stateExpr,
-					"Type mismatch for iterator state (value #2). (Wanted %s, got %s)",
+					"For loop: Type mismatch for iterator state (value #2). (Wanted %s, got %s)",
 					getFriendlyTypeInfoName(iterTypeInfo.argumentTypesIn[1]),
 					getFriendlyTypeInfoName(adjustTypeToOne(state, stateExpr, stateTypeInfo, true))
 				)
@@ -4387,7 +4399,7 @@ end
 			if not isTypeCompatibleWith(adjustTypeToOne(state, initExpr, initTypeInfo, true), iterTypeInfo.argumentTypesIn[2]) then
 				typeError(
 					state, initExpr,
-					"Type mismatch for initial control value (value #3). (Wanted %s, got %s)",
+					"For loop: Type mismatch for initial control value (value #3). (Wanted %s, got %s)",
 					getFriendlyTypeInfoName(iterTypeInfo.argumentTypesIn[2]),
 					getFriendlyTypeInfoName(adjustTypeToOne(state, initExpr, initTypeInfo, true))
 				)
@@ -5128,7 +5140,6 @@ end
 local ALWAYS_CONST = !(Set{
 	nodeTypes.AstBake,
 	nodeTypes.AstImport, -- Namespaces, just like types, are always constant.
-	nodeTypes.AstLambda, -- Lambdas (which are function signatures) are types too, thus constant.
 	nodeTypes.AstLiteral,
 	nodeTypes.AstNamespace,
 	nodeTypes.AstNull,
@@ -5163,6 +5174,10 @@ function _G.isExpressionConstant(state, expr, foreignIsConst)
 	elseif nodeType == !(nodeTypes.AstBinary) then
 		local binary = expr
 		return isExpressionConstant(state, binary.left, foreignIsConst) and isExpressionConstant(state, binary.right, foreignIsConst)
+
+	elseif nodeType == !(nodeTypes.AstLambda) then -- Note: We should not get here for AstType nodes.
+		local lambda = expr
+		return not lambda.captures[1]
 
 	elseif nodeType == !(nodeTypes.AstConditional) then
 		local conditional = expr
@@ -6370,6 +6385,10 @@ function _G.getExpectedTypeInfo(state, node, strict, expectantTerm, nodeForError
 		if not argTypeInfo then
 			!ifDEBUG `astPrintTree(call)`
 			typeError(state, call, "Too many arguments specified for call.")
+		end
+
+		if argTypeInfo.tag == !(typeTags.TypeInfoPlaceholder) then
+			return (getExpectedTypeInfoUsingContents(state, node, strict, expectantTerm, nodeForError))
 		end
 
 		return argTypeInfo

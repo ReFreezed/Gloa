@@ -380,6 +380,7 @@ _G.!structAst"AstEnum:_AstScopeExpression"{
 _G.!structAst"AstLambda:_AstScopeExpression"{
 	_scopeType = "imperative",
 
+	{`captures`,          {},  ast="array"},   -- []AstIdentifier
 	{`argumentsIn`,       nil, astRef="node"}, -- AstArguments
 	{`argumentsOut`,      nil, astRef="node"}, -- AstArguments
 	{`takingVararg`,      false},
@@ -2008,7 +2009,7 @@ function _G.parseRun(state, parentNode, mustBeExpression)
 	end
 
 	local runNode  = astNewNode(AstRun,    token, parentNode)
-	local lambda   = astNewNode(AstLambda, token, parentNode) -- @Incomplete: Never output this function (or inner functions) in the final program (even if --nostrip is set)?
+	local lambda   = astNewNode(AstLambda, token, parentNode) -- @Cleanup: Never output this function (or inner functions) in the final program (even if --nostrip is set)?
 	runNode.lambda = lambda
 
 	tokType, tokValue = peekNextToken(state)
@@ -2305,14 +2306,29 @@ function _G.parseCall(state, parentNode, couldBeType, callee, isMethod)
 	return call
 end
 
--- parseLambda( compilationState, parentNode [, allowBody=false ] )
-function _G.parseLambda(state, parentNode, allowBody)
-	-- Note: We assume the initial '(' has been eaten already.
+function _G.parseLambda(state, parentNode)
+	local lambda = astNewNode(AstLambda, state.nextToken, parentNode)
 
-	local lambda = astNewNode(AstLambda, state.nextToken-1, parentNode)
+	-- Captures.
+	local tokType, tokValue = peekNextToken(state)
+
+	if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"[") then
+		eatNextToken(state)
+		!DO_OR_RETURN `parseNameList(state, lambda, lambda.captures, false)`
+
+		tokType, tokValue = eatNextToken(state)
+		if not isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"]") then
+			!ERROR_OR_RETURN `errorParsingAfterPrevious(state, "Expected ']'.")`
+		end
+	end
 
 	-- Input arguments.
-	local tokType, tokValue = peekNextToken(state)
+	tokType, tokValue = eatNextToken(state)
+	if not isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"(") then
+		!ERROR_OR_RETURN `errorParsingAfterPrevious(state, "Expected '('.")`
+	end
+
+	tokType, tokValue = peekNextToken(state)
 
 	if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),")") then
 		eatNextToken(state)
@@ -2394,6 +2410,10 @@ function _G.parseLambda(state, parentNode, allowBody)
 			end
 		end
 
+		if lambda.isPolymorphic and lambda.captures[1] then
+			!ERROR_OR_RETURN `errorParsing(state, lambda.token, "Polymorphic functions cannot have captures.")`
+		end
+
 		if args.arguments[1] and getLast(args.arguments).declaration.name.nodeType == !(nodeTypes.AstVararg) then
 			lambda.takingVararg = true
 		end
@@ -2473,53 +2493,53 @@ function _G.parseLambda(state, parentNode, allowBody)
 	end
 
 	-- Body.
-	if allowBody then
-		tokType, tokValue = peekNextToken(state)
+	tokType, tokValue = peekNextToken(state)
 
-		if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"{") then
-			eatNextToken(state)
+	if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"{") then
+		eatNextToken(state)
 
-			!SET_OR_RETURN `local block = parseBlock(state, lambda)`
-			lambda.body                 = block
-			table.insert(lambda.statements, block)
+		!SET_OR_RETURN `local block = parseBlock(state, lambda)`
+		lambda.body                 = block
+		table.insert(lambda.statements, block)
 
-			lambda.bodyEndToken = state.nextToken-1 -- The '}'.
+		lambda.bodyEndToken = state.nextToken-1 -- The '}'.
 
-		elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"foreign") then
-			eatNextToken(state)
-			lambda.bodyIsForeign = true
+	elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"foreign") then
+		eatNextToken(state)
+		lambda.bodyIsForeign = true
 
-			local block = astNewNode(AstBlock, state.nextToken-1, lambda) -- Dummy block.
-			lambda.body = block
-			table.insert(lambda.statements, block)
+		local block = astNewNode(AstBlock, state.nextToken-1, lambda) -- Dummy block.
+		lambda.body = block
+		table.insert(lambda.statements, block)
 
-			tokType, tokValue = eatNextToken(state)
-			if not isToken(tokType,tokValue, !(TOKEN_IDENTIFIER)) then
-				!ERROR_OR_RETURN `errorParsingLast(state, "Expected foreign source. (Valid values: lua, method, compiler)")`
-			elseif not !!(anyV(`tokValue`, "lua","method","compiler")) then
-				!ERROR_OR_RETURN `errorParsingLast(state, "Invalid source '%s'. (Valid values: lua, method, compiler)", tokValue)`
-			end
-			lambda.foreignSource = tokValue
-
-			tokType, tokValue = peekNextToken(state)
-			if isToken(tokType,tokValue, !(TOKEN_STRING)) then
-				eatNextToken(state)
-				lambda.foreignSourceName = tokValue
-			else
-				-- void  (lambda.foreignSourceName will be the name of whatever declared constant the lambda is attached to.)
-				!ERROR_OR_RETURN `errorParsingAfterLast(state, "@Incomplete: Infer lambda.foreignSourceName")` -- TEMP
-			end
-
-			lambda.bodyEndToken = state.nextToken-1
-		else
-			lambda.bodyEndToken = state.nextToken-1 -- Dummy value that shouldn't be used since there's no body.
+		tokType, tokValue = eatNextToken(state)
+		if not isToken(tokType,tokValue, !(TOKEN_IDENTIFIER)) then
+			!ERROR_OR_RETURN `errorParsingLast(state, "Expected foreign source. (Valid values: lua, method, compiler)")`
+		elseif not !!(anyV(`tokValue`, "lua","method","compiler")) then
+			!ERROR_OR_RETURN `errorParsingLast(state, "Invalid source '%s'. (Valid values: lua, method, compiler)", tokValue)`
 		end
+		lambda.foreignSource = tokValue
+
+		tokType, tokValue = peekNextToken(state)
+		if isToken(tokType,tokValue, !(TOKEN_STRING)) then
+			eatNextToken(state)
+			lambda.foreignSourceName = tokValue
+		else
+			-- void  (lambda.foreignSourceName will be the name of whatever declared constant the lambda is attached to.)
+			!ERROR_OR_RETURN `errorParsingAfterLast(state, "@Incomplete: Infer lambda.foreignSourceName")` -- TEMP
+		end
+
+		lambda.bodyEndToken = state.nextToken-1
 	else
 		lambda.bodyEndToken = state.nextToken-1 -- Dummy value that shouldn't be used since there's no body.
 	end
 
 	if lambda.isPolymorphic and not lambda.body then
 		!ERROR_OR_RETURN `errorParsing(state, lambda.token, "Types of functions cannot be polymorphic - only functions themselves can.")`
+	elseif lambda.captures[1] and not lambda.body then
+		!ERROR_OR_RETURN `errorParsingAfterLast(state, "Expected a body for function with captures.")`
+	elseif lambda.captures[1] and lambda.bodyIsForeign then
+		!ERROR_OR_RETURN `errorParsing(state, lambda.token, "Foreign functions cannot have captures.")`
 	end
 
 	return lambda
@@ -2614,32 +2634,41 @@ function _G.parseExpression(state, parentNode, prevOpPrecedence, expectLeftValue
 	-- Function signature (type) or lambda.
 	--
 	--     inArgs [-> outArgs] [body]
+	--     captures inArgs [-> outArgs] body
 	--
-	--     inArgs  = ( [ inArg1, ... ] )
-	--     inArg   = [ $ [ ? ] ] name1 [, ... ] : [ $ ] type [ = defaultValue ]
-	--     inArg   = using       name1 [, ... ] : [ $ ] type [ = defaultValue ]
-	--     outArgs = void
-	--     outArgs = type1 [, ... ]
-	--     outArgs = ( outArg1 [, ... ] )
-	--     outArg  = name1 [, ... ] : type
-	--     body    = { ... }
+	--     captures = '[' capture1, ... ']'
+	--     inArgs   = ( [ inArg1, ... ] )
+	--     inArg    = [ $ [ ? ] ] name1 [, ... ] : [ $ ] type [ = defaultValue ]
+	--     inArg    = using       name1 [, ... ] : [ $ ] type [ = defaultValue ]
+	--     outArgs  = void
+	--     outArgs  = type1 [, ... ]
+	--     outArgs  = ( outArg1 [, ... ] )
+	--     outArg   = name1 [, ... ] : type
+	--     body     = { ... }
 	--
 	elseif
-		isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"(")
-		and (
-			isToken(tokType2,tokValue2, !(TOKEN_PUNCTUATION),")")
-			or isToken(tokType2,tokValue2, !(TOKEN_PUNCTUATION),"$")
-			or isToken(tokType2,tokValue2, !(TOKEN_KEYWORD),"using")
-			or (
-				(
-					isToken(tokType2,tokValue2, !(TOKEN_IDENTIFIER)) or
-					isToken(tokType2,tokValue2, !(TOKEN_PUNCTUATION),"...")
+		(
+			isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"(")
+			and (
+				isToken(tokType2,tokValue2, !(TOKEN_PUNCTUATION),")")
+				or isToken(tokType2,tokValue2, !(TOKEN_PUNCTUATION),"$")
+				or isToken(tokType2,tokValue2, !(TOKEN_KEYWORD),"using")
+				or (
+					(
+						isToken(tokType2,tokValue2, !(TOKEN_IDENTIFIER)) or
+						isToken(tokType2,tokValue2, !(TOKEN_PUNCTUATION),"...")
+					)
+					and isToken(tokType3,tokValue3, !(TOKEN_PUNCTUATION),":",",","=")
 				)
-				and isToken(tokType3,tokValue3, !(TOKEN_PUNCTUATION),":",",","=")
 			)
 		)
+		or (
+			isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"[")
+			and not isToken(tokType2,tokValue2, !(TOKEN_PUNCTUATION),"]")
+		)
 	then
-		!SET_OR_RETURN `local lambda = parseLambda(state, parentNode, true)`
+		putBackLastToken(state)
+		!SET_OR_RETURN `local lambda = parseLambda(state, parentNode)`
 
 		if lambda.body then
 			expr = lambda
