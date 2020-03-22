@@ -457,16 +457,15 @@ function _G.findDeclaration(state, startNode, name, declToIgnore)
 	local scope = isScope(startNode) and startNode or getClosestScope(startNode)
 
 	while scope do
-		-- @Cleanup: This seem a little bit ugly maybe. How does this compare to polymorphic functions
-		-- regarding declarations existing directly in the scope? (Baked values in functions probably
-		-- set decl.checkedRedeclaration.)
+		-- This seem a little bit @Ugly maybe. How does this compare to polymorphic functions regarding declarations
+		-- existing directly in the scope? (Baked values in functions probably set decl.checkedRedeclaration.)
 		while scope.nodeType == !(nodeTypes.AstStruct) and scope.isPolymorphic do
 			scope = getClosestScope(scope)
 			if not scope then  return  end
 		end
 
 		for _, decl in ipairs(scope.declarations) do
-			if decl ~= declToIgnore and decl.name.name == name and isDeclarationVisibleToNode(decl, startNode) then
+			if decl ~= declToIgnore and decl.name.name == name and isDeclarationVisibleToNode(state, decl, startNode) then
 				return decl, nil
 			end
 		end
@@ -497,7 +496,7 @@ function _G.findDeclaration(state, startNode, name, declToIgnore)
 							isDeclarationConstant(decl)
 							or (
 								using.variableDeclaration
-								and isDeclarationVisibleToNode(using.variableDeclaration, startNode)
+								and isDeclarationVisibleToNode(state, using.variableDeclaration, startNode)
 							)
 						)
 					then
@@ -508,7 +507,7 @@ function _G.findDeclaration(state, startNode, name, declToIgnore)
 		end
 
 		for _, decl in ipairs(scope.declarationsInTree[name] or EMPTY_TABLE) do
-			if decl ~= declToIgnore and isDeclarationVisibleToNode(decl, startNode) then
+			if decl ~= declToIgnore and isDeclarationVisibleToNode(state, decl, startNode) then
 				return decl, nil
 			end
 		end
@@ -555,7 +554,7 @@ function _G.findDynamicMemberDeclaration(state, scope, name)
 	return nil
 end
 
-function _G.isDeclarationVisibleToNode(decl, node)
+function _G.isDeclarationVisibleToNode(state, decl, node)
 	if isDeclarationGlobal(decl) then  return true  end
 
 	-- It doesn't matter if this is true and we're in a declarative scope because we check that in the loop below.
@@ -563,18 +562,29 @@ function _G.isDeclarationVisibleToNode(decl, node)
 
 	local name                      = decl.name.name
 	local nodeScope, nodeScopeChild = getClosestScope(node)
+	local nodeScope0                = nodeScope
 
 	while true do
 		if not indexOf(nodeScope.declarations, decl) then
 			-- void  (Keep looking through parent scopes and update canSeeImperativeVariables as we go.)
 
-		elseif not (decl.kind == !(DECL_KIND_LOCAL_VAR) --[[or decl.kind == !(DECL_KIND_READ_ONLY)]]) or isScopeDeclarative(nodeScope) then
+		-- Non-static declarations are always visible.
+		elseif not (decl.kind == !(DECL_KIND_LOCAL_VAR) --[[or decl.kind == !(DECL_KIND_READ_ONLY)]]) then
 			return true
+
+		-- Everything in declarative scopes is always visible EXCEPT (variable) struct members
+		-- (and enum members but those don't matter as they're always constant).
+		elseif isScopeDeclarative(nodeScope) then
+			return not (
+				nodeScope.nodeType == !(nodeTypes.AstStruct)
+				and nodeScope ~= nodeScope0
+			)
 
 		elseif not canSeeImperativeVariables then
 			return false
 
-		elseif !!(anyV(`nodeScope.nodeType`, nodeTypes.AstFor,nodeTypes.AstLambda)) then -- These are really a combination of declarative and imperative scopes. (Not sure if this is good. 2020-03-19)
+		elseif !!(anyV(`nodeScope.nodeType`, nodeTypes.AstFor,nodeTypes.AstLambda)) then
+			-- These are really a combination of declarative and imperative scopes. (Not sure if this is good. 2020-03-19)
 			return true
 
 		elseif nodeScope.nodeType == !(nodeTypes.AstBlock) then
@@ -2358,11 +2368,17 @@ end
 local function doesExpressionRepresentPolymorphicStructType(expr)
 	if expr.inferredType.tag ~= !(typeTags.TypeInfoType) then  return false  end
 
-	local typeInfoRepresented = getTypeRepresentedByExpression(expr)
+	local typeRepresented = getTypeRepresentedByExpression(expr)
 	return
-		typeInfoRepresented ~= nil
-		and typeInfoRepresented.tag == !(typeTags.TypeInfoStruct)
-		and typeInfoRepresented.isPolymorphic
+		typeRepresented ~= nil
+		and typeRepresented.tag == !(typeTags.TypeInfoStruct)
+		and typeRepresented.isPolymorphic
+end
+local function doesExpressionRepresentStructType(expr)
+	if expr.inferredType.tag ~= !(typeTags.TypeInfoType) then  return false  end
+
+	local typeRepresented = getTypeRepresentedByExpression(expr)
+	return typeRepresented ~= nil and typeRepresented.tag == !(typeTags.TypeInfoStruct)
 end
 
 !NODE_INFERRER `function nodeInferrers.AstCall(state, call)`
@@ -2390,32 +2406,50 @@ end
 		end
 	end
 
+	if calleeTypeInfo.tag == !(typeTags.TypeInfoList) then
+		local listSig  = calleeTypeInfo -- @Incomplete: Should we use adjustTypeToOne() here? I think so...
+		calleeTypeInfo = listSig[1] or typeError(state, call, "Trying to call void.")
+	end
+
+	!local NOT_CALLABLE = templateToLua(
+		trimTemplate`
+			if callee.nodeType == $nodeTypeIdent then
+				local ident = callee
+				typeError(state, ident, "'%s' is not a function. (It is %s)", ident.name, getFriendlyTypeInfoName(ident.inferredType))
+			else
+				typeError(state, call, "The object being called is not a function. (It is %s)", getFriendlyTypeInfoName(calleeTypeInfo))
+			end
+		`,
+		{nodeTypeIdent=nodeTypes.AstIdentifier}
+	)
+
 	if calleeTypeInfo.tag == !(typeTags.TypeInfoFunction) then
 		-- void
-
-	elseif calleeTypeInfo.tag == !(typeTags.TypeInfoList) then
-		local listSig  = calleeTypeInfo
-		calleeTypeInfo = listSig[1]
-
-		if not calleeTypeInfo then
-			typeError(state, call, "Trying to call void.")
-		elseif calleeTypeInfo.tag == !(typeTags.TypeInfoFunction) then
-			-- void
-		else
-			typeError(state, call, "The object being called is not a function. (It is %s)", getFriendlyTypeInfoName(calleeTypeInfo))
-		end
 
 	elseif doesExpressionRepresentPolymorphicStructType(callee) then -- @Cleanup: We can/should probably just check callee.declaration.valueTypeInfo here.
 		handlePolymorphicStruct(state, call)
 		return
 
-	else
-		if callee.nodeType == !(nodeTypes.AstIdentifier) then
-			local ident = callee
-			typeError(state, ident, "'%s' is not a function. (It is %s)", ident.name, getFriendlyTypeInfoName(ident.inferredType))
-		else
-			typeError(state, call, "The object being called is not a function. (It is %s)", getFriendlyTypeInfoName(calleeTypeInfo))
+	elseif doesExpressionRepresentStructType(callee) then -- @Cleanup: We can/should probably just check callee.declaration.valueTypeInfo here.
+		local structInfo = getTypeRepresentedByExpression(callee)
+
+		-- We have to wait for the members for inherited declarations to be available.
+		if not structInfo.hasMembers then
+			!DEPEND_AND_RETURN(`call`, DEPEND_STRUCT_MEMBERS_READY, `structInfo`)
 		end
+
+		local decl = findMemberDeclaration(state, structInfo.astNode, "!call")
+		if not decl then
+			typeError(state, call, "%s has no !call declaration and thus cannot be called.", getFriendlyTypeInfoName(structInfo))
+		end
+
+		local ident = astCopy(decl.name, callee.token, call)
+		replaceQueuedNodeAndUnqueueOldTree(state, callee, ident)
+
+		return inferNode(state, call)
+
+	else
+		!!(NOT_CALLABLE)
 	end
 
 	!ASSERT("calleeTypeInfo.tag == "..typeTags.TypeInfoFunction)
@@ -4951,6 +4985,11 @@ local function createRunReplacementFromTypeAndLuaValue(state, runNode, parent, t
 		local tableNode  = astNewNode(AstTable, runNode.token, parent)
 		local stringType = getTypeInfoForBuiltinType(state, "string")
 		assert(structInfo.hasMembers)
+
+		-- @Incomplete @Incomplete @Incomplete!!!!!!!!!
+		if structInfo.keyType or structInfo.valueType then
+			errorInternal(state, runNode, "@Incomplete: Handle !run expression results containing instances of structs with !key and !value types.")
+		end
 
 		-- @Robustness: Check that all keys in 't' are valid.
 		for _, member in ipairs(structInfo.members) do

@@ -231,6 +231,7 @@ function _G.bcAllocateConstantValueForExpressionIfNew(state, expr, dependent)
 		local structInfo = struct.representedType
 
 		-- @Incomplete: Wait for statements to get inferred (when we got struct self-referencing working).
+		-- (Or maybe they're always already inferred at this point? 2020-03-22)
 
 		local const, isNew = bcAllocateConstantValueIfNew(state, !(CONST_KIND_NORMAL), typeInfo, structInfo, dependent)
 
@@ -462,7 +463,19 @@ function _G.bcEmitForDeclaration(state, decl)
 		decl.valueConstant = const
 
 		if state.settings.outputDebugInfo then
-			bcMaybeSetConstantName(state, const, decl.name.name)
+			local name = decl.name.name
+
+			if name == "!call" then -- @Ugly detection.
+				!ASSERT("decl.parent.nodeType == "..nodeTypes.AstStruct) -- Only structs can have !call declarations at the moment. 2020-03-22
+				name = decl.parent.representedType.name
+
+				if name ~= "" then
+					bcMaybeSetConstantName(state, const, name.."_call")
+				end
+
+			else
+				bcMaybeSetConstantName(state, const, name)
+			end
 		end
 
 	elseif decl.kind == !(DECL_KIND_STATIC) then
