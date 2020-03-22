@@ -457,6 +457,14 @@ function _G.findDeclaration(state, startNode, name, declToIgnore)
 	local scope = isScope(startNode) and startNode or getClosestScope(startNode)
 
 	while scope do
+		-- @Cleanup: This seem a little bit ugly maybe. How does this compare to polymorphic functions
+		-- regarding declarations existing directly in the scope? (Baked values in functions probably
+		-- set decl.checkedRedeclaration.)
+		while scope.nodeType == !(nodeTypes.AstStruct) and scope.isPolymorphic do
+			scope = getClosestScope(scope)
+			if not scope then  return  end
+		end
+
 		for _, decl in ipairs(scope.declarations) do
 			if decl ~= declToIgnore and decl.name.name == name and isDeclarationVisibleToNode(decl, startNode) then
 				return decl, nil
@@ -2209,6 +2217,14 @@ local function handlePolymorphicStruct(state, call)
 	assert(structInfo.tag == !(typeTags.TypeInfoStruct))
 	assert(structInfo.isPolymorphic)
 
+	if call.isMethod then
+		local exprForError = astGetOriginal(typeNode)
+		if exprForError.nodeType == !(nodeTypes.AstAccess) then
+			exprForError = exprForError.member
+		end
+		typeError(state, exprForError, "This is not a method. (It is struct '%s')", getFriendlyTypeInfoName(structInfo))
+	end
+
 	local struct = structInfo.astNode
 
 	for _, morphDecl in ipairs(struct.polymorphs) do
@@ -2744,6 +2760,10 @@ function _G.checkBinaryOperation(state, exprForError, exprMain,exprL,exprR, binO
 		(typeInfoL.tag == !(typeTags.TypeInfoString) and typeInfoR.tag == !(typeTags.TypeInfoInt)) or
 		(typeInfoL.tag == !(typeTags.TypeInfoInt)    and typeInfoR.tag == !(typeTags.TypeInfoString))
 	) then
+		local intExpr = (typeInfoL.tag == !(typeTags.TypeInfoInt) and exprL or exprR)
+		if intExpr.nodeType == !(nodeTypes.AstLiteral) and intExpr.value < 0 then
+			typeError(state, intExpr, "String repetition: Integer is negative. (%d)", intExpr.value)
+		end
 		return getTypeInfoForBuiltinType(state, "string")
 
 	-- Numeric operation.
@@ -4558,7 +4578,7 @@ end
 
 	-- Wait for and validate inherits.
 	for i, typeExpr in ipairs(struct.inherits) do
-		while typeExpr.replacedBy do  typeExpr = typeExpr.replacedBy  end
+		typeExpr           = astGetReplacement(typeExpr)
 		struct.inherits[i] = typeExpr
 
 		local structInfoToInherit = requireTypeRepresentedByExpression(state, typeExpr)
