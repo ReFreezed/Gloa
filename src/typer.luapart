@@ -4432,33 +4432,69 @@ end
 	moveToNextRelevantPipe(state, forLoop)
 end
 
-local function checkForRecursiveStruct(state, declThatWeAreChecking, memberPath, member, structInfo, parentStructInfo)
-	local typeInfo = member.typeInfo
+local function checkForRecursiveStruct(state, declThatWeAreChecking, memberPath,memberName,memberType, structInfo, parentStructInfo)
+	local structInfoInner
 
-	if typeInfo == structInfo then
-		for i, member in ipairs(memberPath) do
-			memberPath[i] = member.name
+	if memberType.tag == !(typeTags.TypeInfoStruct) then
+		structInfoInner = memberType
+
+		if structInfoInner == structInfo then
+			local decl
+				=  findMemberDeclaration(state, parentStructInfo.astNode, memberName)
+				or errorInternal(state, declThatWeAreChecking, "%s", table.concat(memberPath, "."))
+
+			local valueExpr = decl.value
+			if valueExpr and !!(anyV(`valueExpr.nodeType`, nodeTypes.AstForeign,nodeTypes.AstNull)) then
+				return
+			end
+
+			local niceTypeName = getFriendlyTypeInfoName(structInfo)
+
+			typeError2(state,
+				declThatWeAreChecking.name, F(
+					"%s.%s is of type %s. This creates an infinite recursive loop. (Note: Compound types containing the struct are ok (unless the default value is the struct type), e.g. %s|nil)",
+					niceTypeName, table.concat(memberPath, "."), niceTypeName, niceTypeName
+				),
+				decl, "...here is the other member declaration."
+			)
 		end
 
-		-- @Incomplete: In the case of compound types, trigger this error if the default value has the type of the struct.
-		typeError(
-			state, declThatWeAreChecking.name,
-			"%s.%s is of type %s. This creates an infinite recursive loop. (Note: Compound types containing the struct are ok (unless the default value is the struct type), e.g. %s|nil)",
-			getFriendlyTypeInfoName(structInfo),
-			table.concat(memberPath, "."),
-			getFriendlyTypeInfoName(structInfo),
-			getFriendlyTypeInfoName(structInfo)
-		)
+	else
+		local decl
+			=  findMemberDeclaration(state, parentStructInfo.astNode, memberName)
+			or errorInternal(state, declThatWeAreChecking, "%s", table.concat(memberPath, "."))
+
+		local valueExpr = decl.value
+		if not valueExpr or !!(anyV(`valueExpr.nodeType`, nodeTypes.AstForeign,nodeTypes.AstNull)) then
+			return
+		end
+
+		structInfoInner = valueExpr.inferredType
+		if structInfoInner.tag ~= !(typeTags.TypeInfoStruct) then  return  end
+
+		if structInfoInner == structInfo then
+			local nodeForError = declThatWeAreChecking.value
+			nodeForError       = nodeForError and astGetExpressionVisuallyFurthestToTheLeft(nodeForError) or declThatWeAreChecking
+
+			local niceTypeName = getFriendlyTypeInfoName(structInfo)
+
+			typeError2(state,
+				nodeForError, F(
+					"The default value for %s.%s is of type %s. This creates an infinite recursive loop.",
+					niceTypeName, table.concat(memberPath, "."), niceTypeName
+				),
+				astGetExpressionVisuallyFurthestToTheLeft(valueExpr), F("...here is the default value.")
+			)
+		end
 	end
 
-	if typeInfo.tag ~= !(typeTags.TypeInfoStruct) then  return  end
-	local structInfoInner = typeInfo
+	if not structInfoInner.hasMembers then  return  end
 
 	local memberPathIndex = #memberPath+1
 
 	for _, member in ipairs(structInfoInner.members) do
-		memberPath[memberPathIndex] = member
-		checkForRecursiveStruct(state, declThatWeAreChecking, memberPath, member, structInfo, structInfoInner)
+		memberPath[memberPathIndex] = member.name
+		checkForRecursiveStruct(state, declThatWeAreChecking, memberPath,member.name,member.typeInfo, structInfo, structInfoInner)
 	end
 
 	memberPath[memberPathIndex] = nil
@@ -4486,6 +4522,7 @@ end
 		return
 	end
 
+	-- Start by creating a TypeInfoStruct that others can grab a reference to right away (before any members are ready).
 	local structInfo = struct.representedType
 
 	if not structInfo then
@@ -4506,6 +4543,7 @@ end
 		struct.inferredType    = getTypeInfoForBuiltinType(state, "type")
 	end
 
+	-- Wait for explicit contents to infer.
 	for _, statement in ipairs(struct.statements) do
 		if statement.queued.pipe <= !(PIPE_INFER) then
 			!DEPEND_AND_RETURN(`struct`, DEPEND_NODE_INFERRED, `statement`)
@@ -4518,6 +4556,7 @@ end
 		!DEPEND_AND_RETURN(`struct`, DEPEND_NODE_INFERRED, `struct.valueType`)
 	end
 
+	-- Wait for and validate inherits.
 	for i, typeExpr in ipairs(struct.inherits) do
 		while typeExpr.replacedBy do  typeExpr = typeExpr.replacedBy  end
 		struct.inherits[i] = typeExpr
@@ -4625,15 +4664,17 @@ end
 
 	-- Add members to structInfo.
 	for _, decl in ipairs(struct.declarations) do
+		local memberName = decl.name.name
+		local memberType = decl.name.inferredType or errorInternal()
+		checkForRecursiveStruct(state, decl, {memberName},memberName,memberType, structInfo, structInfo)
+
 		if not isDeclarationConstant(decl) then
-			local member          = TypeInfoStructMember()
-			member.name           = decl.name.name
-			member.typeInfo       = decl.name.inferredType or errorInternal()
+			local member    = TypeInfoStructMember()
+			member.name     = memberName
+			member.typeInfo = memberType
 			table.insert(structInfo.members, member)
 
-			checkForRecursiveStruct(state, decl, {member}, member, structInfo, structInfo)
-
-			-- Inherit foreign state from foreign-marked members in certain situations.
+			-- Inherit foreign state from foreign-marked members in certain situations:
 
 			if struct.isForeign then
 				-- void
