@@ -206,13 +206,13 @@ function _G.shouldOperationHaveSurroundingParentheses(node)
 	)
 end
 
--- writeBinaryOperation( state, writer, indent, nextLocalN, localsStack, left:AstNode|string, right:AstNode|string, binaryOperation, token [, binary ] )
-function _G.writeBinaryOperation(state, writer, indent, nextLocalN, localsStack, left, right, binOp, token, binary)
+-- writeBinaryOperation( state, writer, indent, nextLocalN, localsStack, left:AstNode|string, right:AstNode|string, binaryOperation, leftType, rightType, resultingType, token, binary=nil )
+function _G.writeBinaryOperation(state, writer, indent, nextLocalN, localsStack, l, r, binOp, lType, rType, resultingType, token, binary)
 	!(
 	local function WRITE_OPERAND(sideCode)
 		__LUA(templateToLua(
 			trimTemplate`
-				if type($sideCode) == 'string' then
+				if type($sideCode) == "string" then
 					file:write($sideCode)
 				else
 					writeExpression(state, writer, indent, nextLocalN, localsStack, $sideCode)
@@ -230,21 +230,35 @@ function _G.writeBinaryOperation(state, writer, indent, nextLocalN, localsStack,
 
 	if binOp == ".." then
 		if addParens then  file:write("(")  end
-		writeStringConcatenation(state, writer, indent, nextLocalN, localsStack, left, right) -- This makes sure consecutive string concatenations appear as one operation without any parentheses.
+		writeStringConcatenation(state, writer, indent, nextLocalN, localsStack, l, r) -- This makes sure consecutive string concatenations appear as one operation without any parentheses.
 		if addParens then  file:write(")")  end
 
 	elseif binOp == "//" then
 		file:write("_MATH_FLOOR(")
-		!WRITE_OPERAND `left`
+		!WRITE_OPERAND `l`
 		file:write(" / ")
-		!WRITE_OPERAND `right`
+		!WRITE_OPERAND `r`
+		file:write(")")
+
+	elseif binOp == "*" and resultingType.tag == !(typeTags.TypeInfoString) then
+		-- Just a quick note:
+		--   str *= 3  -- OK
+		--   num *= "" -- Illegal (as the result is a string, which is a type mismatch with 'num')
+		if lType.tag == !(typeTags.TypeInfoString) then
+			file:write("_REP(")
+		else
+			file:write("_REP2(")
+		end
+		!WRITE_OPERAND `l`
+		file:write(", ")
+		!WRITE_OPERAND `r`
 		file:write(")")
 
 	else
 		if addParens then  file:write("(")  end
-		!WRITE_OPERAND `left`
+		!WRITE_OPERAND `l`
 		file:write(" ", binOp, " ")
-		!WRITE_OPERAND `right`
+		!WRITE_OPERAND `r`
 		if addParens then  file:write(")")  end
 	end
 end
@@ -570,7 +584,13 @@ function _G.writeExpression(state, writer, indent, nextLocalN, localsStack, expr
 
 	elseif expr.nodeType == !(nodeTypes.AstBinary) then
 		local binary = expr
-		writeBinaryOperation(state, writer, indent, nextLocalN, localsStack, binary.left, binary.right, binary.operation, binary.token, binary)
+		writeBinaryOperation(
+			state, writer, indent, nextLocalN, localsStack,
+			binary.left, binary.right,
+			binary.operation,
+			binary.left.inferredType, binary.right.inferredType, binary.inferredType,
+			binary.token, binary
+		)
 
 	elseif expr.nodeType == !(nodeTypes.AstLiteral) then
 		local literal = expr
@@ -1004,6 +1024,7 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 		elseif nodeType == !(nodeTypes.AstAssignment) then
 			local assignment = statement
 
+			-- Plain assignment.
 			if assignment.operation == "=" then
 				-- @Optimize: Output '_ = func()' as 'func()'.
 				-- @Optimize: Output 'x, _ = func()' as 'x = func()'.
@@ -1031,6 +1052,7 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 				end
 				writeEol(state, writer)
 
+			-- Assignment with binary operation.
 			else
 				!ASSERT `not inDecl`
 
@@ -1116,7 +1138,16 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 					if not first then  file:write(", ")  end
 					first = false
 
-					writeBinaryOperation(state, writer, indent, nextLocalN, localsStack, targetsToWrite[i], "_VALUE"..i, assignment.binaryOperation, targetExpr.token)
+					local _, valueType = getAssignmentValue(state, targetExpr, assignment.values, i, nil, nil, nil)
+					!ASSERT(`valueType`, `tostring(i)`, `assignment.values[i] or assignment`)
+
+					writeBinaryOperation(
+						state, writer, indent, nextLocalN, localsStack,
+						targetsToWrite[i], "_VALUE"..i,
+						assignment.binaryOperation,
+						targetExpr.inferredType, valueType, targetExpr.inferredType,
+						targetExpr.token, nil
+					)
 				end
 
 				writeEol(state, writer)
@@ -1590,8 +1621,6 @@ local function writeTypeInfo(state, writer, typeInfo)
 			if i > 1 then  file:write(", ")  end
 			file:write("{argumentType=")
 			writeNormalSimpleConstant(state, writer, typeInfoType, typeInfo, false)
-			file:write(", required=")
-			writeNormalSimpleConstant(state, writer, typeInfoBool, funcSig.requiredArgumentsIn[i], false)
 			file:write("}")
 		end
 		file:write("}")
@@ -1601,8 +1630,6 @@ local function writeTypeInfo(state, writer, typeInfo)
 			if i > 1 then  file:write(", ")  end
 			file:write("{argumentType=")
 			writeNormalSimpleConstant(state, writer, typeInfoType, typeInfo, false)
-			file:write(", required=")
-			writeNormalSimpleConstant(state, writer, typeInfoBool, funcSig.requiredArgumentsOut[i], false)
 			file:write("}")
 		end
 		file:write("}")
@@ -1895,6 +1922,7 @@ function _G.writeCompilerSymbols(state, writer)
 		errorPrefix = toLua(RUNTIME_ERROR_PREFIX),
 	})
 
+	-- @Polish: Only output symbols actually used in the program.
 	local SYMBOLS = {
 		`_MATH_HUGE`,  `math.huge`,
 		`_MATH_MODF`,  `math.modf`,  -- Used when casting float to int.
@@ -1902,6 +1930,8 @@ function _G.writeCompilerSymbols(state, writer)
 		`_IPAIRS`,     `ipairs`,     -- Used for short-form array loops.
 		`_PAIRS`,      `pairs`,      -- Used for short-form table loops.
 		`_SELECT`,     `select`,     -- Used for short-form vararg loops. @Incomplete
+		`_REP`,        `string.rep`, -- Used for string repetition (duh).
+		`_REP2`,       `function(n,s)return(s:rep(n))end`,
 
 		-- Used for short-form array loops in reverse.
 		`_IPAIRSR`, trimTemplate`

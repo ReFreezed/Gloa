@@ -91,11 +91,9 @@ local !structTypeInfo"TypeInfoVararg:_TypeInfo"{
 
 local !structTypeInfo"TypeInfoFunction:_TypeInfo"{ -- AKA function signature.
 	_overrides={{`tag`,12}},
-	{`argumentTypesIn`,      {}}, -- []TypeInfo  @Cleanup: Use TypeInfoList here?
-	{`argumentTypesOut`,     {}}, -- []TypeInfo  @Cleanup: Use TypeInfoList here?
-	{`requiredArgumentsIn`,  {}}, -- []bool
-	{`requiredArgumentsOut`, {}}, -- []bool
-	{`isPolymorphic`,        false},
+	{`argumentTypesIn`,  {}}, -- []TypeInfo  @Cleanup: Use TypeInfoList here?
+	{`argumentTypesOut`, {}}, -- []TypeInfo  @Cleanup: Use TypeInfoList here?
+	{`isPolymorphic`,    false},
 }
 
 local !struct"TypeInfoStructMember"{
@@ -226,10 +224,8 @@ local function doesLambdaHaveSignature(lambda, funcSig)
 	if (argsOut and #argsOut.arguments or 0) ~= #argTypesOut then  return false  end
 
 	if argsIn then
-		local requiredArgsIn = funcSig.requiredArgumentsIn
 		for i, arg in ipairs(argsIn.arguments) do
-			if arg.declaration.name.inferredType ~= argTypesIn[i]      then  return false  end
-			if arg.isRequired                    ~= requiredArgsIn[i]  then  return false  end
+			if arg.declaration.name.inferredType ~= argTypesIn[i] then  return false  end
 		end
 	end
 	if argsOut then
@@ -278,7 +274,6 @@ function _G.getTypeInfoForLambda(state, lambda)
 				=   placeholderType
 				and (arg.declaration.name.nodeType == !(nodeTypes.AstVararg) and placeholderTypeVararg or placeholderType)
 				or  arg.declaration.name.inferredType
-			funcSig.requiredArgumentsIn[i]  = arg.isRequired
 		end
 	end
 	if argsOut then
@@ -287,7 +282,6 @@ function _G.getTypeInfoForLambda(state, lambda)
 				=   placeholderType
 				and (arg.declaration.name.nodeType == !(nodeTypes.AstVararg) and placeholderTypeVararg or placeholderType)
 				or  arg.declaration.name.inferredType
-			funcSig.requiredArgumentsOut[i] = arg.isRequired
 		end
 	end
 
@@ -708,13 +702,8 @@ function _G.getFriendlyTypeInfoName(typeInfo)
 		local typeTextsOut = {}
 
 		for i, argTypeInfo in ipairs(funcSig.argumentTypesIn) do
-			if i > 1 then
-				table.insert(typeTextsIn, ",")
-			end
+			if i > 1 then  table.insert(typeTextsIn, ",")  end
 			table.insert(typeTextsIn, getFriendlyTypeInfoName(argTypeInfo))
-			if not (funcSig.requiredArgumentsIn[i] or argTypeInfo.tag == !(typeTags.TypeInfoVararg)) then
-				table.insert(typeTextsIn, "?")
-			end
 		end
 
 		for i, argTypeInfo in ipairs(funcSig.argumentTypesOut) do
@@ -1120,16 +1109,18 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 	--   func() -- First or second?
 	if decl.overloadOf == decl then
 		for i = 1, #decl.overloads-1 do
-			local decl1         = decl.overloads[i]
-			local funcSig1      = decl1.value.inferredType
-			local argTypes1     = funcSig1.argumentTypesIn
-			local argRequireds1 = funcSig1.requiredArgumentsIn
+			local decl1     = decl.overloads[i]
+			local lambda1   = decl1.value
+			local args1     = lambda1.argumentsIn and lambda1.argumentsIn.arguments
+			local funcSig1  = lambda1.inferredType
+			local argTypes1 = funcSig1.argumentTypesIn
 
 			for i = i+1, #decl.overloads do
-				local decl2         = decl.overloads[i]
-				local funcSig2      = decl2.value.inferredType
-				local argTypes2     = funcSig2.argumentTypesIn
-				local argRequireds2 = funcSig2.requiredArgumentsIn
+				local decl2     = decl.overloads[i]
+				local lambda2   = decl2.value
+				local args2     = lambda2.argumentsIn and lambda2.argumentsIn.arguments
+				local funcSig2  = lambda2.inferredType
+				local argTypes2 = funcSig2.argumentTypesIn
 
 				if funcSig1 == funcSig2 then
 					local identEarly, identLate = getEarlyAndLateForRedeclarationError(state, decl1.name, decl2.name)
@@ -1149,8 +1140,8 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 					argTypeInfo1       = argTypeInfo1 and adjustTypeToOne(state, decl1.name, argTypeInfo1)
 					argTypeInfo2       = argTypeInfo2 and adjustTypeToOne(state, decl2.name, argTypeInfo2)
 
-					local isRequired1  = argTypeInfo1 ~= nil and argRequireds1[argIndex]
-					local isRequired2  = argTypeInfo2 ~= nil and argRequireds2[argIndex]
+					local isRequired1  = argTypeInfo1 ~= nil and args1[argIndex].isRequired
+					local isRequired2  = argTypeInfo2 ~= nil and args2[argIndex].isRequired
 
 					-- if isRequired1 then  requiredCount1 = requiredCount1+1  end
 					-- if isRequired2 then  requiredCount2 = requiredCount2+1  end
@@ -2748,8 +2739,15 @@ function _G.checkBinaryOperation(state, exprForError, exprMain,exprL,exprR, binO
 		getFriendlyTypeInfoName(typeInfoR)
 	)`
 
+	-- String repetition.
+	if binOp == "*" and (
+		(typeInfoL.tag == !(typeTags.TypeInfoString) and typeInfoR.tag == !(typeTags.TypeInfoInt)) or
+		(typeInfoL.tag == !(typeTags.TypeInfoInt)    and typeInfoR.tag == !(typeTags.TypeInfoString))
+	) then
+		return getTypeInfoForBuiltinType(state, "string")
+
 	-- Numeric operation.
-	if !!(anyV(`binOp`, "+","-","*","^","%","/","//")) then
+	elseif !!(anyV(`binOp`, "+","-","*","^","%","/","//")) then
 		if not (isTypeNumeric(typeInfoL) and isTypeNumeric(typeInfoR)) then
 			typeError(
 				state, exprMain,
@@ -5741,23 +5739,30 @@ local function simplifyBinary(state, binary)
 	-- @Incomplete: Simplify these kinds of expressions: 1 + -x => 1 - x
 	local typeInfo = binary.inferredType
 
-	if nil then
-		-- void
+	if op == "*" and typeInfo.tag == !(typeTags.TypeInfoString) then
+		local s     = l.value
+		local count = r.value
+
+		if l.inferredType.tag == !(typeTags.TypeInfoInt) then
+			s, count = count, s
+		end
+
+		local literal = newLiteral(binary.parent, binary.token, !(LITERAL_FLOAT), s:rep(count), typeInfo)
+		replaceQueuedNodeAndUnqueueOldTree(state, binary, literal)
+		moveToNextRelevantPipe(state, literal, !(PIPE_INFER))
 
 	!for _, opArithmeticKeepType in ipairs{"+","-","*","^","%"} do
 	elseif op == !(opArithmeticKeepType) then
 		!!(ASSERT_BOTH_OPERANDS_NUMERIC_LITERALS)
 
-		local literal = astNewNode(AstLiteral, binary.token, binary.parent)
-
-		literal.literalType
+		local literalType
 			=  typeInfo.tag == !(typeTags.TypeInfoInt)   and !(LITERAL_INTEGER)
 			or typeInfo.tag == !(typeTags.TypeInfoFloat) and !(LITERAL_FLOAT)
 			or errorInternal(getFriendlyTypeInfoName(typeInfo))
 
-		literal.value        = l.value !!(opArithmeticKeepType) r.value -- This should produce the correct result for any combination of int and float.
-		literal.inferredType = typeInfo
+		local n = l.value !!(opArithmeticKeepType) r.value -- This should produce the correct result for any combination of int and float.
 
+		local literal = newLiteral(binary.parent, binary.token, literalType, n, typeInfo)
 		replaceQueuedNodeAndUnqueueOldTree(state, binary, literal)
 		moveToNextRelevantPipe(state, literal, !(PIPE_INFER))
 	!end
@@ -5765,22 +5770,14 @@ local function simplifyBinary(state, binary)
 	elseif op == "/" then
 		!!(ASSERT_BOTH_OPERANDS_NUMERIC_LITERALS)
 
-		local literal        = astNewNode(AstLiteral, binary.token, binary.parent)
-		literal.literalType  = !(LITERAL_FLOAT)
-		literal.value        = l.value / r.value
-		literal.inferredType = typeInfo
-
+		local literal = newLiteral(binary.parent, binary.token, !(LITERAL_FLOAT), l.value/r.value, typeInfo)
 		replaceQueuedNodeAndUnqueueOldTree(state, binary, literal)
 		moveToNextRelevantPipe(state, literal, !(PIPE_INFER))
 
 	elseif op == "//" then
 		!!(ASSERT_BOTH_OPERANDS_NUMERIC_LITERALS)
 
-		local literal        = astNewNode(AstLiteral, binary.token, binary.parent)
-		literal.literalType  = !(LITERAL_INTEGER)
-		literal.value        = math.floor(l.value / r.value)
-		literal.inferredType = typeInfo
-
+		local literal = newLiteral(binary.parent, binary.token, !(LITERAL_INTEGER), math.floor(l.value/r.value), typeInfo)
 		replaceQueuedNodeAndUnqueueOldTree(state, binary, literal)
 		moveToNextRelevantPipe(state, literal, !(PIPE_INFER))
 
@@ -5795,11 +5792,7 @@ local function simplifyBinary(state, binary)
 			!ASSERT("lType == 'number' or lType == 'string'")
 		!end
 
-		local literal        = astNewNode(AstLiteral, binary.token, binary.parent)
-		literal.literalType  = !(LITERAL_BOOLEAN)
-		literal.value        = l.value !!(opComparison) r.value
-		literal.inferredType = typeInfo
-
+		local literal = newLiteral(binary.parent, binary.token, !(LITERAL_BOOLEAN), (l.value !!(opComparison) r.value), typeInfo)
 		replaceQueuedNodeAndUnqueueOldTree(state, binary, literal)
 		moveToNextRelevantPipe(state, literal, !(PIPE_INFER))
 	!end
@@ -5831,11 +5824,7 @@ local function simplifyBinary(state, binary)
 			errorInternal(state, binary)
 		end
 
-		local literal        = astNewNode(AstLiteral, binary.token, binary.parent)
-		literal.literalType  = !(LITERAL_BOOLEAN)
-		literal.value        = valueL !!(opEquality) valueR
-		literal.inferredType = typeInfo
-
+		local literal = newLiteral(binary.parent, binary.token, !(LITERAL_BOOLEAN), (valueL !!(opEquality) valueR), typeInfo)
 		replaceQueuedNodeAndUnqueueOldTree(state, binary, literal)
 		moveToNextRelevantPipe(state, literal, !(PIPE_INFER))
 	!end
@@ -5847,11 +5836,7 @@ local function simplifyBinary(state, binary)
 		!ASSERT("type(l.value) == 'boolean'")
 		!ASSERT("type(r.value) == 'boolean'")
 
-		local literal        = astNewNode(AstLiteral, binary.token, binary.parent)
-		literal.literalType  = !(LITERAL_BOOLEAN)
-		literal.value        = l.value !!(opLogical) r.value
-		literal.inferredType = typeInfo
-
+		local literal = newLiteral(binary.parent, binary.token, !(LITERAL_BOOLEAN), (l.value !!(opLogical) r.value), typeInfo)
 		replaceQueuedNodeAndUnqueueOldTree(state, binary, literal)
 		moveToNextRelevantPipe(state, literal, !(PIPE_INFER))
 	!end
@@ -5862,11 +5847,8 @@ local function simplifyBinary(state, binary)
 		!ASSERT("type(l.value) == 'string'")
 		!ASSERT("type(r.value) == 'string'")
 
-		local literal        = astNewNode(AstLiteral, binary.token, binary.parent)
-		literal.literalType  = !(LITERAL_STRING)
-		literal.value        = l.value .. r.value -- @Speed: Concatinate more than two values at a time. (Should maybe update parsing stage.)
-		literal.inferredType = typeInfo
-
+		-- @Speed: Concatinate more than two values at a time. (Maybe the parsing stage need an update.)
+		local literal = newLiteral(binary.parent, binary.token, !(LITERAL_STRING), l.value..r.value, typeInfo)
 		replaceQueuedNodeAndUnqueueOldTree(state, binary, literal)
 		moveToNextRelevantPipe(state, literal, !(PIPE_INFER))
 
