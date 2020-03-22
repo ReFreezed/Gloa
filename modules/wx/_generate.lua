@@ -542,7 +542,7 @@ local function parseFunction(s, isConstructor)
 	if isConstructor then
 		local className;className, ptr = parseName(s, ptr, true)
 		className     = className:gsub("^.+::", "")
-		funcData.name = className -- Note: We write "new" as the name in the output.
+		funcData.name = className -- Note: We use !call when outputting.
 
 		funcData.argsOut[1] = {typeName=className, name=""}
 
@@ -1598,16 +1598,17 @@ local function writeClass(classData, isInner)
 		for _, funcData in ipairs(classData.staticFunctions) do
 			colWidth = math.max(
 				colWidth,
-				(funcData.name ~= className and #funcData.name) or (isInner and 4) or 3
+				-- (funcData.name == className and 5 or #funcData.name)
+				(funcData.name ~= className and #funcData.name) or (isInner and 3) or 5
 			)
 		end
 		write("\n")
 		for _, funcData in ipairs(classData.staticFunctions) do
 			if funcData.name == className then
 				if isInner then
-					write(indent, "\tnew_", align("new_", colWidth), " :: ") -- @Compiler @Incomplete: Support overloading of names is different scopes. (Or maybe that's a bad idea?)
+					write(indent, "\tnew", align("new", colWidth), " :: ") -- @Compiler @Incomplete: Support overloading of names is different scopes. (Or maybe that's a bad idea?)
 				else
-					write(indent, "\tnew",  align("new",  colWidth), " :: ")
+					write(indent, "\t!call",  align("!call",  colWidth), " :: ")
 				end
 				writeFunctionSignature(funcData, nil, true)
 				write(' !foreign lua "', classData.table, '.', className, '",\n')
