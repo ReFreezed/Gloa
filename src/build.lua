@@ -1,3 +1,7 @@
+#!/bin/sh
+_=[[
+exec lua "$0" "$@"
+]]
 --[[============================================================
 --=
 --=  Glóa compiler build script
@@ -22,6 +26,28 @@
 		--gloadir <dir> ; Where the compiler will be able to find the modules folder etc. Default is the same folder the compiler is in. (Requires --debug)
 
 --============================================================]]
+
+local COMPILER_HEADER =
+[====[
+#!/bin/sh
+_=[[
+exec lua "$0" "$@"
+]] and nil
+--[[============================================================
+--=
+--=  Glóa compiler
+--=  by Marcus 'ReFreezed' Thunström
+--=
+--=  Note: The compiler (this file) has been processed.
+--=  The original source can be found at github.com/ReFreezed/Gloa
+--=
+--=  Language points:
+--=  - Strong static type system.
+--=  - Compile-time execution.
+--=  - The order of declarations doesn't matter in non-imperative scopes. (No forward declarations needed.)
+--=
+--============================================================]]
+]====]
 
 local buildStartTime = os.clock()
 
@@ -101,7 +127,7 @@ pp.metaEnvironment.GRAPHVIZ_PATH        = pathGraphviz
 
 pp.metaEnvironment.RUNTIME_ERROR_PREFIX = debugMode and runtimeErrorPrefix or ""
 
-local luaSegments = {}
+local luaSegments = {COMPILER_HEADER}
 function pp.metaEnvironment.preprocessorOutputAtTopOfFile(lua)
 	table.insert(luaSegments, lua)
 end

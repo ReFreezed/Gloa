@@ -426,9 +426,7 @@ function _G.getClosestScope(node)
 	-- @Incomplete: Treat global declarations differently and depricate
 	-- getClosestScopeForDeclaration() (or simply change the parent of
 	-- globals to the actual globalScope, though that has problems too).
-	return astFindParent(node,
-		!outputCommaSeparatedValues(unpack(scopeNodeTypes))
-	)
+	return astFindParent(node, !!(CONST_SET(scopeNodeTypes)))
 end
 ]]
 
@@ -3096,6 +3094,15 @@ end
 		if not memberValueType then  errorInternal(state, access.member)  end
 
 		if not constDecl then
+			if typeRepresented then
+				-- We don't allow StructType.dynamicMember except in !type_of and !type_info.
+				local foundNode = astFindParent(access, !!(CONST_SET{ nodeTypes.AstTypeOf, nodeTypes.AstTypeInfo, unpack(scopeNodeTypes) }))
+
+				if not !!(CONST_SET{ nodeTypes.AstTypeOf, nodeTypes.AstTypeInfo })[foundNode.nodeType] then
+					typeError(state, access.member, "Dynamic member '%s' is not accessible in static context.", memberName)
+				end
+			end
+
 			access.inferredType = memberValueType
 			moveToNextRelevantPipe(state, access)
 			return

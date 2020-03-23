@@ -1649,7 +1649,9 @@ function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 
 		eatNextToken(state)
 
-		local loopOrLambda = astFindParent3(breakOrContinue, !(nodeTypes.AstFor),!(nodeTypes.AstWhile),!(nodeTypes.AstLambda))
+		!local constName   = CONST_SET{ nodeTypes.AstFor, nodeTypes.AstWhile, nodeTypes.AstLambda }
+		local loopOrLambda = astFindParent(breakOrContinue, !!(constName))
+
 		if not loopOrLambda or loopOrLambda.nodeType == !(nodeTypes.AstLambda) then
 			!ERROR_OR_RETURN_FALSE `errorParsingLast(state, "Not inside a loop.")`
 		end
@@ -1685,7 +1687,8 @@ function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 					break -- Assume the identifier is part of a different statement.
 				end
 
-				loopOrLambda = astFindParent3(loopOrLambda, !(nodeTypes.AstFor),!(nodeTypes.AstWhile),!(nodeTypes.AstLambda))
+				!local constName = CONST_SET{ nodeTypes.AstFor, nodeTypes.AstWhile, nodeTypes.AstLambda }
+				loopOrLambda     = astFindParent(loopOrLambda, !!(constName))
 			until not loopOrLambda
 		end
 
@@ -2178,7 +2181,7 @@ function _G.parseFileScopeOrNamespaceStatements(state, scope, isTopLevel, single
 			local lineOffset  = 0
 
 			if spaceBefore then
-				local _, nlCount = spaceBefore:gsub("\n", "\0")
+				local _, nlCount = spaceBefore:gsub("\n", "%0")
 				lineOffset       = nlCount
 				lua              = lua:sub(#spaceBefore+1)
 			end
@@ -3635,17 +3638,15 @@ end
 
 
 
--- parent, childClosestToParent = astFindParent ( node, parentNodeType1, ... )
--- parent, childClosestToParent = astFindParent1( node, parentNodeType )
--- parent, childClosestToParent = astFindParent2( node, parentNodeType1, parentNodeType2 )
--- parent, childClosestToParent = astFindParent3( node, parentNodeType1, parentNodeType2, parentNodeType3 )
-function _G.astFindParent(node, ...)
+-- parent, childClosestToParent = astFindParent ( node, parentNodeTypeSet )
+-- parent, childClosestToParent = astFindParent1( node, parentNodeType    )
+function _G.astFindParent(node, nodeTypeSet)
 	local lastNode = node
 
 	while true do
 		node = node.parent
-		if not node                  then  return nil,  nil       end
-		if isAny(node.nodeType, ...) then  return node, lastNode  end
+		if not node                   then  return nil,  nil       end
+		if nodeTypeSet[node.nodeType] then  return node, lastNode  end
 
 		lastNode = node
 	end
@@ -3661,45 +3662,17 @@ function _G.astFindParent1(node, parentNodeType)
 		lastNode = node
 	end
 end
-function _G.astFindParent2(node, parentNodeType1, parentNodeType2)
-	local lastNode = node
-	local _nodeType
-
-	while true do
-		node = node.parent
-		if not node  then  return nil, nil end
-
-		_nodeType = node.nodeType
-		if _nodeType == parentNodeType1 or _nodeType == parentNodeType2 then  return node, lastNode  end
-
-		lastNode = node
-	end
-end
-function _G.astFindParent3(node, parentNodeType1, parentNodeType2, parentNodeType3)
-	local lastNode = node
-	local _nodeType
-
-	while true do
-		node = node.parent
-		if not node  then  return nil, nil end
-
-		_nodeType = node.nodeType
-		if _nodeType == parentNodeType1 or _nodeType == parentNodeType2 or _nodeType == parentNodeType3 then  return node, lastNode  end
-
-		lastNode = node
-	end
-end
 -- scope, statement = astFindParentScope( node )
 function _G.astFindParentScope(node)
 	local lastNode = node
-	local _nodeType
 
 	while true do
 		node = node.parent
 		if not node  then  return nil, nil end
 
-		_nodeType = node.nodeType
-		if !!(anyV(`_nodeType`, unpack(scopeNodeTypes))) then  return node, lastNode  end
+		if !!(CONST_SET(scopeNodeTypes))[node.nodeType] then
+			return node, lastNode
+		end
 
 		lastNode = node
 	end

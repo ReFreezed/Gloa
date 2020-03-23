@@ -762,9 +762,14 @@ function serialize(buffer, v)
 
 	elseif vType == "string" then
 		local s = F("%q", v)
-		if isDebug then
-			s = s:gsub("\\\n", "\\n")
-		end
+
+		-- @Incomplete: Add an option specifically for nice string serialization?
+		s = s:gsub("[%c\128-\255]", function(c)
+			local str           = ESCAPE_SEQUENCES[c] or F("\\%03d", c:byte())
+			ESCAPE_SEQUENCES[c] = str
+			return str
+		end)
+
 		table.insert(buffer, s)
 
 	elseif v == math.huge then
@@ -1979,7 +1984,8 @@ local function _processFileOrString(params, isFile)
 	-- @Incomplete: Maybe add an option to disable this? It might be useful if
 	-- e.g. Lua 5.1 is used to generate Lua 5.3 code (for whatever reason).
 	--
-	local mainChunk, err = loadLuaString(lua, (isFile and params.pathMeta and "@" or "")..pathOut)
+	local luaToCheck     = lua:gsub("^#![^\n]*", "")
+	local mainChunk, err = loadLuaString(luaToCheck, (isFile and params.pathMeta and "@" or "")..pathOut)
 	if not mainChunk then
 		local ln, _err = err:match'^.-:(%d+): (.*)'
 		errorOnLine(pathOut, (tonumber(ln) or 0), nil, "%s", (_err or err))

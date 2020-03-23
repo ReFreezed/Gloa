@@ -1,3 +1,7 @@
+#!/bin/sh
+_=[[
+exec lua "$0" "$@"
+]]
 --[[============================================================
 --=
 --=  wxLua/wxWidget bindings generator for Glóa
