@@ -761,16 +761,14 @@ function serialize(buffer, v)
 		table.insert(buffer, "}")
 
 	elseif vType == "string" then
-		local s = F("%q", v)
-
 		-- @Incomplete: Add an option specifically for nice string serialization?
-		s = s:gsub("[%c\128-\255]", function(c)
+		local s = v:gsub("[%c\128-\255\"\\]", function(c)
 			local str           = ESCAPE_SEQUENCES[c] or F("\\%03d", c:byte())
 			ESCAPE_SEQUENCES[c] = str
 			return str
 		end)
 
-		table.insert(buffer, s)
+		table.insert(buffer, '"'..s..'"')
 
 	elseif v == math.huge then
 		table.insert(buffer, "math.huge")
