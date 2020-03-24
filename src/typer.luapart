@@ -3651,13 +3651,15 @@ end
 	simplifyTypeExpression(state, typeOf, typeOf.representedType)
 end
 
-!NODE_INFERRER `function nodeInferrers.AstOverloadOf(state, overloadOf)`
-	if not overloadOf.call.inferredType then
-		!DEPEND_AND_RETURN(`overloadOf`, DEPEND_NODE_INFERRED, `overloadOf.call`)
+!NODE_INFERRER `function nodeInferrers.AstVariantOf(state, variant)`
+	if not variant.call.inferredType then
+		!DEPEND_AND_RETURN(`variant`, DEPEND_NODE_INFERRED, `variant.call`)
 	end
 
-	local call = overloadOf.call
-	if call.nodeType ~= !(nodeTypes.AstCall) then
+	local call = variant.call
+	if call.nodeType == !(nodeTypes.AstType) then
+		typeError(state, astGetExpressionVisuallyFurthestToTheLeft(call), "Expected a function call. (This is a type)")
+	elseif call.nodeType ~= !(nodeTypes.AstCall) then
 		typeError(state, astGetExpressionVisuallyFurthestToTheLeft(call), "Expected a function call.")
 	end
 
@@ -3672,15 +3674,28 @@ end
 			ident, F("'%s' is not constant.", ident.name),
 			decl,  F("...here is the declaration.")
 		)
-	elseif not decl.overloadOf then
+	end
+
+	local lambda = decl.value or errorInternal(state, decl)
+	lambda       = followIdentifiersToConstantValue(lambda)
+
+	!ASSERT("lambda.nodeType == "..nodeTypes.AstLambda)
+
+	if not (
+		decl.overloadOf
+		or (
+			lambda.parent.parent.nodeType == !(nodeTypes.AstLambda)
+			and indexOf(lambda.parent.parent.polymorphs, lambda.parent)
+		)
+	) then
 		typeError2(state,
-			ident, F("'%s' is not overloaded.", ident.name),
+			ident, F("'%s' is neither overloaded nor a polymorphic function.", ident.name),
 			decl,  F("...here is the declaration.")
 		)
 	end
 
-	local replacement = astCopy(ident, overloadOf.token, overloadOf.parent)
-	replaceQueuedNodeAndUnqueueOldTree(state, overloadOf, replacement)
+	local replacement = astCopy(ident, variant.token, variant.parent)
+	replaceQueuedNodeAndUnqueueOldTree(state, variant, replacement)
 	moveToNextRelevantPipe(state, replacement)
 end
 
@@ -5286,7 +5301,7 @@ local ALWAYS_CONST = !(Set{
 	nodeTypes.AstLiteral,
 	nodeTypes.AstNamespace,
 	nodeTypes.AstNull,
-	nodeTypes.AstOverloadOf, -- The resulting function reference will always be constant.
+	nodeTypes.AstVariantOf, -- The resulting reference will always be constant.
 	nodeTypes.AstStruct, nodeTypes.AstEnum,   -- Structs and enums are types (which are constant).
 	nodeTypes.AstType,   nodeTypes.AstTypeOf, -- All types are constant, just like literals.
 })
@@ -6559,7 +6574,7 @@ local EXPRESSION_EXPECTED = !(Set{
 	nodeTypes.AstCast,
 	nodeTypes.AstConditional,
 	nodeTypes.AstDebug,
-	nodeTypes.AstOverloadOf, -- !run is actually an error here since the expression must always be a call.
+	nodeTypes.AstVariantOf,
 	nodeTypes.AstReturn,
 	nodeTypes.AstRun, -- Good?
 	nodeTypes.AstTable,
