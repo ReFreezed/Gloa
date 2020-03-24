@@ -196,6 +196,9 @@ _G.!structAst"AstTypeOf:_AstExpression"{
 	-- Type phase:
 	{`representedType`, nil}, -- TypeInfo
 }
+_G.!structAst"AstOverloadOf:_AstExpression"{
+	{`call`, nil, ast="node"}, -- AstCall  This may end up being AstType which is a type error.
+}
 _G.!structAst"AstTypeInfo:_AstExpression"{
 	{`expression`,    nil, ast="node"}, -- AstExpression
 	-- Type phase:
@@ -1981,7 +1984,7 @@ function _G.parseBlock(state, parentNode)
 			if not state.soft then  parserMessageLine(io.stderr, state, token, "Warning", "Empty statement.")  end
 
 		else
-			if !!(CONST_SET{ nodeTypes.AstReturn,nodeTypes.AstBreak,nodeTypes.AstContinue })[lastNodeType] then
+			if !!(CONST_SET{ nodeTypes.AstReturn, nodeTypes.AstBreak, nodeTypes.AstContinue })[lastNodeType] then
 				local nodeTitle
 					=  lastNodeType == !(nodeTypes.AstReturn)   and "return"
 					or lastNodeType == !(nodeTypes.AstBreak)    and "break"
@@ -2479,6 +2482,7 @@ function _G.parseLambda(state, parentNode)
 
 		tokType, tokValue         = peekNextToken(state, 1)
 		local tokType2, tokValue2 = peekNextToken(state, 2)
+		local tokType3, tokValue3 = peekNextToken(state, 3)
 
 		-- (...) -> void
 		if isToken(tokType,tokValue, !(TOKEN_KEYWORD),"void") then
@@ -2494,6 +2498,13 @@ function _G.parseLambda(state, parentNode)
 			end
 			--]]
 
+		-- (...) -> ()
+		elseif
+			isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"(")
+			and isToken(tokType2,tokValue2, !(TOKEN_PUNCTUATION),")")
+		then
+			!ERROR_OR_RETURN `errorParsingNext(state, "Ambigous '()'. (Does the function return no values or does it return a function that takes no arguments?)")`
+
 		-- (...) -> (name:type, ...)
 		elseif
 			isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"(")
@@ -2505,17 +2516,12 @@ function _G.parseLambda(state, parentNode)
 			eatNextToken(state)
 			tokType, tokValue = peekNextToken(state)
 
-			-- '()' is the same as 'void'.
-			if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),")") then
-				eatNextToken(state)
+			!SET_OR_RETURN `args = parseArguments(state, lambda, false)`
+			!ASSERT `args.arguments[1]`
 
-			else
-				!SET_OR_RETURN `args = parseArguments(state, lambda, false)`
-
-				tokType, tokValue = eatNextToken(state)
-				if not isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),")") then
-					!ERROR_OR_RETURN `errorParsingAfterPrevious(state, "Expected ')'.")`
-				end
+			tokType, tokValue = eatNextToken(state)
+			if not isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),")") then
+				!ERROR_OR_RETURN `errorParsingAfterPrevious(state, "Expected ')'.")`
 			end
 
 			-- If the return type is a function signature, i.e. () -> () -> ...
@@ -2782,6 +2788,26 @@ function _G.parseExpression(state, parentNode, prevOpPrecedence, expectLeftValue
 		end
 
 		expr = typeOf
+
+	-- Overload of.
+	elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"overload_of") then
+		tokType, tokValue = eatNextToken(state)
+		if not isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"(") then
+			!ERROR_OR_RETURN `errorParsingAfterPrevious(state, "Expected '('.")`
+		end
+
+		local overloadOf                = astNewNode(AstOverloadOf, exprStartToken, parentNode)
+		!SET_OR_RETURN `overloadOf.call = parseExpression(state, overloadOf)`
+
+		tokType, tokValue = eatNextToken(state)
+		if not isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),")") then
+			!ERROR_OR_RETURN `errorParsingAfterPrevious(state, "Expected ')'.")`
+		end
+		if overloadOf.call.nodeType ~= !(nodeTypes.AstCall) then
+			!ERROR_OR_RETURN `errorParsing(state, exprStartToken+2, "Expected a call.")`
+		end
+
+		expr = overloadOf
 
 	-- Array type.
 	elseif isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"[") and isToken(tokType2,tokValue2, !(TOKEN_PUNCTUATION),"]") then
@@ -3459,6 +3485,12 @@ do
 				local typeOf = node
 				!!(CHILD_PRINT_START)
 				if typeOf.expression then  printNode(typeOf.expression, indent+1, printed, printChildren)  end
+				!!(CHILD_PRINT_END)
+
+			elseif node.nodeType == !(nodeTypes.AstOverloadOf) then
+				local overloadOf = node
+				!!(CHILD_PRINT_START)
+				if overloadOf.call then  printNode(overloadOf.call, indent+1, printed, printChildren)  end
 				!!(CHILD_PRINT_END)
 
 			elseif node.nodeType == !(nodeTypes.AstAssignment) then

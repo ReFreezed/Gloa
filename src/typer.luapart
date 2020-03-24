@@ -3651,6 +3651,39 @@ end
 	simplifyTypeExpression(state, typeOf, typeOf.representedType)
 end
 
+!NODE_INFERRER `function nodeInferrers.AstOverloadOf(state, overloadOf)`
+	if not overloadOf.call.inferredType then
+		!DEPEND_AND_RETURN(`overloadOf`, DEPEND_NODE_INFERRED, `overloadOf.call`)
+	end
+
+	local call = overloadOf.call
+	if call.nodeType ~= !(nodeTypes.AstCall) then
+		typeError(state, astGetExpressionVisuallyFurthestToTheLeft(call), "Expected a function call.")
+	end
+
+	local ident = call.callee
+	if ident.nodeType ~= !(nodeTypes.AstIdentifier) then
+		typeError(state, call, "Expected the reference to the called function to be a constant name.")
+	end
+
+	local decl = ident.declaration
+	if not isDeclarationConstant(decl) then
+		typeError2(state,
+			ident, F("'%s' is not constant.", ident.name),
+			decl,  F("...here is the declaration.")
+		)
+	elseif not decl.overloadOf then
+		typeError2(state,
+			ident, F("'%s' is not overloaded.", ident.name),
+			decl,  F("...here is the declaration.")
+		)
+	end
+
+	local replacement = astCopy(ident, overloadOf.token, overloadOf.parent)
+	replaceQueuedNodeAndUnqueueOldTree(state, overloadOf, replacement)
+	moveToNextRelevantPipe(state, replacement)
+end
+
 !NODE_INFERRER `function nodeInferrers.AstTypeInfo(state, typeInfoNode)`
 	-- @Robustness: Check that the expression doesn't have code that looks like it's going to be executed, because it's not!
 
@@ -5249,10 +5282,11 @@ end
 -- Note: It's assumed that the expression tree has all types figured out.
 local ALWAYS_CONST = !(Set{
 	nodeTypes.AstBake,
-	nodeTypes.AstImport, -- Namespaces, just like types, are always constant.
+	nodeTypes.AstImport, -- Imports refer to namespaces which are always constant.
 	nodeTypes.AstLiteral,
 	nodeTypes.AstNamespace,
 	nodeTypes.AstNull,
+	nodeTypes.AstOverloadOf, -- The resulting function reference will always be constant.
 	nodeTypes.AstStruct, nodeTypes.AstEnum,   -- Structs and enums are types (which are constant).
 	nodeTypes.AstType,   nodeTypes.AstTypeOf, -- All types are constant, just like literals.
 })
@@ -6517,33 +6551,34 @@ end
 
 
 local EXPRESSION_EXPECTED = !(Set{
-	nodeTypes.AstType,
-	nodeTypes.AstUnary,
-	nodeTypes.AstBinary,
 	nodeTypes.AstAccess,
-	nodeTypes.AstTable,
+	nodeTypes.AstAssignment,
+	nodeTypes.AstBake,
+	nodeTypes.AstBinary,
 	nodeTypes.AstCall,
-	nodeTypes.AstTypeOf,
 	nodeTypes.AstCast,
 	nodeTypes.AstConditional,
-	nodeTypes.AstBake,
-	nodeTypes.AstRun, -- Good?
-	nodeTypes.AstUsing,
 	nodeTypes.AstDebug,
-	nodeTypes.AstAssignment,
+	nodeTypes.AstOverloadOf, -- !run is actually an error here since the expression must always be a call.
 	nodeTypes.AstReturn,
+	nodeTypes.AstRun, -- Good?
+	nodeTypes.AstTable,
+	nodeTypes.AstType,
+	nodeTypes.AstTypeOf,
+	nodeTypes.AstUnary,
+	nodeTypes.AstUsing,
 })
 local EXPRESSION_NOT_EXPECTED = !(Set{
 	nodeTypes.AstArgument,
 	nodeTypes.AstArguments,
-	nodeTypes.AstDefer,
 	nodeTypes.AstBlock,
+	nodeTypes.AstDefer,
+	nodeTypes.AstEnum,
 	nodeTypes.AstFileScope,
 	nodeTypes.AstGlobalScope,
-	nodeTypes.AstStruct,
-	nodeTypes.AstEnum,
 	nodeTypes.AstLambda,
 	nodeTypes.AstNamespace,
+	nodeTypes.AstStruct,
 })
 
 function _G.isAnExpressionExpected(state, node)
