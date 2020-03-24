@@ -297,8 +297,7 @@ _G.!structAst"AstAssignment:_AstNode"{
 	{`forDeclaration`,   false},
 	{`declarations`,     nil, astRef="array"}, -- []AstDeclaration  (Is set if forDeclaration is set.)
 
-	{`operation`,        "="},
-	{`binaryOperation`,  ""},
+	{`binaryOperation`,  ""}, -- Empty means plain assignment.
 
 	{`addedByPolymorph`, false},
 }
@@ -1387,7 +1386,8 @@ function _G.parseDeclarationStatement(state, scope, imperative, declType)
 end
 
 function _G.parseAssignment(state, parentNode)
-	local assignment = astNewNode(AstAssignment, 1, parentNode)
+	local assignment          = astNewNode(AstAssignment, 1, parentNode)
+	local statementStartToken = state.nextToken
 
 	!DO_OR_RETURN `parseExpressionList(state, assignment, assignment.targets, true)`
 
@@ -1398,11 +1398,18 @@ function _G.parseAssignment(state, parentNode)
 	end
 
 	local tokType, tokValue = eatNextToken(state)
+
 	if not isTokenAssigning(tokType, tokValue) then
-		!ERROR_OR_RETURN `errorParsingAfterPrevious(state, "Expected '='.")`
+		!TRACE()
+		!ERROR_OR_RETURN `
+			printerr()
+			parserMessageAfter(io.stderr, state, state.nextToken-2,   "Error", "Expected '=' in assignment statement.")
+			parserMessage     (io.stderr, state, statementStartToken, "Info",  "...start of statement is here.")
+			exitFailure()
+		`
 	end
+
 	assignment.token           = state.nextToken-1
-	assignment.operation       = tokValue
 	assignment.binaryOperation = tokValue:sub(1, -2) -- All assignments with extra operations end with '=' (e.g. '+='). Here we just strip away the '='.
 
 	!DO_OR_RETURN `parseExpressionList(state, assignment, assignment.values)`
@@ -1658,26 +1665,30 @@ function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 
 		tokType, tokValue = peekNextToken(state)
 
-		if tokType == !(TOKEN_IDENTIFIER) then
+		if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"(") then
+			eatNextToken(state) -- '('
+
+			!SET_OR_RETURN_FALSE `local loopNameIdent = parseIdentifier(state, breakOrContinue)`
+
+			local loopName    = loopNameIdent.name
 			local loopClosest = loopOrLambda
 
 			repeat
 				-- We can break from these types of loops:
-				--   for i = 1, 2  break i
-				--   while x       break x
-				--   while not x   break x
+				--   for i = 1, 2  break(i)
+				--   while x       break(x)
+				--   while not x   break(x)
 				-- We cannot break from these:
-				--   for 1, 2   break it  -- 'it' is an implicit name. (We could make this work if necessary.)
-				--   while x+y  break x   -- The condition expression is too complex. (What's "too complex" is debatable. @Revise)
+				--   for 1, 2   break(it)  -- 'it' is an implicit name. (We could make this work if necessary.)
+				--   while x+y  break(x)   -- The condition expression is too complex. (What's "too complex" is debatable. @Revise)
 				if
-					loopOrLambda.nodeType == !(nodeTypes.AstFor)   and itemWith1(loopOrLambda.names, "name", tokValue) or
-					loopOrLambda.nodeType == !(nodeTypes.AstWhile) and getBreakableNameFromSimpleExpression(loopOrLambda.condition) == tokValue
+					loopOrLambda.nodeType == !(nodeTypes.AstFor)   and itemWith1(loopOrLambda.names, "name", loopName) or
+					loopOrLambda.nodeType == !(nodeTypes.AstWhile) and getBreakableNameFromSimpleExpression(loopOrLambda.condition) == loopName
 				then
-					-- We don't need a named break if we're breaking from the closest loop. (Should we save this info anyway for the metaprogram?)
 					if loopOrLambda == loopClosest then
-						eatNextToken(state) -- The identifier.
+						-- void  We don't need a named break if we're breaking from the closest loop. (Should we save this info anyway for the metaprogram?)
 					else
-						breakOrContinue.loopName    = parseIdentifier(state, breakOrContinue) or errorInternal()
+						breakOrContinue.loopName    = loopNameIdent
 						breakOrContinue.loop        = loopOrLambda
 						loopOrLambda.hasNamedBreaks = true
 					end
@@ -1690,6 +1701,16 @@ function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 				!local constName = CONST_SET{ nodeTypes.AstFor, nodeTypes.AstWhile, nodeTypes.AstLambda }
 				loopOrLambda     = astFindParent(loopOrLambda, !!(constName))
 			until not loopOrLambda
+
+			if not loopOrLambda or loopOrLambda.nodeType == !(nodeTypes.AstLambda) then
+				!ERROR_OR_RETURN_FALSE `errorParsingLast(state, "Could not find what loop '%s' refers to.", loopName)`
+			end
+
+			tokType, tokValue = eatNextToken(state)
+
+			if not isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),")") then
+				!ERROR_OR_RETURN_FALSE `errorParsingAfterPrevious(state, "Expected ')'.")`
+			end
 		end
 
 		statement = breakOrContinue
@@ -1954,20 +1975,25 @@ function _G.parseBlock(state, parentNode)
 
 		elseif isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),";") then
 			eatNextToken(state)
+
 			-- We allow empty statement like Lua 5.2+ does (so things like ';(x and func1 or func2)()'
 			-- always work, no matter what comes previously). :EmptyStatement
 			if not state.soft then  parserMessageLine(io.stderr, state, token, "Warning", "Empty statement.")  end
 
 		else
-			if !!(anyV(`lastNodeType`, nodeTypes.AstReturn,nodeTypes.AstBreak,nodeTypes.AstContinue)) then
+			if !!(CONST_SET{ nodeTypes.AstReturn,nodeTypes.AstBreak,nodeTypes.AstContinue })[lastNodeType] then
 				local nodeTitle
-					=  lastNodeType == !(nodeTypes.AstReturn)   and "Return"
-					or lastNodeType == !(nodeTypes.AstBreak)    and "Break"
-					or lastNodeType == !(nodeTypes.AstContinue) and "Continue"
+					=  lastNodeType == !(nodeTypes.AstReturn)   and "return"
+					or lastNodeType == !(nodeTypes.AstBreak)    and "break"
+					or lastNodeType == !(nodeTypes.AstContinue) and "continue"
 					or assert(lastNodeType)
 
-				-- @Incomplete: If it's a return statement, tell whether the function wants any values returned.
-				!ERROR_OR_RETURN `errorParsing(state, statementStartToken, "%s statements must be at the end of the scope.", nodeTitle)`
+				local extra
+					=  lastNodeType ~= !(nodeTypes.AstReturn) and ""
+					or getLast(block.statements).values[1]    and " (Note: The function has return arguments.)"
+					or                                            " (Note: The function has no return arguments.)"
+
+				!ERROR_OR_RETURN `errorParsing(state, state.nextToken, "Unreachable code after %s statement.%s", nodeTitle, extra)`
 			end
 
 			statementStartToken = state.nextToken
@@ -1987,7 +2013,7 @@ function _G.parseBlockOrScopedStatement(state, parentNode)
 
 	if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"{") then
 		eatNextToken(state)
-		return parseBlock(state, parentNode) -- May return nil.
+		return (parseBlock(state, parentNode)) -- May return nil.
 	end
 
 	local block = astNewNode(AstBlock, token, parentNode)
@@ -2644,10 +2670,10 @@ function _G.parseExpression(state, parentNode, prevOpPrecedence, expectLeftValue
 		isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"+","-","#") or
 		isToken(tokType,tokValue, !(TOKEN_KEYWORD),"not")
 	then
-		local unaryOp                      = astNewNode(AstUnary, exprStartToken, parentNode)
-		unaryOp.operation                  = tokValue
-		!SET_OR_RETURN `unaryOp.expression = parseExpression(state, unaryOp, OPERATOR_PRECEDENCE.unary)`
-		expr                               = unaryOp
+		local unary                      = astNewNode(AstUnary, exprStartToken, parentNode)
+		unary.operation                  = tokValue
+		!SET_OR_RETURN `unary.expression = parseExpression(state, unary, OPERATOR_PRECEDENCE.unary)`
+		expr                             = unary
 
 	-- Function signature (type) or lambda.
 	--
@@ -2895,12 +2921,12 @@ function _G.parseExpression(state, parentNode, prevOpPrecedence, expectLeftValue
 		then
 			eatNextToken(state)
 
-			local binOp                 = astNewNode(AstBinary, token, parentNode)
-			binOp.operation             = tokValue
-			binOp.left                  = expr
-			!SET_OR_RETURN `binOp.right = parseExpression(state, binOp, OPERATOR_PRECEDENCE[tokValue])`
-			expr.parent                 = binOp
-			expr                        = binOp
+			local binary                 = astNewNode(AstBinary, token, parentNode)
+			binary.operation             = tokValue
+			binary.left                  = expr
+			!SET_OR_RETURN `binary.right = parseExpression(state, binary, OPERATOR_PRECEDENCE[tokValue])`
+			expr.parent                  = binary
+			expr                         = binary
 
 		-- Right-associative binary operations.
 		-- @Incomplete: Combine string concatenations in some way?
@@ -2910,12 +2936,12 @@ function _G.parseExpression(state, parentNode, prevOpPrecedence, expectLeftValue
 		then
 			eatNextToken(state)
 
-			local binOp                 = astNewNode(AstBinary, token, parentNode)
-			binOp.operation             = tokValue
-			binOp.left                  = expr
-			!SET_OR_RETURN `binOp.right = parseExpression(state, binOp, OPERATOR_PRECEDENCE[tokValue]-1)` -- The -1 makes this right-associative.
-			expr.parent                 = binOp
-			expr                        = binOp
+			local binary                 = astNewNode(AstBinary, token, parentNode)
+			binary.operation             = tokValue
+			binary.left                  = expr
+			!SET_OR_RETURN `binary.right = parseExpression(state, binary, OPERATOR_PRECEDENCE[tokValue]-1)` -- The -1 makes this right-associative.
+			expr.parent                  = binary
+			expr                         = binary
 
 		-- Lookup using '.'. (t.k is syntactic sugar for t["k"])
 		elseif
@@ -3138,6 +3164,16 @@ function _G.parserMessage(file, state, token, label, s, ...)
 	reportMessageInFile(file, buffer, path, tokens.position1[token], label, "Parser", s, ...)
 end
 
+-- parserMessageAfter( [ outputFile=io.stdout, ] compilationState, token, label, formatString, ... )
+function _G.parserMessageAfter(file, state, token, label, s, ...)
+	if type(file) ~= "userdata" then  return parserMessage(io.stdout, file, state, token, label, s, ...)  end
+
+	local tokens = state.tokens
+	local path   = tokens.file[token]      or errorInternal("No tokens.")
+	local buffer = state.fileBuffers[path] or errorInternal("No file buffer for '%s'.", path)
+	reportMessageInFile(file, buffer, path, tokens.position2[token]+1, label, "Parser", s, ...)
+end
+
 -- parserMessageLine( [ outputFile=io.stdout, ] compilationState, token, label, formatString, ... )
 function _G.parserMessageLine(file, state, token, label, s, ...)
 	if type(file) ~= "userdata" then  return parserMessageLine(io.stdout, file, state, token, label, s, ...)  end
@@ -3310,19 +3346,19 @@ do
 				write(")\n")
 
 			elseif node.nodeType == !(nodeTypes.AstUnary) then
-				local unaryOp = node
-				write(" (", unaryOp.operation, ")")
+				local unary = node
+				write(" (", unary.operation, ")")
 				!!(CHILD_PRINT_START)
-				if unaryOp.expression then  printNode(unaryOp.expression, indent+1, printed, printChildren)  end
+				if unary.expression then  printNode(unary.expression, indent+1, printed, printChildren)  end
 				!!(CHILD_PRINT_END)
 
 			elseif node.nodeType == !(nodeTypes.AstBinary) then
-				local binOp = node
-				write(" (", binOp.operation, ")")
+				local binary = node
+				write(" (", binary.operation, ")")
 				!!(CHILD_PRINT_START)
-				if binOp.left  then  printNode(binOp.left,  indent+1, printed, printChildren)  end
-				write(indentStr, !(INDENT.."op "), binOp.operation, "\n")
-				if binOp.right then  printNode(binOp.right, indent+1, printed, printChildren)  end
+				if binary.left  then  printNode(binary.left,  indent+1, printed, printChildren)  end
+				write(indentStr, !(INDENT.."op "), binary.operation, "\n")
+				if binary.right then  printNode(binary.right, indent+1, printed, printChildren)  end
 				!!(CHILD_PRINT_END)
 
 			elseif node.nodeType == !(nodeTypes.AstAccess) then
@@ -3435,10 +3471,10 @@ do
 					write(")")
 				end
 				if assignment.addedByPolymorph then  write(" (addedByPolymorph)")  end
-				write(" (", assignment.operation, ")")
+				write(" (", assignment.binaryOperation, "=)")
 				!!(CHILD_PRINT_START)
 				printNodeList(assignment.targets, indent+1, printed, printChildren)
-				write(indentStr, !(INDENT.."op "), assignment.operation, "\n")
+				write(indentStr, !(INDENT.."op "), assignment.binaryOperation, "=\n")
 				printNodeList(assignment.values, indent+1, printed, printChildren)
 				!!(CHILD_PRINT_END)
 

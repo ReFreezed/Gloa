@@ -1573,7 +1573,7 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 	local slotsToCheck  = valueCount -- Assuming the requested count is accepted.
 
 	if not valueExprLast then
-		--void
+		-- void
 
 	elseif valueExprLast.nodeType == !(nodeTypes.AstCall) then
 		local valueCall = valueExprLast
@@ -1661,12 +1661,17 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 	if requestedMin < acceptedMin then
 		if softCheck then  return false, 0  end
 
-		local exprForError = values[1] and getArgumentNodeForError(callOrReturnNode, 1, values[1]) or callOrReturnNode
+		local exprForError = valueExprLast and getArgumentNodeForError(callOrReturnNode, 1, values[1]) or callOrReturnNode
 		local prefix       = requestedMax+acceptedMax == math.huge and "Incorrect number of" or "Missing"
 		local thingsStr    = callOrReturnNode.nodeType == !(nodeTypes.AstCall) and "arguments" or "values to return"
 		local gotStr       = (requestedMax ~= math.huge and F("%d", requestedMin)) or (requestedMin == 0 and "variable amount") or F("%d + variable amount", requestedMin)
 
-		typeError(state, exprForError, "%s %s. (Wanted %d, got %s)", prefix, thingsStr, acceptedMin, gotStr)
+		local errorFunc
+			=   not valueExprLast and callOrReturnNode.nodeType == !(nodeTypes.AstReturn)
+			and typeErrorAfter
+			or  typeError
+
+		errorFunc(state, exprForError, "%s %s. (Wanted %d, got %s)", prefix, thingsStr, acceptedMin, gotStr)
 
 	-- Too many values.
 	-- @UX: Better error message if the last value is a call (without parentheses).
