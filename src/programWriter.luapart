@@ -37,6 +37,128 @@
 
 
 
+!(
+-- info.what     = "Lua"|"C"|"main"|"tail"
+-- info.namewhat = "global"|"local"|"method"|"field"|"upvalue"|""
+
+local ERROR_HANDLER = templateToLua(
+	trimTemplate`
+		(function(lineMappings, getinfo, tonumber, outputFile, type, exit)
+			return function(err)
+				local mainSource = (getinfo(1, "S") or {}).source or "<UNKNOWN_SOURCE>"
+
+				if type(err) == "string" then
+					local pathHere = mainSource:match"^@(.+)"
+					local pathLen  = pathHere and #pathHere
+					local ln       = pathHere and err:sub(1, pathLen) == pathHere and tonumber(err:match("^:(%d+): ", pathLen+1))
+
+					if lineMappings.lines[ln] then
+						err = (
+							lineMappings.paths[lineMappings.files[ln]]..":"
+							..lineMappings.lines[ln]..": "
+							..err:sub(pathLen+1):gsub("^:%d+: ", "")
+						)
+					end
+				end
+
+				outputFile:write("\n")
+				if type(err) == "string" then
+					outputFile:write("Error: ", err, "\n")
+				else
+					outputFile:write("Error!\n")
+				end
+				outputFile:write("stack traceback:\n")
+
+				for level = 2, 1000 do
+					local info = getinfo(level, "nSl")
+					if not info then  break  end
+
+					outputFile:write("\t")
+
+					if info.what == "C" then
+						outputFile:write("[ C ]: ")
+						if (info.name or "") ~= "" then
+							outputFile:write("'", info.name, "'")
+						else
+							outputFile:write("?")
+						end
+
+					else
+						if info.source == mainSource and (lineMappings.lines[info.currentline] or 0) > 0 then
+							outputFile:write(lineMappings.paths[lineMappings.files[info.currentline]], ":", lineMappings.lines[info.currentline])
+						else
+							outputFile:write("[Lua]")
+						end
+
+						outputFile:write(":")
+
+						if info.what == "tail" then
+							outputFile:write(" tail call")
+						elseif info.what == "main" then
+							outputFile:write(" main chunk")
+						elseif (info.name or "") ~= "" then
+							outputFile:write(" ")
+							if info.namewhat == "method" or info.namewhat == "field" then  outputFile:write(info.namewhat, " ")  end
+							outputFile:write("'", info.name, "'")
+						elseif info.source == mainSource and (lineMappings.lines[info.linedefined] or 0) > 0 and info.linedefined ~= info.currentline then
+							outputFile:write(" (linedefined:", lineMappings.lines[info.linedefined], ")")
+						end
+
+						local source = nil
+
+						if info.source:find"^@" then
+							source = $errorPrefix..info.source:sub(2)
+						elseif info.source:find"%.lua$" then
+							source = info.source
+						end
+
+						source = source and source..":"..info.currentline
+
+						if source then
+							outputFile:write(" (", source)
+							if info.linedefined > 0 and info.linedefined ~= info.currentline then
+								outputFile:write(", linedefined:", info.linedefined)
+							end
+							outputFile:write(")")
+						end
+					end
+
+					outputFile:write("\n")
+				end
+
+				exit(1)
+			end
+		end)(lineMappings, debug.getinfo, tonumber, io.stderr, type, os.exit)
+	`,
+	{ errorPrefix=toLua(RUNTIME_ERROR_PREFIX) }
+)
+
+local COMPILER_SYMBOL_PAIRS = {
+	`_HUGE`,   `math.huge`,
+	`_MODF`,   `math.modf`,  -- Used when casting float to int.
+	`_FLOOR`,  `math.floor`, -- Used for integer division.
+	`_IPAIRS`, `ipairs`,     -- Used for short-form array loops.
+	`_PAIRS`,  `pairs`,      -- Used for short-form table loops.
+	`_SELECT`, `select`,     -- Used for short-form vararg loops. @Incomplete
+	`_REP`,    `string.rep`, -- Used for string repetition (duh).
+	`_REP2`,   `function(n,s)return(s:rep(n))end`,
+
+	-- Used for short-form array loops in reverse.
+	`_IPAIRSR`, trimTemplate`
+		(function()
+			local function inext(arr, i)
+				i = i-1
+				if i > 0 then  return i, arr[i]  end
+			end
+			return function(arr)
+				return inext, arr, #arr+1
+			end
+		end)()
+	`,
+}
+local COMPILER_SYMBOL_COUNT = #COMPILER_SYMBOL_PAIRS/2
+)
+
 local foreignApiCompilerSymbols = {
 	-- These can be used in user code through !foreign compiler "symbolName".
 	-- (See utils.gloa, io.gloa and other modules for declarations.)
@@ -68,26 +190,30 @@ local foreignApiCompilerSymbols = {
 	ipairsr = `_IPAIRSR`,
 
 	wrapFunctionInGloaErrorHandler = !(trimTemplate`
-		function(cb)
-			return function(...)
-				local args = {n=select("#", ...), ...}
+		(function(select, xpcall, unpack, exit, gloaErrorHandler)
+			return function(cb)
+				return function(...)
+					local args = {n=select("#", ...), ...}
 
-				if not xpcall(
-					function()
-						cb(unpack(args, 1, args.n))
-					end,
-					gloaErrorHandler
-				) then
-					os.exit(1)
+					if not xpcall(
+						function()
+							cb(unpack(args, 1, args.n))
+						end,
+						gloaErrorHandler
+					) then
+						exit(1)
+					end
 				end
 			end
-		end
+		end)(select, xpcall, unpack, os.exit, gloaErrorHandler)
 	`),
 
 	getProgramArguments = !(trimTemplate`
-		function()
-			return {unpack(programArguments)}
-		end
+		(function(programArguments)
+			return function()
+				return {unpack(programArguments)}
+			end
+		end)(programArguments)
 	`),
 
 	-- getTypeInfo = !(trimTemplate`
@@ -234,7 +360,7 @@ function _G.writeBinaryOperation(state, writer, indent, nextLocalN, localsStack,
 		if addParens then  file:write(")")  end
 
 	elseif binOp == "//" then
-		file:write("_MATH_FLOOR(")
+		file:write("_FLOOR(")
 		!WRITE_OPERAND `l`
 		file:write(" / ")
 		!WRITE_OPERAND `r`
@@ -338,7 +464,7 @@ function _G.writeCast(state, writer, indent, nextLocalN, localsStack, cast, name
 		!!(WRITE_EXPRESSION)
 	-- float -> int
 	elseif typeInfoSource.tag == !(typeTags.TypeInfoFloat) and typeInfoTarget.tag == !(typeTags.TypeInfoInt) then
-		writer.file:write("_MATH_MODF(") -- Note: math.modf() returns two values.
+		writer.file:write("_MODF(") -- Note: math.modf() returns two values.
 		!!(WRITE_EXPRESSION)
 		writer.file:write(")")
 
@@ -1535,9 +1661,9 @@ local function writeNormalSimpleConstant(state, writer, typeInfo, v, isEnum)
 		if v == 0 then
 			file:write("0.0") -- Avoid writing '-0.0'.
 		elseif v == math.huge then
-			file:write("_MATH_HUGE")
+			file:write("_HUGE")
 		elseif v == -math.huge then
-			file:write("(-_MATH_HUGE)")
+			file:write("(-_HUGE)")
 		elseif v ~= v then
 			file:write("(0/0)")
 		else
@@ -1816,145 +1942,23 @@ end
 function _G.writeCompilerSymbols(state, writer)
 	local file = writer.file
 
-	file:write("local lineMappingPaths, lineMappingFiles, lineMappingLines = {}, {}, {}")
+	file:write("local lineMappings = {paths={},files={},lines={}}")
 	writeEol(state, writer)
 
 	if writer.outputRuntime then
-		file:write("local programArguments = {...}")
+		file:write("local programArguments = {...}") -- Should we use 'arg' here? It has additional stuff in index 0 and below. metaprogramArguments needs to be updated too.
 	else
 		file:write("local programArguments = metaprogramArguments")
 	end
 	writeEol(state, writer)
 
-	!(
-	-- info.what     = "Lua"|"C"|"main"|"tail"
-	-- info.namewhat = "global"|"local"|"method"|"field"|"upvalue"|""
-
-	local TEMPLATE_ERROR_HANDLER = trimTemplate`
-		local function gloaErrorHandler(err)
-			local mainSource = (debug.getinfo(1, "S") or {}).source or "<UNKNOWN_SOURCE>"
-
-			if type(err) == "string" then
-				local pathHere = mainSource:match"^@(.+)"
-				local pathLen  = pathHere and #pathHere
-				local ln       = pathHere and err:sub(1, pathLen) == pathHere and tonumber(err:match("^:(%d+): ", pathLen+1))
-
-				if lineMappingLines[ln] then
-					err = (
-						lineMappingPaths[lineMappingFiles[ln]]..":"
-						..lineMappingLines[ln]..": "
-						..err:sub(pathLen+1):gsub("^:%d+: ", "")
-					)
-				end
-			end
-
-			local outputFile = io.stderr
-
-			outputFile:write("\n")
-			if type(err) == "string" then
-				outputFile:write("Error: ", err, "\n")
-			else
-				outputFile:write("Error!\n")
-			end
-			outputFile:write("stack traceback:\n")
-
-			for level = 2, math.huge do
-				local info = debug.getinfo(level, "nSl")
-				if not info then  break  end
-
-				outputFile:write("\t")
-
-				if info.what == "C" then
-					outputFile:write("[ C ]: ")
-					if (info.name or "") ~= "" then
-						outputFile:write("'", info.name, "'")
-					else
-						outputFile:write("?")
-					end
-
-				else
-					if info.source == mainSource and (lineMappingLines[info.currentline] or 0) > 0 then
-						outputFile:write(lineMappingPaths[lineMappingFiles[info.currentline]], ":", lineMappingLines[info.currentline])
-					else
-						outputFile:write("[Lua]")
-					end
-
-					outputFile:write(":")
-
-					if info.what == "tail" then
-						outputFile:write(" tail call")
-					elseif info.what == "main" then
-						outputFile:write(" main chunk")
-					elseif (info.name or "") ~= "" then
-						outputFile:write(" ")
-						if info.namewhat == "method" or info.namewhat == "field" then  outputFile:write(info.namewhat, " ")  end
-						outputFile:write("'", info.name, "'")
-					elseif info.source == mainSource and (lineMappingLines[info.linedefined] or 0) > 0 and info.linedefined ~= info.currentline then
-						outputFile:write(" (linedefined:", lineMappingLines[info.linedefined], ")")
-					end
-
-					local source = nil
-
-					if info.source:find"^@" then
-						source = $errorPrefix..info.source:sub(2)
-					elseif info.source:find"%.lua$" then
-						source = info.source
-					end
-
-					source = source and source..":"..info.currentline
-
-					if source then
-						outputFile:write(" (", source)
-						if info.linedefined > 0 and info.linedefined ~= info.currentline then
-							outputFile:write(", linedefined:", info.linedefined)
-						end
-						outputFile:write(")")
-					end
-				end
-
-				outputFile:write("\n")
-			end
-
-			os.exit(1)
-		end
-	`
-	local ERROR_HANDLER = templateToLua(TEMPLATE_ERROR_HANDLER.."\n", {
-		errorPrefix = toLua(RUNTIME_ERROR_PREFIX),
-	})
+	file:write!("local gloaErrorHandler = "..ERROR_HANDLER)
+	writeEol(state, writer)
 
 	-- @Polish: Only output symbols actually used in the program.
-	local SYMBOLS = {
-		`_MATH_HUGE`,  `math.huge`,
-		`_MATH_MODF`,  `math.modf`,  -- Used when casting float to int.
-		`_MATH_FLOOR`, `math.floor`, -- Used for integer division.
-		`_IPAIRS`,     `ipairs`,     -- Used for short-form array loops.
-		`_PAIRS`,      `pairs`,      -- Used for short-form table loops.
-		`_SELECT`,     `select`,     -- Used for short-form vararg loops. @Incomplete
-		`_REP`,        `string.rep`, -- Used for string repetition (duh).
-		`_REP2`,       `function(n,s)return(s:rep(n))end`,
-
-		-- Used for short-form array loops in reverse.
-		`_IPAIRSR`, trimTemplate`
-			(function()
-				local function inext(arr, i)
-					i = i-1
-					if i > 0 then  return i, arr[i]  end
-				end
-				return function(arr)
-					return inext, arr, #arr+1
-				end
-			end)()
-		`,
-	}
-	)
-
-	file:write(!(ERROR_HANDLER))
-
-	!local _, nlCount        = ERROR_HANDLER:gsub("\n", "%0")
-	writer.currentOutputLine = writer.currentOutputLine + !(nlCount)
-
-	!for i = 1, #SYMBOLS, 2 do
-		file:write(!("local "..SYMBOLS[i].." = "..SYMBOLS[i+1])) ; writeEol(state, writer)
+	!for i = 1, #COMPILER_SYMBOL_PAIRS, 2 do
+		file:write!("local "..COMPILER_SYMBOL_PAIRS[i].." = "..COMPILER_SYMBOL_PAIRS[i+1])
+		writeEol(state, writer)
 	!end
 end
 
@@ -2189,6 +2193,11 @@ function _G.writeProgram(state, writer)
 	writeConstantObjectsExceptFunctions(state, writer, state.constants, false, relevantObjects)
 
 	if state.constants[1] or state.topScopeNames[1] then
+		-- @Incomplete @Robustness: A nicer/better way of supporting more upvalues than Lua. Right now we just limit forward declarations of Glóa globals.
+		!local MAX_UPVALUES = 60
+		!local MAX_NAMES    = MAX_UPVALUES - COMPILER_SYMBOL_COUNT
+		local declCount     = 0
+
 		-- Forward declarations.
 		local first = true
 		file:write("\tlocal ")
@@ -2197,9 +2206,14 @@ function _G.writeProgram(state, writer)
 		for _, const in ipairs(state.constants) do
 			if relevantObjects and not relevantObjects[const] then
 				-- void
+
 			elseif const.kind == !(CONST_KIND_NORMAL) and const.valueType.tag == !(typeTags.TypeInfoFunction) then
 				local lambda = const.value
+
 				if not (lambda.isPolymorphic or (lambda.bodyIsForeign and lambda.foreignSource == "method")) then
+					declCount = declCount+1
+					if declCount > !(MAX_NAMES) then  break  end
+
 					if not first then  file:write(", ")  end
 					first = false
 					file:write(const.name)
@@ -2209,6 +2223,9 @@ function _G.writeProgram(state, writer)
 
 		-- Top-level declarations. (Note: Glóa globals are not Lua globals.)
 		for _, topScopeName in ipairs(state.topScopeNames) do
+			declCount = declCount+1
+			if declCount > !(MAX_NAMES) then  break  end
+
 			if not first then  file:write(", ")  end
 			first = false
 			file:write(topScopeName)
@@ -2238,7 +2255,7 @@ function _G.writeProgram(state, writer)
 		local USE_PADDING = true -- Enabling this seem better.
 		)
 
-		writer.currentOutputLine = writer.currentOutputLine+4
+		writer.currentOutputLine = writer.currentOutputLine+5
 		addLineMappingDummy(state, writer) -- For the xpcall() here below.
 
 		local MODULE_DIR_PREFIX = COMPILER_DIRECTORY.."/modules/"
@@ -2249,7 +2266,7 @@ function _G.writeProgram(state, writer)
 
 		file:write("local _ = nil\n") -- Takes up less space than 'nil'.
 
-		file:write("lineMappingPaths = {")
+		file:write("lineMappings.paths = {")
 		for ln = 1, writer.currentOutputLine do
 			local path = writer.lineMappingFiles[ln]
 
@@ -2273,7 +2290,7 @@ function _G.writeProgram(state, writer)
 		end
 		file:write("}\n")
 
-		file:write("lineMappingFiles = {")
+		file:write("lineMappings.files = {")
 		!if USE_PADDING then
 			for ln = 1, writer.currentOutputLine do
 				if ln > 1 then  file:write(",")  end
@@ -2291,7 +2308,7 @@ function _G.writeProgram(state, writer)
 		!end
 		file:write("}\n")
 
-		file:write("lineMappingLines = {")
+		file:write("lineMappings.lines = {")
 		!if USE_PADDING then
 			for ln = 1, writer.currentOutputLine do
 				if ln > 1 then  file:write(",")  end
@@ -2310,8 +2327,9 @@ function _G.writeProgram(state, writer)
 		file:write("}\n")
 	end
 
+	file:write("local exit = os.exit\n")
 	file:write("if not xpcall(runProgram, gloaErrorHandler) then\n")
-	file:write("\tos.exit(1)\n") -- In case there was an error in gloaErrorHandler() for some reason.
+	file:write("\texit(1)\n") -- In case there was an error in gloaErrorHandler() for some reason.
 	file:write("end\n")
 
 	file:close()

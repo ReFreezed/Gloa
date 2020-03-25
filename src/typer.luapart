@@ -2778,6 +2778,9 @@ local function isValidEqualityCheck(state, binary, typeInfoL, typeInfoR)
 	if isArrayItemOrTableFieldCheck(state, binary, typeInfoL, typeInfoR) then  return true  end
 	if isCompoundCompare           (state, binary, typeInfoL, typeInfoR) then  return true  end
 
+	-- We allow comparing namespaces even though technically each namespace has it's own unique type.
+	if typeInfoL.tag == typeInfoR.tag and typeInfoL.tag == !(typeTags.TypeInfoNamespace) then  return true  end
+
 	return false
 end
 
@@ -5964,15 +5967,8 @@ local function simplifyBinary(state, binary)
 
 		if l.inferredType.tag == !(typeTags.TypeInfoType) then
 			!ASSERT("r.inferredType.tag == "..typeTags.TypeInfoType)
-			valueL = getTypeRepresentedByExpression(l).id
-			valueR = getTypeRepresentedByExpression(r).id
-
-		elseif l.inferredType.tag == !(typeTags.TypeInfoEnum) then
-			!ASSERT("r.inferredType.tag == "..typeTags.TypeInfoEnum)
-			!ASSERT("l.nodeType == "..nodeTypes.AstIdentifier)
-			!ASSERT("r.nodeType == "..nodeTypes.AstIdentifier)
-			valueL = l.name
-			valueR = r.name
+			valueL = getTypeRepresentedByExpression(l) or errorInternal(state, l)
+			valueR = getTypeRepresentedByExpression(r) or errorInternal(state, r)
 
 		elseif l.nodeType == !(nodeTypes.AstLiteral) then
 			!ASSERT("r.nodeType == "..nodeTypes.AstLiteral)
@@ -5981,8 +5977,9 @@ local function simplifyBinary(state, binary)
 			valueR = r.value
 
 		else
-			!ifDEBUG `astPrintTree(binary)`
-			errorInternal(state, binary)
+			valueL = followIdentifiersToConstantValue(l)
+			valueR = followIdentifiersToConstantValue(r)
+			!ASSERT("valueL.nodeType == valueR.nodeType")
 		end
 
 		local literal = newLiteral(binary.parent, binary.token, !(LITERAL_BOOLEAN), (valueL !!(opEquality) valueR), typeInfo)
@@ -6548,7 +6545,7 @@ end
 function _G.followIdentifiersToConstantValue(constExpr)
 	while constExpr.nodeType == !(nodeTypes.AstIdentifier) do
 		local decl = constExpr.declaration
-		constExpr  = decl.value
+		constExpr  = decl.value or errorInternal()
 	end
 	return constExpr
 end
