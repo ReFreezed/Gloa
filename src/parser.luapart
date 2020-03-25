@@ -187,7 +187,6 @@ _G.!structAst"AstTable:_AstExpression"{
 _G.!structAst"AstCall:_AstExpression"{
 	{`callee`,                    nil, ast="node"},  -- AstExpression
 	{`arguments`,                 {},  ast="array"}, -- []AstExpression
-	{`couldBeTypeWithParameters`, false},
 	{`isMethod`,                  false},
 	{`surroundedByParentheses`,   false},
 }
@@ -2300,12 +2299,10 @@ function _G.parseGlobalScope(state, firstFilePath)
 	return globalScope
 end
 
--- call = parseCall( compilationState, parentNode, couldBeType [, callee=theFollowingIdentifier, isMethod=false ] )
-function _G.parseCall(state, parentNode, couldBeType, callee, isMethod)
-	assert(type(couldBeType) == "boolean")
-
+-- call = parseCallChain( compilationState, parentNode [, callee=theFollowingIdentifier, isMethod=false ] )
+function _G.parseCallChain(state, parentNode, callee, isMethod)
 	if not callee then
-		!SET_OR_RETURN `callee = parseIdentifier(state, parentNode)` -- We'll update the parent later.
+		!SET_OR_RETURN `callee = parseIdentifier(state, parentNode)` -- We'll update the parent in a moment.
 	end
 
 	isMethod = isMethod or false
@@ -2313,39 +2310,45 @@ function _G.parseCall(state, parentNode, couldBeType, callee, isMethod)
 
 	while true do
 		local tokType, tokValue, token = eatNextToken(state)
-		if not isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"(") then
-			!ERROR_OR_RETURN `errorParsingLast(state, "Expected '('.")`
-		end
 
-		call              = astNewNode(AstCall, token, parentNode)
-		tokType, tokValue = peekNextToken(state)
+		if tokType == !(TOKEN_STRING) then
+			call                = astNewNode(AstCall, token, parentNode)
 
-		if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),")") then
-			eatNextToken(state)
+			local literal       = astNewNode(AstLiteral, token, call)
+			literal.literalType = !(LITERAL_STRING)
+			literal.value       = tokValue
 
-			-- Should struct arguments be able to have default values, allowing foo()
-			-- to possibly be a type?
-			couldBeType = false
+			call.arguments[1]   = literal
+
+		elseif isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"(") then
+			call              = astNewNode(AstCall, token, parentNode)
+			tokType, tokValue = peekNextToken(state)
+
+			if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),")") then
+				eatNextToken(state)
+
+			else
+				!DO_OR_RETURN `parseExpressionList(state, call, call.arguments)`
+
+				tokType, tokValue = eatNextToken(state)
+				if not isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),")") then
+					!ERROR_OR_RETURN `errorParsingAfterPrevious(state, "Expected ')' or ','.")`
+				end
+			end
 
 		else
-			!DO_OR_RETURN `parseExpressionList(state, call, call.arguments)`
-
-			tokType, tokValue = eatNextToken(state)
-			if not isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),")") then
-				!ERROR_OR_RETURN `errorParsingAfterPrevious(state, "Expected ')' or ','.")`
-			end
+			!ERROR_OR_RETURN `errorParsingLast(state, "Expected '('.")`
 		end
-
-		call.couldBeTypeWithParameters = couldBeType
 
 		callee.parent = call
 		call.callee   = callee
 		call.isMethod = isMethod
 
 		tokType, tokValue = peekNextToken(state)
-		if not isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"(") then  break  end
+		if not (isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"(") or tokType == !(TOKEN_STRING)) then
+			break
+		end
 
-		call.couldBeTypeWithParameters = false
 		callee   = call
 		isMethod = false
 	end
@@ -2613,12 +2616,12 @@ function _G.parseExpression(state, parentNode, prevOpPrecedence, expectLeftValue
 	-- Note: We also detect function calls later by the binary operations.
 	-- The difference is that here we may have a type.
 	--
-	if
-		tokType == !(TOKEN_IDENTIFIER)
-		and isToken(tokType2,tokValue2, !(TOKEN_PUNCTUATION),"(")
-	then
+	if tokType == !(TOKEN_IDENTIFIER) and (
+		isToken(tokType2,tokValue2, !(TOKEN_PUNCTUATION),"(")
+		or tokType2 == !(TOKEN_STRING)
+	) then
 		putBackLastToken(state)
-		!SET_OR_RETURN `expr = parseCall(state, parentNode, true)`
+		!SET_OR_RETURN `expr = parseCallChain(state, parentNode)`
 
 	-- Built-in type.
 	elseif isTokenBuiltinType(tokType, tokValue) then
@@ -3016,30 +3019,35 @@ function _G.parseExpression(state, parentNode, prevOpPrecedence, expectLeftValue
 
 		-- Function call.
 		elseif
-			isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"(")
+			(
+				isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"(")
+				or tokType == !(TOKEN_STRING)
+			)
 			and !(OPERATOR_PRECEDENCE.call) > prevOpPrecedence
 		then
-			!SET_OR_RETURN `expr = parseCall(state, parentNode, false, expr, false)`
+			!SET_OR_RETURN `expr = parseCallChain(state, parentNode, expr, false)`
 
 		-- Method call.
 		elseif
 			(
 				isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"!")
-				and isToken(tokType2,tokValue2, !(TOKEN_PUNCTUATION),"(")
+				and (
+					isToken(tokType2,tokValue2, !(TOKEN_PUNCTUATION),"(")
+					or tokType2 == !(TOKEN_STRING)
+				)
 			)
 			and !(OPERATOR_PRECEDENCE.call) > prevOpPrecedence
 		then
 			tokType, tokValue = peekLastToken(state)
 
 			if not isToken(tokType,tokValue, !(TOKEN_IDENTIFIER)) then
-				!ERROR_OR_RETURN `errorParsingNext(state, "Expected a method name before this.")`
+				!ERROR_OR_RETURN `errorParsingNext(state, "Expected a method name before this.")` -- @Incomplete: Don't require an identifier specifically.
 			elseif not thisCanBeMethodCall then
-				putBackLastToken(state)
-				!ERROR_OR_RETURN `errorParsingNext(state, "Expected an object to call a method on.")`
+				!ERROR_OR_RETURN `errorParsingLast(state, "Expected an object to call a method on.")`
 			end
 
 			eatNextToken(state)
-			!SET_OR_RETURN `expr = parseCall(state, parentNode, false, expr, true)`
+			!SET_OR_RETURN `expr = parseCallChain(state, parentNode, expr, true)`
 
 		-- Compound type.
 		elseif
@@ -3437,10 +3445,8 @@ do
 
 			elseif node.nodeType == !(nodeTypes.AstCall) then
 				local call = node
-				assert(not (call.couldBeTypeWithParameters and call.isMethod))
-				if call.couldBeTypeWithParameters then  write(" (couldBeType)")    end
-				if call.isMethod                  then  write(" (method)")         end
-				if call.surroundedByParentheses   then  write(" (adjustArgsTo1)")  end
+				if call.isMethod                then  write(" (method)")         end
+				if call.surroundedByParentheses then  write(" (adjustArgsTo1)")  end
 				!!(CHILD_PRINT_START)
 				if call.callee then  printNode(call.callee, indent+1, printed, printChildren)  end
 				printNodeList(call.arguments, indent+1, printed, printChildren, "ARG")
