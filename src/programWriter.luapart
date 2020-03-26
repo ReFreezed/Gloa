@@ -2143,55 +2143,10 @@ function _G.writeProgram(state, writer)
 	if not state.settings.keepDeadCode then
 		relevantObjects = {}
 
-		local function crawl(unit)
-			astVisitAllNodes(unit, function(node)
-				relevantObjects[node] = true
-
-				if not node.queued then
-					return !(VISIT_IGNORE_CHILDREN)
-
-				elseif node.nodeType == !(nodeTypes.AstIdentifier) then
-					local ident = node
-					local decl  = ident.declaration or errorInternal()
-
-					if not relevantObjects[decl] then
-						crawl(decl)
-
-						if not decl.value then
-							local valueExpr = getDeclarationValue(decl)
-							if valueExpr then  crawl(valueExpr)  end
-						end
-					end
-
-				elseif node.nodeType == !(nodeTypes.AstTypeInfo) then
-					local typeInfoNode = node
-					relevantObjects[typeInfoNode.valueConstant] = true
-
-				elseif node.nodeType == !(nodeTypes.AstDeclaration) then
-					local decl = node
-					if not decl.valueConstant then  return  end
-
-					if decl.name.inferredType.tag == !(typeTags.TypeInfoNamespace) then  return  end -- This check seem a bit out of place maybe. @Cleanup
-
-					if decl ~= unit then -- decl is unit if we followed an identifier.
-						relevantObjects[decl] = nil
-						return !(VISIT_IGNORE_CHILDREN)
-					end
-
-					relevantObjects[decl.valueConstant] = true
-
-				elseif !!(anyV(`node.nodeType`, nodeTypes.AstLiteral,nodeTypes.AstLambda,nodeTypes.AstForeign)) then
-					if node.valueConstant then
-						relevantObjects[node.valueConstant] = true
-					end
-				end
-			end)
-		end
-
 		if outputType == !(OUTPUT_TYPE_LUA_APP) then
-			crawl(mainLambda)
+			crawl(state, mainLambda, relevantObjects)
 		elseif outputType == !(OUTPUT_TYPE_LUA_MODULE) then
-			crawl(globalScope.fileScopeWithValueToExport.valueToExport)
+			crawl(state, globalScope.fileScopeWithValueToExport.valueToExport, relevantObjects)
 		else
 			errorInternal("outputType==%d", outputType)
 		end

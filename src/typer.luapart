@@ -11,6 +11,7 @@
 
 	areTreesEqual
 	checkBinaryOperation
+	crawl
 	createTypeNodeFromInfo
 	findDeclaration, findPublicDeclarationInScope, findMemberDeclaration, findDynamicMemberDeclaration, isDeclarationVisibleToNode, printDeclarationChain
 	followIdentifiersToConstantValue
@@ -4922,6 +4923,7 @@ end
 	moveToNextRelevantPipe(state, block)
 end
 
+-- @Robustness @Cleanup: Join visitNodesForRunning() and crawl().
 local function visitNodesForRunning(state, runNode, unit, visited, deepTopScopeDeclarations)
 	astVisitAllNodes(unit, function(node)
 		visited[node] = true
@@ -4933,24 +4935,77 @@ local function visitNodesForRunning(state, runNode, unit, visited, deepTopScopeD
 			!DEPEND_AND_RETURN(`runNode`, DEPEND_NODE_EMITTED, `node`, nil, toLua(VISIT_BREAK))
 
 		elseif node.nodeType == !(nodeTypes.AstIdentifier) then
-			local decl = node.declaration or errorInternal()
+			local ident = node
+			local decl  = ident.declaration or errorInternal(state, ident)
 
-			if not visited[decl] then
-				visitNodesForRunning(state, runNode, decl, visited, deepTopScopeDeclarations)
+			if visited[decl] then  return  end
+
+			visitNodesForRunning(state, runNode, decl, visited, deepTopScopeDeclarations)
+			if runNode.queued.waitingOn then  return !(VISIT_BREAK)  end
+
+			if decl.value then  return  end
+
+			local valueExpr = getDeclarationValue(decl)
+			if valueExpr then
+				visitNodesForRunning(state, runNode, valueExpr, visited, deepTopScopeDeclarations)
 				if runNode.queued.waitingOn then  return !(VISIT_BREAK)  end
-
-				local valueExpr = getDeclarationValue(decl)
-
-				if valueExpr then
-					visitNodesForRunning(state, runNode, valueExpr, visited, deepTopScopeDeclarations)
-					if runNode.queued.waitingOn then  return !(VISIT_BREAK)  end
-				end
 			end
 
 		elseif node.nodeType == !(nodeTypes.AstDeclaration) then
 			local decl = node
 			if decl.kind == !(DECL_KIND_STATIC) or decl.parent.nodeType == !(nodeTypes.AstNamespace) then
 				table.insert(deepTopScopeDeclarations, decl)
+			end
+		end
+	end)
+end
+
+function _G.crawl(state, unit, crawled)
+	astVisitAllNodes(unit, function(node)
+		crawled[node] = true
+
+		-- Also see visitNodesForRunning():
+
+		if not node.queued then
+			return !(VISIT_IGNORE_CHILDREN)
+
+		elseif node.nodeType == !(nodeTypes.AstIdentifier) then
+			local ident = node
+			local decl  = ident.declaration or errorInternal(state, ident)
+
+			if crawled[decl] then  return  end
+
+			crawl(state, decl, crawled)
+
+			if decl.value then  return  end
+
+			local valueExpr = getDeclarationValue(decl)
+			if valueExpr then
+				crawl(state, valueExpr, crawled)
+			end
+
+		elseif node.nodeType == !(nodeTypes.AstDeclaration) then
+			local decl = node
+			if not decl.valueConstant then  return  end
+
+			if decl.name.inferredType.tag == !(typeTags.TypeInfoNamespace) then  return  end -- This check seem a bit out of place maybe. @Cleanup
+
+			if decl ~= unit then -- decl is unit if we followed an identifier.
+				crawled[decl] = nil
+				return !(VISIT_IGNORE_CHILDREN)
+			end
+
+			crawled[decl.valueConstant] = true
+
+		--
+
+		elseif node.nodeType == !(nodeTypes.AstTypeInfo) then
+			local typeInfoNode = node
+			crawled[typeInfoNode.valueConstant] = true
+
+		elseif !!(CONST_SET{ nodeTypes.AstLiteral, nodeTypes.AstLambda, nodeTypes.AstForeign })[node.nodeType] then
+			if node.valueConstant then
+				crawled[node.valueConstant] = true
 			end
 		end
 	end)
@@ -5174,14 +5229,16 @@ end
 	end
 	--]]
 
-	local visited                  = {}
 	local deepTopScopeDeclarations = {}
 
-	visitNodesForRunning(state, runNode, lambda, visited, deepTopScopeDeclarations)
+	visitNodesForRunning(state, runNode, lambda, {}, deepTopScopeDeclarations)
 	if runNode.queued.waitingOn then  return  end
 
+	local relevantObjects = {}
+	crawl(state, lambda, relevantObjects)
+
 	for _, const in ipairs(state.constants) do
-		if not const.isReady and (const.kind == !(CONST_KIND_NORMAL) and const.valueType.tag == !(typeTags.TypeInfoFunction)) and visited[const.value] then
+		if relevantObjects[const] and not const.isReady and (const.kind == !(CONST_KIND_NORMAL) and const.valueType.tag == !(typeTags.TypeInfoFunction)) then
 			!DEPEND_AND_RETURN(`runNode`, DEPEND_CONSTANT_READY, `const`)
 		end
 	end
@@ -5193,7 +5250,8 @@ end
 	local newTopScopeDeclarations = {}
 
 	for _, const in ipairs(state.constants) do
-		if not state.runnerWrittenObjects[const] and const.isReady then
+		if relevantObjects[const] and not state.runnerWrittenObjects[const] then
+			assert(const.isReady)
 			state.runnerWrittenObjects[const] = true
 			table.insert(newConstants, const)
 			const.nameLocked = true -- @UX: Update constant names as they are allocated (and not when declarations pass PIPE_BYTECODE).
@@ -5201,21 +5259,21 @@ end
 	end
 
 	for _, decl in ipairs(state.globalScope.declarations) do
-		if visited[decl] and not state.runnerWrittenObjects[decl] then
+		if relevantObjects[decl] and not state.runnerWrittenObjects[decl] then
 			state.runnerWrittenObjects[decl] = true
 			table.insert(newTopScopeDeclarations, decl)
 		end
 	end
 	for _, fileScope in ipairs(state.globalScope.fileScopes) do
 		for __, decl in ipairs(fileScope.declarations) do
-			if visited[decl] and not state.runnerWrittenObjects[decl] then
+			if relevantObjects[decl] and not state.runnerWrittenObjects[decl] then
 				state.runnerWrittenObjects[decl] = true
 				table.insert(newTopScopeDeclarations, decl)
 			end
 		end
 	end
 	for __, decl in ipairs(deepTopScopeDeclarations) do
-		if not state.runnerWrittenObjects[decl] then
+		if relevantObjects[decl] and not state.runnerWrittenObjects[decl] then
 			state.runnerWrittenObjects[decl] = true
 			table.insert(newTopScopeDeclarations, decl)
 		end
