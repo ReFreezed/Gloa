@@ -4892,8 +4892,16 @@ end
 end
 
 !NODE_INFERRER `function nodeInferrers.AstFileScope(state, fileScope)`
-	if fileScope.valueToExport and fileScope.valueToExport.queued.pipe <= !(PIPE_INFER) then
-		!DEPEND_AND_RETURN(`fileScope`, DEPEND_NODE_INFERRED_FULLY, `fileScope.valueToExport`)
+	local valueExpr = fileScope.valueToExport
+
+	if not valueExpr then
+		-- void
+	elseif valueExpr.queued.pipe <= !(PIPE_INFER) then
+		!DEPEND_AND_RETURN(`fileScope`, DEPEND_NODE_INFERRED_FULLY, `valueExpr`)
+	elseif valueExpr.inferredType.tag == !(typeTags.TypeInfoNamespace) then
+		typeError(state, valueExpr, "Cannot export namespaces.")
+	elseif valueExpr.inferredType.tag == !(typeTags.TypeInfoFunction) and valueExpr.inferredType.isPolymorphic then
+		typeError(state, valueExpr, "Cannot export references to raw polymorphic functions.")
 	end
 
 	for _, statement in ipairs(fileScope.statements) do
