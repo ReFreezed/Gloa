@@ -335,14 +335,16 @@ _G.!structAst"AstBlock:_AstScope"{
 }
 _G.!structAst"AstFileScope:_AstScope"{
 	_scopeType = "declarative",
-	{`path`,       ""},
-	{`isModule`,   false},
-	{`moduleName`, ""},
+	{`valueToExport`, nil, ast="node"}, -- Used when outputting a Lua module.
+	{`path`,          ""},
+	{`isModule`,      false},
+	{`moduleName`,    ""},
 }
 _G.!structAst"AstGlobalScope:_AstScope"{
 	_scopeType = "declarative",
-	{`fileScopes`,     {},  astRef="array"}, -- []AstFileScope
-	{`firstFileScope`, nil, astRef="node"},  -- AstFileScope  (@Cleanup: Remove this in favor of fileScopes[1].)
+	{`fileScopes`,                 {},  astRef="array"}, -- []AstFileScope
+	{`firstFileScope`,             nil, astRef="node"},  -- AstFileScope  (@Cleanup: Remove this in favor of fileScopes[1].)
+	{`fileScopeWithValueToExport`, nil, astRef="node"},  -- See AstFileScope.valueToExport
 }
 _G.!structAst"AstFor:_AstScope"{
 	_scopeType = "imperative",
@@ -626,17 +628,17 @@ function _G.parseTable(state, parentNode)
 end
 
 -- Parse comma-separated expressions. Used for function calls and struct parameters.
--- success = parseExpressionList( compilationState, parentNode, expressions [, expectLeftValues=false ] )
-function _G.parseExpressionList(state, parentNode, expressions, expectLeftValues)
+-- success = parseExpressionList( compilationState, parentNode, expressions [, expectLvalues=false ] )
+function _G.parseExpressionList(state, parentNode, expressions, expectLvalues)
 	while true do
 		local tokType, tokValue = peekNextToken(state)
 		local expr
 
-		if expectLeftValues and isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"_") then
+		if expectLvalues and isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"_") then
 			expr = astNewNode(AstBlank, state.nextToken, parentNode)
 			eatNextToken(state)
 		else
-			!SET_OR_RETURN_FALSE `expr = parseExpression(state, parentNode, nil, expectLeftValues)`
+			!SET_OR_RETURN_FALSE `expr = parseExpression(state, parentNode, nil, expectLvalues)`
 		end
 		table.insert(expressions, expr)
 
@@ -2108,26 +2110,28 @@ function _G.parseRun(state, parentNode, mustBeExpression)
 			block.statements[1]     = returnNode
 			!SET_OR_RETURN `returnNode.values[1] = parseExpression(state, returnNode)`
 		else
-			!SET_OR_RETURN `block.statements[1]  = parseExpression(state, block)`
+			!DO_OR_RETURN `parseOneStatementButSometimesMoreAndAddToBlock(state, block)`
 		end
 
-		-- Catch situations like these which are probably errors:
+		-- Catch situations like these, which are probably errors:
 		--   local v = !run func
 		--   local v = !run foo.func
-		local exprIsOnlyIdents = true
+		if expectValue then
+			local exprIsOnlyIdents = true
 
-		for token = exprStartToken, state.nextToken-1 do
-			tokType, tokValue = getToken(state.tokens, token)
-			if not (tokType == !(TOKEN_IDENTIFIER) or isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),".")) then
-				exprIsOnlyIdents = false
-				break
+			for token = exprStartToken, state.nextToken-1 do
+				tokType, tokValue = getToken(state.tokens, token)
+				if not (tokType == !(TOKEN_IDENTIFIER) or isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),".")) then
+					exprIsOnlyIdents = false
+					break
+				end
 			end
-		end
 
-		if exprIsOnlyIdents then
-			tokType, tokValue = getToken(state.tokens, state.nextToken-1)
-			assert(tokType == !(TOKEN_IDENTIFIER))
-			!ERROR_OR_RETURN `errorParsingAfterLast(state, "Ambiguity in !run expression: Did you mean to call %s()?", tokValue)`
+			if exprIsOnlyIdents then
+				tokType, tokValue = getToken(state.tokens, state.nextToken-1)
+				assert(tokType == !(TOKEN_IDENTIFIER))
+				!ERROR_OR_RETURN `errorParsingAfterLast(state, "Ambiguity in !run expression: Did you mean to call %s()?", tokValue)`
+			end
 		end
 	end
 
@@ -2141,11 +2145,39 @@ function _G.parseFileScopeOrNamespaceStatements(state, scope, isTopLevel, single
 	while true do
 		local tokType,  tokValue, token = peekNextToken(state, 1)
 		local tokType2, tokValue2       = peekNextToken(state, 2)
+		local tokType3, tokValue3       = peekNextToken(state, 3)
 
 		if not tokType and isTopLevel then
 			break
 
 		----------------------------------------------------------------
+
+		elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"export") and not (
+			isToken(tokType2,tokValue2, !(TOKEN_IDENTIFIER))
+			and isToken(tokType3,tokValue3, !(TOKEN_PUNCTUATION),":",",","=")
+		) then
+			eatNextToken(state)
+			if not isTopLevel then
+				!ERROR_OR_RETURN_FALSE `errorParsingNext(state, "Values must be exported directly from file scope.")`
+			end
+
+			local fileScope = scope
+			!ASSERT("fileScope.nodeType == "..nodeTypes.AstFileScope)
+
+			if fileScope.isModule then
+				!ERROR_OR_RETURN_FALSE `errorParsingNext(state, "Cannot export values from modules.")`
+			end
+
+			if fileScope.valueToExport then
+				!ERROR_OR_RETURN_FALSE `
+					printerr()
+					parserMessage(io.stderr, state, state.nextToken,               "Error", "Multiple exported values.")
+					parserMessage(io.stderr, state, fileScope.valueToExport.token, "Info",  "...previous value is here.")
+					exitFailure()
+				`
+			end
+
+			!SET_OR_RETURN_FALSE `fileScope.valueToExport = parseExpression(state, fileScope)`
 
 		elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"local","export") or (
 			isToken(tokType, tokValue,  !(TOKEN_KEYWORD),"using") and
@@ -2264,6 +2296,27 @@ function _G.parseFileScope(state, parentNode, path, isModule, moduleName)
 
 	!DO_OR_RETURN `parseFileScopeOrNamespaceStatements(state, fileScope, true, false)`
 
+	if fileScope.valueToExport then
+		local globalScope = state.globalScope
+		!ASSERT `parentNode == globalScope`
+
+		if globalScope.fileScopeWithValueToExport then
+			local valueToExport = globalScope.fileScopeWithValueToExport.valueToExport
+
+			!ERROR_OR_RETURN `
+				printerr()
+				parserMessage(io.stderr, state, state.nextToken,     "Error", "Multiple exported values in multiple files.")
+				parserMessage(io.stderr, state, valueToExport.token, "Info",  "...previous value is here.")
+				exitFailure()
+			`
+		end
+
+		--
+		-- Everything's done now, so it's ok to modify globalScope.
+		--
+		globalScope.fileScopeWithValueToExport = fileScope
+	end
+
 	return fileScope
 end
 
@@ -2271,15 +2324,21 @@ function _G.astMoveRelevantThingsFromFileScopeToGlobalScope(state, fileScope)
 	!ASSERT `not fileScope.isModule`
 	!ASSERT `not fileScope.queued`
 
-	local globalScope = state.globalScope
+	local globalScope         = state.globalScope
+	local globalDeclarations  = globalScope.declarations
+	local declarationsUnmoved = {}
 
-	for i, decl in ipairsr(fileScope.declarations) do
+	for _, decl in ipairs(fileScope.declarations) do
 		if isDeclarationExported(decl) then
-			removeUnordered(fileScope.declarations, i)
-			table.insert(globalScope.declarations, decl)
+			table.insert(globalDeclarations, decl)
+		else
+			table.insert(declarationsUnmoved, decl)
 		end
 	end
 
+	fileScope.declarations = declarationsUnmoved
+
+	-- @Incomplete: Don't move absolutely all imports! Require the user to say 'export !import "foo"' instead.
 	insertArrayItems(globalScope.imports, fileScope.imports)
 	fileScope.imports = {}
 end
@@ -2600,8 +2659,8 @@ end
 
 
 
--- expression = parseExpression( compilationState, parentNode [, previousOperatorPrecedence, expectLeftValue=false ] )
-function _G.parseExpression(state, parentNode, prevOpPrecedence, expectLeftValue)
+-- expression = parseExpression( compilationState, parentNode [, previousOperatorPrecedence, expectLvalue=false ] )
+function _G.parseExpression(state, parentNode, prevOpPrecedence, expectLvalue)
 	prevOpPrecedence = prevOpPrecedence or 0
 
 	local tokType,  tokValue, exprStartToken = eatNextToken(state)
@@ -2752,7 +2811,7 @@ function _G.parseExpression(state, parentNode, prevOpPrecedence, expectLeftValue
 		end
 
 		--[[ @Incomplete :ParenthesesAmbiguityError
-		if expectLeftValue and expr.nodeType == !(nodeTypes.AstIdentifier) then
+		if expectLvalue and expr.nodeType == !(nodeTypes.AstIdentifier) then
 			!ERROR_OR_RETURN `errorParsing(state, exprStartToken, "Unexpected parentheses around identifier.")`
 		end
 		--]]
@@ -3111,7 +3170,7 @@ function _G.parseExpression(state, parentNode, prevOpPrecedence, expectLeftValue
 		end
 	end
 
-	if expectLeftValue then
+	if expectLvalue then
 		if expr.nodeType == !(nodeTypes.AstIdentifier) then
 			if encounteredParentheses then
 				!ERROR_OR_RETURN `errorParsing(state, exprStartToken, "Unexpected parentheses around identifier.")` -- :ParenthesesAmbiguityError
@@ -3689,6 +3748,9 @@ do
 					if node.valueType then  printNode(node.valueType, indent+1, printed, printChildren, "V")  end
 				end
 				printNodeList(node.statements, indent+1, printed, printChildren)
+				if node.nodeType == !(nodeTypes.AstFileScope) then
+					if node.valueToExport then  printNode(node.valueToExport, indent+1, printed, printChildren, "EXPORT")  end
+				end
 				!!(CHILD_PRINT_END)
 
 			else

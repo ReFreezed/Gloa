@@ -2,28 +2,32 @@
 -- Deep compilation test.
 --
 
-!run compileOthers({
-	"deepCompilation.1.gloa",
-	"deepCompilation.2.gloa",
-})
+!import "basic"
+!import "string"
+!import "os"
+!import "compiler"
 
-local compileOthers :: (paths:[]string) {
-	!import "basic"
-	!import "string"
-	!import "os"
-	!import "compiler"
-
+!run {
 	local options      = getBuildOptions()
-	options.outputFile = false
+	options.outputType = BuildOutputType.NONE
 	setBuildOptions(options)
 
-	for paths {
+	-- compileApps({
+	-- 	"deepCompilation.1.gloa",
+	-- 	"deepCompilation.2.gloa",
+	-- })
+
+	compileLuaModule()
+}
+
+local compileApps :: (filenames:[]string) {
+	for filenames {
 		print("Compiling "..it.."...")
 		compile(it)
 	}
 	print("Both compiled!")
 
-	for paths {
+	for filenames {
 		local path
 			= getProjectDirectory().."/"
 			..replacePattern(it, "%.gloa$", ".lua")
@@ -37,4 +41,26 @@ local compileOthers :: (paths:[]string) {
 			error(err ?: "Failed!")
 	}
 	print("Both ran!")
+}
+
+local compileLuaModule :: () {
+	local FILENAME = "deepCompilation.luaModule.gloa"
+	print("Compiling "..FILENAME.."...")
+	compile(FILENAME)
+
+	local path
+		= getProjectDirectory().."/"
+		..replacePattern(FILENAME, "%.gloa$", ".lua")
+
+	local requireLuaModuleByPath :: (path:string, $ModuleType:type) -> ModuleType !foreign lua "dofile"
+
+	local luaModule = requireLuaModuleByPath(path, !foreign struct {
+		foo:   string           = NULL,
+		func:  ()               = NULL,
+		round: (x:float) -> int = NULL,
+	})
+
+	printf("foo = %s", luaModule.foo)
+	luaModule.func()
+	printf("round(11.65) = %d", luaModule.round(11.65))
 }

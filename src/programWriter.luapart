@@ -41,6 +41,7 @@
 -- info.what     = "Lua"|"C"|"main"|"tail"
 -- info.namewhat = "global"|"local"|"method"|"field"|"upvalue"|""
 
+-- @Incomplete: Handle errors better in compiled Lua modules. :LuaModuleErrors
 local ERROR_HANDLER = templateToLua(
 	trimTemplate`
 		(function(lineMappings, getinfo, tonumber, outputFile, type, exit)
@@ -2063,48 +2064,65 @@ function _G.writeProgram(state, writer)
 		insertArrayItems(topScopeDeclarations, fileScope.declarations)
 	end
 
-	local entryPointName = state.settings.entryPointName
-	local mainFuncDecl   = nil
+	local outputType = state.settings.outputType
 
-	for _, decl in ipairs(topScopeDeclarations) do -- Note: topScopeDeclarations does not include static declarations or declarations in namespaces yet.
-		if decl.name.name == entryPointName then
-			mainFuncDecl = decl
-			break
-		end
-	end
-
-	if not mainFuncDecl then
+	if outputType == !(OUTPUT_TYPE_LUA_MODULE) and not globalScope.fileScopeWithValueToExport then
 		local filePaths = {}
-		for i, fileScope in ipairs(globalScope.fileScopes) do
-			filePaths[i] = fileScope.path
+		for _, fileScope in ipairs(globalScope.fileScopes) do
+			if not fileScope.isModule then  table.insert(filePaths, fileScope.path)  end
 		end
 		errorLine(
 			"ProgramWriter",
-			"Missing program entry point ('%s' function) in top-level scope in loaded files:\n- %s",
-			entryPointName, table.concat(filePaths, "\n- ")
-		)
-
-	elseif not isDeclarationConstant(mainFuncDecl) then
-		nodeError(state, mainFuncDecl.name, "ProgramWriter", "Declared name '%s' must be a constant.", entryPointName)
-	end
-
-	local mainLambda = mainFuncDecl.valueConstant.value
-
-	if mainLambda.inferredType.tag ~= !(typeTags.TypeInfoFunction) then
-		nodeError(
-			state, mainFuncDecl.value, "ProgramWriter",
-			"Declared name '%s' must be a function to represent the entry point of the program.",
-			entryPointName
+			"Missing value to export as the Lua module in top-level scope in loaded files:\n- %s",
+			table.concat(filePaths, "\n- ")
 		)
 	end
-	!ASSERT("mainLambda.nodeType == "..nodeTypes.AstLambda)
 
-	if mainFuncDecl.overloadOf then
-		nodeError(state, mainFuncDecl.name, "ProgramWriter", "Program entry point name must not be overloaded.")
-	elseif mainLambda.inferredType.argumentTypesIn[1] then
-		nodeError(state, mainLambda.argumentsIn, "ProgramWriter", "Program entry point function must not take any arguments.")
-	elseif mainLambda.inferredType.argumentTypesOut[1] then
-		nodeError(state, mainLambda.argumentsOut, "ProgramWriter", "Program entry point function must not return any values.")
+	local mainFuncDecl, mainLambda = nil
+
+	if outputType == !(OUTPUT_TYPE_LUA_APP) then
+		local entryPointName = state.settings.entryPointName
+
+		for _, decl in ipairs(topScopeDeclarations) do -- Note: topScopeDeclarations does not include static declarations or declarations in namespaces yet.
+			if decl.name.name == entryPointName then
+				mainFuncDecl = decl
+				break
+			end
+		end
+
+		if not mainFuncDecl then
+			local filePaths = {}
+			for _, fileScope in ipairs(globalScope.fileScopes) do
+				if not fileScope.isModule then  table.insert(filePaths, fileScope.path)  end
+			end
+			errorLine(
+				"ProgramWriter",
+				"Missing program entry point ('%s' function) in top-level scope in loaded files:\n- %s",
+				entryPointName, table.concat(filePaths, "\n- ")
+			)
+
+		elseif not isDeclarationConstant(mainFuncDecl) then
+			nodeError(state, mainFuncDecl.name, "ProgramWriter", "Declared name '%s' must be a constant.", entryPointName)
+		end
+
+		mainLambda = mainFuncDecl.valueConstant.value
+
+		if mainLambda.inferredType.tag ~= !(typeTags.TypeInfoFunction) then
+			nodeError(
+				state, mainFuncDecl.value, "ProgramWriter",
+				"Declared name '%s' must be a function to represent the entry point of the program.",
+				entryPointName
+			)
+		end
+		!ASSERT("mainLambda.nodeType == "..nodeTypes.AstLambda)
+
+		if mainFuncDecl.overloadOf then
+			nodeError(state, mainFuncDecl.name, "ProgramWriter", "Program entry point name must not be overloaded.")
+		elseif mainLambda.inferredType.argumentTypesIn[1] then
+			nodeError(state, mainLambda.argumentsIn, "ProgramWriter", "Program entry point function must not take any arguments.")
+		elseif mainLambda.inferredType.argumentTypesOut[1] then
+			nodeError(state, mainLambda.argumentsOut, "ProgramWriter", "Program entry point function must not return any values.")
+		end
 	end
 
 	astVisitAllNodes(globalScope, function(node)
@@ -2170,17 +2188,26 @@ function _G.writeProgram(state, writer)
 			end)
 		end
 
-		crawl(mainLambda)
+		if outputType == !(OUTPUT_TYPE_LUA_APP) then
+			crawl(mainLambda)
+		elseif outputType == !(OUTPUT_TYPE_LUA_MODULE) then
+			crawl(globalScope.fileScopeWithValueToExport.valueToExport)
+		else
+			errorInternal("outputType==%d", outputType)
+		end
 	end
 
 	--
 	-- Write program.
 	--
-	local file = writer.file
+	local file               = writer.file
+	writer.currentOutputLine = 1 -- @Cleanup: Not sure we need to reset this. The runner uses its own writer, right?
 
-	-- @Incomplete: Setting to specify the prefix for the written file (shebang and maybe a comment with copyright info, library documentation etc.).
-	file:write('#!/bin/sh\n_=[[\nexec lua "$0" "$@"\n]] and nil\n')
-	writer.currentOutputLine = 5
+	if outputType == !(OUTPUT_TYPE_LUA_APP) then
+		-- @Incomplete: Setting to specify the prefix for the written file (shebang and maybe a comment with copyright info, library documentation etc.).
+		file:write('#!/bin/sh\n_=[[\nexec lua "$0" "$@"\n]] and nil\n')
+		writer.currentOutputLine = 5
+	end
 
 	writeLuaPreloads(state, writer, 1)
 	writeCompilerSymbols(state, writer)
@@ -2238,8 +2265,21 @@ function _G.writeProgram(state, writer)
 	writeTopScopeDeclarations(state, writer, topScopeDeclarations, relevantObjects)
 
 	-- Write program entry point.
-	addLineMappingDummy(state, writer)
-	file:write("\t", mainFuncDecl.valueConstant.name, "()") ; writeEol(state, writer)
+
+	if outputType == !(OUTPUT_TYPE_LUA_APP) then
+		addLineMappingDummy(state, writer)
+		file:write("\t", mainFuncDecl.valueConstant.name, "()")
+		writeEol(state, writer)
+
+	elseif outputType == !(OUTPUT_TYPE_LUA_MODULE) then
+		addLineMappingDummy(state, writer)
+		file:write("\treturn ")
+		writeExpression(state, writer, 2, 1, {}, globalScope.fileScopeWithValueToExport.valueToExport)
+		writeEol(state, writer)
+
+	else
+		errorInternal("outputType==%d", outputType)
+	end
 
 	-- End of user code.
 	file:write("end") ; writeEol(state, writer)
@@ -2327,10 +2367,14 @@ function _G.writeProgram(state, writer)
 		file:write("}\n")
 	end
 
-	file:write("local exit = os.exit\n")
-	file:write("if not xpcall(runProgram, gloaErrorHandler) then\n")
-	file:write("\texit(1)\n") -- In case there was an error in gloaErrorHandler() for some reason.
-	file:write("end\n")
+	local moduleVariableCode = (outputType == !(OUTPUT_TYPE_LUA_MODULE) and ", module" or "")
+
+	file:write("local os, ok"..moduleVariableCode.." = os, xpcall(runProgram, gloaErrorHandler)\n")
+	file:write("if not ok then  os.exit(1)  end\n") -- In case there was an error in gloaErrorHandler() for some reason.  :LuaModuleErrors
+
+	if outputType == !(OUTPUT_TYPE_LUA_MODULE) then
+		file:write("return module\n")
+	end
 
 	file:close()
 end
