@@ -214,6 +214,7 @@ _G.!structAst"AstCast:_AstExpression"{
 _G.!structAst"AstImport:_AstExpression"{
 	{`isLoad`,     false},
 	{`importName`, ""},
+	{`exported`,   false},
 	-- Type phase:
 	{`fileScope`,  nil, astRef="node"}, -- AstFileScope
 }
@@ -325,7 +326,7 @@ _G.!structAst"AstDefer:_AstNode"{
 !structAst"_AstScope:_AstNode"{
 	{`statements`,         {}, ast="array"},    -- []AstNode
 	{`declarations`,       {}, astRef="array"}, -- []AstDeclaration  (Note that inner blocks have their own declarations.)
-	{`imports`,            {}, astRef="array"}, -- []AstImport       (Excluding loads.)
+	{`imports`,            {}, astRef="array"}, -- []AstImport
 	{`usings`,             {}, astRef="array"}, -- []AstUsing
 	-- Type phase:
 	{`declarationsInTree`, {}, doNotCopy=true}, -- Includes all child scopes. Does not include shadows.
@@ -1897,9 +1898,7 @@ function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 		!SET_OR_RETURN_FALSE `local import = parseImportOrLoad(state, block)`
 		statement                          = import
 
-		if not import.isLoad then
-			table.insert(block.imports, import)
-		end
+		table.insert(block.imports, import)
 
 	elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"assert","print") then
 		!SET_OR_RETURN_FALSE `statement = parseDebugNode(state, block)`
@@ -2034,11 +2033,11 @@ function _G.parseImportOrLoad(state, parentNode)
 		-- void
 	elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"load") then
 		import.isLoad = true
+		if astIsOrIsInModule(import.parent) then
+			!ERROR_OR_RETURN `errorParsingNext(state, "Modules cannot use !load.")`
+		end
 	else
 		!ERROR_OR_RETURN `errorParsingLast(state, "Expected '!load' or '!import'.")`
-	end
-	if import.isLoad and astIsOrIsInModule(import) then
-		!ERROR_OR_RETURN `errorParsingNext(state, "Modules cannot use !load.")`
 	end
 
 	local tokType, tokValue = eatNextToken(state)
@@ -2157,15 +2156,32 @@ function _G.parseFileScopeOrNamespaceStatements(state, scope, isTopLevel, single
 			and isToken(tokType3,tokValue3, !(TOKEN_PUNCTUATION),":",",","=")
 		) then
 			eatNextToken(state)
+
+			if astIsOrIsInModule(scope) then
+				errorParsingNext(state, "Cannot export namespaces from modules into global space.")
+			end
+
+			!SET_OR_RETURN_FALSE `local import = parseExpression(state, scope, math.huge)`
+			if import.nodeType ~= !(nodeTypes.AstImport) then
+				errorInternal(state, import, "@Incomplete: Support any expression after 'export'. (Currently supported are !import, !load and !self)")
+			end
+
+			import.exported = true
+
+			table.insert(scope.statements, import)
+			table.insert(scope.imports,    import)
+
+		elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"export_value") then
+			eatNextToken(state)
 			if not isTopLevel then
-				!ERROR_OR_RETURN_FALSE `errorParsingNext(state, "Values must be exported directly from file scope.")`
+				errorParsingNext(state, "Values must be exported directly from file scope.")
 			end
 
 			local fileScope = scope
 			!ASSERT("fileScope.nodeType == "..nodeTypes.AstFileScope)
 
 			if fileScope.isModule then
-				!ERROR_OR_RETURN_FALSE `errorParsingNext(state, "Cannot export values from modules.")`
+				errorParsingNext(state, "Cannot export values from modules.")
 			end
 
 			if fileScope.valueToExport then
@@ -2195,17 +2211,11 @@ function _G.parseFileScopeOrNamespaceStatements(state, scope, isTopLevel, single
 		elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"import","load") then
 			-- @Incomplete: Warn about duplicate imports? Maybe not necessay as things will only ever be imported once anyway.
 			!SET_OR_RETURN_FALSE `local import = parseImportOrLoad(state, scope)`
-			statement                          = import
-
 			table.insert(scope.statements, import)
-			if not import.isLoad then
-				table.insert(scope.imports, import)
-			end
+			table.insert(scope.imports,    import)
 
 		elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"using") then
 			!SET_OR_RETURN_FALSE `local using = parseUsing(state, scope)`
-			statement                         = using
-
 			table.insert(scope.statements, using)
 			table.insert(scope.usings,     using)
 
@@ -2305,7 +2315,7 @@ function _G.parseFileScope(state, parentNode, path, isModule, moduleName)
 
 			!ERROR_OR_RETURN `
 				printerr()
-				parserMessage(io.stderr, state, state.nextToken,     "Error", "Multiple exported values in multiple files.")
+				parserMessage(io.stderr, state, state.nextToken,     "Error", "Multiple exported values across multiple files.")
 				parserMessage(io.stderr, state, valueToExport.token, "Info",  "...previous value is here.")
 				exitFailure()
 			`
@@ -2325,29 +2335,27 @@ function _G.astMoveRelevantThingsFromFileScopeToGlobalScope(state, fileScope)
 	!ASSERT `not fileScope.queued`
 
 	local globalScope         = state.globalScope
-	local globalDeclarations  = globalScope.declarations
-	local declarationsUnmoved = {}
+	-- local globalDeclarations  = globalScope.declarations
+	local globalImports       = globalScope.imports
+	-- local unmovedDeclarations = {}
+	local unmovedImports      = {}
 
-	for _, decl in ipairs(fileScope.declarations) do
-		if isDeclarationExported(decl) then
-			table.insert(globalDeclarations, decl)
-		else
-			table.insert(declarationsUnmoved, decl)
-		end
+	-- for _, decl in ipairs(fileScope.declarations) do
+	-- 	table.insert((isDeclarationExported(decl) and globalDeclarations or unmovedDeclarations), decl)
+	-- end
+	for _, import in ipairs(fileScope.imports) do
+		table.insert((import.exported and globalImports or unmovedImports), import)
 	end
 
-	fileScope.declarations = declarationsUnmoved
-
-	-- @Incomplete: Don't move absolutely all imports! Require the user to say 'export !import "foo"' instead.
-	insertArrayItems(globalScope.imports, fileScope.imports)
-	fileScope.imports = {}
+	-- fileScope.declarations = unmovedDeclarations
+	fileScope.imports      = unmovedImports
 end
 
 function _G.parseGlobalScope(state, firstFilePath)
 	local globalScope          = astNewNode(AstGlobalScope, state.nextToken)
 	state.globalScope          = globalScope
 
-	local firstFileScope       = parseFileScope(state, globalScope, firstFilePath, false, "")
+	local firstFileScope       = parseFileScope(state, globalScope, firstFilePath, false, state.mainFileBasename)
 	globalScope.firstFileScope = firstFileScope
 
 	table.insert(globalScope.statements, firstFileScope)
@@ -2904,19 +2912,23 @@ function _G.parseExpression(state, parentNode, prevOpPrecedence, expectLvalue)
 		expr = literal
 
 	-- Import/load.
-	elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"load") then
-		!ERROR_OR_RETURN `errorParsingLast(state, "!load must be a full statement. It cannot be part of an expression.")`
-	elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"import") then
+	elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"import","load") then
 		putBackLastToken(state)
 		!SET_OR_RETURN `expr = parseImportOrLoad(state, parentNode)`
-		-- !ERROR_OR_RETURN `errorParsingLast(state, "Invalid place for '!%s'.", tokValue)`
+
+	-- Self (parent file scope).
+	elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"self") then
+		local import      = astNewNode(AstImport, exprStartToken, parentNode)
+		local fileScope   = astFindParent1(import, !(nodeTypes.AstFileScope)) or errorInternal()
+		import.isLoad     = not fileScope.isModule
+		import.importName = fileScope.moduleName
+		import.fileScope  = fileScope
+		expr              = import
 
 	-- Struct/enum.
 	elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"struct") then
-		-- eatNextToken(state)
 		!SET_OR_RETURN `expr = parseStruct(state, parentNode)`
 	elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"enum") then
-		-- eatNextToken(state)
 		!SET_OR_RETURN `expr = parseEnum(state, parentNode)`
 
 	-- Foreign value or struct.
@@ -3637,7 +3649,9 @@ do
 
 			elseif node.nodeType == !(nodeTypes.AstImport) then
 				local import = node
-				write(" (", (import.isLoad and "load " or "import "), import.importName, ")")
+				write(" (", (import.isLoad and "load " or "import "), import.importName)
+				if import.exported then  write(", exported")  end
+				write(")")
 				write("\n")
 
 			elseif node.nodeType == !(nodeTypes.AstForeign) then
@@ -3761,12 +3775,14 @@ do
 
 	function _G.astPrintTree(_file, node)
 		if type(_file) ~= "userdata" then  _file, node = io.stdout, _file  end
+		!ASSERT `node`
 		file = _file
 		printNode(node, 0, {}, true)
 	end
 
 	function _G.astPrint(_file, node)
 		if type(_file) ~= "userdata" then  _file, node = io.stdout, _file  end
+		!ASSERT `node`
 		file = _file
 		printNode(node, 0, {}, false)
 	end
@@ -3777,41 +3793,25 @@ end
 -- parent, childClosestToParent = astFindParent ( node, parentNodeTypeSet )
 -- parent, childClosestToParent = astFindParent1( node, parentNodeType    )
 function _G.astFindParent(node, nodeTypeSet)
-	local lastNode = node
-
 	while true do
-		node = node.parent
+		local lastNode = node
+		node           = node.parent
 		if not node                   then  return nil,  nil       end
 		if nodeTypeSet[node.nodeType] then  return node, lastNode  end
-
-		lastNode = node
 	end
 end
 function _G.astFindParent1(node, parentNodeType)
-	local lastNode = node
-
 	while true do
-		node = node.parent
+		local lastNode = node
+		node           = node.parent
 		if not node                        then  return nil,  nil       end
 		if node.nodeType == parentNodeType then  return node, lastNode  end
-
-		lastNode = node
 	end
 end
 -- scope, statement = astFindParentScope( node )
 function _G.astFindParentScope(node)
-	local lastNode = node
-
-	while true do
-		node = node.parent
-		if not node  then  return nil, nil end
-
-		if !!(CONST_SET(scopeNodeTypes))[node.nodeType] then
-			return node, lastNode
-		end
-
-		lastNode = node
-	end
+	local scope, statement = astFindParent(node, !!(CONST_SET(scopeNodeTypes)))
+	return scope, statement
 end
 
 function _G.astFindCommonParent(node1, node2)

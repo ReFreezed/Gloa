@@ -435,8 +435,8 @@ end
 -- we have to treat these declarations differently sometimes. This function
 -- returns the correct scope for global declarations.
 function _G.getClosestScopeForDeclaration(state, decl)
-	-- do return getClosestScope(decl) end
-	return isDeclarationGlobal(decl) and state.globalScope or getClosestScope(decl)
+	return astFindParentScope(decl)
+	-- return isDeclarationGlobal(decl) and state.globalScope or getClosestScope(decl)
 end
 
 function _G.isScope           (node)   return SCOPE_SET            [node .nodeType] or false  end
@@ -554,8 +554,6 @@ function _G.findDynamicMemberDeclaration(state, scope, name)
 end
 
 function _G.isDeclarationVisibleToNode(state, decl, node)
-	if isDeclarationGlobal(decl) then  return true  end
-
 	-- It doesn't matter if this is true and we're in a declarative scope because we check that in the loop below.
 	local canSeeImperativeVariables = (decl.kind == !(DECL_KIND_LOCAL_VAR) --[[or decl.kind == !(DECL_KIND_READ_ONLY)]])
 
@@ -827,7 +825,7 @@ local function getEarlyAndLateForRedeclarationError(state, identEarly, identLate
 	local extraMessageEarly = ""
 	local extraMessageLate  = ""
 
-	-- Globals before locals.
+	-- Globals before locals.  @Incomplete: May need update since globals refactor. 2020-03-26
 	if isDeclarationGlobal(identEarly.declaration) ~= isDeclarationGlobal(identLate.declaration) then
 		if isDeclarationGlobal(identLate.declaration) then
 			identEarly, identLate = identLate, identEarly
@@ -2538,7 +2536,7 @@ end
 
 !NODE_INFERRER `function nodeInferrers.AstDeclaration(state, decl)`
 	local valueExpr = getDeclarationValue(decl, true)
-	if valueExpr and not valueExpr.inferredType then
+	if valueExpr and not valueExpr.inferredType then -- @Robustness: Should we check queued.pipe here instead of inferredType?
 		!DEPEND_AND_RETURN(`decl`, DEPEND_NODE_INFERRED_FULLY, `valueExpr`) -- FULLY is needed if valueExpr is an AstTable.
 	end
 
@@ -3889,74 +3887,93 @@ end
 end
 
 !NODE_INFERRER `function nodeInferrers.AstImport(state, import)`
-	local path
-
-	if import.isLoad then
-		path = isPathAbsolute(import.importName) and import.importName or state.projectDirectory.."/"..import.importName
-
-	else
-		path = COMPILER_DIRECTORY.."/modules/"..import.importName..".gloa"
-
-		if not isReadableFile(path) then
-			local pathFallback = COMPILER_DIRECTORY.."/modules/"..import.importName.."/main.gloa"
-
-			if not isReadableFile(pathFallback) then
-				typeError(state, import, "Could not read module file '%s' or '%s'.", path, pathFallback)
-			end
-
-			path = pathFallback
-		end
-	end
-
-	local globalScope = state.globalScope
-
-	if not state.fileBuffers[path] then
-		!ifDEBUG `profilerPause()`
-
-		local isPreload = not import.isLoad and import.importName == "preload"
-		local tokens    = state.tokens
-
-		if not isPreload then
-			insertToken(tokens, !(TOKEN_DIRECTIVE), "import",  path)
-			insertToken(tokens, !(TOKEN_STRING),    "preload", path)
-		end
-
-		local startToken = tokens.count+1
-
-		-- @Incomplete: Include these times in the compilation stats.
-		local timeStartLexing, timeEndLexing = readAndTokenizeFile(state, path, (not isPreload))
-		!ASSERT(`state.fileBuffers[path]`, `path`)
-
-		local timeStartParsing = os.clock()
-		local fileScope        = parseFileScope(state, globalScope, path, (not import.isLoad), import.importName)
-		local timeEndParsing   = os.clock()
-
-		if peekNextToken(state) then
-			errorParsingNext(state, "Expected the end of the file.")
-		end
-
-		if isPreload then
-			for token = startToken, tokens.count do
-				tokens.inserted[token] = true
-			end
-		end
-
-		!ifDEBUG `profilerUnpause()`
-
-		table.insert(globalScope.statements, fileScope)
-		table.insert(globalScope.fileScopes, fileScope)
+	if not import.fileScope then
+		local path
 
 		if import.isLoad then
-			astMoveRelevantThingsFromFileScopeToGlobalScope(state, fileScope)
+			local importName = import.importName
+
+			if isPathAbsolute(importName) then
+				path = importName
+
+			else
+				path = state.projectDirectory.."/"..importName..".gloa"
+
+				if not isReadableFile(path) then
+					local pathFallback = state.projectDirectory.."/"..importName.."/main.gloa"
+
+					if not isReadableFile(pathFallback) then
+						typeError(state, import, "Could not read file '%s' or '%s'.", path, pathFallback)
+					end
+
+					path = pathFallback
+				end
+			end
+
+		else
+			path = COMPILER_DIRECTORY.."/modules/"..import.importName..".gloa"
+
+			if not isReadableFile(path) then
+				local pathFallback = COMPILER_DIRECTORY.."/modules/"..import.importName.."/main.gloa"
+
+				if not isReadableFile(pathFallback) then
+					typeError(state, import, "Could not read module file '%s' or '%s'.", path, pathFallback)
+				end
+
+				path = pathFallback
+			end
 		end
 
-		local i = indexOf(globalScope.fileScopes, fileScope) or errorInternal()
-		addToQueueRecursively(state, fileScope, globalScope.fileScopes, i)
+		local globalScope = state.globalScope
+
+		if not state.fileBuffers[path] then
+			!ifDEBUG `profilerPause()`
+
+			local isPreload = not import.isLoad and import.importName == "preload"
+			local tokens    = state.tokens
+
+			if not isPreload then
+				insertToken(tokens, !(TOKEN_DIRECTIVE), "import",  path)
+				insertToken(tokens, !(TOKEN_STRING),    "preload", path)
+			end
+
+			local startToken = tokens.count+1
+
+			-- @Incomplete: Include these times in the compilation stats.
+			local timeStartLexing, timeEndLexing = readAndTokenizeFile(state, path, (not isPreload))
+			!ASSERT(`state.fileBuffers[path]`, `path`)
+
+			local timeStartParsing = os.clock()
+			local fileScope        = parseFileScope(state, globalScope, path, (not import.isLoad), import.importName)
+			local timeEndParsing   = os.clock()
+
+			if peekNextToken(state) then
+				errorParsingNext(state, "Expected the end of the file.")
+			end
+
+			if isPreload then
+				for token = startToken, tokens.count do
+					tokens.inserted[token] = true
+				end
+			end
+
+			!ifDEBUG `profilerUnpause()`
+
+			table.insert(globalScope.statements, fileScope)
+			table.insert(globalScope.fileScopes, fileScope)
+
+			if import.isLoad then
+				astMoveRelevantThingsFromFileScopeToGlobalScope(state, fileScope)
+			end
+
+			local i = indexOf(globalScope.fileScopes, fileScope) or errorInternal()
+			addToQueueRecursively(state, fileScope, globalScope.fileScopes, i)
+		end
+
+		import.fileScope = itemWith1(globalScope.fileScopes, "path", path) or errorInternal(path)
 	end
 
-	import.fileScope    = itemWith1(globalScope.fileScopes, "path", path) or errorInternal(path)
 	import.inferredType = getTypeInfoForNamespace(state, import.fileScope)
-
 	moveToNextRelevantPipe(state, import)
 end
 
@@ -4185,6 +4202,7 @@ end
 			newlyDeclared[decl.name.name] = true
 		end
 		for _, import in ipairs(branchToUse.imports) do
+			if import.exported then  errorInternal(state, import, "@Incomplete: Export from static if.")  end
 			table.insert(scope.imports, import)
 		end
 		for _, using in ipairs(branchToUse.usings) do
@@ -4919,6 +4937,7 @@ end
 			!DEPEND_AND_RETURN(`globalScope`, DEPEND_NODE_INFERRED, `statement`)
 		end
 	end
+
 	moveToNextRelevantPipe(state, globalScope)
 end
 

@@ -48,6 +48,8 @@ do
 	setfenv(1, compilerEnvironment)
 end
 
+local gotCriticalError = false
+
 xpcall(function()
 	local timeStartInitial = os.clock()
 
@@ -228,6 +230,7 @@ xpcall(function()
 		{`settings`,          nil},   -- CompilationSettings
 
 		{`projectDirectory`,  ""},
+		{`mainFileBasename`,  ""},
 
 		-- Parser:
 		{`globalScope`,       nil},   -- AstGlobalScope
@@ -273,6 +276,11 @@ xpcall(function()
 		--   ../main.gloa     > ..
 		--   main.gloa        > .
 		state.projectDirectory = pathToFirstFile:gsub("/?[^/]+$", ""):gsub("^$", ".")
+		state.mainFileBasename = pathToFirstFile:match"([^/]+)%.gloa$"
+
+		if not state.mainFileBasename then
+			errorLine(nil, "Expected the file to compile to end with '.gloa': %s", pathToFirstFile)
+		end
 
 		local settings           = CompilationSettings()
 		settings.outputDebugInfo = outputDebugInfo
@@ -582,5 +590,15 @@ xpcall(function()
 	exit()
 
 end, function(err)
-	errorInternal(2, "Critical Lua error: %s", (tostring(err):gsub("^[%w/.]+:%d+: ", "")))
+	err = tostring(err):gsub("^[%w/.]+:%d+: ", "")
+
+	if gotCriticalError then
+		io.stderr:write(debug.traceback("Error: Internal error: Critical Lua error: Error in xpcall() error handler: "..err, 2))
+		os.exit(1)
+	end
+
+	gotCriticalError = true -- For some reason this function is also the error handler for itself. What the heck, Lua...
+
+	printerr(debug.traceback("Error: Internal error: Critical Lua error: "..err, 2))
+	exit(1) -- Don't use exitFailure()! :ExitFailureOverride
 end)
