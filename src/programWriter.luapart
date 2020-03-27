@@ -140,7 +140,7 @@ local COMPILER_SYMBOL_PAIRS = {
 	`_FLOOR`,  `math.floor`, -- Used for integer division.
 	`_IPAIRS`, `ipairs`,     -- Used for short-form array loops.
 	`_PAIRS`,  `pairs`,      -- Used for short-form table loops.
-	`_SELECT`, `select`,     -- Used for short-form vararg loops. @Incomplete
+	`_SELECT`, `select`,     -- Used for short-form vararg loops.
 	`_REP`,    `string.rep`, -- Used for string repetition (duh).
 	`_REP2`,   `function(n,s)return(s:rep(n))end`,
 
@@ -1389,44 +1389,69 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 
 			elseif forLoop.forType == !(FOR_SHORT) then
 				local objExpr = forLoop.expressions[1]
-				local objType = adjustTypeToOne(state, objExpr, objExpr.inferredType, true)
+				local objType = objExpr.inferredType
 
 				file:write(indentStr, "for ")
 
-				for i, decl in ipairs(forLoop.declarations) do
-					if i > 1 then  file:write(", ")  end
-					writeIdentifierName(state, writer, decl.name)
-				end
+				if objType.tag == !(typeTags.TypeInfoVararg) then
+					!ASSERT("objExpr.nodeType == "..nodeTypes.AstVararg)
 
-				file:write(" in ")
-
-				if objType.tag == !(typeTags.TypeInfoArray) then
 					addLineMapping(state, writer, objExpr.token)
+					writeIdentifierName(state, writer, forLoop.declarations[1].name)
+					file:write(" = ")
+
 					if forLoop.reverse then
-						file:write("_IPAIRSR")
+						file:write('_SELECT("#", ...), 1, -1')
 					else
-						file:write("_IPAIRS")
+						file:write('1, _SELECT("#", ...)')
 					end
 
-				elseif objType.tag == !(typeTags.TypeInfoTable) then
-					assert(not forLoop.reverse)
-					addLineMapping(state, writer, objExpr.token)
-					file:write("_PAIRS")
+					file:write(" do")
+					writeEol(state, writer)
 
-				elseif objType.tag == !(typeTags.TypeInfoStruct) then
-					assert(not forLoop.reverse)
-					errorUnhandledNodeType(state, objExpr)
-					-- @Incomplete: Output default iterator for the struct. Also handle array-like structs and structured tables.
-					-- writeConstantValueOrReference(state, writer, interatorFuncConst?, objExpr)
+					file:write(indentStr, "\tlocal ")
+					writeIdentifierName(state, writer, forLoop.declarations[2].name)
+					file:write(" = _SELECT(")
+					writeIdentifierName(state, writer, forLoop.declarations[1].name)
+					file:write(", ...);")
+					writeEol(state, writer)
 
 				else
-					errorInternal(state, objExpr)
-				end
+					for i, decl in ipairs(forLoop.declarations) do
+						if i > 1 then  file:write(", ")  end
+						writeIdentifierName(state, writer, decl.name)
+					end
 
-				file:write("(")
-				writeExpression(state, writer, indent, nextLocalN, localsStack, objExpr)
-				file:write(") do")
-				writeEol(state, writer)
+					file:write(" in ")
+
+					if objType.tag == !(typeTags.TypeInfoArray) then
+						addLineMapping(state, writer, objExpr.token)
+						if forLoop.reverse then
+							file:write("_IPAIRSR")
+						else
+							file:write("_IPAIRS")
+						end
+
+					elseif objType.tag == !(typeTags.TypeInfoTable) then
+						assert(not forLoop.reverse)
+						addLineMapping(state, writer, objExpr.token)
+						file:write("_PAIRS")
+
+					elseif objType.tag == !(typeTags.TypeInfoStruct) then
+						assert(not forLoop.reverse)
+						errorUnhandledNodeType(state, objExpr)
+						-- @Incomplete: Output default iterator for the struct. Also handle array-like structs and structured tables.
+						-- writeConstantValueOrReference(state, writer, interatorFuncConst?, objExpr)
+
+					else
+						errorInternal(state, objExpr)
+					end
+
+					file:write("(")
+					writeExpression(state, writer, indent, nextLocalN, localsStack, objExpr)
+					file:write(") do")
+					writeEol(state, writer)
+				end
 
 				writeLoopBodyAndFooter(state, writer, forLoop, indent, nextLocalN, localsStack, deferStartIndex)
 

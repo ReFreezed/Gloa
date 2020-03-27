@@ -20,7 +20,7 @@
 	getDeclarationValue, isDeclarationGlobal, isDeclarationConstant, isDeclarationWritable, isDeclarationImperative, shouldDeclarationValueDefinitivelyBeConstant
 	getLambda
 	inferNode, queueForReinfer
-	isExpressionConstant
+	isExpressionConstant, isExpressionExactlyOneValue
 	isPartOfAnyDeclaration
 	isTypeSimple, isTypeNumeric, isTypeTableLike, isTypeCompatibleWith, doesStructInherit, adjustTypeToOne
 	newTypeInfo, isTypeBuiltin, getTypeInfo*
@@ -1018,6 +1018,9 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 		local typeInfo = decl.name.inferredType
 		if not typeInfo then
 			!DEPEND_AND_RETURN(`identOrVararg`, DEPEND_NODE_INFERRED, `decl`)
+		end
+		if vararg and vararg.surroundedByParentheses then
+			typeInfo = adjustTypeToOne(state, vararg, typeInfo, true)
 		end
 
 		identOrVararg.inferredType = typeInfo
@@ -4421,15 +4424,35 @@ end
 
 			-- Note: Built-in short-form for loops have the value first and then the index/key.
 			local objExpr = values[1]
-			local objType = adjustTypeToOne(state, objExpr, objExpr.inferredType, true)
+			local objType = objExpr.inferredType
+
+			-- We adjust lists to one, but leave vararg as-is.
+			if objType.tag == !(typeTags.TypeInfoList) then
+				objType = adjustTypeToOne(state, objExpr, objExpr.inferredType, true)
+			end
 
 			if objType.tag == !(typeTags.TypeInfoArray) then
+				if names[3] then
+					typeError(state, names[3], "Too many names for short-form array loop. (Expected at most a value name and an index name.)")
+				end
+				local name1 = (names[1] and names[1].name) or "it"
+				local name2 = (names[2] and names[2].name) or "itIndex"
+				addDeclarationInForLoop(state, forLoop, name2, getTypeInfoForBuiltinType(state, "int"))
+				addDeclarationInForLoop(state, forLoop, name1, objType.itemType)
+
+			elseif objType.tag == !(typeTags.TypeInfoVararg) then
+				if names[3] then
+					typeError(state, names[3], "Too many names for short-form vararg loop. (Expected at most a value name and an index name.)")
+				end
 				local name1 = (names[1] and names[1].name) or "it"
 				local name2 = (names[2] and names[2].name) or "itIndex"
 				addDeclarationInForLoop(state, forLoop, name2, getTypeInfoForBuiltinType(state, "int"))
 				addDeclarationInForLoop(state, forLoop, name1, objType.itemType)
 
 			elseif objType.tag == !(typeTags.TypeInfoTable) then
+				if names[3] then
+					typeError(state, names[3], "Too many names for short-form table loop. (Expected at most a value name and a key name.)")
+				end
 				local name1    = (names[1] and names[1].name) or "it"
 				local name2    = (names[2] and names[2].name) or "itIndex"
 				local typeInfo = getTypeInfoForBuiltinType(state, "any")
@@ -4437,7 +4460,7 @@ end
 				addDeclarationInForLoop(state, forLoop, name1, typeInfo)
 
 			elseif objType.tag == !(typeTags.TypeInfoStruct) then
-				-- We need custom iterators to work AND default iterators for structs before we can do this! @Incomplete
+				-- We need default iterators for structs before we can do this! @Incomplete
 				-- @Incomplete: Fall back to array-like behavior if structInfo.kind==STRUCT_KIND_ARRAY and there's no default iterator.
 				typeError(state, objExpr, "@Incomplete: Iterate over struct instances using custom default iterators.")
 
@@ -4450,7 +4473,7 @@ end
 				)
 			end
 
-			if forLoop.reverse and objType.tag ~= !(typeTags.TypeInfoArray) then
+			if forLoop.reverse and not (objType.tag == !(typeTags.TypeInfoArray) or objType.tag == !(typeTags.TypeInfoVararg)) then
 				typeError(
 					state, objExpr,
 					"Only arrays can be iterated in reverse. (This is %s)",
@@ -5372,9 +5395,24 @@ end
 	moveToNextRelevantPipe(state, namespace)
 end
 
+!if DEBUG then
+	!for nodeType, nodeName in ipairs(nodeTypeNames) do
+		!local inferrerName    = "nodeInferrer_"..nodeName
+		local !!(inferrerName) = nodeInferrers[!(nodeType)]
+
+		nodeInferrers[!(nodeType)] = function(state, node)
+			!!(inferrerName)(state, node) -- Better traceback in DEBUG mode.
+		end
+	!end
+!end
+
 function _G.inferNode(state, node)
-	local nodeInferrer = nodeInferrers[node.nodeType] or errorUnhandledNodeType(state, node)
-	nodeInferrer(state, node)
+	!if DEBUG then
+		local nodeInferrer = nodeInferrers[node.nodeType] or errorInternal(state, node)
+		nodeInferrer(state, node)
+	!else
+		return nodeInferrers[node.nodeType](state, node)
+	!end
 end
 
 function _G.queueForReinfer(state, node)
@@ -5460,6 +5498,10 @@ function _G.isExpressionConstant(state, expr, foreignIsConst)
 	else
 		errorUnhandledNodeType(state, expr)
 	end
+end
+
+function _G.isExpressionExactlyOneValue(expr)
+	return not (expr.nodeType == !(nodeTypes.AstVararg) or expr.nodeType == !(nodeTypes.AstCall)) or expr.surroundedByParentheses
 end
 
 
