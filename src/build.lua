@@ -13,17 +13,15 @@ exec lua "$0" "$@"
 --=
 --==============================================================
 
-	To build the compiler, run this from the project root folder:
-
-		lua src/build.lua [ <options> ]
+	To build the compiler, run this from the repository root folder:
+		lua src/build.lua [options]
 
 	Options:
-
-		--ouput <path>  ; Where to output the compiler. Default is "gloa.lua" in the project root folder.
+		--ouput <path>  ; Where to output the compiler. Default is "gloa.lua" in the repository root folder.
 		--silent        ; Disable printing during build.
 		--debug         ; Enable some compiler debugging functionality.
 		--debugger      ; Enable the built-in debugger. (Requires --debug)
-		--gloadir <dir> ; Where the compiler will be able to find the modules folder etc. Default is the same folder the compiler is in. (Requires --debug)
+		--gloadir <dir> ; Where the compiler will be able to find the modules folder etc. Default is the same folder the compiler is in.
 
 --============================================================]]
 
@@ -121,7 +119,7 @@ local pp = chunk()
 pp.metaEnvironment.DEBUG                = debugMode
 pp.metaEnvironment.DEBUGGER             = debugMode and debugger
 
-pp.metaEnvironment.GLOA_DIR             = debugMode and dirGloa or ""
+pp.metaEnvironment.GLOA_DIR             = dirGloa
 pp.metaEnvironment.PLANTUML_PATH        = pathPlantuml
 pp.metaEnvironment.GRAPHVIZ_PATH        = pathGraphviz
 

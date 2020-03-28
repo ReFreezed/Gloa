@@ -1,15 +1,20 @@
 --
 -- Glóa test suite
 --
+-- Program arguments:
+-- * testToRun (optional, default is all)
+--
 
 !import "basic"
+!import "compiler"
 !import "io"
+!import "os"
 !import "string"
 !import "utils"
 
 !load "suite.fails"
 
-local TEST_FILES : []string : {
+local TEST_FILES :: {
 	"examples/lovelyBlaster/main.gloa",
 	"examples/lovelySnake/main.gloa",
 	"tests/basic.gloa",
@@ -22,28 +27,47 @@ local TEST_FILES : []string : {
 local COMPILER_OPTIONS   :: "--debug --nogc --silent"
 local OUTPUT_REDIRECTION :: ">NUL" -- ">NUL 2>&1"
 
-local execute :: (cmd:string) -> int !foreign lua "os.execute"
+!run {
+	local options      = getBuildOptions()
+	options.outputType = BuildOutputType.NONE
+	setBuildOptions(options)
 
-local main :: () {
 	disableBuffering(STDOUT)
 	disableBuffering(STDERR)
 
+	local testToRun = getProgramArguments()[1]
+	testToRun       = testToRun ~= NULL ? toLower(testToRun) : ""
+
+	if testToRun  printf("Looking for test '%s'.", testToRun)
+
+	local testCount = 0
 	local failCount = 0
 	local lines: []string
 
-	for path: TEST_FILES {
-		local cmd = format([["lua "%s" %s "%s" %s"]], COMPILER_PATH, COMPILER_OPTIONS, path, OUTPUT_REDIRECTION)
+	local shouldRunTest = [testToRun] (path:string) -> bool {
+		if not testToRun  return true
+		local _, basename = matchPattern(path, "([^/]+)%.gloa$")
+		return (find(toLower(basename), testToRun))
+	}
 
-		print(cmd)
-		if execute(cmd) == 0 {
-			insert(lines, format("ok      %s", path))
-		} else {
-			insert(lines, format("NOT_OK  %s", path))
-			failCount = failCount+1
+	for path: TEST_FILES {
+		if shouldRunTest(path) {
+			testCount += 1
+			local cmd   = format([["lua "%s" %s "%s" %s"]], COMPILER_PATH, COMPILER_OPTIONS, path, OUTPUT_REDIRECTION)
+
+			print(cmd)
+			if execute(cmd) == 0 {
+				insert(lines, format("ok      %s", path))
+			} else {
+				insert(lines, format("NOT_OK  %s", path))
+				failCount = failCount+1
+			}
+
+			if testToRun ~= ""  break
 		}
 	}
 
-	local FILES_TO_COPY_TO_TEMP_FOLDER : []string : {
+	local FILES_TO_COPY_TO_TEMP_FOLDER :: {
 		"tests/types.errorGlobal.gloa",
 		"tests/types.errorLocal.gloa",
 		"tests/types.load.gloa",
@@ -58,34 +82,41 @@ local main :: () {
 	}
 
 	for gloa, i: TESTS_THAT_SHOULD_FAIL {
-		if not find(gloa, "main ::")
-			gloa = gloa.."\nlocal main :: () {}\n"
-
 		local tempPath = format("local/temp/shouldFail%d.gloa", i)
-		local ok, err  = writeFile(tempPath, gloa)
-		assert(ok, err)
 
-		local cmd = format([["lua "%s" %s "%s" %s"]], COMPILER_PATH, COMPILER_OPTIONS, tempPath, OUTPUT_REDIRECTION)
-		print(cmd)
+		if shouldRunTest(tempPath) {
+			testCount += 1
 
-		if execute(cmd) ~= 0 {
-			insert(lines, format("ok      %s", tempPath))
-		} else {
-			insert(lines, format("NOT_OK  %s", tempPath))
-			failCount = failCount+1
+			if not find(gloa, "main ::")
+				gloa = gloa.."\nlocal main :: () {}\n"
+
+			local ok, err  = writeFile(tempPath, gloa)
+			assert(ok, err)
+
+			local cmd = format([["lua "%s" %s "%s" %s"]], COMPILER_PATH, COMPILER_OPTIONS, tempPath, OUTPUT_REDIRECTION)
+			print(cmd)
+
+			if execute(cmd) ~= 0 {
+				insert(lines, format("ok      %s", tempPath))
+			} else {
+				insert(lines, format("NOT_OK  %s", tempPath))
+				failCount = failCount+1
+			}
+
+			if testToRun ~= ""  break
 		}
 	}
 
-	print()
-	print(repeat("-", 64))
+	print("-"*64)
 	for lines  print(it)
-	print(repeat("-", 64))
+	print("-"*64)
 
-	local TEST_COUNT :: #TESTS_THAT_SHOULD_FAIL + #TEST_FILES
-	if failCount == 0
-		printf("Completed all %d tests successfully. Yay!", TEST_COUNT)
+	if testCount == 0
+		print("No tests ran!")
+	elseif failCount == 0
+		printf("Completed all %d tests successfully. Yay!", testCount)
 	else
-		printf("Failed %d of %d", failCount, TEST_COUNT)
+		printf("Failed %d of %d", failCount, testCount)
 
 	print()
 }
