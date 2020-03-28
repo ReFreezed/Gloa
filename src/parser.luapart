@@ -23,6 +23,7 @@
 	errorParsing*, parserMessage*
 	errorUnhandledNodeType, errorUnhandledType
 	isNodeAt
+	newLiteral, newIdentifier
 	nodeError, nodeErrorAfter, nodeMessage, where
 	parse*
 
@@ -1184,10 +1185,10 @@ function _G.parseDeclarationStatement(state, scope, imperative, declType)
 		tokType, tokValue = peekNextToken(state)
 		local ident
 
-		if declType == !(DECLARATION_STRUCT) and isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"call") then
+		if declType == !(DECLARATION_STRUCT) and isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"call","iterator") then
 			eatNextToken(state)
 			ident      = astNewNode(AstIdentifier, state.nextToken-1, decl)
-			ident.name = "!call"
+			ident.name = "!"..tokValue
 		else
 			!SET_OR_RETURN `ident = parseIdentifier(state, decl)`
 		end
@@ -1354,8 +1355,8 @@ function _G.parseDeclarationStatement(state, scope, imperative, declType)
 		end
 	end
 
-	if declType == !(DECLARATION_STRUCT) and not isConst and declNames[1].name == "!call" then
-		!ERROR_OR_RETURN `errorParsing(state, declNames[1].token, "!call declarations must be constant.")`
+	if declType == !(DECLARATION_STRUCT) and not isConst and !!(CONST_SET{"!call","!iterator"})[declNames[1].name] then
+		!ERROR_OR_RETURN `errorParsing(state, declNames[1].token, "%s declarations must be constant.", declNames[1].name)`
 	end
 
 	if declType == !(DECLARATION_NORMAL) then  eatTrailingSemicolon(state)  end
@@ -4335,6 +4336,15 @@ function _G.newLiteral(parent, token, literalType, value, typeInfo)
 	local literal        = astNewNode(AstLiteral, token, parent)
 	literal.literalType  = literalType
 	literal.value        = value
+	literal.inferredType = typeInfo
+	return literal
+end
+
+-- literal = newIdentifier( parent, token, name [, declaration, typeInfo ] )
+function _G.newIdentifier(parent, token, name, decl, typeInfo)
+	local literal        = astNewNode(AstIdentifier, token, parent)
+	literal.name         = name
+	literal.declaration  = decl
 	literal.inferredType = typeInfo
 	return literal
 end

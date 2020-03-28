@@ -4460,9 +4460,60 @@ end
 				addDeclarationInForLoop(state, forLoop, name1, typeInfo)
 
 			elseif objType.tag == !(typeTags.TypeInfoStruct) then
-				-- We need default iterators for structs before we can do this! @Incomplete
-				-- @Incomplete: Fall back to array-like behavior if structInfo.kind==STRUCT_KIND_ARRAY and there's no default iterator.
-				typeError(state, objExpr, "@Incomplete: Iterate over struct instances using custom default iterators.")
+				local structInfo = objType
+
+				-- We have to wait for the members for inherited declarations to be available.
+				if not structInfo.hasMembers then
+					!DEPEND_AND_RETURN(`forLoop`, DEPEND_STRUCT_MEMBERS_READY, `structInfo`)
+				end
+
+				local decl = findMemberDeclaration(state, structInfo.astNode, "!iterator")
+				if not decl then
+					-- @Incomplete: Fall back to array-like behavior if structInfo.kind==STRUCT_KIND_ARRAY and there's no default iterator.
+					typeError(state, objExpr, "%s has no default iterator.", getFriendlyTypeInfoName(structInfo))
+				end
+
+				local iterStarter     = decl.value
+				local iterStarterType = iterStarter.inferredType
+
+				if iterStarterType.tag ~= !(typeTags.TypeInfoFunction) then
+					typeError(state, iterStarter, "The !iterator value must be a function. (This is %s)", getFriendlyTypeInfoName(iterStarterType))
+				elseif decl.overloadOf then
+					typeError(state, objExpr, "The default iterator for %s is overloaded which is currently not supported.", getFriendlyTypeInfoName(structInfo))
+				end
+
+				local iterTypeInfo = iterStarterType.argumentTypesOut[1]
+
+				if not iterTypeInfo then
+					typeError(state, iterStarter, "Expected function to return an iterator as the first value.")
+				elseif iterTypeInfo.tag ~= !(typeTags.TypeInfoFunction) then
+					typeError(
+						state, iterStarter.argumentsOut.arguments[1],
+						"Expected function to return an iterator as the first value. (This returns %s)",
+						getFriendlyTypeInfoName(iterTypeInfo)
+					)
+				elseif #iterTypeInfo.argumentTypesOut ~= 2 then
+					typeError(
+						state, iterStarter.argumentsOut.arguments[1],
+						"Default iterators for structs must return exactly two values - a control value and the current value. (This returns %d)",
+						#iterTypeInfo.argumentTypesOut
+					)
+				end
+
+				if names[3] then
+					typeError(state, names[3], "Too many names for short-form struct loop. (Expected at most a value name and a control value name.)")
+				end
+				names[1] = names[1] or newIdentifier(forLoop, forLoop.token, "itIndex")
+				names[2] = names[2] or newIdentifier(forLoop, forLoop.token, "it")
+
+				-- Convert FOR_SHORT into FOR_ITERATOR.
+				local call  = astNewNode(AstCall, decl.token, forLoop)
+				call.callee = astCopy(decl.name, nil, call)
+				addToQueue(state, call.callee, call, "callee", !(PIPE_INFER))
+				pokeAndQueueUnqueuedNodeIntoTree(state, objExpr, call, call.arguments,1)
+
+				forLoop.forType = !(FOR_ITERATOR)
+				-- Continue to after the reverse check below.
 
 			else
 				typeError(
@@ -4480,6 +4531,8 @@ end
 					getFriendlyTypeInfoName(objType)
 				)
 			end
+
+			if forLoop.forType == !(FOR_ITERATOR) then  return  end
 
 		-- for v1, ... in iter [, state [, init ] ]
 		else--if forType == FOR_ITERATOR
