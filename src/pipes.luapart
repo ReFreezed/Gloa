@@ -47,7 +47,7 @@ function _G.addDependency(state, dependent, dependType, dependOn, extraData)
 		elseif dependType == !(DEPEND_MEMBER_DECLARATION) then
 			!ASSERT `type(dependOn)  == "string"`
 			!ASSERT `type(extraData) == "table"`
-		elseif !!(anyV(`dependType`, DEPEND_NODE_INFERRED,DEPEND_NODE_INFERRED_FULLY,DEPEND_NODE_EMITTED,DEPEND_STRUCT_MEMBERS_READY,DEPEND_CONSTANT_READY)) then
+		elseif !!(CONST_SET{ DEPEND_NODE_INFERRED, DEPEND_NODE_INFERRED_FULLY, DEPEND_NODE_EMITTED, DEPEND_STRUCT_MEMBERS_READY, DEPEND_CONSTANT_READY })[dependType] then
 			!ASSERT `type(dependOn)  == "table"`
 		else
 			errorInternal("%d", dependType)
@@ -61,7 +61,7 @@ function _G.addDependency(state, dependent, dependType, dependOn, extraData)
 		!ifDEBUG `astPrint(dependent)`
 		nodeMessage(io.stderr, state, dependent, "Error", "Pipes", "Internal compiler error: Trying to add dependency twice. (%s)", (DEPEND_TITLES[dependType] or "?"))
 
-		if !!(anyV(`dependType`, DEPEND_NODE_INFERRED,DEPEND_NODE_INFERRED_FULLY,DEPEND_NODE_EMITTED)) then
+		if !!(CONST_SET{ DEPEND_NODE_INFERRED, DEPEND_NODE_INFERRED_FULLY, DEPEND_NODE_EMITTED })[dependType] then
 			!ifDEBUG `astPrint(dependOn)`
 			nodeMessage(io.stderr, state, dependOn, "Info", "Pipes", "...depending on this.")
 		end
@@ -72,7 +72,7 @@ function _G.addDependency(state, dependent, dependType, dependOn, extraData)
 
 	dependent = dependent.queued
 
-	if !!(anyV(`dependType`, DEPEND_NODE_INFERRED,DEPEND_NODE_INFERRED_FULLY,DEPEND_NODE_EMITTED)) then
+	if !!(CONST_SET{ DEPEND_NODE_INFERRED, DEPEND_NODE_INFERRED_FULLY, DEPEND_NODE_EMITTED })[dependType] then
 		assert(dependent ~= dependOn.node)
 		dependOn = dependOn.queued or errorInternal(state, dependOn)
 	end
@@ -141,7 +141,7 @@ end
 function _G.getExistingDependency(state, dependent, dependType, dependOn)
 	dependent = dependent.queued
 
-	if !!(anyV(`dependType`, DEPEND_NODE_INFERRED,DEPEND_NODE_INFERRED_FULLY,DEPEND_NODE_EMITTED)) then
+	if !!(CONST_SET{ DEPEND_NODE_INFERRED, DEPEND_NODE_INFERRED_FULLY, DEPEND_NODE_EMITTED })[dependType] then
 		dependOn = dependOn.queued
 	end
 
@@ -201,7 +201,7 @@ do
 				registerNodesToAddToQueue(state, staticIf.condition, nodesToAdd)
 				return !(VISIT_IGNORE_CHILDREN)
 
-			elseif !!(anyV(`node.nodeType`, nodeTypes.AstLambda,nodeTypes.AstStruct)) and node.isPolymorphic then
+			elseif !!(CONST_SET{ nodeTypes.AstLambda, nodeTypes.AstStruct })[node.nodeType] and node.isPolymorphic then
 				return !(VISIT_IGNORE_CHILDREN) -- We don't need to queue anything inside polymorphic functions or structs (I think).
 			end
 		end)
@@ -246,7 +246,7 @@ do
 					end
 					return !(VISIT_IGNORE_CHILDREN)
 
-				elseif !!(anyV(`node.nodeType`, nodeTypes.AstLambda,nodeTypes.AstStruct)) and node.isPolymorphic then
+				elseif !!(CONST_SET{ nodeTypes.AstLambda, nodeTypes.AstStruct })[node.nodeType] and node.isPolymorphic then
 					return !(VISIT_IGNORE_CHILDREN) -- We don't need to queue anything inside polymorphic functions or structs (I think).
 				end
 			end
@@ -359,12 +359,12 @@ function _G.moveToNextRelevantPipe(state, node, fromPipe)
 	if fromPipe == !(PIPE_INFER) then
 		local nodeType = node.nodeType
 
-		if !!(anyV(`nodeType`, nodeTypes.AstLiteral,nodeTypes.AstForeign,nodeTypes.AstTypeInfo)) then
+		if !!(CONST_SET{ nodeTypes.AstLiteral, nodeTypes.AstForeign, nodeTypes.AstTypeInfo })[nodeType] then
 			moveToPipe(state, node, !(PIPE_BYTECODE))
 
 		elseif nodeType == !(nodeTypes.AstDeclaration) then
 			local decl = node
-			if decl.name.inferredType.tag == XXX_TYPE_TAG_NAMESPACE then
+			if decl.name.inferredType.tag == !(TYPE_NAMESPACE) then
 				moveToPipe(state, decl, !(PIPE_DONE))
 			else
 				moveToPipe(state, decl, !(PIPE_BYTECODE))
@@ -488,7 +488,7 @@ function _G.errorPipesAreStuck(state)
 				elseif node.nodeType == !(nodeTypes.AstAccess) then
 					local access = node
 
-					if access.object.inferredType.tag == XXX_TYPE_TAG_NAMESPACE and access.object.inferredType.scope.nodeType == !(nodeTypes.AstFileScope) then
+					if access.object.inferredType.tag == !(TYPE_NAMESPACE) and access.object.inferredType.scope.nodeType == !(nodeTypes.AstFileScope) then
 						local fileScope = access.object.inferredType.scope
 						!!(REPORT_START)
 						typeError(
@@ -505,11 +505,11 @@ function _G.errorPipesAreStuck(state)
 						local tag    = access.object.inferredType.tag
 						local ignore = false
 
-						if tag == XXX_TYPE_TAG_NAMESPACE then
+						if tag == !(TYPE_NAMESPACE) then
 							scope = access.object.inferredType.scope
-						elseif tag == XXX_TYPE_TAG_ENUM then
+						elseif tag == !(TYPE_ENUM) then
 							scope = access.object.inferredType.astNode
-						elseif tag == XXX_TYPE_TAG_STRUCT then
+						elseif tag == !(TYPE_STRUCT) then
 							scope = access.object.inferredType.astNode
 							if not access.object.inferredType.hasMembers then  ignore = true  end -- Better to report the next issue, probably.
 						else
@@ -654,7 +654,7 @@ function _G.errorPipesAreStuck(state)
 		local const = queued.waitingOn.dependOn
 		!!(REPORT_START)
 		printerr()
-		if const.valueType.tag == XXX_TYPE_TAG_FUNCTION then
+		if const.valueType.tag == !(TYPE_FUNCTION) then
 			local lambda = const.value
 			!ifDEBUG`astPrint(lambda)`
 			typeMessage(io.stderr, state, lambda, "Error", "Failed finishing the constant for this function.")
@@ -716,7 +716,7 @@ function _G.errorPipesAreInfiniteLooping(state, finalPipe)
 				dependency and ", waiting" or ""
 			)
 
-			if dependency and !!(anyV(`dependency.dependType`, DEPEND_NODE_INFERRED,DEPEND_NODE_INFERRED_FULLY,DEPEND_NODE_EMITTED)) then
+			if dependency and !!(CONST_SET{ DEPEND_NODE_INFERRED, DEPEND_NODE_INFERRED_FULLY, DEPEND_NODE_EMITTED })[dependency.dependType] then
 				astPrint(dependency.dependOn.node)
 				nodeMessage(io.stderr, state, dependency.dependOn.node, "Debug", nil, "...waiting on this.")
 			end
@@ -779,7 +779,7 @@ function _G.outputDependencyGraph(state)
 						local name = dependency.dependOn
 						file:write(" --|> (Name ", name, ")")
 
-					elseif !!(anyV(`dependency.dependType`, DEPEND_NODE_INFERRED,DEPEND_NODE_INFERRED_FULLY,DEPEND_NODE_EMITTED)) then
+					elseif !!(CONST_SET{ DEPEND_NODE_INFERRED, DEPEND_NODE_INFERRED_FULLY, DEPEND_NODE_EMITTED })[dependency.dependType] then
 						local nodeOther = dependency.dependOn.node
 						file:write(" --|> ")
 						writeNode(nodeOther)
@@ -791,7 +791,7 @@ function _G.outputDependencyGraph(state)
 
 					elseif dependency.dependType == !(DEPEND_CONSTANT_READY) then
 						local const = dependency.dependOn
-						if const.valueType.tag == XXX_TYPE_TAG_FUNCTION then
+						if const.valueType.tag == !(TYPE_FUNCTION) then
 							local lambda = const.value
 							file:write(" --|> ")
 							writeNode(lambda)

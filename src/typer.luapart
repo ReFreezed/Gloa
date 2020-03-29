@@ -16,12 +16,12 @@
 	findDeclaration, findPublicDeclarationInScope, findMemberDeclaration, findDynamicMemberDeclaration, isDeclarationVisibleToNode, printDeclarationChain
 	followIdentifiersToConstantValue
 	getAssignmentValue
-	getClosestScope, getClosestScopeForDeclaration, isScope, isScopeDeclarative, isScopeImperative
 	getDeclarationValue, isDeclarationGlobal, isDeclarationConstant, isDeclarationWritable, isDeclarationImperative, shouldDeclarationValueDefinitivelyBeConstant
 	getLambda
 	inferNode, queueForReinfer
 	isExpressionConstant, isExpressionExactlyOneValue
 	isPartOfAnyDeclaration
+	isScope, isScopeDeclarative, isScopeImperative
 	isTypeSimple, isTypeNumeric, isTypeTableLike, isTypeCompatibleWith, doesStructInherit, adjustTypeToOne, compareIdsOfTypes
 	newTypeInfo, isTypeBuiltin, getTypeInfo*
 	simplifyExpressionIfConstant, simplifyTypeExpression
@@ -32,66 +32,49 @@
 
 
 
-!(
-_G.typeTags        = {}
-local typeTagNames = {}
-
-local function structTypeInfo(nameAndParent)
-	return function(fields)
-		local name = nameAndParent:match"^[%w_]+"
-
-		if not name:find"^_" then
-			local tag         = itemWith1(fields._overrides, 1, "tag")[2] or error()
-			typeTags[name]    = tag
-			typeTagNames[tag] = name:gsub("^TypeInfo", ""):lower()
-		end
-
-		struct(nameAndParent)(fields)
-	end
-end
-)
+!local structTypeInfo = struct
 
 !struct"_TypeInfo"{
-	{`tag`, 0}, -- This is like a "type of type info". The word "type" is used in so many places so we call it "tag" here to make it less confusing...
+	{`tag`, 0}, -- This is like the "type of type" or the "type group". The word "type" is used in so many places so we call it "tag" here to make it less confusing.
 	{`id`,  0},
 }
 
-local !structTypeInfo"TypeInfoAny:_TypeInfo"   {_overrides={{`tag`,1}}}
-local !structTypeInfo"TypeInfoBool:_TypeInfo"  {_overrides={{`tag`,2}}}
-local !structTypeInfo"TypeInfoInt:_TypeInfo"   {_overrides={{`tag`,3}}}
-local !structTypeInfo"TypeInfoNone:_TypeInfo"  {_overrides={{`tag`,4}}}
-local !structTypeInfo"TypeInfoFloat:_TypeInfo" {_overrides={{`tag`,5}}}
-local !structTypeInfo"TypeInfoString:_TypeInfo"{_overrides={{`tag`,6}}}
-local !structTypeInfo"TypeInfoTable:_TypeInfo" {_overrides={{`tag`,7}}}
-local !structTypeInfo"TypeInfoType:_TypeInfo"  {_overrides={{`tag`,8}}}
+local !structTypeInfo"TypeInfoAny:_TypeInfo"   {_overrides={{`tag`,TYPE_ANY}}}
+local !structTypeInfo"TypeInfoBool:_TypeInfo"  {_overrides={{`tag`,TYPE_BOOL}}}
+local !structTypeInfo"TypeInfoInt:_TypeInfo"   {_overrides={{`tag`,TYPE_INT}}}
+local !structTypeInfo"TypeInfoNone:_TypeInfo"  {_overrides={{`tag`,TYPE_NONE}}}
+local !structTypeInfo"TypeInfoFloat:_TypeInfo" {_overrides={{`tag`,TYPE_FLOAT}}}
+local !structTypeInfo"TypeInfoString:_TypeInfo"{_overrides={{`tag`,TYPE_STRING}}}
+local !structTypeInfo"TypeInfoTable:_TypeInfo" {_overrides={{`tag`,TYPE_TABLE}}}
+local !structTypeInfo"TypeInfoType:_TypeInfo"  {_overrides={{`tag`,TYPE_TYPE}}}
 
-local !structTypeInfo"TypeInfoVoid:_TypeInfo"       {_overrides={{`tag`,0}}}
-local !structTypeInfo"TypeInfoPlaceholder:_TypeInfo"{_overrides={{`tag`,9}}}
+local !structTypeInfo"TypeInfoVoid:_TypeInfo"       {_overrides={{`tag`,TYPE_VOID}}}
+local !structTypeInfo"TypeInfoPlaceholder:_TypeInfo"{_overrides={{`tag`,TYPE_PLACEHOLDER}}}
 
-_G.!(local )!!SIMPLE_TYPE_TAG = {
+_G.SIMPLE_TYPES = !({
 	-- These small type infos don't have any extra information.
-	[typeTags.TypeInfoAny]    = true,
-	[typeTags.TypeInfoBool]   = true,
-	[typeTags.TypeInfoInt]    = true,
-	[typeTags.TypeInfoNone]   = true,
-	[typeTags.TypeInfoFloat]  = true,
-	[typeTags.TypeInfoString] = true,
-	[typeTags.TypeInfoTable]  = true,
-	[typeTags.TypeInfoType]   = true,
-}
+	[TYPE_ANY]    = true,
+	[TYPE_BOOL]   = true,
+	[TYPE_INT]    = true,
+	[TYPE_NONE]   = true,
+	[TYPE_FLOAT]  = true,
+	[TYPE_STRING] = true,
+	[TYPE_TABLE]  = true,
+	[TYPE_TYPE]   = true,
+})
 
 local !structTypeInfo"TypeInfoArray:_TypeInfo"{
-	_overrides={{`tag`,10}},
+	_overrides={{`tag`,TYPE_ARRAY}},
 	{`itemType`, nil}, -- TypeInfo
 }
 
 local !structTypeInfo"TypeInfoVararg:_TypeInfo"{
-	_overrides={{`tag`,11}},
+	_overrides={{`tag`,TYPE_VARARG}},
 	{`itemType`, nil}, -- TypeInfo
 }
 
 local !structTypeInfo"TypeInfoFunction:_TypeInfo"{ -- AKA function signature.
-	_overrides={{`tag`,12}},
+	_overrides={{`tag`,TYPE_FUNCTION}},
 	{`argumentTypesIn`,  {}}, -- []TypeInfo  @Cleanup: Use TypeInfoList here?
 	{`argumentTypesOut`, {}}, -- []TypeInfo  @Cleanup: Use TypeInfoList here?
 	{`isPolymorphic`,    false},
@@ -102,7 +85,7 @@ local !struct"TypeInfoStructMember"{
 	{`typeInfo`, nil},
 }
 local !structTypeInfo"TypeInfoStruct:_TypeInfo"{
-	_overrides={{`tag`,13}},
+	_overrides={{`tag`,TYPE_STRUCT}},
 
 	{`astNode`,       nil}, -- AstStruct
 	{`name`,          ""},  -- Filled in during definition.
@@ -121,7 +104,7 @@ local !struct"TypeInfoEnumMember"{
 	{`name`, ""},
 }
 local !structTypeInfo"TypeInfoEnum:_TypeInfo"{
-	_overrides={{`tag`,14}},
+	_overrides={{`tag`,TYPE_ENUM}},
 	{`astNode`,        nil}, -- AstEnum
 	{`name`,           ""},
 	{`memberTypeInfo`, nil}, -- Must be one of these primitive types: int, string, type, bool or float.
@@ -129,25 +112,19 @@ local !structTypeInfo"TypeInfoEnum:_TypeInfo"{
 }
 
 local !structTypeInfo"TypeInfoNamespace:_TypeInfo"{
-	_overrides={{`tag`,15}},
+	_overrides={{`tag`,TYPE_NAMESPACE}},
 	{`scope`, nil}, -- AstScope
 }
 
 local !structTypeInfo"TypeInfoCompound:_TypeInfo"{
-	_overrides={{`tag`,16}},
+	_overrides={{`tag`,TYPE_COMPOUND}},
 	-- [1]=typeInfo1, ...
 }
 
 local !structTypeInfo"TypeInfoList:_TypeInfo"{ -- Special type used for returns from calls (both when sending and receiving).
-	_overrides={{`tag`,17}},
+	_overrides={{`tag`,TYPE_LIST}},
 	-- [1]=typeInfo1, ...
 }
-
-_G.TYPE_TAG_NAMES         = !(typeTagNames)
-_G.XXX_TYPE_TAG_FUNCTION  = !(typeTags.TypeInfoFunction)
-_G.XXX_TYPE_TAG_STRUCT    = !(typeTags.TypeInfoStruct)
-_G.XXX_TYPE_TAG_ENUM      = !(typeTags.TypeInfoEnum)
-_G.XXX_TYPE_TAG_NAMESPACE = !(typeTags.TypeInfoNamespace)
 
 
 
@@ -258,7 +235,7 @@ function _G.getTypeInfoForLambda(state, lambda)
 	end
 
 	for _, typeInfoCached in ipairs(state.allTypeInfos) do
-		if typeInfoCached.tag == !(typeTags.TypeInfoFunction) and doesLambdaHaveSignature(lambda, typeInfoCached) then
+		if typeInfoCached.tag == !(TYPE_FUNCTION) and doesLambdaHaveSignature(lambda, typeInfoCached) then
 			return typeInfoCached
 		end
 	end
@@ -306,7 +283,7 @@ do
 	end
 
 	function _G.getTypeInfoForList(state, typeInfos)
-		return getTypeInfoForListOrCompoundType(state, typeInfos, !(typeTags.TypeInfoList), TypeInfoList)
+		return getTypeInfoForListOrCompoundType(state, typeInfos, !(TYPE_LIST), TypeInfoList)
 	end
 
 	-- Note: typeInfos is expected to be sorted by type ID already if doSort is false.
@@ -315,7 +292,7 @@ do
 		if doSort then
 			table.sort(typeInfos, compareIdsOfTypes)
 		end
-		return getTypeInfoForListOrCompoundType(state, typeInfos, !(typeTags.TypeInfoCompound), TypeInfoCompound)
+		return getTypeInfoForListOrCompoundType(state, typeInfos, !(TYPE_COMPOUND), TypeInfoCompound)
 	end
 end
 
@@ -335,11 +312,11 @@ do
 	end
 
 	function _G.getTypeInfoForArray(state, itemType)
-		return getTypeInfoForArrayOrVararg(state, itemType, !(typeTags.TypeInfoArray), TypeInfoArray)
+		return getTypeInfoForArrayOrVararg(state, itemType, !(TYPE_ARRAY), TypeInfoArray)
 	end
 
 	function _G.getTypeInfoForVararg(state, itemType)
-		return getTypeInfoForArrayOrVararg(state, itemType, !(typeTags.TypeInfoVararg), TypeInfoVararg)
+		return getTypeInfoForArrayOrVararg(state, itemType, !(TYPE_VARARG), TypeInfoVararg)
 	end
 end
 
@@ -347,7 +324,7 @@ function _G.getTypeInfoForNamespace(state, scope)
 	!ASSERT `scope`
 
 	for _, typeInfoCached in ipairs(state.allTypeInfos) do
-		if typeInfoCached.tag == !(typeTags.TypeInfoNamespace) and scope == typeInfoCached.scope then
+		if typeInfoCached.tag == !(TYPE_NAMESPACE) and scope == typeInfoCached.scope then
 			return typeInfoCached
 		end
 	end
@@ -384,7 +361,7 @@ function _G.getTypeRepresentedByExpression(expr)
 	elseif expr.nodeType == !(nodeTypes.AstCast) then
 		local cast = expr
 		return
-			cast.inferredType.tag == !(typeTags.TypeInfoType) -- Is this check needed?
+			cast.inferredType.tag == !(TYPE_TYPE) -- Is this check needed?
 			and getTypeRepresentedByExpression(cast.expression)
 			or  nil
 
@@ -395,7 +372,7 @@ function _G.getTypeRepresentedByExpression(expr)
 		local bake = expr
 		return bake.name.declaration.valueTypeInfo -- May be nil.
 
-	elseif expr.inferredType.tag == !(typeTags.TypeInfoType) then
+	elseif expr.inferredType.tag == !(TYPE_TYPE) then
 		errorInternal("Incomplete: Unhandled node type: %s", getFriendlyTypeInfoName(expr.inferredType))
 	else
 		return nil
@@ -409,9 +386,9 @@ function _G.requireTypeRepresentedByExpression(state, expr)
 
 	local typeInfo = expr.inferredType
 
-	if typeInfo.tag == !(typeTags.TypeInfoList) then
+	if typeInfo.tag == !(TYPE_LIST) then
 		typeError(state, expr, "Expected a type. This is a function call.")
-	elseif typeInfo.tag ~= !(typeTags.TypeInfoType) then
+	elseif typeInfo.tag ~= !(TYPE_TYPE) then
 		typeError(state, expr, "Expected a type. (Got %s)", getFriendlyTypeInfoName(typeInfo))
 	elseif not isExpressionConstant(state, expr, false) then
 		-- @UX: Better message for foreign values.
@@ -424,26 +401,8 @@ end
 
 
 
--- scope, childClosestToScope = getClosestScope( node )
-_G.getClosestScope = astFindParentScope
---[[
-function _G.getClosestScope(node)
-	-- @Incomplete: Treat global declarations differently and depricate
-	-- getClosestScopeForDeclaration() (or simply change the parent of
-	-- globals to the actual globalScope, though that has problems too).
-	return astFindParent(node, !!(CONST_SET(scopeNodeTypes)))
-end
-]]
+function _G.isScope(node)  return SCOPE_SET[node.nodeType] or false  end
 
--- Since the physical parent of global declarations actually is a file scope
--- we have to treat these declarations differently sometimes. This function
--- returns the correct scope for global declarations.
-function _G.getClosestScopeForDeclaration(state, decl)
-	return astFindParentScope(decl)
-	-- return isDeclarationGlobal(decl) and state.globalScope or getClosestScope(decl)
-end
-
-function _G.isScope           (node)   return SCOPE_SET            [node .nodeType] or false  end
 function _G.isScopeDeclarative(scope)  return SCOPE_SET_DECLARATIVE[scope.nodeType] or false  end
 function _G.isScopeImperative (scope)  return SCOPE_SET_IMPERATIVE [scope.nodeType] or false  end
 
@@ -457,13 +416,13 @@ end
 
 -- declaration, fromUsing = findDeclaration( compilationState, startNode, name [, declarationToIgnore ] )
 function _G.findDeclaration(state, startNode, name, declToIgnore)
-	local scope = isScope(startNode) and startNode or getClosestScope(startNode)
+	local scope = isScope(startNode) and startNode or astFindParentScope(startNode)
 
 	while scope do
 		-- This seem a little bit @Ugly maybe. How does this compare to polymorphic functions regarding declarations
 		-- existing directly in the scope? (Baked values in functions probably set decl.checkedRedeclaration.)
 		while scope.nodeType == !(nodeTypes.AstStruct) and scope.isPolymorphic do
-			scope = getClosestScope(scope)
+			scope = astFindParentScope(scope)
 			if not scope then  return  end
 		end
 
@@ -488,7 +447,7 @@ function _G.findDeclaration(state, startNode, name, declToIgnore)
 		for _, using in ipairs(scope.usings) do
 			if using.scope then
 				local nodeType    = using.scope.nodeType
-				local onlyExports = !!(anyV(`nodeType`, nodeTypes.AstFileScope,nodeTypes.AstGlobalScope,nodeTypes.AstNamespace))
+				local onlyExports = !!(CONST_SET{ nodeTypes.AstFileScope, nodeTypes.AstGlobalScope, nodeTypes.AstNamespace })[nodeType]
 
 				for _, decl in ipairs(using.scope.declarations) do
 					if
@@ -520,7 +479,7 @@ function _G.findDeclaration(state, startNode, name, declToIgnore)
 			break
 		end
 
-		scope = getClosestScope(scope)
+		scope = astFindParentScope(scope)
 	end
 
 	return nil, nil
@@ -562,7 +521,7 @@ function _G.isDeclarationVisibleToNode(state, decl, node)
 	local canSeeImperativeVariables = (decl.kind == !(DECL_KIND_LOCAL_VAR) --[[or decl.kind == !(DECL_KIND_READ_ONLY)]])
 
 	local name                      = decl.name.name
-	local nodeScope, nodeScopeChild = getClosestScope(node)
+	local nodeScope, nodeScopeChild = astFindParentScope(node)
 	local nodeScope0                = nodeScope
 
 	while true do
@@ -584,7 +543,7 @@ function _G.isDeclarationVisibleToNode(state, decl, node)
 		elseif not canSeeImperativeVariables then
 			return false
 
-		elseif !!(anyV(`nodeScope.nodeType`, nodeTypes.AstFor,nodeTypes.AstLambda)) then
+		elseif !!(CONST_SET{ nodeTypes.AstFor, nodeTypes.AstLambda })[nodeScope.nodeType] then
 			-- These are really a combination of declarative and imperative scopes. (Not sure if this is good. 2020-03-19)
 			return true
 
@@ -594,7 +553,7 @@ function _G.isDeclarationVisibleToNode(state, decl, node)
 			-- Note: If the node is inside the initial assignment then we need to treat the declaration
 			-- and the assignment as if they were the same statement. Otherwise the assignment will be
 			-- able to see it's own declarations, which is illegal!
-			local declScope, declScopeChild = getClosestScope(decl.assignment or decl)
+			local declScope, declScopeChild = astFindParentScope(decl.assignment or decl)
 
 			if declScope == block then
 				local imperativeIndexForDecl = indexOf(block.statements, declScopeChild) or errorInternal()
@@ -619,7 +578,7 @@ function _G.isDeclarationVisibleToNode(state, decl, node)
 			canSeeImperativeVariables = false
 		end
 
-		nodeScope, nodeScopeChild = getClosestScope(nodeScope)
+		nodeScope, nodeScopeChild = astFindParentScope(nodeScope)
 		if not nodeScope then  return false  end -- This shouldn't happen I don't think, unless decl and node is not part of the same tree.
 	end
 end
@@ -683,7 +642,7 @@ end
 function _G.getFriendlyTypeInfoName(typeInfo)
 	local name = ""
 
-	if typeInfo.tag == !(typeTags.TypeInfoStruct) then
+	if typeInfo.tag == !(TYPE_STRUCT) then
 		local structInfo = typeInfo
 		name             = structInfo.name
 
@@ -711,11 +670,11 @@ function _G.getFriendlyTypeInfoName(typeInfo)
 				.."("..table.concat(params, ",")..")"
 		end
 
-	elseif typeInfo.tag == !(typeTags.TypeInfoEnum) then
+	elseif typeInfo.tag == !(TYPE_ENUM) then
 		local enumInfo = typeInfo
 		name           = enumInfo.name
 
-	elseif typeInfo.tag == !(typeTags.TypeInfoFunction) then
+	elseif typeInfo.tag == !(TYPE_FUNCTION) then
 		local funcSig      = typeInfo
 		local typeTextsIn  = {}
 		local typeTextsOut = {}
@@ -733,7 +692,7 @@ function _G.getFriendlyTypeInfoName(typeInfo)
 			and F("function(%s)->(%s)", table.concat(typeTextsIn), table.concat(typeTextsOut, ","))
 			or  F("function(%s)->void", table.concat(typeTextsIn))
 
-	elseif typeInfo.tag == !(typeTags.TypeInfoCompound) then
+	elseif typeInfo.tag == !(TYPE_COMPOUND) then
 		local compound  = typeInfo
 		local typeTexts = {}
 
@@ -743,7 +702,7 @@ function _G.getFriendlyTypeInfoName(typeInfo)
 
 		name = table.concat(typeTexts, "|")
 
-	elseif typeInfo.tag == !(typeTags.TypeInfoList) then
+	elseif typeInfo.tag == !(TYPE_LIST) then
 		local listSig   = typeInfo
 		local typeTexts = {}
 
@@ -753,15 +712,15 @@ function _G.getFriendlyTypeInfoName(typeInfo)
 
 		name = "list("..table.concat(typeTexts, ", ")..")"
 
-	elseif typeInfo.tag == !(typeTags.TypeInfoArray) then
+	elseif typeInfo.tag == !(TYPE_ARRAY) then
 		local arraySig = typeInfo
 		name           = "array("..getFriendlyTypeInfoName(arraySig.itemType)..")"
 
-	elseif typeInfo.tag == !(typeTags.TypeInfoVararg) then
+	elseif typeInfo.tag == !(TYPE_VARARG) then
 		local varargSig = typeInfo
 		name            = "..."..getFriendlyTypeInfoName(varargSig.itemType)
 
-	elseif typeInfo.tag == !(typeTags.TypeInfoNamespace) then
+	elseif typeInfo.tag == !(TYPE_NAMESPACE) then
 		local namespaceInfo = typeInfo
 		local scope         = namespaceInfo.scope
 		local scopeParent   = scope.parent
@@ -774,7 +733,7 @@ function _G.getFriendlyTypeInfoName(typeInfo)
 	end
 
 	if name == "" then
-		name = TYPE_TAG_NAMES[typeInfo.tag] or errorInternal("%d", typeInfo.tag)
+		name = TYPE_NAMES[typeInfo.tag] or errorInternal("%d", typeInfo.tag)
 	end
 
 	-- !(if DEBUG then)  name = name.."@"..typeInfo.id  !(end)
@@ -840,7 +799,7 @@ local function getEarlyAndLateForRedeclarationError(state, identEarly, identLate
 		if isDeclarationStatic(identLate.declaration) then
 			identEarly, identLate = identLate, identEarly
 		end
-		if isScopeImperative(getClosestScopeForDeclaration(state, identLate.declaration)) then
+		if isScopeImperative(astFindParentScope(identLate.declaration)) then
 			extraMessageEarly = " (Note that constants in imperative scopes are visible to the whole scope, unlike variables.)"
 		end
 
@@ -856,7 +815,7 @@ local function getEarlyAndLateForRedeclarationError(state, identEarly, identLate
 		end
 
 		if isDeclarationConstant(identEarly.declaration) then
-			if isScopeImperative(getClosestScopeForDeclaration(state, identEarly.declaration)) then
+			if isScopeImperative(astFindParentScope(identEarly.declaration)) then
 				extraMessageEarly = " (Note that constants in imperative scopes are visible to the whole scope.)"
 			end
 		elseif identEarly.declaration.kind == !(DECL_KIND_STATIC) then
@@ -874,7 +833,7 @@ local function checkRedeclaration(state, ident, decl, isMember, scope)
 	if not declExisting then  return  end
 	!ASSERT `declExisting ~= decl`
 
-	local scopeExisting = getClosestScopeForDeclaration(state, declExisting)
+	local scopeExisting = astFindParentScope(declExisting)
 
 	-- Member.
 	if isMember and decl.kind == !(DECL_KIND_LOCAL_VAR) and scope ~= scopeExisting then
@@ -938,9 +897,9 @@ local function checkRedeclaration(state, ident, decl, isMember, scope)
 		scope == scopeExisting
 		or (
 			-- We do not allow declarations on lambda bodies to shadow the lambda's arguments.
-			scope.nodeType                      == !(nodeTypes.AstBlock)
-			and getClosestScope(scope).nodeType == !(nodeTypes.AstLambda)
-			and getClosestScope(scope)          == scopeExisting
+			scope.nodeType                         == !(nodeTypes.AstBlock)
+			and astFindParentScope(scope).nodeType == !(nodeTypes.AstLambda)
+			and astFindParentScope(scope)          == scopeExisting
 		)
 	then
 		typeError2(state,
@@ -1071,7 +1030,7 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 
 	-- 3. At this point we're defining a declared identifier.
 
-	local scope = getClosestScopeForDeclaration(state, decl)
+	local scope = astFindParentScope(decl)
 
 	if not scope then
 		astPrint(identOrVararg)
@@ -1222,7 +1181,7 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 
 			if parentScope.nodeType == !(nodeTypes.AstFileScope) and parentScope.isModule then  break  end
 
-			parentScope = getClosestScope(parentScope)
+			parentScope = astFindParentScope(parentScope)
 		until not parentScope
 	end
 
@@ -1259,21 +1218,21 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 			local enumInfo = enum.representedType
 			typeInfo       = enumInfo -- Kind of a @Hack, but maybe it's fine for enum members!
 
-			if enumInfo.memberTypeInfo.tag == !(typeTags.TypeInfoType) then
+			if enumInfo.memberTypeInfo.tag == !(TYPE_TYPE) then
 				-- This means you can for example say: local myVar:MyEnum.MY_TYPE
 				assert(typeInfoForDecl)
 			end
 		end
 
-		if typeInfo.tag == !(typeTags.TypeInfoType) then
+		if typeInfo.tag == !(TYPE_TYPE) then
 			if not typeInfoForDecl then
 				errorInternal(state, valueExpr, "Missing what type this constant expression represents.")
 			end
 
-		elseif typeInfo.tag == !(typeTags.TypeInfoEnum) then -- @Robustness: Actually detect whether we have a type enum and include it here above.
+		elseif typeInfo.tag == !(TYPE_ENUM) then -- @Robustness: Actually detect whether we have a type enum and include it here above.
 			-- void  For now we may or may not have a type enum and typeInfoForDecl.
 
-		elseif typeInfo.tag == !(typeTags.TypeInfoPlaceholder) then
+		elseif typeInfo.tag == !(TYPE_PLACEHOLDER) then
 			-- void  Just ignore this for now. We get here when placeholders are combined with auto-baking (which produces constants).
 
 		elseif typeInfoForDecl then
@@ -1287,13 +1246,13 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 		if not typeInfoForDecl then
 			-- void
 
-		elseif typeInfoForDecl.tag == !(typeTags.TypeInfoStruct) then
+		elseif typeInfoForDecl.tag == !(TYPE_STRUCT) then
 			local structInfo = typeInfoForDecl
 			if structInfo.name == "" then -- Is this detection ok? Need testing or another solution.
 				structInfo.name = ident.name
 			end
 
-		elseif typeInfoForDecl.tag == !(typeTags.TypeInfoEnum) then
+		elseif typeInfoForDecl.tag == !(TYPE_ENUM) then
 			local enumInfo = typeInfoForDecl
 			if enumInfo.name == "" then -- Is this detection ok? Need testing or another solution.
 				enumInfo.name = ident.name
@@ -1313,7 +1272,7 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 			io.stdout:write("DEFINE ", identOrVararg.name ,":", getFriendlyTypeInfoName(typeInfo), " (", DECL_KIND_TITLES[decl.kind], ")")
 			if typeInfoForDecl then  io.stdout:write(" (VALUE ", getFriendlyTypeInfoName(typeInfoForDecl), ")")  end
 			io.stdout:write(" IN ")
-			astPrint(getClosestScopeForDeclaration(state, decl))
+			astPrint(astFindParentScope(decl))
 		end
 	!end
 
@@ -1333,7 +1292,7 @@ end
 
 		if not (decl.kind == !(DECL_KIND_LOCAL_VAR) --[[or decl.kind == !(DECL_KIND_READ_ONLY)]]) then
 			typeError(state, blank, "Blank names in declarations require the declarations to be declarations of local variables.")
-		elseif not isScopeImperative(getClosestScope(decl)) then
+		elseif not isScopeImperative(astFindParentScope(decl)) then
 			typeError(state, blank, "Blank names are only allowed in imperative contexts.")
 		end
 
@@ -1376,7 +1335,7 @@ end
 		if not lambda.inferredType then
 			!DEPEND_AND_RETURN(`typeNode`, DEPEND_NODE_INFERRED, `lambda`)
 		end
-		assert(lambda.inferredType.tag == !(typeTags.TypeInfoFunction))
+		assert(lambda.inferredType.tag == !(TYPE_FUNCTION))
 
 		local funcSig       = getTypeInfoForLambda(state, lambda)
 		typeInfoRepresented = funcSig
@@ -1390,9 +1349,9 @@ end
 		end
 
 		local itemTypeInfo = requireTypeRepresentedByExpression(state, itemTypeNode)
-		if itemTypeInfo.tag == !(typeTags.TypeInfoNone) then
+		if itemTypeInfo.tag == !(TYPE_NONE) then
 			typeError(state, itemTypeNode, "Arrays cannot contain nil.")
-		elseif itemTypeInfo.tag == !(typeTags.TypeInfoCompound) and indexWith1(itemTypeInfo, "tag", !(typeTags.TypeInfoNone)) then
+		elseif itemTypeInfo.tag == !(TYPE_COMPOUND) and indexWith1(itemTypeInfo, "tag", !(TYPE_NONE)) then
 			typeError(state, itemTypeNode, "Arrays cannot contain nil. (Item type is %s)", getFriendlyTypeInfoName(itemTypeInfo))
 		end
 
@@ -1437,7 +1396,7 @@ end
 
 			local componentType = requireTypeRepresentedByExpression(state, typeExpr)
 
-			if componentType.tag == !(typeTags.TypeInfoCompound) then
+			if componentType.tag == !(TYPE_COMPOUND) then
 				-- Unpack the sub-compound type so we don't end up with compound types of other compound types.
 				local compound = componentType
 
@@ -1455,7 +1414,7 @@ end
 			else
 				if duplicates[componentType] then
 					!ERROR_DUPLICATE_TYPE("compound type", `componentType`)
-				elseif componentType.tag == !(typeTags.TypeInfoAny) then
+				elseif componentType.tag == !(TYPE_ANY) then
 					typeError(state, typeExpr, "Cannot include 'any' in compound types.")
 				end
 
@@ -1488,16 +1447,16 @@ end
 		typeInfo            = decl.name.inferredType or errorInternal()
 
 		-- Type enum members can be used as types, as a special case.
-		if isDeclarationConstant(decl) and typeInfo.tag == !(typeTags.TypeInfoEnum) then
+		if isDeclarationConstant(decl) and typeInfo.tag == !(TYPE_ENUM) then
 			local enum     = typeInfo.astNode     or errorInternal()
 			local enumInfo = enum.representedType or errorInternal()
 
-			if enumInfo.memberTypeInfo.tag == !(typeTags.TypeInfoType) then
+			if enumInfo.memberTypeInfo.tag == !(TYPE_TYPE) then
 				typeInfo = getTypeInfoForBuiltinType(state, "type")
 			end
 		end
 
-		if typeInfo.tag ~= !(typeTags.TypeInfoType) then
+		if typeInfo.tag ~= !(TYPE_TYPE) then
 			!TRACE()
 			printerr()
 			typeMessage(io.stderr, state, typeNode, "Error", "'%s' is not a type. (It is %s)", typeNode.typeName, getFriendlyTypeInfoName(typeInfo))
@@ -1513,10 +1472,10 @@ end
 
 		-- @Incomplete: Proper error messages here:
 
-		if SIMPLE_TYPE_TAG[typeInfo.tag] then
+		if SIMPLE_TYPES[typeInfo.tag] then
 			assert(not typeNode.arguments) -- This should have been caught during parsing, e.g. int(a,b).
 
-		elseif typeInfo.tag == !(typeTags.TypeInfoStruct) then
+		elseif typeInfo.tag == !(TYPE_STRUCT) then
 			local structInfo = typeInfo
 			if structInfo.arguments[1] then
 				errorInternal("@Incomplete: Struct arguments.")
@@ -1524,14 +1483,14 @@ end
 				typeError(state, astGetExpressionVisuallyFurthestToTheLeft(typeNode.arguments[1]), "Parameters for structs are not supported yet.")
 			end
 
-		elseif typeInfo.tag == !(typeTags.TypeInfoEnum) then
+		elseif typeInfo.tag == !(TYPE_ENUM) then
 			assert(not typeNode.arguments)
 
-		elseif typeInfo.tag == !(typeTags.TypeInfoFunction) then
+		elseif typeInfo.tag == !(TYPE_FUNCTION) then
 			assert(not typeNode.arguments) -- This should not be possible I think. The node should have been parsed as an AstCall - not an AstType without functionHeader... right? I may be wrong.
 
 		else
-			errorInternal("Incomplete: Handle type group '%s'.", TYPE_TAG_NAMES[typeInfo.tag])
+			errorInternal("Incomplete: Handle type group '%s'.", TYPE_NAMES[typeInfo.tag])
 		end
 	end
 
@@ -1586,12 +1545,12 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 		if not valueCall.surroundedByParentheses then
 			local calleeTypeInfo = valueCall.callee.inferredType
 
-			if calleeTypeInfo.tag == !(typeTags.TypeInfoList) then
+			if calleeTypeInfo.tag == !(TYPE_LIST) then
 				local listSig  = calleeTypeInfo
 				calleeTypeInfo = listSig[1] or errorInternal() -- The error should have happened when inferring AstCall.
 			end
 
-			assert(calleeTypeInfo.tag == !(typeTags.TypeInfoFunction))
+			assert(calleeTypeInfo.tag == !(TYPE_FUNCTION))
 
 			local argTypesOut = calleeTypeInfo.argumentTypesOut
 			local argCount    = #argTypesOut
@@ -1601,7 +1560,7 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 				typeError(state, valueCall, "Function call returns nothing. (Expected at least one value.)")
 			end
 
-			local returnsVararg = argCount > 0 and argTypesOut[argCount].tag == !(typeTags.TypeInfoVararg)
+			local returnsVararg = argCount > 0 and argTypesOut[argCount].tag == !(TYPE_VARARG)
 			local returnsMin    = returnsVararg and argCount-1 or argCount
 			local returnsMax    = returnsVararg and math.huge  or argCount
 
@@ -1622,7 +1581,7 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 
 	-- Get accepted count.
 	local typeInfoCount   = #typeInfos
-	local acceptingVararg = typeInfoCount > 0 and typeInfos[typeInfoCount].tag == !(typeTags.TypeInfoVararg)
+	local acceptingVararg = typeInfoCount > 0 and typeInfos[typeInfoCount].tag == !(TYPE_VARARG)
 	local acceptedMin     = acceptingVararg and typeInfoCount-1 or typeInfoCount
 	local acceptedMax     = acceptingVararg and math.huge       or typeInfoCount
 
@@ -1708,7 +1667,7 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 		local isCompatible, compatibilityScore
 
 		-- Function call (0..inf values).
-		if valueTypeInfo.tag == !(typeTags.TypeInfoList) then
+		if valueTypeInfo.tag == !(TYPE_LIST) then
 			local listSig         = valueTypeInfo
 			local callOutArgIndex = slot-valueIndex+1
 			valueTypeInfo         = listSig[callOutArgIndex]
@@ -1718,7 +1677,7 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 				typeError(state, valueExpr, "Function call returns nothing. (Expected at least one value.)") -- Note: "Nothing" is not the same as vararg of zero length.
 			end
 
-			local adjustVarargToIncludeNil   = not (valueTypeInfo.tag == !(typeTags.TypeInfoVararg) and typeInfoToMatch.tag == !(typeTags.TypeInfoVararg))
+			local adjustVarargToIncludeNil   = not (valueTypeInfo.tag == !(TYPE_VARARG) and typeInfoToMatch.tag == !(TYPE_VARARG))
 			local valueTypeInfoAdjusted      = adjustTypeToOne(state, valueExpr,        valueTypeInfo, adjustVarargToIncludeNil) -- We have a value with a type.
 			local typeInfoToMatchAdjusted    = adjustTypeToOne(state, callOrReturnNode, typeInfoToMatch)                         -- We want a specific type.
 			isCompatible, compatibilityScore = isTypeCompatibleWith(valueTypeInfoAdjusted, typeInfoToMatchAdjusted)
@@ -1740,7 +1699,7 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 
 		-- Vararg (0..inf values) OR other (1 value).
 		else
-			local adjustVarargToIncludeNil   = not (valueTypeInfo.tag == !(typeTags.TypeInfoVararg) and typeInfoToMatch.tag == !(typeTags.TypeInfoVararg))
+			local adjustVarargToIncludeNil   = not (valueTypeInfo.tag == !(TYPE_VARARG) and typeInfoToMatch.tag == !(TYPE_VARARG))
 			local valueTypeInfoAdjusted      = adjustTypeToOne(state, valueExpr,        valueTypeInfo, adjustVarargToIncludeNil) -- We have a value with a type.
 			local typeInfoToMatchAdjusted    = adjustTypeToOne(state, callOrReturnNode, typeInfoToMatch)                         -- We want a specific type.
 			isCompatible, compatibilityScore = isTypeCompatibleWith(valueTypeInfoAdjusted, typeInfoToMatchAdjusted)
@@ -1773,7 +1732,7 @@ local function getMatchingFunctions(state, call, realArguments, realArgumentType
 	for _, decl in ipairs(declarations) do
 		local funcSig = decl.name.inferredType
 
-		!ASSERT("funcSig.tag == "..typeTags.TypeInfoFunction)
+		!ASSERT("funcSig.tag == "..TYPE_FUNCTION)
 
 		local doesMatch, compatibilityScore = checkIfValuesMatchArgumentTypes(
 			state, call, realArguments, realArgumentTypes, funcSig.argumentTypesIn, true, decl
@@ -1967,7 +1926,7 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 		morphLambda.polymorphs    = {}
 
 		for i, statement in ipairsr(morphLambda.statements) do
-			if !!(anyV(`statement.nodeType`, nodeTypes.AstDeclaration,nodeTypes.AstAssignment)) and statement.addedByPolymorph then
+			if !!(CONST_SET{ nodeTypes.AstDeclaration, nodeTypes.AstAssignment })[statement.nodeType] and statement.addedByPolymorph then
 				table.remove(morphLambda.statements, i) -- Should be fast enough. There shouldn't be that many statements in lambdas.
 			end
 		end
@@ -2051,12 +2010,12 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 						local patternTypeNode = patternLoc.containerNode
 
 						if patternTypeNode.kind == !(TYPE_KIND_ARRAY) then
-							if bakeValueType.tag == !(typeTags.TypeInfoArray) then
+							if bakeValueType.tag == !(TYPE_ARRAY) then
 								local arraySig = bakeValueType
 								bakeValueExpr  = nil
 								bakeValueType  = arraySig.itemType or errorInternal(state, valueExpr)
 
-							elseif bakeValueType.tag == !(typeTags.TypeInfoStruct) and bakeValueType.kind == !(STRUCT_KIND_ARRAY) then
+							elseif bakeValueType.tag == !(TYPE_STRUCT) and bakeValueType.kind == !(STRUCT_KIND_ARRAY) then
 								local structInfo = bakeValueType
 								bakeValueExpr    = nil
 								bakeValueType    = structInfo.valueType or errorInternal(state, valueExpr)
@@ -2072,9 +2031,9 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 					elseif patternLoc.containerNode.nodeType == !(nodeTypes.AstCall) then
 						local patternCall = patternLoc.containerNode
 
-						if bakeValueType.tag == !(typeTags.TypeInfoStruct) then
+						if bakeValueType.tag == !(TYPE_STRUCT) then
 							-- void
-						elseif bakeValueType.tag == !(typeTags.TypeInfoType) then
+						elseif bakeValueType.tag == !(TYPE_TYPE) then
 							-- Note sure if this is bullet proof or sane in any way...
 							assert(bakeValueExpr)
 							bakeValueType = requireTypeRepresentedByExpression(state, bakeValueExpr)
@@ -2083,7 +2042,7 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 						end
 
 						local structInfo = bakeValueType
-						if structInfo.tag ~= !(typeTags.TypeInfoStruct) then
+						if structInfo.tag ~= !(TYPE_STRUCT) then
 							!BAKE_ERROR`"Polymorphic call: Expected a type to be a (polymorphic) struct. (Got %s)", getFriendlyTypeInfoName(structInfo)`
 						elseif not structInfo.astNode.polymorphSourceStruct then
 							bakeValueExpr = structInfo.astNode
@@ -2232,7 +2191,7 @@ local function handlePolymorphicStruct(state, call)
 	assert(typeNode.nodeType == !(nodeTypes.AstType))
 
 	local structInfo = typeNode.representedType
-	assert(structInfo.tag == !(typeTags.TypeInfoStruct))
+	assert(structInfo.tag == !(TYPE_STRUCT))
 	assert(structInfo.isPolymorphic)
 
 	if call.isMethod then
@@ -2339,7 +2298,7 @@ local function handlePolymorphicStruct(state, call)
 		morphStruct.polymorphs    = {}
 
 		for i, statement in ipairsr(morphStruct.statements) do
-			if !!(anyV(`statement.nodeType`, nodeTypes.AstDeclaration,nodeTypes.AstAssignment)) and statement.addedByPolymorph then
+			if !!(CONST_SET{ nodeTypes.AstDeclaration, nodeTypes.AstAssignment })[statement.nodeType] and statement.addedByPolymorph then
 				table.remove(morphStruct.statements, i) -- This line should only trigger at most twice per polymorph.
 			end
 		end
@@ -2374,19 +2333,19 @@ local function handlePolymorphicStruct(state, call)
 end
 
 local function doesExpressionRepresentPolymorphicStructType(expr)
-	if expr.inferredType.tag ~= !(typeTags.TypeInfoType) then  return false  end
+	if expr.inferredType.tag ~= !(TYPE_TYPE) then  return false  end
 
 	local typeRepresented = getTypeRepresentedByExpression(expr)
 	return
 		typeRepresented ~= nil
-		and typeRepresented.tag == !(typeTags.TypeInfoStruct)
+		and typeRepresented.tag == !(TYPE_STRUCT)
 		and typeRepresented.isPolymorphic
 end
 local function doesExpressionRepresentStructType(expr)
-	if expr.inferredType.tag ~= !(typeTags.TypeInfoType) then  return false  end
+	if expr.inferredType.tag ~= !(TYPE_TYPE) then  return false  end
 
 	local typeRepresented = getTypeRepresentedByExpression(expr)
-	return typeRepresented ~= nil and typeRepresented.tag == !(typeTags.TypeInfoStruct)
+	return typeRepresented ~= nil and typeRepresented.tag == !(TYPE_STRUCT)
 end
 
 !NODE_INFERRER `function nodeInferrers.AstCall(state, call)`
@@ -2414,7 +2373,7 @@ end
 		end
 	end
 
-	if calleeTypeInfo.tag == !(typeTags.TypeInfoList) then
+	if calleeTypeInfo.tag == !(TYPE_LIST) then
 		local listSig  = calleeTypeInfo -- @Incomplete: Should we use adjustTypeToOne() here? I think so...
 		calleeTypeInfo = listSig[1] or typeError(state, call, "Trying to call void.")
 	end
@@ -2431,7 +2390,7 @@ end
 		{nodeTypeIdent=nodeTypes.AstIdentifier}
 	)
 
-	if calleeTypeInfo.tag == !(typeTags.TypeInfoFunction) then
+	if calleeTypeInfo.tag == !(TYPE_FUNCTION) then
 		-- void
 
 	elseif doesExpressionRepresentPolymorphicStructType(callee) then -- @Cleanup: We can/should probably just check callee.declaration.valueTypeInfo here.
@@ -2460,7 +2419,7 @@ end
 		!!(NOT_CALLABLE)
 	end
 
-	!ASSERT("calleeTypeInfo.tag == "..typeTags.TypeInfoFunction)
+	!ASSERT("calleeTypeInfo.tag == "..TYPE_FUNCTION)
 
 	!if DEBUG then
 		if call.isMethod and callee.nodeType ~= !(nodeTypes.AstAccess) then
@@ -2478,7 +2437,7 @@ end
 	end
 	for _, argExpr in ipairs(call.arguments) do
 		local typeInfo = argExpr.inferredType
-		if !!(anyV(`argExpr.nodeType`, nodeTypes.AstVararg,nodeTypes.AstCall)) and argExpr.surroundedByParentheses then
+		if !!(CONST_SET{ nodeTypes.AstVararg, nodeTypes.AstCall })[argExpr.nodeType] and argExpr.surroundedByParentheses then
 			typeInfo = adjustTypeToOne(state, argExpr, typeInfo, true)
 		end
 		table.insert(realArgumentTypes, typeInfo)
@@ -2514,7 +2473,7 @@ end
 		end
 	end
 
-	local scope = getClosestScope(returnNode) or errorInternal()
+	local scope = astFindParentScope(returnNode) or errorInternal()
 
 	while scope.nodeType ~= !(nodeTypes.AstLambda) do
 		if not isScopeImperative(scope) then -- This may eventually be AstFileScope, at most.
@@ -2522,7 +2481,7 @@ end
 			typeError(state, scope, "Return statement is not in a function.")
 		end
 
-		scope = getClosestScope(scope) or errorInternal()
+		scope = astFindParentScope(scope) or errorInternal()
 	end
 
 	local lambda = scope
@@ -2562,7 +2521,7 @@ end
 
 		if decl.parent.nodeType == !(nodeTypes.AstArgument) then
 			-- void  (Ignore function arguments.)
-		elseif typeInfoRepresented.tag ~= !(typeTags.TypeInfoCompound) then
+		elseif typeInfoRepresented.tag ~= !(TYPE_COMPOUND) then
 			-- void
 		elseif isDeclarationConstant(decl) then
 			typeError(
@@ -2581,10 +2540,10 @@ end
 
 	-- @Incomplete: decl.notes (if we make them structured, which we should!)
 
-	local scope = getClosestScope(decl)
+	local scope = astFindParentScope(decl)
 
 	if valueExpr then
-		if valueExpr.inferredType.tag == !(typeTags.TypeInfoNamespace) and not isDeclarationConstant(decl) then
+		if valueExpr.inferredType.tag == !(TYPE_NAMESPACE) and not isDeclarationConstant(decl) then
 			typeError(state, valueExpr, "References to namespaces must be constant.")
 		end
 
@@ -2648,7 +2607,7 @@ end
 		or (not isDeclarationConstant(decl) and decl.parent == scope and scope.nodeType == !(nodeTypes.AstStruct) and scope.isForeign)
 	) then
 		!ASSERT `not isDeclarationConstant(decl)` -- This should have been detected in inferIdentifierOrVararg() (I think).
-		typeError(state, identOrVararg, "Variables in type group '%s' must have a specified initial value.", TYPE_TAG_NAMES[identOrVararg.inferredType.tag])
+		typeError(state, identOrVararg, "Variables in type group '%s' must have a specified initial value.", TYPE_NAMES[identOrVararg.inferredType.tag])
 	end
 
 	moveToNextRelevantPipe(state, decl)
@@ -2662,11 +2621,11 @@ end
 	[LITERAL_STRING]  = "string",
 }
 _G.!(local )!!BUILTIN_TYPE_TAG_TO_LITERAL_TYPE = {
-	[typeTags.TypeInfoBool]   = LITERAL_BOOLEAN,
-	[typeTags.TypeInfoInt]    = LITERAL_INTEGER,
-	[typeTags.TypeInfoNone]   = LITERAL_NIL,
-	[typeTags.TypeInfoFloat]  = LITERAL_FLOAT,
-	[typeTags.TypeInfoString] = LITERAL_STRING,
+	[TYPE_BOOL]   = LITERAL_BOOLEAN,
+	[TYPE_INT]    = LITERAL_INTEGER,
+	[TYPE_NONE]   = LITERAL_NIL,
+	[TYPE_FLOAT]  = LITERAL_FLOAT,
+	[TYPE_STRING] = LITERAL_STRING,
 }
 
 !NODE_INFERRER `function nodeInferrers.AstLiteral(state, literal)`
@@ -2697,13 +2656,13 @@ end
 		end
 
 	elseif unary.operation == "not" then
-		if typeInfo.tag ~= !(typeTags.TypeInfoBool) then
+		if typeInfo.tag ~= !(TYPE_BOOL) then
 			wrapInImplicitCast(state, unary.expression, getTypeInfoForBuiltinType(state, "bool"), true)
 			return
 		end
 
 	elseif unary.operation == "#" then
-		if not !!(anyV(`typeInfo.tag`, typeTags.TypeInfoArray,typeTags.TypeInfoTable)) then
+		if not !!(CONST_SET{ TYPE_ARRAY, TYPE_TABLE })[typeInfo.tag] then
 			typeError(
 				state, unary.expression,
 				"Unary length operation (#): Expected an array or a table. (Got %s)",
@@ -2729,9 +2688,9 @@ local function isArrayItemOrTableFieldCheck(state, binary, typeInfoL, typeInfoR)
 	local maybeAccess = binary.left
 	local nilExpr     = binary.right
 
-	if nilExpr.inferredType.tag == !(typeTags.TypeInfoNone) then
+	if nilExpr.inferredType.tag == !(TYPE_NONE) then
 		-- void
-	elseif maybeAccess.inferredType.tag == !(typeTags.TypeInfoNone) then
+	elseif maybeAccess.inferredType.tag == !(TYPE_NONE) then
 		nilExpr, maybeAccess = maybeAccess, nilExpr
 	else
 		return false
@@ -2740,7 +2699,7 @@ local function isArrayItemOrTableFieldCheck(state, binary, typeInfoL, typeInfoR)
 	if maybeAccess.nodeType ~= !(nodeTypes.AstAccess) then  return false  end
 
 	local tag = maybeAccess.object.inferredType.tag
-	if not !!(anyV(`tag`, typeTags.TypeInfoArray,typeTags.TypeInfoTable)) then  return false  end
+	if not !!(CONST_SET{ TYPE_ARRAY, TYPE_TABLE })[tag] then  return false  end
 
 	return true
 end
@@ -2751,8 +2710,8 @@ local function isCompoundCompare(state, binary, typeInfoL, typeInfoR)
 	local compound    = typeInfoL
 	local otherType   = typeInfoR
 
-	local lIsCompound = (compound.tag  == !(typeTags.TypeInfoCompound))
-	local rIsCompound = (otherType.tag == !(typeTags.TypeInfoCompound))
+	local lIsCompound = (compound.tag  == !(TYPE_COMPOUND))
+	local rIsCompound = (otherType.tag == !(TYPE_COMPOUND))
 
 	if lIsCompound and rIsCompound then
 		-- The compound types must be the same for a theoretical test here to pass
@@ -2773,8 +2732,8 @@ end
 
 local function isValidEqualityCheck(state, binary, typeInfoL, typeInfoR)
 	if typeInfoL     == typeInfoR               then  return true  end
-	if typeInfoL.tag == !(typeTags.TypeInfoAny) then  return true  end
-	if typeInfoR.tag == !(typeTags.TypeInfoAny) then  return true  end
+	if typeInfoL.tag == !(TYPE_ANY) then  return true  end
+	if typeInfoR.tag == !(TYPE_ANY) then  return true  end
 
 	if isTypeNumeric(typeInfoL) and isTypeNumeric(typeInfoR) then  return true  end
 
@@ -2782,7 +2741,7 @@ local function isValidEqualityCheck(state, binary, typeInfoL, typeInfoR)
 	if isCompoundCompare           (state, binary, typeInfoL, typeInfoR) then  return true  end
 
 	-- We allow comparing namespaces even though technically each namespace has it's own unique type.
-	if typeInfoL.tag == typeInfoR.tag and typeInfoL.tag == !(typeTags.TypeInfoNamespace) then  return true  end
+	if typeInfoL.tag == typeInfoR.tag and typeInfoL.tag == !(TYPE_NAMESPACE) then  return true  end
 
 	return false
 end
@@ -2800,17 +2759,17 @@ function _G.checkBinaryOperation(state, exprForError, exprMain,exprL,exprR, binO
 
 	-- String repetition.
 	if binOp == "*" and (
-		(typeInfoL.tag == !(typeTags.TypeInfoString) and typeInfoR.tag == !(typeTags.TypeInfoInt)) or
-		(typeInfoL.tag == !(typeTags.TypeInfoInt)    and typeInfoR.tag == !(typeTags.TypeInfoString))
+		(typeInfoL.tag == !(TYPE_STRING) and typeInfoR.tag == !(TYPE_INT)) or
+		(typeInfoL.tag == !(TYPE_INT)    and typeInfoR.tag == !(TYPE_STRING))
 	) then
-		local intExpr = (typeInfoL.tag == !(typeTags.TypeInfoInt) and exprL or exprR)
+		local intExpr = (typeInfoL.tag == !(TYPE_INT) and exprL or exprR)
 		if intExpr.nodeType == !(nodeTypes.AstLiteral) and intExpr.value < 0 then
 			typeError(state, intExpr, "String repetition: Integer is negative. (%d)", intExpr.value)
 		end
 		return getTypeInfoForBuiltinType(state, "string")
 
 	-- Numeric operation.
-	elseif !!(anyV(`binOp`, "+","-","*","^","%","/","//")) then
+	elseif !!(CONST_SET{"+","-","*","^","%","/","//"})[binOp] then
 		if not (isTypeNumeric(typeInfoL) and isTypeNumeric(typeInfoR)) then
 			typeError(
 				state, exprMain,
@@ -2825,17 +2784,17 @@ function _G.checkBinaryOperation(state, exprForError, exprMain,exprL,exprR, binO
 			return getTypeInfoForBuiltinType(state, "float")
 		elseif binOp == "//" then
 			return getTypeInfoForBuiltinType(state, "int")
-		elseif typeInfoL.tag == !(typeTags.TypeInfoFloat) or typeInfoR.tag == !(typeTags.TypeInfoFloat) then
+		elseif typeInfoL.tag == !(TYPE_FLOAT) or typeInfoR.tag == !(TYPE_FLOAT) then
 			return getTypeInfoForBuiltinType(state, "float")
 		else
 			return getTypeInfoForBuiltinType(state, "int")
 		end
 
 	-- Comparison.
-	elseif !!(anyV(`binOp`, "<",">","<=",">=")) then
+	elseif !!(CONST_SET{"<",">","<=",">="})[binOp] then
 		if not (typeInfoL == typeInfoR or (isTypeNumeric(typeInfoL) and isTypeNumeric(typeInfoR))) then
 			!!(TYPE_MISMATCH)
-		elseif not !!(anyV(`typeInfoL.tag`, typeTags.TypeInfoInt,typeTags.TypeInfoFloat,typeTags.TypeInfoString)) then
+		elseif not !!(CONST_SET{ TYPE_INT, TYPE_FLOAT, TYPE_STRING })[typeInfoL.tag] then
 			typeError(
 				state, exprMain,
 				"Binary comparison (%s): Expected a float, int or string. (Got %s)",
@@ -2847,23 +2806,23 @@ function _G.checkBinaryOperation(state, exprForError, exprMain,exprL,exprR, binO
 		return getTypeInfoForBuiltinType(state, "bool")
 
 	-- Equality.
-	elseif !!(anyV(`binOp`, "==","~=")) then
+	elseif !!(CONST_SET{"==","~="})[binOp] then
 		if not isValidEqualityCheck(state, exprForError, typeInfoL, typeInfoR) then
 			!!(TYPE_MISMATCH)
 		end
 		return getTypeInfoForBuiltinType(state, "bool")
 
 	-- Boolean operation.
-	elseif !!(anyV(`binOp`, "and","or")) then
+	elseif !!(CONST_SET{"and","or"})[binOp] then
 		local bothAreBool = true
 		local typeInfo    = getTypeInfoForBuiltinType(state, "bool")
 
-		if typeInfoL.tag ~= !(typeTags.TypeInfoBool) then
+		if typeInfoL.tag ~= !(TYPE_BOOL) then
 			!ASSERT `not inAssignment`
 			bothAreBool = false
 			wrapInImplicitCast(state, exprL, typeInfo, true)
 		end
-		if typeInfoR.tag ~= !(typeTags.TypeInfoBool) then
+		if typeInfoR.tag ~= !(TYPE_BOOL) then
 			bothAreBool = false
 			wrapInImplicitCast(state, exprR, typeInfo, true)
 		end
@@ -2873,9 +2832,9 @@ function _G.checkBinaryOperation(state, exprForError, exprMain,exprL,exprR, binO
 
 	-- String concatenation.
 	elseif binOp == ".." then
-		if typeInfoL.tag ~= !(typeTags.TypeInfoString) then
+		if typeInfoL.tag ~= !(TYPE_STRING) then
 			typeError(state, exprL, "String concatenation expected a string. (Got %s)", getFriendlyTypeInfoName(typeInfoL))
-		elseif typeInfoR.tag ~= !(typeTags.TypeInfoString) then
+		elseif typeInfoR.tag ~= !(TYPE_STRING) then
 			typeError(state, exprR, "String concatenation expected a string. (Got %s)", getFriendlyTypeInfoName(typeInfoR))
 		end
 		return getTypeInfoForBuiltinType(state, "string")
@@ -2934,20 +2893,20 @@ function _G.validateStructKey(state, dependent, keyExpr, structInfo, isLvalue)
 		!DEPEND_AND_RETURN(`dependent`, DEPEND_STRUCT_MEMBERS_READY, `structInfo`, nil, `nil`)
 	end
 
-	if structInfo.kind == !(STRUCT_KIND_TABLE) and (keyExprType.tag ~= !(typeTags.TypeInfoString) or structInfo.keyType.tag == !(typeTags.TypeInfoString)) then
+	if structInfo.kind == !(STRUCT_KIND_TABLE) and (keyExprType.tag ~= !(TYPE_STRING) or structInfo.keyType.tag == !(TYPE_STRING)) then
 		if not isTypeCompatibleWith(keyExprType, structInfo.keyType) then
 			typeError(state, keyExpr, "Expected struct member name or %s. (Got %s)", getFriendlyTypeInfoName(structInfo.keyType), getFriendlyTypeInfoName(keyExprType))
 		end
 		memberValueType = structInfo.valueType
 
-	elseif structInfo.kind == !(STRUCT_KIND_ARRAY) and keyExprType.tag ~= !(typeTags.TypeInfoString) then
-		if keyExprType.tag ~= !(typeTags.TypeInfoInt) then
+	elseif structInfo.kind == !(STRUCT_KIND_ARRAY) and keyExprType.tag ~= !(TYPE_STRING) then
+		if keyExprType.tag ~= !(TYPE_INT) then
 			typeError(state, keyExpr, "Expected struct member name or array index. (Got %s)", getFriendlyTypeInfoName(keyExprType))
 		end
 		memberValueType = structInfo.valueType
 
 	else
-		if keyExprType.tag ~= !(typeTags.TypeInfoString) then
+		if keyExprType.tag ~= !(TYPE_STRING) then
 			typeError(
 				state, astGetExpressionVisuallyFurthestToTheLeft(keyExpr),
 				"Member names in struct constructors must be strings. (This is %s)",
@@ -3027,15 +2986,15 @@ end
 	local isLvalue        = access.parent.nodeType == !(nodeTypes.AstAssignment) and access.queued.container == access.parent.targets
 	local typeRepresented = getTypeRepresentedByExpression(access.object)
 
-	if typeObject.tag == !(typeTags.TypeInfoTable) then
-		if typeMember.tag == !(typeTags.TypeInfoNone) then
+	if typeObject.tag == !(TYPE_TABLE) then
+		if typeMember.tag == !(TYPE_NONE) then
 			typeError(state, access.member, "Table keys cannot be nil.")
 
-		elseif typeMember.tag == !(typeTags.TypeInfoCompound) and indexOf(typeMember, getTypeInfoForBuiltinType(state, "none")) then
+		elseif typeMember.tag == !(TYPE_COMPOUND) and indexOf(typeMember, getTypeInfoForBuiltinType(state, "none")) then
 			typeError(state, access.member, "Table keys cannot be nil. (Type is %s)", getFriendlyTypeInfoName(typeMember))
 
 		--[[ This warning message may be too noisy in some programs.
-		elseif typeMember.tag == !(typeTags.TypeInfoAny) then
+		elseif typeMember.tag == !(TYPE_ANY) then
 			-- @Incomplete: Add a setting to suppress warnings.
 			typeMessage(
 				io.stderr, state, astGetExpressionVisuallyFurthestToTheLeft(access.member),
@@ -3047,10 +3006,10 @@ end
 		access.inferredType = getTypeInfoForBuiltinType(state, "any")
 		moveToNextRelevantPipe(state, access)
 
-	elseif typeObject.tag == !(typeTags.TypeInfoArray) then
+	elseif typeObject.tag == !(TYPE_ARRAY) then
 		local arraySig = typeObject
 
-		if typeMember.tag == !(typeTags.TypeInfoInt) then
+		if typeMember.tag == !(TYPE_INT) then
 			-- @Incomplete: Check for isLvalue and constantness.
 
 			if access.member.nodeType == !(nodeTypes.AstLiteral) and access.member.value < 1 then
@@ -3088,7 +3047,7 @@ end
 
 			moveToNextRelevantPipe(state, access)
 
-		-- elseif not isLvalue and typeMember.tag == !(typeTags.TypeInfoString) then
+		-- elseif not isLvalue and typeMember.tag == !(TYPE_STRING) then
 		-- 	local abstractMemberLiteral = access.member
 		-- 	local abstractMemberName    = getConstantNameOrTriggerError(state, abstractMemberLiteral)
 		-- 	if abstractMemberName == ? then ... end
@@ -3097,7 +3056,7 @@ end
 			typeError(state, access.member, "Expected an array index of type int. (Got %s)", getFriendlyTypeInfoName(typeMember))
 		end
 
-	elseif typeObject.tag == !(typeTags.TypeInfoStruct) or (typeRepresented and typeRepresented.tag == !(typeTags.TypeInfoStruct)) then
+	elseif typeObject.tag == !(TYPE_STRUCT) or (typeRepresented and typeRepresented.tag == !(TYPE_STRUCT)) then
 		local structInfo                             = typeRepresented or typeObject
 		local memberName, memberValueType, constDecl = validateStructKey(state, access, access.member, structInfo, isLvalue)
 
@@ -3130,17 +3089,17 @@ end
 		local nodeType  = valueExpr.nodeType
 		local replacement
 
-		if !!(anyV(`nodeType`, nodeTypes.AstLiteral,nodeTypes.AstForeign)) then
+		if !!(CONST_SET{ nodeTypes.AstLiteral, nodeTypes.AstForeign })[nodeType] then
 			replacement = astCopy(valueExpr, access.member.token)
 
 		elseif nodeType == !(nodeTypes.AstType) then
 			replacement = astCopy(valueExpr, access.member.token)
 			addUnqueuedChildrenToQueueRecursively(state, replacement, !(PIPE_DONE))
 
-		elseif nodeType == !(nodeTypes.AstIdentifier) and valueExpr.inferredType.tag == !(typeTags.TypeInfoEnum) then
+		elseif nodeType == !(nodeTypes.AstIdentifier) and valueExpr.inferredType.tag == !(TYPE_ENUM) then
 			replacement = astCopy(valueExpr, access.member.token)
 
-		elseif !!(anyV(`nodeType`, nodeTypes.AstEnum,nodeTypes.AstStruct)) then
+		elseif !!(CONST_SET{ nodeTypes.AstEnum, nodeTypes.AstStruct })[nodeType] then
 			replacement = createTypeNodeFromInfo(state, valueExpr.representedType, access.member.token, access.parent) -- Parent is temp and will change in a moment.
 
 		elseif nodeType == !(nodeTypes.AstLambda) then
@@ -3205,7 +3164,7 @@ end
 		replaceQueuedNodeAndUnqueueOldTree(state, access, replacement)
 		moveToNextRelevantPipe(state, replacement, !(PIPE_INFER))
 
-	elseif typeObject.tag == !(typeTags.TypeInfoEnum) or (typeRepresented and typeRepresented.tag == !(typeTags.TypeInfoEnum)) then
+	elseif typeObject.tag == !(TYPE_ENUM) or (typeRepresented and typeRepresented.tag == !(TYPE_ENUM)) then
 		local memberLiteral = access.member
 		local memberName    = getConstantNameOrTriggerError(state, memberLiteral)
 
@@ -3224,7 +3183,7 @@ end
 		replaceQueuedNodeAndUnqueueOldTree(state, access, ident)
 		-- Stay in the current pipe so we get simplified. (Needed? Or maybe we can @Speed things up here?)
 
-	elseif typeObject.tag == !(typeTags.TypeInfoNamespace) then
+	elseif typeObject.tag == !(TYPE_NAMESPACE) then
 		assert(isDirectObject)
 
 		local memberLiteral = access.member
@@ -3254,7 +3213,7 @@ local function inferTableArray(state, tableNode, arraySig)
 
 		if not indexLiteral.inferredType then
 			!DEPEND_AND_RETURN(`tableNode`, DEPEND_NODE_INFERRED, `indexLiteral`)
-		elseif indexLiteral.inferredType.tag ~= !(typeTags.TypeInfoInt) then
+		elseif indexLiteral.inferredType.tag ~= !(TYPE_INT) then
 			typeError(
 				state, astGetExpressionVisuallyFurthestToTheLeft(indexLiteral),
 				"Array indices must be integers. (This is %s)",
@@ -3465,7 +3424,7 @@ end
 	local typeExpected = tableNode.inferredType or getExpectedTypeInfo(state, tableNode, false, "constructor", tableNode)
 	if not typeExpected then  return  end
 
-	if typeExpected.tag == !(typeTags.TypeInfoAny) and tableNode.parent.nodeType == !(nodeTypes.AstTable) then
+	if typeExpected.tag == !(TYPE_ANY) and tableNode.parent.nodeType == !(nodeTypes.AstTable) then
 		typeExpected = getTypeInfoForBuiltinType(state, "table")
 	end
 
@@ -3499,17 +3458,17 @@ end
 		!DEPEND_AND_RETURN(`tableNode`, DEPEND_NODE_INFERRED, `trailingExpr`)
 	end
 
-	if typeExpected.tag == !(typeTags.TypeInfoTable) then
+	if typeExpected.tag == !(TYPE_TABLE) then
 		-- @Incomplete: Check for duplicate fields (among constant keys).
 		-- @Incomplete: Check for nil keys.
 		tableNode.inferredType = typeExpected
 		-- Note: We don't need to validate any types or anything (including tableNode.trailingExpression) as generic tables accept anything.
 
-	elseif typeExpected.tag == !(typeTags.TypeInfoArray) then
+	elseif typeExpected.tag == !(TYPE_ARRAY) then
 		inferTableArray(state, tableNode, typeExpected)
 		if tableNode.queued.waitingOn then  return  end
 
-	elseif typeExpected.tag == !(typeTags.TypeInfoStruct) then
+	elseif typeExpected.tag == !(TYPE_STRUCT) then
 		inferTableStruct(state, tableNode, typeExpected)
 		if tableNode.queued.waitingOn then  return  end
 
@@ -3518,7 +3477,7 @@ end
 			state, tableNode,
 			"This constructor is trying to get inferred as %s (type group '%s') which is illegal. (The inferred type must be array, struct or table.)",
 			getFriendlyTypeInfoName(typeExpected),
-			TYPE_TAG_NAMES[typeExpected.tag]
+			TYPE_NAMES[typeExpected.tag]
 		)
 	end
 
@@ -3581,7 +3540,7 @@ end
 		if not argIn1 then
 			typeError(state, lambda, "Expected a struct as first argument for foreign method.")
 
-		elseif argType1.tag ~= !(typeTags.TypeInfoStruct) then
+		elseif argType1.tag ~= !(TYPE_STRUCT) then
 			typeError(
 				state, argsIn.arguments[1],
 				"Expected the first arguments to be a struct. Foreign methods are only supported on structs. (Type is %s)",
@@ -3639,16 +3598,16 @@ end
 
 	if not exprTypeInfo then
 		!DEPEND_AND_RETURN(`typeOf`, DEPEND_NODE_INFERRED, `typeOf.expression`)
-	elseif exprTypeInfo.tag == !(typeTags.TypeInfoNamespace) then
+	elseif exprTypeInfo.tag == !(TYPE_NAMESPACE) then
 		typeError(state, typeOf.expression, "Namespaces don't have a type.")
-	elseif exprTypeInfo.tag == !(typeTags.TypeInfoList) then
+	elseif exprTypeInfo.tag == !(TYPE_LIST) then
 		typeError(state, astGetExpressionVisuallyFurthestToTheLeft(typeOf.expression), "Cannot get the type of function calls.")
 	end
 
 	typeOf.inferredType    = getTypeInfoForBuiltinType(state, "type")
 	typeOf.representedType = exprTypeInfo
 
-	if typeOf.representedType.tag == !(typeTags.TypeInfoVararg) then
+	if typeOf.representedType.tag == !(TYPE_VARARG) then
 		local varargSig        = typeOf.representedType
 		typeOf.representedType = varargSig.itemType
 	end
@@ -3716,31 +3675,31 @@ end
 	local tag             = typeRepresented.tag
 	local typeInfoStructName
 
-	if tag == !(typeTags.TypeInfoArray) then
+	if tag == !(TYPE_ARRAY) then
 		typeInfoStructName = "TypeInfoArray"
-	elseif tag == !(typeTags.TypeInfoCompound) then
+	elseif tag == !(TYPE_COMPOUND) then
 		typeInfoStructName = "TypeInfoCompound"
-	elseif tag == !(typeTags.TypeInfoEnum) then
+	elseif tag == !(TYPE_ENUM) then
 		typeInfoStructName = "TypeInfoEnum"
-	elseif tag == !(typeTags.TypeInfoFunction) then
+	elseif tag == !(TYPE_FUNCTION) then
 		typeInfoStructName = "TypeInfoFunction"
-	elseif tag == !(typeTags.TypeInfoStruct) then
+	elseif tag == !(TYPE_STRUCT) then
 		typeInfoStructName = "TypeInfoStruct"
-	elseif tag == !(typeTags.TypeInfoVararg) then
+	elseif tag == !(TYPE_VARARG) then
 		typeInfoStructName = "TypeInfoVararg"
 
-	elseif !!(anyV(`tag`,
-		typeTags.TypeInfoAny,
-		typeTags.TypeInfoBool,
-		typeTags.TypeInfoFloat,
-		typeTags.TypeInfoInt,
-		typeTags.TypeInfoNone,
-		typeTags.TypeInfoPlaceholder,
-		typeTags.TypeInfoString,
-		typeTags.TypeInfoTable,
-		typeTags.TypeInfoType,
-		typeTags.TypeInfoVoid
-	)) then
+	elseif !!(CONST_SET{
+		TYPE_ANY,
+		TYPE_BOOL,
+		TYPE_FLOAT,
+		TYPE_INT,
+		TYPE_NONE,
+		TYPE_PLACEHOLDER,
+		TYPE_STRING,
+		TYPE_TABLE,
+		TYPE_TYPE,
+		TYPE_VOID
+	})[tag] then
 		typeInfoStructName = "TypeInfo"
 
 	else
@@ -3757,7 +3716,7 @@ end
 	end
 
 	assert(decl.valueTypeInfo)
-	assert(decl.valueTypeInfo.tag == !(typeTags.TypeInfoStruct))
+	assert(decl.valueTypeInfo.tag == !(TYPE_STRUCT))
 
 	typeInfoNode.declaration   = decl
 	typeInfoNode.valueTypeInfo = typeRepresented
@@ -3796,35 +3755,34 @@ end
 		cutOutPartOfNodeTree(state, cast, cast.expression)
 		return
 
-	elseif isTypeCompatibleWith(exprType, castType) or exprTypeTag == !(typeTags.TypeInfoAny) then
+	elseif isTypeCompatibleWith(exprType, castType) or exprTypeTag == !(TYPE_ANY) then
 		-- void  Valid cast.
 
 	elseif isTypeNumeric(castType) and isTypeNumeric(exprType) then
 		-- void  Valid cast.
 
-	elseif exprTypeTag == !(typeTags.TypeInfoStruct) and castTypeTag == !(typeTags.TypeInfoStruct) and doesStructInherit(castType, exprType) then
+	elseif exprTypeTag == !(TYPE_STRUCT) and castTypeTag == !(TYPE_STRUCT) and doesStructInherit(castType, exprType) then
 		-- void  Valid cast.
 
-	elseif castTypeTag == !(typeTags.TypeInfoBool) and !!(anyV(
-		`exprTypeTag`,
-		typeTags.TypeInfoInt,
-		typeTags.TypeInfoFloat,
-		typeTags.TypeInfoString,
-		typeTags.TypeInfoArray
-	)) then
+	elseif castTypeTag == !(TYPE_BOOL) and !!(CONST_SET{
+		TYPE_INT,
+		TYPE_FLOAT,
+		TYPE_STRING,
+		TYPE_ARRAY
+	})[exprTypeTag] then
 		-- void  Valid cast.
 
-	elseif castTypeTag == !(typeTags.TypeInfoBool) and exprTypeTag == !(typeTags.TypeInfoStruct) and exprType.kind == !(STRUCT_KIND_ARRAY) then
+	elseif castTypeTag == !(TYPE_BOOL) and exprTypeTag == !(TYPE_STRUCT) and exprType.kind == !(STRUCT_KIND_ARRAY) then
 		-- void  Array-like structs can pass as arrays.
 
-	elseif exprTypeTag == !(typeTags.TypeInfoEnum) and isTypeCompatibleWith(castType, exprType.memberTypeInfo) then
+	elseif exprTypeTag == !(TYPE_ENUM) and isTypeCompatibleWith(castType, exprType.memberTypeInfo) then
 		-- void  Enum members can cast to the real member type.
 
-	elseif exprTypeTag == !(typeTags.TypeInfoEnum) and isTypeNumeric(castType) and isTypeNumeric(exprType.memberTypeInfo) then
+	elseif exprTypeTag == !(TYPE_ENUM) and isTypeNumeric(castType) and isTypeNumeric(exprType.memberTypeInfo) then
 		-- We need two casts to happen in sequence here so we wrap ourselves in another cast.
 		wrapInImplicitCast(state, cast, exprType.memberTypeInfo, false)
 
-	elseif castTypeTag ~= !(typeTags.TypeInfoCompound) and exprTypeTag == !(typeTags.TypeInfoCompound) then
+	elseif castTypeTag ~= !(TYPE_COMPOUND) and exprTypeTag == !(TYPE_COMPOUND) then
 		-- We get here for situations like these: local xMaybe:int|nil = 0 ; local x = cast(int) xMaybe
 		-- The user better know what they're doing!
 		local compound = exprType
@@ -3856,7 +3814,7 @@ end
 
 	-- Validate targets.
 	for _, targetExpr in ipairs(assignment.targets) do
-		if not !!(anyV(`targetExpr.nodeType`, nodeTypes.AstIdentifier,nodeTypes.AstAccess,nodeTypes.AstBlank)) then
+		if not !!(CONST_SET{ nodeTypes.AstIdentifier, nodeTypes.AstAccess, nodeTypes.AstBlank })[targetExpr.nodeType] then
 			!ifDEBUG`astPrint(targetExpr)`
 			typeError(state, astGetExpressionVisuallyFurthestToTheLeft(targetExpr), "Invalid assignment target. Expected a variable name or object field.")
 		end
@@ -3864,7 +3822,7 @@ end
 
 	-- Validate values.
 	-- Note: Enum member values are already validated by the enum itself.
-	local declScope        = assignment.forDeclaration and getClosestScope(assignment) or nil
+	local declScope        = assignment.forDeclaration and astFindParentScope(assignment) or nil
 	local isEnumMemberDecl = declScope ~= nil and declScope.nodeType == !(nodeTypes.AstEnum)
 
 	if not isEnumMemberDecl then
@@ -3997,7 +3955,7 @@ end
 		local ident = expr
 		local decl  = ident.declaration
 
-		if typeInfo.tag == !(typeTags.TypeInfoStruct) then
+		if typeInfo.tag == !(TYPE_STRUCT) then
 			local structInfo = typeInfo
 			usingScope       = structInfo.astNode
 
@@ -4005,33 +3963,33 @@ end
 				using.variableDeclaration = decl
 			end
 
-		elseif typeInfo.tag == !(typeTags.TypeInfoEnum) then
+		elseif typeInfo.tag == !(TYPE_ENUM) then
 			-- Using an enum value is the same as using the enum type. Is this good?
 			local enumInfo = typeInfo
 			usingScope     = enumInfo.astNode
 
-		elseif typeInfo.tag == !(typeTags.TypeInfoNamespace) then
+		elseif typeInfo.tag == !(TYPE_NAMESPACE) then
 			local namespaceInfo = typeInfo
 			usingScope          = namespaceInfo.scope
 
 		else
-			typeError(state, ident, "Invalid or unsupported type group (%s) in 'using' expression.", TYPE_TAG_NAMES[typeInfo.tag])
+			typeError(state, ident, "Invalid or unsupported type group (%s) in 'using' expression.", TYPE_NAMES[typeInfo.tag])
 		end
 
 	elseif expr.nodeType == !(nodeTypes.AstType) then
 		local typeNode = expr
 		typeInfo       = typeNode.representedType
 
-		if typeInfo.tag == !(typeTags.TypeInfoStruct) then
+		if typeInfo.tag == !(TYPE_STRUCT) then
 			local structInfo = typeInfo
 			usingScope       = structInfo.astNode
 
-		elseif typeInfo.tag == !(typeTags.TypeInfoEnum) then
+		elseif typeInfo.tag == !(TYPE_ENUM) then
 			local enumInfo = typeInfo
 			usingScope     = enumInfo.astNode
 
 		else
-			typeError(state, typeNode, "Invalid or unsupported type group (%s) in 'using' expression.", TYPE_TAG_NAMES[typeInfo.tag])
+			typeError(state, typeNode, "Invalid or unsupported type group (%s) in 'using' expression.", TYPE_NAMES[typeInfo.tag])
 		end
 
 	else
@@ -4039,7 +3997,7 @@ end
 		typeError(state, astGetExpressionVisuallyFurthestToTheLeft(expr), "Invalid or unsupported 'using' expression.")
 	end
 
-	local scopeOfUsing  = getClosestScope(using)
+	local scopeOfUsing  = astFindParentScope(using)
 	local usingExisting = itemWith1(scopeOfUsing.usings, "scope", usingScope)
 
 	if usingExisting then
@@ -4085,7 +4043,7 @@ end
 		!DEPEND_AND_RETURN(`bake`, DEPEND_NODE_INFERRED, `bake.name`)
 	end
 
-	local scope, statement = getClosestScope(bake)
+	local scope, statement = astFindParentScope(bake)
 	if not (scope and (
 		(scope.nodeType == !(nodeTypes.AstLambda) and statement == scope.argumentsIn)
 		-- or (scope.nodeType == !(nodeTypes.AstStruct) and indexOf(scope.bakeDeclarations, statement))
@@ -4108,7 +4066,7 @@ end
 	end
 
 	if debugNode.action == "assert" then
-		if typeInfo.tag ~= !(typeTags.TypeInfoBool) then
+		if typeInfo.tag ~= !(TYPE_BOOL) then
 			wrapInImplicitCast(state, expr, getTypeInfoForBuiltinType(state, "bool"), true)
 			return
 		end
@@ -4142,7 +4100,7 @@ local function inferIfOrWhile(state, ifOrWhile)
 
 	typeInfo = adjustTypeToOne(state, cond, typeInfo, true)
 
-	if typeInfo.tag ~= !(typeTags.TypeInfoBool) then
+	if typeInfo.tag ~= !(TYPE_BOOL) then
 		wrapInImplicitCast(state, cond, getTypeInfoForBuiltinType(state, "bool"), true)
 		return
 	end
@@ -4169,7 +4127,7 @@ end
 
 	typeInfo = adjustTypeToOne(state, cond, typeInfo, true)
 
-	if typeInfo.tag ~= !(typeTags.TypeInfoBool) then
+	if typeInfo.tag ~= !(TYPE_BOOL) then
 		wrapInImplicitCast(state, cond, getTypeInfoForBuiltinType(state, "bool"), true)
 		return
 	end
@@ -4261,7 +4219,7 @@ end
 
 	typeInfo = adjustTypeToOne(state, cond, typeInfo, true)
 
-	if typeInfo.tag ~= !(typeTags.TypeInfoBool) then
+	if typeInfo.tag ~= !(TYPE_BOOL) then
 		-- Note: This wrap will not affect conditional.conditionAndBranchTrue which is the actual expression we use in the output.
 		wrapInImplicitCast(state, cond, getTypeInfoForBuiltinType(state, "bool"), true)
 		return
@@ -4318,7 +4276,7 @@ end
 	if switch.complete then
 		local enumInfo = typeInfo
 
-		if enumInfo.tag ~= !(typeTags.TypeInfoEnum) then
+		if enumInfo.tag ~= !(TYPE_ENUM) then
 			typeError(
 				state, switch.value,
 				"!complete requires the value to be an enum. (Got %s)",
@@ -4390,7 +4348,7 @@ end
 			for _, valueExpr in ipairs(values) do
 				local typeInfo = adjustTypeToOne(state, valueExpr, valueExpr.inferredType, true)
 
-				if typeInfo.tag ~= !(typeTags.TypeInfoInt) then
+				if typeInfo.tag ~= !(TYPE_INT) then
 					typeError(
 						state, astGetExpressionVisuallyFurthestToTheLeft(valueExpr),
 						"For loop: Expected an int. (Got %s)",
@@ -4430,11 +4388,11 @@ end
 			local objType = objExpr.inferredType
 
 			-- We adjust lists to one, but leave vararg as-is.
-			if objType.tag == !(typeTags.TypeInfoList) then
+			if objType.tag == !(TYPE_LIST) then
 				objType = adjustTypeToOne(state, objExpr, objExpr.inferredType, true)
 			end
 
-			if objType.tag == !(typeTags.TypeInfoArray) then
+			if objType.tag == !(TYPE_ARRAY) then
 				if names[3] then
 					typeError(state, names[3], "For loop: Too many names for short-form array loop. (Expected at most a value name and an index name.)")
 				end
@@ -4443,7 +4401,7 @@ end
 				addDeclarationInForLoop(state, forLoop, name2, getTypeInfoForBuiltinType(state, "int"))
 				addDeclarationInForLoop(state, forLoop, name1, objType.itemType)
 
-			elseif objType.tag == !(typeTags.TypeInfoVararg) then
+			elseif objType.tag == !(TYPE_VARARG) then
 				if names[3] then
 					typeError(state, names[3], "For loop: Too many names for short-form vararg loop. (Expected at most a value name and an index name.)")
 				end
@@ -4452,7 +4410,7 @@ end
 				addDeclarationInForLoop(state, forLoop, name2, getTypeInfoForBuiltinType(state, "int"))
 				addDeclarationInForLoop(state, forLoop, name1, objType.itemType)
 
-			elseif objType.tag == !(typeTags.TypeInfoTable) then
+			elseif objType.tag == !(TYPE_TABLE) then
 				if names[3] then
 					typeError(state, names[3], "For loop: Too many names for short-form table loop. (Expected at most a value name and a key name.)")
 				end
@@ -4462,7 +4420,7 @@ end
 				addDeclarationInForLoop(state, forLoop, name2, typeInfo)
 				addDeclarationInForLoop(state, forLoop, name1, typeInfo)
 
-			elseif objType.tag == !(typeTags.TypeInfoStruct) then
+			elseif objType.tag == !(TYPE_STRUCT) then
 				local structInfo = objType
 
 				-- We have to wait for the members for inherited declarations to be available.
@@ -4481,7 +4439,7 @@ end
 				local iterLambda   = followIdentifiersToConstantValue(decl.value)
 				local iterTypeInfo = iterLambda.inferredType
 
-				if iterTypeInfo.tag ~= !(typeTags.TypeInfoFunction) then
+				if iterTypeInfo.tag ~= !(TYPE_FUNCTION) then
 					typeError(state, decl.value, "The !iterator value must be a function. (This is %s)", getFriendlyTypeInfoName(iterTypeInfo))
 				end
 
@@ -4546,12 +4504,12 @@ end
 				typeError(
 					state, objExpr,
 					"For loop: Cannot iterate over values in type group '%s'. (Type is %s)",
-					TYPE_TAG_NAMES[objType.tag],
+					TYPE_NAMES[objType.tag],
 					getFriendlyTypeInfoName(objType)
 				)
 			end
 
-			if forLoop.reverse and not (objType.tag == !(typeTags.TypeInfoArray) or objType.tag == !(typeTags.TypeInfoVararg)) then
+			if forLoop.reverse and not (objType.tag == !(TYPE_ARRAY) or objType.tag == !(TYPE_VARARG)) then
 				typeError(
 					state, objExpr,
 					"For loop: Only arrays can be iterated in reverse. (This is %s)",
@@ -4568,7 +4526,7 @@ end
 
 			local iterExpr, iterTypeInfo = getAssignmentValue(state, forLoop, values, 1, nil, nil, "loop value")
 
-			if iterTypeInfo.tag ~= !(typeTags.TypeInfoFunction) then
+			if iterTypeInfo.tag ~= !(TYPE_FUNCTION) then
 				typeError(state, iterExpr, "For loop: Expected a function. (Got %s)", getFriendlyTypeInfoName(iterTypeInfo))
 
 			elseif #iterTypeInfo.argumentTypesIn ~= 2 then
@@ -4585,17 +4543,17 @@ end
 					"For loop: Iterator does not return anything."
 				)
 
-			elseif iterTypeInfo.argumentTypesOut[1].tag == !(typeTags.TypeInfoNone) then
+			elseif iterTypeInfo.argumentTypesOut[1].tag == !(TYPE_NONE) then
 				typeError(
 					state, astGetExpressionVisuallyFurthestToTheLeft(iterExpr),
 					"For loop: The type of the first returned value from iterators cannot be simply nil. It must be a compound type where nil is included."
 				)
 
 			elseif not (
-				iterTypeInfo.argumentTypesOut[1].tag == !(typeTags.TypeInfoAny)
+				iterTypeInfo.argumentTypesOut[1].tag == !(TYPE_ANY)
 				or (
-					iterTypeInfo.argumentTypesOut[1].tag == !(typeTags.TypeInfoCompound)
-					and itemWith1(iterTypeInfo.argumentTypesOut[1], "tag", !(typeTags.TypeInfoNone))
+					iterTypeInfo.argumentTypesOut[1].tag == !(TYPE_COMPOUND)
+					and itemWith1(iterTypeInfo.argumentTypesOut[1], "tag", !(TYPE_NONE))
 				)
 			) then
 				typeError(
@@ -4643,7 +4601,7 @@ end
 			for i, ident in ipairs(names) do
 				local typeInfo = iterTypeInfo.argumentTypesOut[i]
 
-				if i > 1 or typeInfo.tag == !(typeTags.TypeInfoAny) then
+				if i > 1 or typeInfo.tag == !(TYPE_ANY) then
 					-- void
 
 				-- Strip nil from the compound type for the first value (unless it's 'any').
@@ -4652,7 +4610,7 @@ end
 					removeItem(typeInfos, getTypeInfoForBuiltinType(state, "none"))
 					typeInfo = getTypeInfoForCompoundType(state, typeInfos, false)
 				else
-					typeInfo = typeInfo[2].tag == !(typeTags.TypeInfoNone) and typeInfo[1] or typeInfo[2] or errorInternal()
+					typeInfo = typeInfo[2].tag == !(TYPE_NONE) and typeInfo[1] or typeInfo[2] or errorInternal()
 				end
 
 				addDeclarationInForLoop(state, forLoop, ident.name, typeInfo)
@@ -4672,7 +4630,7 @@ end
 local function checkForRecursiveStruct(state, declThatWeAreChecking, memberPath,memberName,memberType, structInfo, parentStructInfo)
 	local structInfoInner
 
-	if memberType.tag == !(typeTags.TypeInfoStruct) then
+	if memberType.tag == !(TYPE_STRUCT) then
 		structInfoInner = memberType
 
 		if structInfoInner == structInfo then
@@ -4681,7 +4639,7 @@ local function checkForRecursiveStruct(state, declThatWeAreChecking, memberPath,
 				or errorInternal(state, declThatWeAreChecking, "%s", table.concat(memberPath, "."))
 
 			local valueExpr = decl.value
-			if valueExpr and !!(anyV(`valueExpr.nodeType`, nodeTypes.AstForeign,nodeTypes.AstNull)) then
+			if valueExpr and !!(CONST_SET{ nodeTypes.AstForeign, nodeTypes.AstNull })[valueExpr.nodeType] then
 				return
 			end
 
@@ -4702,12 +4660,12 @@ local function checkForRecursiveStruct(state, declThatWeAreChecking, memberPath,
 			or errorInternal(state, declThatWeAreChecking, "%s", table.concat(memberPath, "."))
 
 		local valueExpr = decl.value
-		if not valueExpr or !!(anyV(`valueExpr.nodeType`, nodeTypes.AstForeign,nodeTypes.AstNull)) then
+		if not valueExpr or !!(CONST_SET{ nodeTypes.AstForeign, nodeTypes.AstNull })[valueExpr.nodeType] then
 			return
 		end
 
 		structInfoInner = valueExpr.inferredType
-		if structInfoInner.tag ~= !(typeTags.TypeInfoStruct) then  return  end
+		if structInfoInner.tag ~= !(TYPE_STRUCT) then  return  end
 
 		if structInfoInner == structInfo then
 			local nodeForError = declThatWeAreChecking.value
@@ -4799,7 +4757,7 @@ end
 		struct.inherits[i] = typeExpr
 
 		local structInfoToInherit = requireTypeRepresentedByExpression(state, typeExpr)
-		if structInfoToInherit.tag ~= !(typeTags.TypeInfoStruct) then
+		if structInfoToInherit.tag ~= !(TYPE_STRUCT) then
 			typeError(state, typeExpr, "Expected the type of a struct to inherit members from.")
 		end
 		if not structInfoToInherit.hasMembers then
@@ -4916,19 +4874,19 @@ end
 			if struct.isForeign then
 				-- void
 
-			elseif decl.value and !!(anyV(`decl.value.nodeType`, nodeTypes.AstForeign,nodeTypes.AstNull)) then
+			elseif decl.value and !!(CONST_SET{ nodeTypes.AstForeign, nodeTypes.AstNull })[decl.value.nodeType] then
 				-- void
 
-			elseif member.typeInfo.tag == !(typeTags.TypeInfoStruct) then
+			elseif member.typeInfo.tag == !(TYPE_STRUCT) then
 				if member.typeInfo.astNode.isForeign then
 					struct.isForeign          = true
 					struct.foreignThroughNode = decl
 				end
 
-			elseif member.typeInfo.tag == !(typeTags.TypeInfoCompound) then
-				!ASSERT("decl.value.inferredType.tag ~= "..typeTags.TypeInfoCompound)
+			elseif member.typeInfo.tag == !(TYPE_COMPOUND) then
+				!ASSERT("decl.value.inferredType.tag ~= "..TYPE_COMPOUND)
 
-				if decl.value.inferredType.tag == !(typeTags.TypeInfoStruct) and decl.value.inferredType.astNode.isForeign then
+				if decl.value.inferredType.tag == !(TYPE_STRUCT) and decl.value.inferredType.astNode.isForeign then
 					struct.isForeign          = true
 					struct.foreignThroughNode = decl
 					break
@@ -4938,7 +4896,7 @@ end
 	end
 	structInfo.hasMembers = true
 
-	if structInfo.keyType and (structInfo.members[1] or struct.declarations[1]) and structInfo.keyType.tag == !(typeTags.TypeInfoString) then
+	if structInfo.keyType and (structInfo.members[1] or struct.declarations[1]) and structInfo.keyType.tag == !(TYPE_STRING) then
 		-- Note: We trigger this error for static members too, not just dynamic, as some lookups would otherwise be ambigous.
 		typeError(state, typeSourceNodeK, "Strongly typed tables with string keys cannot also have members.")
 	end
@@ -4970,7 +4928,7 @@ end
 	else
 		-- Just use the type of the first member as the wanted type for the enum.
 		enumMemberInfo = enum.declarations[1].value.inferredType
-		if not !!(anyV(`enumMemberInfo.tag`, typeTags.TypeInfoInt,typeTags.TypeInfoString,typeTags.TypeInfoType,typeTags.TypeInfoBool,typeTags.TypeInfoFloat)) then
+		if not !!(CONST_SET{ TYPE_INT, TYPE_STRING, TYPE_TYPE, TYPE_BOOL, TYPE_FLOAT })[enumMemberInfo.tag] then
 			typeError(state, enum, "Supported enum member types are: int, string, type, bool, float")
 		end
 	end
@@ -5019,9 +4977,9 @@ end
 		-- void
 	elseif valueExpr.queued.pipe <= !(PIPE_INFER) then
 		!DEPEND_AND_RETURN(`fileScope`, DEPEND_NODE_INFERRED_FULLY, `valueExpr`)
-	elseif valueExpr.inferredType.tag == !(typeTags.TypeInfoNamespace) then
+	elseif valueExpr.inferredType.tag == !(TYPE_NAMESPACE) then
 		typeError(state, valueExpr, "Cannot export namespaces.")
-	elseif valueExpr.inferredType.tag == !(typeTags.TypeInfoFunction) and valueExpr.inferredType.isPolymorphic then
+	elseif valueExpr.inferredType.tag == !(TYPE_FUNCTION) and valueExpr.inferredType.isPolymorphic then
 		typeError(state, valueExpr, "Cannot export references to raw polymorphic functions.")
 	end
 
@@ -5118,7 +5076,7 @@ function _G.crawl(state, unit, crawled)
 			local decl = node
 			if not decl.valueConstant then  return  end
 
-			if decl.name.inferredType.tag == !(typeTags.TypeInfoNamespace) then  return  end -- This check seem a bit out of place maybe. @Cleanup
+			if decl.name.inferredType.tag == !(TYPE_NAMESPACE) then  return  end -- This check seem a bit out of place maybe. @Cleanup
 
 			if decl ~= unit then -- decl is unit if we followed an identifier.
 				crawled[decl] = nil
@@ -5144,7 +5102,7 @@ end
 local function createRunReplacementFromTypeAndLuaValue(state, runNode, parent, typeInfo, v)
 	local tag = typeInfo.tag
 
-	if tag == !(typeTags.TypeInfoInt) or (tag == !(typeTags.TypeInfoAny) and type(v) == "number" and v == math.floor(v)) then
+	if tag == !(TYPE_INT) or (tag == !(TYPE_ANY) and type(v) == "number" and v == math.floor(v)) then
 		local n = v
 		assert(type(n) == "number" and n == math.floor(n))
 		local literal        = astNewNode(AstLiteral, runNode.token, parent)
@@ -5153,7 +5111,7 @@ local function createRunReplacementFromTypeAndLuaValue(state, runNode, parent, t
 		literal.inferredType = getTypeInfoForBuiltinType(state, "int")
 		return literal
 
-	elseif tag == !(typeTags.TypeInfoFloat) or (tag == !(typeTags.TypeInfoAny) and type(v) == "number") then
+	elseif tag == !(TYPE_FLOAT) or (tag == !(TYPE_ANY) and type(v) == "number") then
 		local n = v
 		assert(type(n) == "number")
 		local literal        = astNewNode(AstLiteral, runNode.token, parent)
@@ -5162,7 +5120,7 @@ local function createRunReplacementFromTypeAndLuaValue(state, runNode, parent, t
 		literal.inferredType = getTypeInfoForBuiltinType(state, "float")
 		return literal
 
-	elseif tag == !(typeTags.TypeInfoString) or (tag == !(typeTags.TypeInfoAny) and type(v) == "string") then
+	elseif tag == !(TYPE_STRING) or (tag == !(TYPE_ANY) and type(v) == "string") then
 		local s = v
 		assert(type(s) == "string")
 		local literal        = astNewNode(AstLiteral, runNode.token, parent)
@@ -5171,7 +5129,7 @@ local function createRunReplacementFromTypeAndLuaValue(state, runNode, parent, t
 		literal.inferredType = getTypeInfoForBuiltinType(state, "string")
 		return literal
 
-	elseif tag == !(typeTags.TypeInfoBool) or (tag == !(typeTags.TypeInfoAny) and type(v) == "boolean") then
+	elseif tag == !(TYPE_BOOL) or (tag == !(TYPE_ANY) and type(v) == "boolean") then
 		local flag = v
 		assert(type(flag) == "boolean")
 		local literal        = astNewNode(AstLiteral, runNode.token, parent)
@@ -5180,7 +5138,7 @@ local function createRunReplacementFromTypeAndLuaValue(state, runNode, parent, t
 		literal.inferredType = getTypeInfoForBuiltinType(state, "bool")
 		return literal
 
-	elseif tag == !(typeTags.TypeInfoNone) or (tag == !(typeTags.TypeInfoAny) and v == nil) then
+	elseif tag == !(TYPE_NONE) or (tag == !(TYPE_ANY) and v == nil) then
 		assert(v == nil)
 		local literal        = astNewNode(AstLiteral, runNode.token, parent)
 		literal.literalType  = !(LITERAL_NIL)
@@ -5188,7 +5146,7 @@ local function createRunReplacementFromTypeAndLuaValue(state, runNode, parent, t
 		literal.inferredType = getTypeInfoForBuiltinType(state, "none")
 		return literal
 
-	elseif tag == !(typeTags.TypeInfoTable) or (tag == !(typeTags.TypeInfoAny) and type(v) == "table") then
+	elseif tag == !(TYPE_TABLE) or (tag == !(TYPE_ANY) and type(v) == "table") then
 		local t = v
 		assert(type(t) == "table")
 		local tableNode = astNewNode(AstTable, runNode.token, parent)
@@ -5204,7 +5162,7 @@ local function createRunReplacementFromTypeAndLuaValue(state, runNode, parent, t
 		tableNode.inferredType = getTypeInfoForBuiltinType(state, "table")
 		return tableNode
 
-	elseif tag == !(typeTags.TypeInfoArray) then
+	elseif tag == !(TYPE_ARRAY) then
 		local t = v
 		assert(type(t) == "table")
 		local arraySig  = typeInfo
@@ -5229,7 +5187,7 @@ local function createRunReplacementFromTypeAndLuaValue(state, runNode, parent, t
 		tableNode.inferredType = arraySig
 		return tableNode
 
-	elseif tag == !(typeTags.TypeInfoStruct) then
+	elseif tag == !(TYPE_STRUCT) then
 		local t = v
 		assert(type(t) == "table")
 		local structInfo = typeInfo
@@ -5260,12 +5218,12 @@ local function createRunReplacementFromTypeAndLuaValue(state, runNode, parent, t
 		tableNode.inferredType = structInfo
 		return tableNode
 
-	elseif tag == !(typeTags.TypeInfoEnum) then
+	elseif tag == !(TYPE_ENUM) then
 		local enumInfo     = typeInfo
 		local ident        = astNewNode(AstIdentifier, runNode.token, parent)
 		ident.inferredType = enumInfo
 
-		if !!(anyV(`enumInfo.memberTypeInfo.tag`, typeTags.TypeInfoInt,typeTags.TypeInfoString,typeTags.TypeInfoBool,typeTags.TypeInfoFloat)) then
+		if !!(CONST_SET{ TYPE_INT, TYPE_STRING, TYPE_BOOL, TYPE_FLOAT })[enumInfo.memberTypeInfo.tag] then
 			for _, decl in ipairs(enumInfo.astNode.declarations) do
 				local literal = decl.value
 				assert(literal.nodeType == !(nodeTypes.AstLiteral))
@@ -5276,7 +5234,7 @@ local function createRunReplacementFromTypeAndLuaValue(state, runNode, parent, t
 				end
 			end
 
-		elseif enumInfo.memberTypeInfo.tag == !(typeTags.TypeInfoType) then
+		elseif enumInfo.memberTypeInfo.tag == !(TYPE_TYPE) then
 			for _, decl in ipairs(enumInfo.astNode.declarations) do
 				if requireTypeRepresentedByExpression(state, decl.value).id == v then
 					ident.name        = decl.name.name
@@ -5295,14 +5253,14 @@ local function createRunReplacementFromTypeAndLuaValue(state, runNode, parent, t
 
 		return ident
 
-	elseif tag == !(typeTags.TypeInfoFunction) then
+	elseif tag == !(TYPE_FUNCTION) then
 		local func = v
 		assert(type(func) == "function")
 
 		local theConst = nil
 
 		for _, const in ipairs(state.constants) do
-			if const.kind == !(CONST_KIND_NORMAL) and const.valueType.tag == !(typeTags.TypeInfoFunction) and state.runnerEnvironment[const.name] == func then
+			if const.kind == !(CONST_KIND_NORMAL) and const.valueType.tag == !(TYPE_FUNCTION) and state.runnerEnvironment[const.name] == func then
 				theConst = const
 				break
 			end
@@ -5324,7 +5282,7 @@ local function createRunReplacementFromTypeAndLuaValue(state, runNode, parent, t
 			return copy
 		end
 
-	elseif tag == !(typeTags.TypeInfoType) then
+	elseif tag == !(TYPE_TYPE) then
 		local typeId = v
 		assert(type(typeId) == "number" and typeId == math.floor(typeId))
 
@@ -5336,9 +5294,9 @@ local function createRunReplacementFromTypeAndLuaValue(state, runNode, parent, t
 		local typeNode = createTypeNodeFromInfo(state, typeRepresented, runNode.token, parent)
 		return typeNode
 
-	elseif tag == !(typeTags.TypeInfoCompound) then
+	elseif tag == !(TYPE_COMPOUND) then
 		typeError(state, runNode, "!run expression is, or contains something, of a compound type which is illegal. (Type is %s)", getFriendlyTypeInfoName(typeInfo))
-	elseif tag == !(typeTags.TypeInfoNamespace) then
+	elseif tag == !(TYPE_NAMESPACE) then
 		typeError(state, runNode, "!run expression is a namespace which is illegal here.")
 	else
 		errorUnhandledType(state, runNode, typeInfo)
@@ -5353,7 +5311,7 @@ end
 	end
 	--[[ This is currently not needed as only functions may be waiting. 2020-02-26
 	for _, const in ipairs(state.constants) do
-		if not const.isReady and not (const.kind == !(CONST_KIND_NORMAL) and const.valueType.tag == !(typeTags.TypeInfoFunction)) then
+		if not const.isReady and not (const.kind == !(CONST_KIND_NORMAL) and const.valueType.tag == !(TYPE_FUNCTION)) then
 			!DEPEND_AND_RETURN(`runNode`, DEPEND_CONSTANT_READY, `const`)
 		end
 	end
@@ -5368,7 +5326,7 @@ end
 	crawl(state, lambda, relevantObjects)
 
 	for _, const in ipairs(state.constants) do
-		if relevantObjects[const] and not const.isReady and (const.kind == !(CONST_KIND_NORMAL) and const.valueType.tag == !(typeTags.TypeInfoFunction)) then
+		if relevantObjects[const] and not const.isReady and (const.kind == !(CONST_KIND_NORMAL) and const.valueType.tag == !(TYPE_FUNCTION)) then
 			!DEPEND_AND_RETURN(`runNode`, DEPEND_CONSTANT_READY, `const`)
 		end
 	end
@@ -5450,7 +5408,7 @@ end
 	addUnqueuedChildrenToQueueRecursively(state, replacement, !(PIPE_INFER))
 
 	replaceQueuedNodeAndUnqueueOldTree(state, runNode, replacement)
-	if typeInfo.tag == !(typeTags.TypeInfoAny) and replacement.inferredType.tag ~= !(typeTags.TypeInfoAny) then
+	if typeInfo.tag == !(TYPE_ANY) and replacement.inferredType.tag ~= !(TYPE_ANY) then
 		replacement = wrapInImplicitCast(state, replacement, typeInfo, true)
 	end
 
@@ -5653,7 +5611,7 @@ function _G.getAssignmentValue(state, targetExpr, values, i, typeInfoExpected, b
 	if valueExpr then
 		local valueTypeInfo = valueExpr.inferredType
 
-		if valueTypeInfo.tag == !(typeTags.TypeInfoList) then
+		if valueTypeInfo.tag == !(TYPE_LIST) then
 			valueTypeInfo = valueTypeInfo[1]
 
 			if not valueTypeInfo then
@@ -5669,7 +5627,7 @@ function _G.getAssignmentValue(state, targetExpr, values, i, typeInfoExpected, b
 		!CHECK_TYPE_COMPATABILITY_AND_MAYBE_RETURN(`valueExpr`, `valueTypeInfo`, `valueTypeInfoAdjusted`)
 
 		local messageFormat
-			=   valueTypeInfoAdjusted.tag == !(typeTags.TypeInfoFunction) and typeInfoExpected.tag == !(typeTags.TypeInfoFunction)
+			=   valueTypeInfoAdjusted.tag == !(TYPE_FUNCTION) and typeInfoExpected.tag == !(TYPE_FUNCTION)
 			and "Function signature is different from %s #%d%s. (Wanted %s, got %s)"
 			or  "Value type mismatch for %s #%d%s. (Wanted %s, got %s)"
 
@@ -5694,7 +5652,7 @@ function _G.getAssignmentValue(state, targetExpr, values, i, typeInfoExpected, b
 		local typeInfoForCall = call.inferredType
 		local listSig
 
-		if typeInfoForCall.tag == !(typeTags.TypeInfoList) then
+		if typeInfoForCall.tag == !(TYPE_LIST) then
 			listSig = typeInfoForCall
 		else
 			typeError(state, call, "The object being called is not a function. (It is %s)", getFriendlyTypeInfoName(typeInfoForCall))
@@ -5704,7 +5662,7 @@ function _G.getAssignmentValue(state, targetExpr, values, i, typeInfoExpected, b
 
 		if typeInfoForOutArg then
 			-- void
-		elseif listSig[1] and listSig[#listSig].tag == !(typeTags.TypeInfoVararg) then
+		elseif listSig[1] and listSig[#listSig].tag == !(TYPE_VARARG) then
 			typeInfoForOutArg = listSig[#listSig]
 		else
 			!!(CALL_RETURNS_NOTHING)
@@ -5786,48 +5744,48 @@ function _G.createTypeNodeFromInfo(state, typeRepresented, token, parent)
 		typeNode.kind           = !(TYPE_KIND_SIMPLE_BUILTIN)
 		typeNode.typeName       = typeName
 
-	elseif typeRepresented.tag == !(typeTags.TypeInfoStruct) then
+	elseif typeRepresented.tag == !(TYPE_STRUCT) then
 		local structInfo        = typeRepresented
 		typeNode.kind           = structInfo.isPolymorphic and !(TYPE_KIND_POLY_STRUCT) or !(TYPE_KIND_SIMPLE_USER)
 		typeNode.typeName       = structInfo.name
 
-	elseif typeRepresented.tag == !(typeTags.TypeInfoEnum) then
+	elseif typeRepresented.tag == !(TYPE_ENUM) then
 		local enumInfo          = typeRepresented
 		typeNode.kind           = !(TYPE_KIND_SIMPLE_USER)
 		typeNode.typeName       = enumInfo.name
 
-	elseif typeRepresented.tag == !(typeTags.TypeInfoFunction) then
+	elseif typeRepresented.tag == !(TYPE_FUNCTION) then
 		local funcSig           = typeRepresented
 		typeNode.kind           = !(TYPE_KIND_FUNCTION)
 		typeNode.functionHeader = createLambdaFromSignature(state, funcSig, typeNode) -- Is this really needed? I doubt it. @Cleanup
 
-	elseif typeRepresented.tag == !(typeTags.TypeInfoCompound) then
+	elseif typeRepresented.tag == !(TYPE_COMPOUND) then
 		typeNode.kind           = !(TYPE_KIND_COMPOUND)
 
-	elseif typeRepresented.tag == !(typeTags.TypeInfoArray) then
+	elseif typeRepresented.tag == !(TYPE_ARRAY) then
 		local arraySig          = typeRepresented
 		typeNode.kind           = !(TYPE_KIND_ARRAY)
 		typeNode.arrayItemType  = createTypeNodeFromInfo(state, arraySig.itemType, token, typeNode)
 
-	elseif typeRepresented.tag == !(typeTags.TypeInfoVararg) then
+	elseif typeRepresented.tag == !(TYPE_VARARG) then
 		errorInternal() -- When do we get here?
 	else
 		!ifDEBUG `print(getFriendlyTypeInfoName(typeRepresented))`
-		errorInternal("Incomplete: Handle type group '%s'.", TYPE_TAG_NAMES[typeRepresented.tag])
+		errorInternal("Incomplete: Handle type group '%s'.", TYPE_NAMES[typeRepresented.tag])
 	end
 
 	return typeNode
 end
 
 local function isTypeOrDoesTypeContainPlaceholder(typeInfo)
-	if typeInfo.tag == !(typeTags.TypeInfoPlaceholder) then
+	if typeInfo.tag == !(TYPE_PLACEHOLDER) then
 		return true
 
-	elseif typeInfo.tag == !(typeTags.TypeInfoCompound) then
+	elseif typeInfo.tag == !(TYPE_COMPOUND) then
 		local compound = typeInfo
-		return itemWith1(compound, "tag", !(typeTags.TypeInfoPlaceholder)) ~= nil
+		return itemWith1(compound, "tag", !(TYPE_PLACEHOLDER)) ~= nil
 
-	elseif typeInfo.tag == !(typeTags.TypeInfoFunction) then
+	elseif typeInfo.tag == !(TYPE_FUNCTION) then
 		local funcSig = typeInfo
 		for _, argTypeInfo in ipairs(funcSig.argumentTypesIn) do
 			if isTypeOrDoesTypeContainPlaceholder(argTypeInfo) then  return true  end
@@ -5885,7 +5843,7 @@ local function simplifyCast(state, cast)
 		errorInternal(state, cast) -- This should have been simplified away already.
 
 	-- int -> float
-	elseif exprTypeInfo.tag == !(typeTags.TypeInfoInt) and castTypeInfo.tag == !(typeTags.TypeInfoFloat) then
+	elseif exprTypeInfo.tag == !(TYPE_INT) and castTypeInfo.tag == !(TYPE_FLOAT) then
 		!ASSERT("cast.expression.nodeType == "..nodeTypes.AstLiteral)
 		!ASSERT("type(cast.expression.value) == 'number'")
 
@@ -5898,7 +5856,7 @@ local function simplifyCast(state, cast)
 		moveToNextRelevantPipe(state, literal, !(PIPE_INFER))
 
 	-- float -> int
-	elseif exprTypeInfo.tag == !(typeTags.TypeInfoFloat) and castTypeInfo.tag == !(typeTags.TypeInfoInt) then
+	elseif exprTypeInfo.tag == !(TYPE_FLOAT) and castTypeInfo.tag == !(TYPE_INT) then
 		!ASSERT("cast.expression.nodeType == "..nodeTypes.AstLiteral)
 		!ASSERT("type(cast.expression.value) == 'number'")
 
@@ -5911,7 +5869,7 @@ local function simplifyCast(state, cast)
 		moveToNextRelevantPipe(state, literal, !(PIPE_INFER))
 
 	-- (numeric) -> bool
-	elseif isTypeNumeric(exprTypeInfo) and castTypeInfo.tag == !(typeTags.TypeInfoBool) then
+	elseif isTypeNumeric(exprTypeInfo) and castTypeInfo.tag == !(TYPE_BOOL) then
 		!ASSERT("cast.expression.nodeType == "..nodeTypes.AstLiteral)
 		!ASSERT("type(cast.expression.value) == 'number'")
 
@@ -5924,7 +5882,7 @@ local function simplifyCast(state, cast)
 		moveToNextRelevantPipe(state, literal, !(PIPE_INFER))
 
 	-- string -> bool
-	elseif exprTypeInfo.tag == !(typeTags.TypeInfoString) and castTypeInfo.tag == !(typeTags.TypeInfoBool) then
+	elseif exprTypeInfo.tag == !(TYPE_STRING) and castTypeInfo.tag == !(TYPE_BOOL) then
 		!ASSERT("cast.expression.nodeType == "..nodeTypes.AstLiteral)
 		!ASSERT("type(cast.expression.value) == 'string'")
 
@@ -5937,7 +5895,7 @@ local function simplifyCast(state, cast)
 		moveToNextRelevantPipe(state, literal, !(PIPE_INFER))
 
 	-- array -> bool
-	elseif exprTypeInfo.tag == !(typeTags.TypeInfoArray) and castTypeInfo.tag == !(typeTags.TypeInfoBool) then
+	elseif exprTypeInfo.tag == !(TYPE_ARRAY) and castTypeInfo.tag == !(TYPE_BOOL) then
 		local tableNode = followIdentifiersToConstantValue(cast.expression)
 		assert(tableNode.nodeType == !(nodeTypes.AstTable))
 
@@ -5950,7 +5908,7 @@ local function simplifyCast(state, cast)
 		moveToNextRelevantPipe(state, literal, !(PIPE_INFER))
 
 	-- enum -> enumMemberType (int, float, string, bool or type)
-	elseif exprTypeInfo.tag == !(typeTags.TypeInfoEnum) and isTypeCompatibleWith(exprTypeInfo.memberTypeInfo, castTypeInfo) then
+	elseif exprTypeInfo.tag == !(TYPE_ENUM) and isTypeCompatibleWith(exprTypeInfo.memberTypeInfo, castTypeInfo) then
 		local castIsDirect = (castTypeInfo == exprTypeInfo.memberTypeInfo)
 
 		local enumInfo = exprTypeInfo
@@ -5970,7 +5928,7 @@ local function simplifyCast(state, cast)
 			if castIsDirect then
 				assert(literalCopy.inferredType == castTypeInfo)
 
-			elseif exprTypeInfo.memberTypeInfo.tag == !(typeTags.TypeInfoInt) and castTypeInfo.tag == !(typeTags.TypeInfoFloat) then
+			elseif exprTypeInfo.memberTypeInfo.tag == !(TYPE_INT) and castTypeInfo.tag == !(TYPE_FLOAT) then
 				literalCopy.literalType  = !(LITERAL_FLOAT)
 				literalCopy.inferredType = castTypeInfo
 
@@ -5986,7 +5944,7 @@ local function simplifyCast(state, cast)
 			replaceQueuedNodeAndUnqueueOldTree(state, cast, literalCopy)
 			moveToNextRelevantPipe(state, literalCopy, !(PIPE_INFER))
 
-		elseif castTypeInfo.tag == !(typeTags.TypeInfoType) then
+		elseif castTypeInfo.tag == !(TYPE_TYPE) then
 			assert(castIsDirect)
 
 			local typeNode = valueExpr
@@ -6003,12 +5961,12 @@ local function simplifyCast(state, cast)
 		end
 
 	-- (whatever) -> compound
-	elseif castTypeInfo.tag == !(typeTags.TypeInfoCompound) then
+	elseif castTypeInfo.tag == !(TYPE_COMPOUND) then
 		typeError(state, cast, "Cannot cast constants to compound types. (Target type is %s)", getFriendlyTypeInfoName(castTypeInfo))
 
 	-- (whatever) -> any
 	-- any -> (whatever)
-	elseif exprTypeInfo.tag == !(typeTags.TypeInfoAny) or castTypeInfo.tag == !(typeTags.TypeInfoAny) then -- Handle this last!
+	elseif exprTypeInfo.tag == !(TYPE_ANY) or castTypeInfo.tag == !(TYPE_ANY) then -- Handle this last!
 		-- void
 
 	else
@@ -6038,8 +5996,8 @@ local function simplifyUnary(state, unary)
 		local literal = astNewNode(AstLiteral, unary.token, unary.parent)
 
 		literal.literalType
-			=  typeInfo.tag == !(typeTags.TypeInfoInt)   and !(LITERAL_INTEGER)
-			or typeInfo.tag == !(typeTags.TypeInfoFloat) and !(LITERAL_FLOAT)
+			=  typeInfo.tag == !(TYPE_INT)   and !(LITERAL_INTEGER)
+			or typeInfo.tag == !(TYPE_FLOAT) and !(LITERAL_FLOAT)
 			or errorInternal(getFriendlyTypeInfoName(typeInfo))
 
 		literal.value        = !!(opArithmetic ~= "+" and opArithmetic or "") unary.expression.value
@@ -6066,12 +6024,12 @@ local function simplifyUnary(state, unary)
 		local length    = 0
 		assert(tableNode.nodeType == !(nodeTypes.AstTable))
 
-		if tableNode.inferredType.tag == !(typeTags.TypeInfoArray) then
+		if tableNode.inferredType.tag == !(TYPE_ARRAY) then
 			for _, tableField in ipairs(tableNode.fields) do
 				length = math.max(length, tableField.key.value)
 			end
 
-		elseif tableNode.inferredType.tag == !(typeTags.TypeInfoTable) then
+		elseif tableNode.inferredType.tag == !(TYPE_TABLE) then
 			errorUnhandledNodeType(state, unary)
 
 		else
@@ -6113,11 +6071,11 @@ local function simplifyBinary(state, binary)
 	-- @Incomplete: Simplify these kinds of expressions: 1 + -x => 1 - x
 	local typeInfo = binary.inferredType
 
-	if op == "*" and typeInfo.tag == !(typeTags.TypeInfoString) then
+	if op == "*" and typeInfo.tag == !(TYPE_STRING) then
 		local s     = l.value
 		local count = r.value
 
-		if l.inferredType.tag == !(typeTags.TypeInfoInt) then
+		if l.inferredType.tag == !(TYPE_INT) then
 			s, count = count, s
 		end
 
@@ -6130,8 +6088,8 @@ local function simplifyBinary(state, binary)
 		!!(ASSERT_BOTH_OPERANDS_NUMERIC_LITERALS)
 
 		local literalType
-			=  typeInfo.tag == !(typeTags.TypeInfoInt)   and !(LITERAL_INTEGER)
-			or typeInfo.tag == !(typeTags.TypeInfoFloat) and !(LITERAL_FLOAT)
+			=  typeInfo.tag == !(TYPE_INT)   and !(LITERAL_INTEGER)
+			or typeInfo.tag == !(TYPE_FLOAT) and !(LITERAL_FLOAT)
 			or errorInternal(getFriendlyTypeInfoName(typeInfo))
 
 		local n = l.value !!(opArithmeticKeepType) r.value -- This should produce the correct result for any combination of int and float.
@@ -6175,8 +6133,8 @@ local function simplifyBinary(state, binary)
 	elseif op == !(opEquality) then
 		local valueL, valueR
 
-		if l.inferredType.tag == !(typeTags.TypeInfoType) then
-			!ASSERT("r.inferredType.tag == "..typeTags.TypeInfoType)
+		if l.inferredType.tag == !(TYPE_TYPE) then
+			!ASSERT("r.inferredType.tag == "..TYPE_TYPE)
 			valueL = getTypeRepresentedByExpression(l) or errorInternal(state, l)
 			valueR = getTypeRepresentedByExpression(r) or errorInternal(state, r)
 
@@ -6248,7 +6206,7 @@ function _G.simplifyExpressionIfConstant(state, expr)
 
 		local typeInfo = ident.inferredType
 
-		if typeInfo.tag == !(typeTags.TypeInfoEnum) then
+		if typeInfo.tag == !(TYPE_ENUM) then
 			if ident.name ~= decl.name.name then
 				-- @Cleanup: Is this necessary? Can't we just do ident.name=decl.name.name?
 				local copy = astCopy(decl.name, ident.token, ident.parent)
@@ -6265,7 +6223,7 @@ function _G.simplifyExpressionIfConstant(state, expr)
 			return
 		end
 
-		!ASSERT("typeInfo.tag ~= "..typeTags.TypeInfoType)
+		!ASSERT("typeInfo.tag ~= "..TYPE_TYPE)
 		if not isTypeSimple(typeInfo) then  return  end
 
 		if decl.value.nodeType == !(nodeTypes.AstAccess) then  return  end -- This will create a constant lookup (AKA view).
@@ -6299,23 +6257,23 @@ end
 -- Note: Glóa types are represented as ints in Lua and thus are 'simple'.
 function _G.isTypeSimple(typeInfo)
 	local tag = typeInfo.tag
-	return !!(anyV(`tag`,
-		typeTags.TypeInfoBool,
-		typeTags.TypeInfoInt,
-		typeTags.TypeInfoNone,
-		typeTags.TypeInfoFloat,
-		typeTags.TypeInfoString,
-		typeTags.TypeInfoType,
-		typeTags.TypeInfoEnum -- All enum member types are simple.
-	))
+	return !!(CONST_SET{
+		TYPE_BOOL,
+		TYPE_INT,
+		TYPE_NONE,
+		TYPE_FLOAT,
+		TYPE_STRING,
+		TYPE_TYPE,
+		TYPE_ENUM -- All enum member types are simple.
+	})[tag] or false
 end
 
 function _G.isTypeNumeric(typeInfo)
-	return !!(anyV(`typeInfo.tag`, typeTags.TypeInfoInt,typeTags.TypeInfoFloat))
+	return !!(CONST_SET{ TYPE_INT, TYPE_FLOAT })[typeInfo.tag] or false
 end
 
 function _G.isTypeTableLike(typeInfo)
-	return !!(anyV(`typeInfo.tag`, typeTags.TypeInfoTable,typeTags.TypeInfoStruct,typeTags.TypeInfoArray))
+	return !!(CONST_SET{ TYPE_TABLE, TYPE_STRUCT, TYPE_ARRAY })[typeInfo.tag] or false
 end
 
 -- isCompatible, compatibilityScore = isTypeCompatibleWith( typeToCheck, otherType )
@@ -6324,40 +6282,37 @@ function _G.isTypeCompatibleWith(typeToCheck, otherType)
 	if typeToCheck == otherType then  return true, !(SCORE)  end
 
 	-- Namespaces are never compatible with anything but themselves as they're not allowed in most places.
-	if typeToCheck.tag == !(typeTags.TypeInfoNamespace) or otherType.tag == !(typeTags.TypeInfoNamespace) then  return false, 0  end
+	if typeToCheck.tag == !(TYPE_NAMESPACE) or otherType.tag == !(TYPE_NAMESPACE) then  return false, 0  end
 
 	-- Placeholders cannot actually be checked - we just say they are compatible with
 	-- everything (except namespaces) until the situation is handled elsewhere.
 	!local SCORE = .1
-	if typeToCheck.tag == !(typeTags.TypeInfoPlaceholder) or otherType.tag == !(typeTags.TypeInfoPlaceholder) then  return true, !(SCORE)  end
+	if typeToCheck.tag == !(TYPE_PLACEHOLDER) or otherType.tag == !(TYPE_PLACEHOLDER) then  return true, !(SCORE)  end
 
 	-- Everything is compatible with the 'any' type. The user better know what they're doing!
 	!local SCORE = 0x1
-	if otherType.tag == !(typeTags.TypeInfoAny) then  return true, !(SCORE)  end
+	if otherType.tag == !(TYPE_ANY) then  return true, !(SCORE)  end
 
 	-- Ints are always compatible with floats (but the opposite is false).
 	-- This should be safe as all numbers are 64-bit floats in Lua 5.1 (I think).
 	!local SCORE = 0x1000
-	if typeToCheck.tag == !(typeTags.TypeInfoInt) and otherType.tag == !(typeTags.TypeInfoFloat) then  return true, !(SCORE)  end
+	if typeToCheck.tag == !(TYPE_INT) and otherType.tag == !(TYPE_FLOAT) then  return true, !(SCORE)  end
 
 	-- Substructs are compatible with base structs.
 	!local SCORE = 0x1000
-	if typeToCheck.tag == !(typeTags.TypeInfoStruct) and otherType.tag == !(typeTags.TypeInfoStruct) then
+	if typeToCheck.tag == !(TYPE_STRUCT) and otherType.tag == !(TYPE_STRUCT) then
 		if doesStructInherit(typeToCheck, otherType) then  return true, !(SCORE)  end
 		return false, 0
 	end
 
 	-- Structs and arrays are outputted as tables in Lua, so they are always compatible with tables in Glóa.
 	!local SCORE = 0x10
-	if
-		otherType.tag == !(typeTags.TypeInfoTable)
-		and !!(anyV(`typeToCheck.tag`, typeTags.TypeInfoStruct,typeTags.TypeInfoArray))
-	then
+	if otherType.tag == !(TYPE_TABLE) and !!(CONST_SET{ TYPE_STRUCT, TYPE_ARRAY })[typeToCheck.tag] then
 		return true, !(SCORE)
 	end
 
 	!local SCORE = 0x100
-	if typeToCheck.tag == !(typeTags.TypeInfoCompound) then
+	if typeToCheck.tag == !(TYPE_COMPOUND) then
 		-- All compound items has to match the target. (If only one item matches, an explicit cast is needed.)
 		local compoundToCheck = typeToCheck
 		for _, compoundItemToCheck in ipairs(compoundToCheck) do
@@ -6367,7 +6322,7 @@ function _G.isTypeCompatibleWith(typeToCheck, otherType)
 	end
 
 	!local SCORE = 0x100
-	if otherType.tag == !(typeTags.TypeInfoCompound) then
+	if otherType.tag == !(TYPE_COMPOUND) then
 		-- typeToCheck has to match at least one compound item.
 		local otherCompound = otherType
 		for _, otherCompoundItem in ipairs(otherCompound) do
@@ -6377,10 +6332,10 @@ function _G.isTypeCompatibleWith(typeToCheck, otherType)
 	end
 
 	-- Array compatability completely depends on the item type.
-	if otherType.tag == !(typeTags.TypeInfoArray) then
-		if typeToCheck.tag == !(typeTags.TypeInfoArray) then
+	if otherType.tag == !(TYPE_ARRAY) then
+		if typeToCheck.tag == !(TYPE_ARRAY) then
 			return isTypeCompatibleWith(typeToCheck.itemType, otherType.itemType)
-		elseif typeToCheck.tag == !(typeTags.TypeInfoStruct) and typeToCheck.kind == !(STRUCT_KIND_ARRAY) then
+		elseif typeToCheck.tag == !(TYPE_STRUCT) and typeToCheck.kind == !(STRUCT_KIND_ARRAY) then
 			return isTypeCompatibleWith(typeToCheck.valueType, otherType.itemType)
 		end
 	end
@@ -6410,13 +6365,13 @@ end
 -- Types that aren't single: TypeInfoVararg and TypeInfoList.
 do
 	local function adjustVarargItemTypeToOneAndToIncludeNil(state, itemType)
-		if !!(anyV(`itemType.tag`, typeTags.TypeInfoNone,typeTags.TypeInfoAny)) then
+		if !!(CONST_SET{ TYPE_NONE, TYPE_ANY })[itemType.tag] then
 			return itemType
 		end
 
 		local nilTypeInfo = getTypeInfoForBuiltinType(state, "none")
 
-		if itemType.tag ~= !(typeTags.TypeInfoCompound) then
+		if itemType.tag ~= !(TYPE_COMPOUND) then
 			return getTypeInfoForCompoundType(state, {itemType, nilTypeInfo}, true)
 		end
 
@@ -6427,14 +6382,14 @@ do
 	end
 
 	function _G.adjustTypeToOne(state, exprForError, typeInfo, adjustVarargToIncludeNil)
-		if typeInfo.tag == !(typeTags.TypeInfoList) then
+		if typeInfo.tag == !(TYPE_LIST) then
 			typeInfo = typeInfo[1]
 			if not typeInfo then
 				typeError(state, exprForError, "Function call returns nothing. (Expected at least one value.)") -- Note: "Nothing" is not the same as vararg of zero length.
 			end
 		end
 
-		if typeInfo.tag == !(typeTags.TypeInfoVararg) then
+		if typeInfo.tag == !(TYPE_VARARG) then
 			typeInfo = typeInfo.itemType
 			if adjustVarargToIncludeNil then
 				typeInfo = adjustVarargItemTypeToOneAndToIncludeNil(state, typeInfo)
@@ -6630,16 +6585,16 @@ function _G.getExpectedTypeInfo(state, node, strict, expectantTerm, nodeForError
 
 		!ASSERT `tableField`
 
-		if tableNode.inferredType.tag == !(typeTags.TypeInfoTable) then
+		if tableNode.inferredType.tag == !(TYPE_TABLE) then
 			return getTypeInfoForBuiltinType(state, "any")
 
-		elseif tableNode.inferredType.tag == !(typeTags.TypeInfoArray) then
+		elseif tableNode.inferredType.tag == !(TYPE_ARRAY) then
 			if isKey then  return getTypeInfoForBuiltinType(state, "int")  end
 
 			local arraySig = tableNode.inferredType
 			return arraySig.itemType
 
-		elseif tableNode.inferredType.tag == !(typeTags.TypeInfoStruct) then
+		elseif tableNode.inferredType.tag == !(TYPE_STRUCT) then
 			if isKey then  return getTypeInfoForBuiltinType(state, "string")  end
 
 			local structInfo = tableNode.inferredType
@@ -6682,8 +6637,8 @@ function _G.getExpectedTypeInfo(state, node, strict, expectantTerm, nodeForError
 		local argTypeInfo = argTypesOut[i]
 
 		if
-			(not argTypeInfo and argTypesOut[1] and argTypesOut[#argTypesOut].tag == !(typeTags.TypeInfoVararg))
-			or (argTypeInfo.tag == !(typeTags.TypeInfoVararg))
+			(not argTypeInfo and argTypesOut[1] and argTypesOut[#argTypesOut].tag == !(TYPE_VARARG))
+			or (argTypeInfo.tag == !(TYPE_VARARG))
 		then
 			local varargSig = argTypeInfo or argTypesOut[#argTypesOut]
 			argTypeInfo     = varargSig.itemType
@@ -6720,8 +6675,8 @@ function _G.getExpectedTypeInfo(state, node, strict, expectantTerm, nodeForError
 		local argTypeInfo = argTypesIn[i]
 
 		if
-			(argTypeInfo and argTypeInfo.tag == !(typeTags.TypeInfoVararg))
-			or (not argTypeInfo and argTypesIn[1] and argTypesIn[#argTypesIn].tag == !(typeTags.TypeInfoVararg))
+			(argTypeInfo and argTypeInfo.tag == !(TYPE_VARARG))
+			or (not argTypeInfo and argTypesIn[1] and argTypesIn[#argTypesIn].tag == !(TYPE_VARARG))
 		then
 			local varargSig = argTypeInfo or argTypesIn[#argTypesIn]
 			argTypeInfo     = varargSig.itemType
@@ -6733,7 +6688,7 @@ function _G.getExpectedTypeInfo(state, node, strict, expectantTerm, nodeForError
 			typeError(state, call, "Too many arguments specified for call.")
 		end
 
-		if argTypeInfo.tag == !(typeTags.TypeInfoPlaceholder) then
+		if argTypeInfo.tag == !(TYPE_PLACEHOLDER) then
 			return (getExpectedTypeInfoUsingContents(state, node, strict, expectantTerm, nodeForError))
 		end
 
@@ -6811,7 +6766,7 @@ function _G.isAnExpressionExpected(state, node)
 		return node == parent.name or node == parent.type or node == parent.value
 	elseif parentNodeType == !(nodeTypes.AstFor) then
 		return node ~= parent.body
-	elseif !!(anyV(`parentNodeType`, nodeTypes.AstIf,nodeTypes.AstStaticIf,nodeTypes.AstWhile)) then
+	elseif !!(CONST_SET{ nodeTypes.AstIf, nodeTypes.AstStaticIf, nodeTypes.AstWhile })[parentNodeType] then
 		return node == parent.condition
 	else
 		errorUnhandledNodeType(state, node.parent)

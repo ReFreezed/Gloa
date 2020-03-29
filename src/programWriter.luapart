@@ -170,24 +170,6 @@ local foreignApiCompilerSymbols = {
 	compilerPath      = F("%q", COMPILER_PATH),
 	compilerDirectory = F("%q", COMPILER_DIRECTORY),
 
-	-- @Cleanup: Move these to a special !compiler directive. (Maybe move the above paths, directories and any other simple value as well?)
-	-- typeTagAny         = !(toLua(typeTags.TypeInfoAny)),
-	-- typeTagArray       = !(toLua(typeTags.TypeInfoArray)),
-	-- typeTagBool        = !(toLua(typeTags.TypeInfoBool)),
-	-- typeTagCompound    = !(toLua(typeTags.TypeInfoCompound)),
-	-- typeTagEnum        = !(toLua(typeTags.TypeInfoEnum)),
-	-- typeTagFloat       = !(toLua(typeTags.TypeInfoFloat)),
-	-- typeTagFunction    = !(toLua(typeTags.TypeInfoFunction)),
-	-- typeTagInt         = !(toLua(typeTags.TypeInfoInt)),
-	-- typeTagNone        = !(toLua(typeTags.TypeInfoNone)),
-	-- typeTagPlaceholder = !(toLua(typeTags.TypeInfoPlaceholder)),
-	-- typeTagString      = !(toLua(typeTags.TypeInfoString)),
-	-- typeTagStruct      = !(toLua(typeTags.TypeInfoStruct)),
-	-- typeTagTable       = !(toLua(typeTags.TypeInfoTable)),
-	-- typeTagType        = !(toLua(typeTags.TypeInfoType)),
-	-- typeTagVararg      = !(toLua(typeTags.TypeInfoVararg)),
-	-- typeTagVoid        = !(toLua(typeTags.TypeInfoVoid)),
-
 	ipairsr = `_IPAIRSR`,
 
 	wrapFunctionInGloaErrorHandler = !(trimTemplate`
@@ -217,6 +199,7 @@ local foreignApiCompilerSymbols = {
 		end)(programArguments)
 	`),
 
+	-- @Incomplete: Make all type infos available to the user program somehow.
 	-- getTypeInfo = !(trimTemplate`
 	-- 	function(T)
 	-- 		return _TYPE_INFO[T]
@@ -320,7 +303,7 @@ function _G.shouldOperationHaveSurroundingParentheses(node)
 	local parent         = node.parent
 	local parentNodeType = parent.nodeType
 	return not (
-		!!(anyV(`parentNodeType`,
+		!!(CONST_SET{
 			nodeTypes.AstCast, -- Casts should always add their own parentheses.
 			nodeTypes.AstAssignment,
 			nodeTypes.AstCall, -- Both callee and arguments.
@@ -328,7 +311,7 @@ function _G.shouldOperationHaveSurroundingParentheses(node)
 			nodeTypes.AstIf,
 			nodeTypes.AstFor,
 			nodeTypes.AstWhile
-		))
+		})[parentNodeType]
 		or parent.nodeType == !(nodeTypes.AstAccess) and node == parent.member -- The member should be inside [].
 	)
 end
@@ -367,11 +350,11 @@ function _G.writeBinaryOperation(state, writer, indent, nextLocalN, localsStack,
 		!WRITE_OPERAND `r`
 		file:write(")")
 
-	elseif binOp == "*" and resultingType.tag == !(typeTags.TypeInfoString) then
+	elseif binOp == "*" and resultingType.tag == !(TYPE_STRING) then
 		-- Just a quick note:
 		--   str *= 3  -- OK
 		--   num *= "" -- Illegal (as the result is a string, which is a type mismatch with 'num')
-		if lType.tag == !(typeTags.TypeInfoString) then
+		if lType.tag == !(TYPE_STRING) then
 			file:write("_REP(")
 		else
 			file:write("_REP2(")
@@ -427,7 +410,7 @@ function _G.writeAccess(state, writer, indent, nextLocalN, localsStack, access)
 			writer.file:write("]")
 		end
 
-	elseif typeInfo.tag == !(typeTags.TypeInfoEnum) then
+	elseif typeInfo.tag == !(TYPE_ENUM) then
 		errorInternal(state, access) -- Enum accesses should have been simplified away.
 
 	else
@@ -455,54 +438,54 @@ function _G.writeCast(state, writer, indent, nextLocalN, localsStack, cast, name
 
 	if
 		typeInfoSource == typeInfoTarget
-		or typeInfoSource.tag == !(typeTags.TypeInfoCompound)
-		or typeInfoTarget.tag == !(typeTags.TypeInfoCompound)
+		or typeInfoSource.tag == !(TYPE_COMPOUND)
+		or typeInfoTarget.tag == !(TYPE_COMPOUND)
 	then
 		!!(WRITE_EXPRESSION)
 
 	-- int -> float
-	elseif typeInfoSource.tag == !(typeTags.TypeInfoInt) and typeInfoTarget.tag == !(typeTags.TypeInfoFloat) then
+	elseif typeInfoSource.tag == !(TYPE_INT) and typeInfoTarget.tag == !(TYPE_FLOAT) then
 		!!(WRITE_EXPRESSION)
 	-- float -> int
-	elseif typeInfoSource.tag == !(typeTags.TypeInfoFloat) and typeInfoTarget.tag == !(typeTags.TypeInfoInt) then
+	elseif typeInfoSource.tag == !(TYPE_FLOAT) and typeInfoTarget.tag == !(TYPE_INT) then
 		writer.file:write("_MODF(") -- Note: math.modf() returns two values.
 		!!(WRITE_EXPRESSION)
 		writer.file:write(")")
 
 	-- (numeric) -> bool
-	elseif isTypeNumeric(typeInfoSource) and typeInfoTarget.tag == !(typeTags.TypeInfoBool) then
+	elseif isTypeNumeric(typeInfoSource) and typeInfoTarget.tag == !(TYPE_BOOL) then
 		!!(WRITE_EXPRESSION)
 		writer.file:write(" ~= 0")
 	-- string -> bool
-	elseif typeInfoSource.tag == !(typeTags.TypeInfoString) and typeInfoTarget.tag == !(typeTags.TypeInfoBool) then
+	elseif typeInfoSource.tag == !(TYPE_STRING) and typeInfoTarget.tag == !(TYPE_BOOL) then
 		!!(WRITE_EXPRESSION)
 		writer.file:write(' ~= ""')
 	-- array -> bool
-	elseif typeInfoSource.tag == !(typeTags.TypeInfoArray) and typeInfoTarget.tag == !(typeTags.TypeInfoBool) then
+	elseif typeInfoSource.tag == !(TYPE_ARRAY) and typeInfoTarget.tag == !(TYPE_BOOL) then
 		!!(WRITE_EXPRESSION)
 		writer.file:write("[1] ~= nil")
 	-- (array-like struct) -> bool
-	elseif typeInfoSource.tag == !(typeTags.TypeInfoStruct) and typeInfoSource.kind == !(STRUCT_KIND_ARRAY) and typeInfoTarget.tag == !(typeTags.TypeInfoBool) then
+	elseif typeInfoSource.tag == !(TYPE_STRUCT) and typeInfoSource.kind == !(STRUCT_KIND_ARRAY) and typeInfoTarget.tag == !(TYPE_BOOL) then
 		!!(WRITE_EXPRESSION)
 		writer.file:write("[1] ~= nil")
 
 	-- enum -> (real enum member type)
-	elseif typeInfoSource.tag == !(typeTags.TypeInfoEnum) and typeInfoTarget == typeInfoSource.memberTypeInfo then
+	elseif typeInfoSource.tag == !(TYPE_ENUM) and typeInfoTarget == typeInfoSource.memberTypeInfo then
 		!!(WRITE_EXPRESSION)
 
 	-- (base struct) -> (substruct)
-	elseif typeInfoSource.tag == !(typeTags.TypeInfoStruct) and typeInfoTarget.tag == !(typeTags.TypeInfoStruct) then
+	elseif typeInfoSource.tag == !(TYPE_STRUCT) and typeInfoTarget.tag == !(TYPE_STRUCT) then
 		!!(WRITE_EXPRESSION)
 	-- (table-like) -> table
-	elseif isTypeTableLike(typeInfoSource) and typeInfoTarget.tag == !(typeTags.TypeInfoTable) then
+	elseif isTypeTableLike(typeInfoSource) and typeInfoTarget.tag == !(TYPE_TABLE) then
 		!!(WRITE_EXPRESSION)
 	-- (array-like struct) -> array
-	elseif typeInfoSource.tag == !(typeTags.TypeInfoStruct) and typeInfoSource.kind == !(STRUCT_KIND_ARRAY) and typeInfoTarget.tag == !(typeTags.TypeInfoArray) then
+	elseif typeInfoSource.tag == !(TYPE_STRUCT) and typeInfoSource.kind == !(STRUCT_KIND_ARRAY) and typeInfoTarget.tag == !(TYPE_ARRAY) then
 		!!(WRITE_EXPRESSION)
 
 	-- (whatever) -> any
 	-- any -> (whatever)
-	elseif typeInfoSource.tag == !(typeTags.TypeInfoAny) or typeInfoTarget.tag == !(typeTags.TypeInfoAny) then
+	elseif typeInfoSource.tag == !(TYPE_ANY) or typeInfoTarget.tag == !(TYPE_ANY) then
 		-- The user better know what they're doing!
 		-- @Incomplete: Compiler setting for runtime checks of 'any' and 'compound' casts.
 		!!(WRITE_EXPRESSION)
@@ -555,13 +538,13 @@ local function findTableFieldByNameInStructConstructor(state, tableNode, memberN
 end
 
 local function doesTypeContainBoolOrNone(typeInfo)
-	if !!(anyV(`typeInfo.tag`, typeTags.TypeInfoBool,typeTags.TypeInfoNone,typeTags.TypeInfoAny)) then  return true  end
+	if !!(CONST_SET{ TYPE_BOOL, TYPE_NONE, TYPE_ANY })[typeInfo.tag] then  return true  end
 
-	if typeInfo.tag ~= !(typeTags.TypeInfoCompound) then  return false  end
+	if typeInfo.tag ~= !(TYPE_COMPOUND) then  return false  end
 	local compound = typeInfo
 
 	for _, compoundItem in ipairs(compound) do
-		if !!(anyV(`compoundItem.tag`, typeTags.TypeInfoBool,typeTags.TypeInfoNone)) then  return true  end
+		if !!(CONST_SET{ TYPE_BOOL, TYPE_NONE })[compoundItem.tag] then  return true  end
 	end
 	return false
 end
@@ -592,7 +575,7 @@ function _G.writeExpression(state, writer, indent, nextLocalN, localsStack, expr
 				end
 			!end
 
-			if const.valueType.tag == !(typeTags.TypeInfoFunction) and const.value.bodyIsForeign and const.value.foreignSource == "method" then
+			if const.valueType.tag == !(TYPE_FUNCTION) and const.value.bodyIsForeign and const.value.foreignSource == "method" then
 				callingForeignMethod = true
 				local argExpr        = call.arguments[1] or errorInternal(state, call)
 
@@ -658,11 +641,11 @@ function _G.writeExpression(state, writer, indent, nextLocalN, localsStack, expr
 						if
 							argExprLast and (
 								(
-									argExprLast.inferredType.tag == !(typeTags.TypeInfoVararg)
+									argExprLast.inferredType.tag == !(TYPE_VARARG)
 									and not argExprLast.surroundedByParentheses
 								)
 								or (
-									argExprLast.inferredType.tag == !(typeTags.TypeInfoList)
+									argExprLast.inferredType.tag == !(TYPE_LIST)
 									and not argExprLast.surroundedByParentheses
 									and argExprLast.inferredType[2]
 								)
@@ -785,12 +768,12 @@ function _G.writeExpression(state, writer, indent, nextLocalN, localsStack, expr
 			writeExpression(state, writer, indent, nextLocalN, localsStack, valueExpr)
 		end
 
-		if tableNode.inferredType.tag == !(typeTags.TypeInfoTable) then
+		if tableNode.inferredType.tag == !(TYPE_TABLE) then
 			for _, tableField in ipairs(tableNode.fields) do
 				writeGenericTableFieldIfValueIsNotNil(tableField)
 			end
 
-		elseif tableNode.inferredType.tag == !(typeTags.TypeInfoArray) then
+		elseif tableNode.inferredType.tag == !(TYPE_ARRAY) then
 			local items = {}
 
 			for _, tableField in ipairs(tableNode.fields) do
@@ -807,7 +790,7 @@ function _G.writeExpression(state, writer, indent, nextLocalN, localsStack, expr
 				writeExpression(state, writer, indent, nextLocalN, localsStack, expr)
 			end
 
-		elseif tableNode.inferredType.tag == !(typeTags.TypeInfoStruct) then
+		elseif tableNode.inferredType.tag == !(TYPE_STRUCT) then
 			local structInfo    = tableNode.inferredType
 			local writtenFields = {}
 			!ASSERT `not structInfo.isPolymorphic`
@@ -940,7 +923,7 @@ function _G.writeExpression(state, writer, indent, nextLocalN, localsStack, expr
 	elseif expr.nodeType == !(nodeTypes.AstNull) then
 		file:write("nil")
 
-	elseif expr.inferredType.tag == !(typeTags.TypeInfoNamespace) then
+	elseif expr.inferredType.tag == !(TYPE_NAMESPACE) then
 		nodeError(state, expr, "ProgramWriter", "Invalid place for a namespace.")
 	else
 		errorUnhandledNodeType(state, expr)
@@ -951,20 +934,20 @@ function _G.writeDefaultValueForType(state, writer, indent, nextLocalN, localsSt
 	local file = writer.file
 	local tag  = typeInfo.tag
 
-	if tag == !(typeTags.TypeInfoBool) then
+	if tag == !(TYPE_BOOL) then
 		file:write("false")
-	elseif tag == !(typeTags.TypeInfoInt) then
+	elseif tag == !(TYPE_INT) then
 		file:write("0")
-	elseif tag == !(typeTags.TypeInfoNone) then
+	elseif tag == !(TYPE_NONE) then
 		file:write("nil")
-	elseif tag == !(typeTags.TypeInfoFloat) then
+	elseif tag == !(TYPE_FLOAT) then
 		file:write("0.0")
-	elseif tag == !(typeTags.TypeInfoString) then
+	elseif tag == !(TYPE_STRING) then
 		file:write('""')
-	elseif tag == !(typeTags.TypeInfoArray) or tag == !(typeTags.TypeInfoTable) then
+	elseif tag == !(TYPE_ARRAY) or tag == !(TYPE_TABLE) then
 		file:write("{}")
 
-	elseif tag == !(typeTags.TypeInfoStruct) then
+	elseif tag == !(TYPE_STRUCT) then
 		local structInfo = typeInfo
 		!ASSERT `not structInfo.isPolymorphic`
 
@@ -996,7 +979,7 @@ function _G.writeDefaultValueForType(state, writer, indent, nextLocalN, localsSt
 		file:write("}")
 
 	elseif doesTypeHaveAnyDefaultValue(typeInfo) then
-		errorInternal("Incomplete: Write default value for type group '%s'.", TYPE_TAG_NAMES[typeInfo.tag])
+		errorInternal("Incomplete: Write default value for type group '%s'.", TYPE_NAMES[typeInfo.tag])
 	else
 		nodeError(state, nodeForError, "ProgramWriter", "There is no default value for %s.", getFriendlyTypeInfoName(typeInfo))
 	end
@@ -1393,7 +1376,7 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 
 				file:write(indentStr, "for ")
 
-				if objType.tag == !(typeTags.TypeInfoVararg) then
+				if objType.tag == !(TYPE_VARARG) then
 					!ASSERT("objExpr.nodeType == "..nodeTypes.AstVararg)
 
 					addLineMapping(state, writer, objExpr.token)
@@ -1424,7 +1407,7 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 
 					file:write(" in ")
 
-					if objType.tag == !(typeTags.TypeInfoArray) then
+					if objType.tag == !(TYPE_ARRAY) then
 						addLineMapping(state, writer, objExpr.token)
 						if forLoop.reverse then
 							file:write("_IPAIRSR")
@@ -1432,12 +1415,12 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 							file:write("_IPAIRS")
 						end
 
-					elseif objType.tag == !(typeTags.TypeInfoTable) then
+					elseif objType.tag == !(TYPE_TABLE) then
 						assert(not forLoop.reverse)
 						addLineMapping(state, writer, objExpr.token)
 						file:write("_PAIRS")
 
-					elseif objType.tag == !(typeTags.TypeInfoStruct) then
+					elseif objType.tag == !(TYPE_STRUCT) then
 						assert(not forLoop.reverse)
 						errorUnhandledNodeType(state, objExpr)
 						-- @Incomplete: Output default iterator for the struct. Also handle array-like structs and structured tables.
@@ -1524,7 +1507,7 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 				file:write(indentStr, "end") ; writeEol(state, writer)
 			end
 
-		elseif !!(anyV(`nodeType`, nodeTypes.AstImport,nodeTypes.AstUsing,nodeTypes.AstDebug,nodeTypes.AstRun)) then
+		elseif !!(CONST_SET{ nodeTypes.AstImport, nodeTypes.AstUsing, nodeTypes.AstDebug, nodeTypes.AstRun })[nodeType] then
 			-- void  (Ignore these statements.)
 
 		else
@@ -1664,10 +1647,10 @@ local function writeNormalSimpleConstant(state, writer, typeInfo, v, isEnum)
 	local file = writer.file
 	local tag  = typeInfo.tag
 
-	if tag == !(typeTags.TypeInfoBool) then
+	if tag == !(TYPE_BOOL) then
 		file:write(v and "true" or "false")
 
-	elseif tag == !(typeTags.TypeInfoInt) then
+	elseif tag == !(TYPE_INT) then
 		if v == 0 then
 			file:write("0") -- Avoid writing '-0'.
 		else
@@ -1682,7 +1665,7 @@ local function writeNormalSimpleConstant(state, writer, typeInfo, v, isEnum)
 			end
 		end
 
-	elseif tag == !(typeTags.TypeInfoFloat) then
+	elseif tag == !(TYPE_FLOAT) then
 		-- @Incomplete: Use shouldOperationHaveSurroundingParentheses().
 		if v == 0 then
 			file:write("0.0") -- Avoid writing '-0.0'.
@@ -1704,13 +1687,13 @@ local function writeNormalSimpleConstant(state, writer, typeInfo, v, isEnum)
 			end
 		end
 
-	elseif tag == !(typeTags.TypeInfoNone) then
+	elseif tag == !(TYPE_NONE) then
 		file:write("nil")
 
-	elseif tag == !(typeTags.TypeInfoString) then
+	elseif tag == !(TYPE_STRING) then
 		writeStringLiteral(writer, v)
 
-	elseif tag == !(typeTags.TypeInfoType) then
+	elseif tag == !(TYPE_TYPE) then
 		local typeInfo = v
 		file:write(F("%d", typeInfo.id))
 
@@ -1719,7 +1702,7 @@ local function writeNormalSimpleConstant(state, writer, typeInfo, v, isEnum)
 		end
 
 	else
-		errorInternal("Incomplete: Handle constant value of type '%s'.", (TYPE_TAG_NAMES[tag] or "?"))
+		errorInternal("Incomplete: Handle constant value of type '%s'.", (TYPE_NAMES[tag] or "?"))
 	end
 end
 
@@ -1745,11 +1728,11 @@ local function writeTypeInfo(state, writer, typeInfo)
 
 	file:write("{tag=", tag)
 	if state.settings.outputDebugInfo then
-		file:write("--[[TypeTag.", TYPE_TAG_NAMES[tag]:upper(), "]]")
+		file:write("--[[TypeTag.", TYPE_NAMES[tag]:upper(), "]]")
 	end
 	file:write(", id=", typeInfo.id)
 
-	if tag == !(typeTags.TypeInfoArray) then
+	if tag == !(TYPE_ARRAY) then
 		local arraySig = typeInfo
 
 		file:write(", itemType=")
@@ -1757,7 +1740,7 @@ local function writeTypeInfo(state, writer, typeInfo)
 
 		!!(END_OF_TYPE_INFO"TypeInfoArray")
 
-	elseif tag == !(typeTags.TypeInfoVararg) then
+	elseif tag == !(TYPE_VARARG) then
 		local varargSig = typeInfo
 
 		file:write(", itemType=")
@@ -1765,7 +1748,7 @@ local function writeTypeInfo(state, writer, typeInfo)
 
 		!!(END_OF_TYPE_INFO"TypeInfoVararg")
 
-	elseif tag == !(typeTags.TypeInfoFunction) then
+	elseif tag == !(TYPE_FUNCTION) then
 		local funcSig = typeInfo
 
 		file:write(", argumentsIn={")
@@ -1788,7 +1771,7 @@ local function writeTypeInfo(state, writer, typeInfo)
 
 		!!(END_OF_TYPE_INFO"TypeInfoFunction")
 
-	elseif tag == !(typeTags.TypeInfoStruct) then
+	elseif tag == !(TYPE_STRUCT) then
 		-- @Incomplete: Output struct kind and key/value types. (Remember to update preload.gloa)
 		local structInfo = typeInfo
 
@@ -1805,7 +1788,7 @@ local function writeTypeInfo(state, writer, typeInfo)
 
 		!!(END_OF_TYPE_INFO"TypeInfoStruct")
 
-	elseif tag == !(typeTags.TypeInfoEnum) then
+	elseif tag == !(TYPE_ENUM) then
 		local enumInfo = typeInfo
 
 		file:write(", memberType=")
@@ -1822,7 +1805,7 @@ local function writeTypeInfo(state, writer, typeInfo)
 
 		!!(END_OF_TYPE_INFO"TypeInfoEnum")
 
-	elseif tag == !(typeTags.TypeInfoCompound) then
+	elseif tag == !(TYPE_COMPOUND) then
 		local compound = typeInfo
 
 		file:write(", types={")
@@ -1834,17 +1817,17 @@ local function writeTypeInfo(state, writer, typeInfo)
 
 		!!(END_OF_TYPE_INFO"TypeInfoCompound")
 
-	elseif !!(anyV(`tag`,
-		typeTags.TypeInfoAny,
-		typeTags.TypeInfoBool,
-		typeTags.TypeInfoFloat,
-		typeTags.TypeInfoInt,
-		typeTags.TypeInfoNone,
-		typeTags.TypeInfoPlaceholder,
-		typeTags.TypeInfoString,
-		typeTags.TypeInfoTable,
-		typeTags.TypeInfoType
-	)) then
+	elseif !!(CONST_SET{
+		TYPE_ANY,
+		TYPE_BOOL,
+		TYPE_FLOAT,
+		TYPE_INT,
+		TYPE_NONE,
+		TYPE_PLACEHOLDER,
+		TYPE_STRING,
+		TYPE_TABLE,
+		TYPE_TYPE
+	})[tag] then
 		-- void  No more information.
 		!!(END_OF_TYPE_INFO"TypeInfo")
 
@@ -1876,7 +1859,7 @@ function _G.writeConstantValue(state, writer, const)
 		errorInternal("Incomplete: Handle constant kind '%s'.", (CONST_KIND_TITLES[const.kind] or "?"))
 
 	elseif not const.isObject then
-		if tag ~= !(typeTags.TypeInfoEnum) then
+		if tag ~= !(TYPE_ENUM) then
 			writeNormalSimpleConstant(state, writer, const.valueType, const.value, false)
 			return
 		end
@@ -1886,7 +1869,7 @@ function _G.writeConstantValue(state, writer, const)
 		local decl       = findMemberDeclaration(state, enumInfo.astNode, memberName) or errorInternal(state, enumInfo.astNode, "Did not find member '%s'.", memberName)
 		local valueExpr  = decl.value
 
-		if enumInfo.memberTypeInfo.tag == !(typeTags.TypeInfoType) then
+		if enumInfo.memberTypeInfo.tag == !(TYPE_TYPE) then
 			local typeNode = valueExpr
 			!ASSERT("typeNode.nodeType == "..nodeTypes.AstType)
 			writeNormalSimpleConstant(state, writer, enumInfo.memberTypeInfo, typeNode.representedType, true)
@@ -1900,18 +1883,18 @@ function _G.writeConstantValue(state, writer, const)
 			file:write("--[[", enumInfo.name, ".", memberName, "]]")
 		end
 
-	elseif tag == !(typeTags.TypeInfoFunction) then
+	elseif tag == !(TYPE_FUNCTION) then
 		local lambda = const.value
 		writeFunction(state, writer, 1, 1, {}, lambda)
 
-	elseif !!(anyV(`tag`, typeTags.TypeInfoTable,typeTags.TypeInfoArray,typeTags.TypeInfoStruct)) then
+	elseif !!(CONST_SET{ TYPE_TABLE, TYPE_ARRAY, TYPE_STRUCT })[tag] then
 		local tableNode = const.value
 		writeExpression(state, writer, 1, 1, {}, tableNode)
 
-	elseif !!(anyV(`tag`, typeTags.TypeInfoAny,typeTags.TypeInfoNamespace,typeTags.TypeInfoCompound,typeTags.TypeInfoList)) then
-		errorInternal("Cannot write invalid value type '%s'.", TYPE_TAG_NAMES[tag])
+	elseif !!(CONST_SET{ TYPE_ANY, TYPE_NAMESPACE, TYPE_COMPOUND, TYPE_LIST })[tag] then
+		errorInternal("Cannot write invalid value type '%s'.", TYPE_NAMES[tag])
 	else
-		errorInternal("Incomplete: Handle constant value of type '%s'.", (TYPE_TAG_NAMES[tag] or "?"))
+		errorInternal("Incomplete: Handle constant value of type '%s'.", (TYPE_NAMES[tag] or "?"))
 	end
 end
 
@@ -1921,7 +1904,7 @@ function _G.writeConstantValueOrReference(state, writer, const, nodeForError)
 		return
 	end
 
-	if const.valueType.tag == !(typeTags.TypeInfoFunction) then
+	if const.valueType.tag == !(TYPE_FUNCTION) then
 		local lambda = const.value
 
 		if lambda.bodyIsForeign and lambda.foreignSource == "method" then
@@ -1994,7 +1977,7 @@ function _G.writeForeignImports(state, writer, constants, asGlobals, relevantObj
 		if relevantObjects and not relevantObjects[const] then
 			-- void
 
-		elseif const.kind == !(CONST_KIND_NORMAL) and const.valueType.tag == !(typeTags.TypeInfoFunction) and const.value.bodyIsForeign then
+		elseif const.kind == !(CONST_KIND_NORMAL) and const.valueType.tag == !(TYPE_FUNCTION) and const.value.bodyIsForeign then
 			-- @Polish: Treat function constants pointing to the same foreign function as the same constant.
 			local lambda = const.value
 			writeForeignImportIfNew(state, writer, const.valueType, lambda.foreignSource, lambda.foreignSourceName, lambda.foreignSourceId, lambda.token, asGlobals)
@@ -2014,7 +1997,7 @@ function _G.writeConstantObjectsExceptFunctions(state, writer, constants, asGlob
 		if relevantObjects and not relevantObjects[const] then
 			-- void
 
-		elseif const.isObject and not (const.kind == !(CONST_KIND_NORMAL) and const.valueType.tag == !(typeTags.TypeInfoFunction)) then
+		elseif const.isObject and not (const.kind == !(CONST_KIND_NORMAL) and const.valueType.tag == !(TYPE_FUNCTION)) then
 			file:write("\t")
 			if not asGlobals then  file:write("local ")  end
 			file:write(const.name, " = ")
@@ -2031,7 +2014,7 @@ function _G.writeFunctionObjects(state, writer, constants, relevantObjects)
 	for _, const in ipairs(constants) do
 		if relevantObjects and not relevantObjects[const] then
 			--void
-		elseif const.kind == !(CONST_KIND_NORMAL) and const.valueType.tag == !(typeTags.TypeInfoFunction) then
+		elseif const.kind == !(CONST_KIND_NORMAL) and const.valueType.tag == !(TYPE_FUNCTION) then
 			local lambda = const.value
 			-- @Cleanup: Don't generate constants for polymorphic functions. (It's probably declarations doing this.) (I guess don't generate constants for foreign methods either.)
 			if not (lambda.isPolymorphic or (lambda.bodyIsForeign and lambda.foreignSource == "method")) then
@@ -2132,7 +2115,7 @@ function _G.writeProgram(state, writer)
 
 		mainLambda = mainFuncDecl.valueConstant.value
 
-		if mainLambda.inferredType.tag ~= !(typeTags.TypeInfoFunction) then
+		if mainLambda.inferredType.tag ~= !(TYPE_FUNCTION) then
 			nodeError(
 				state, mainFuncDecl.value, "ProgramWriter",
 				"Declared name '%s' must be a function to represent the entry point of the program.",
@@ -2214,7 +2197,7 @@ function _G.writeProgram(state, writer)
 			if relevantObjects and not relevantObjects[const] then
 				-- void
 
-			elseif const.kind == !(CONST_KIND_NORMAL) and const.valueType.tag == !(typeTags.TypeInfoFunction) then
+			elseif const.kind == !(CONST_KIND_NORMAL) and const.valueType.tag == !(TYPE_FUNCTION) then
 				local lambda = const.value
 
 				if not (lambda.isPolymorphic or (lambda.bodyIsForeign and lambda.foreignSource == "method")) then
@@ -2377,15 +2360,15 @@ end
 
 
 local HAS_DEFAULT_VALUE = !(Set{
-	typeTags.TypeInfoBool,
-	typeTags.TypeInfoInt,
-	typeTags.TypeInfoNone,
-	typeTags.TypeInfoFloat,
-	typeTags.TypeInfoString,
-	typeTags.TypeInfoArray,
-	typeTags.TypeInfoTable,
-	typeTags.TypeInfoStruct,
-	typeTags.TypeInfoVararg, -- Varargs never have any default value(s), but because it's a list we can just say that the default value is "nothing".
+	TYPE_BOOL,
+	TYPE_INT,
+	TYPE_NONE,
+	TYPE_FLOAT,
+	TYPE_STRING,
+	TYPE_ARRAY,
+	TYPE_TABLE,
+	TYPE_STRUCT,
+	TYPE_VARARG, -- Varargs never have any default value(s), but because it's a list we can just say that the default value is "nothing".
 })
 function _G.doesTypeHaveAnyDefaultValue(typeInfo)
 	return HAS_DEFAULT_VALUE[typeInfo.tag] or false

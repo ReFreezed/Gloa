@@ -114,8 +114,8 @@ function _G.bcAllocateConstantValueIfNew(state, kind, typeInfo, v, nodeForError)
 		=  (kindIsNormal and isTypeSimple(typeInfo))
 		or kind == !(CONST_KIND_NULL)
 
-	if not isSimple and !!(anyV(`tag`, typeTags.TypeInfoAny,typeTags.TypeInfoNamespace,typeTags.TypeInfoCompound,typeTags.TypeInfoList,typeTags.TypeInfoPlaceholder)) then
-		errorInternal(state, nodeForError, "Invalid type '%s' for constant.", (TYPE_TAG_NAMES[tag] or "?"))
+	if not isSimple and !!(CONST_SET{ TYPE_ANY, TYPE_NAMESPACE, TYPE_COMPOUND, TYPE_LIST, TYPE_PLACEHOLDER })[tag] then
+		errorInternal(state, nodeForError, "Invalid type '%s' for constant.", (TYPE_NAMES[tag] or "?"))
 	end
 	local isObject = not isSimple
 
@@ -130,7 +130,7 @@ function _G.bcAllocateConstantValueIfNew(state, kind, typeInfo, v, nodeForError)
 			elseif isSimple then
 				if const.value == v then  return const, false  end
 
-			elseif tag == !(typeTags.TypeInfoFunction) then
+			elseif tag == !(TYPE_FUNCTION) then
 				-- All functions are unique for now (except foreign functions, which are identified differently).
 				-- We may detect duplicate non-foreign functions at some point.
 				if
@@ -143,11 +143,11 @@ function _G.bcAllocateConstantValueIfNew(state, kind, typeInfo, v, nodeForError)
 				end
 
 			-- All table-likes are always unique.
-			elseif !!(anyV(`tag`, typeTags.TypeInfoStruct,typeTags.TypeInfoArray,typeTags.TypeInfoTable)) then
+			elseif !!(CONST_SET{ TYPE_STRUCT, TYPE_ARRAY, TYPE_TABLE })[tag] then
 				if const.value == v then  return const, false  end
 
 			else
-				errorInternal(state, nodeForError, "Incomplete: Unhandled constant value type '%s'.", (TYPE_TAG_NAMES[tag] or "?"))
+				errorInternal(state, nodeForError, "Incomplete: Unhandled constant value type '%s'.", (TYPE_NAMES[tag] or "?"))
 			end
 
 		elseif kind == !(CONST_KIND_FOREIGN) then
@@ -172,11 +172,11 @@ function _G.bcAllocateConstantValueIfNew(state, kind, typeInfo, v, nodeForError)
 	const.valueType = typeInfo
 	const.value     = v
 	const.isObject  = isObject
-	const.isReady   = not (kindIsNormal and tag == !(typeTags.TypeInfoFunction))
+	const.isReady   = not (kindIsNormal and tag == !(TYPE_FUNCTION))
 
 	-- Note: Simple constants (like ints) don't need a referencable name as we write those values directly everywhere.
 	if isObject then
-		if kindIsNormal and tag == !(typeTags.TypeInfoFunction) then
+		if kindIsNormal and tag == !(TYPE_FUNCTION) then
 			assert(not v.isPolymorphic)
 			state.functionN = state.functionN+1
 			const.name      = "_F"..state.functionN
@@ -255,7 +255,7 @@ function _G.bcAllocateConstantValueForExpressionIfNew(state, expr, dependent)
 	elseif nodeType == !(nodeTypes.AstIdentifier) then
 		local ident = expr
 
-		if typeInfo.tag == !(typeTags.TypeInfoEnum) then
+		if typeInfo.tag == !(TYPE_ENUM) then
 			local enumInfo = typeInfo
 			return bcAllocateConstantValueIfNew(state, !(CONST_KIND_NORMAL), enumInfo, ident.name, dependent)
 
@@ -350,15 +350,15 @@ local function createNodeWithDefaultValueForType(state, parent, typeInfo)
 		literal.literalType  = BUILTIN_TYPE_TAG_TO_LITERAL_TYPE[tag]
 		literal.inferredType = typeInfo
 
-		if tag == !(typeTags.TypeInfoBool) then
+		if tag == !(TYPE_BOOL) then
 			literal.value = false
-		elseif tag == !(typeTags.TypeInfoInt) then
+		elseif tag == !(TYPE_INT) then
 			literal.value = 0
-		elseif tag == !(typeTags.TypeInfoNone) then
+		elseif tag == !(TYPE_NONE) then
 			literal.value = nil
-		elseif tag == !(typeTags.TypeInfoFloat) then
+		elseif tag == !(TYPE_FLOAT) then
 			literal.value = 0
-		elseif tag == !(typeTags.TypeInfoString) then
+		elseif tag == !(TYPE_STRING) then
 			literal.value = ""
 		else
 			errorInternal("%d", tag)
@@ -367,7 +367,7 @@ local function createNodeWithDefaultValueForType(state, parent, typeInfo)
 		return literal
 
 	else
-		errorInternal("Incomplete: Handle type group '%s'.", (TYPE_TAG_NAMES[tag] or "?"))
+		errorInternal("Incomplete: Handle type group '%s'.", (TYPE_NAMES[tag] or "?"))
 	end
 end
 --]]
@@ -452,7 +452,7 @@ function _G.bcEmitForDeclaration(state, decl)
 		end
 
 		local const
-		if decl.name.inferredType.tag == !(typeTags.TypeInfoEnum) then
+		if decl.name.inferredType.tag == !(TYPE_ENUM) then
 			local enumInfo = decl.name.inferredType
 			const          = bcAllocateConstantValueIfNew(state, !(CONST_KIND_NORMAL), enumInfo, decl.name.name, decl)
 		else
@@ -500,7 +500,7 @@ function _G.bcEmitForDeclaration(state, decl)
 		decl.topScopeName = bcAllocateTopScopeName(state, decl.name.name)
 
 	else
-		local scope = getClosestScope(decl)
+		local scope = astFindParentScope(decl)
 
 		if isScopeDeclarative(scope) then
 			local valueExpr = getDeclarationValue(decl)
@@ -512,7 +512,7 @@ function _G.bcEmitForDeclaration(state, decl)
 				decl.valueConstant = const
 			end
 
-			if !!(anyV(`scope.nodeType`, nodeTypes.AstFileScope,nodeTypes.AstGlobalScope,nodeTypes.AstNamespace)) then
+			if !!(CONST_SET{ nodeTypes.AstFileScope, nodeTypes.AstGlobalScope, nodeTypes.AstNamespace })[scope.nodeType] then
 				decl.topScopeName = bcAllocateTopScopeName(state, decl.name.name)
 			end
 		end
