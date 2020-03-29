@@ -22,7 +22,7 @@
 	inferNode, queueForReinfer
 	isExpressionConstant, isExpressionExactlyOneValue
 	isPartOfAnyDeclaration
-	isTypeSimple, isTypeNumeric, isTypeTableLike, isTypeCompatibleWith, doesStructInherit, adjustTypeToOne
+	isTypeSimple, isTypeNumeric, isTypeTableLike, isTypeCompatibleWith, doesStructInherit, adjustTypeToOne, compareIdsOfTypes
 	newTypeInfo, isTypeBuiltin, getTypeInfo*
 	simplifyExpressionIfConstant, simplifyTypeExpression
 	typeError, typeErrorAfter, typeError2, typeMessage
@@ -309,8 +309,12 @@ do
 		return getTypeInfoForListOrCompoundType(state, typeInfos, !(typeTags.TypeInfoList), TypeInfoList)
 	end
 
-	-- Note: typeInfos is expected to be sorted by type ID.
-	function _G.getTypeInfoForCompoundType(state, typeInfos)
+	-- Note: typeInfos is expected to be sorted by type ID already if doSort is false.
+	function _G.getTypeInfoForCompoundType(state, typeInfos, doSort)
+		!ASSERT `type(doSort) == "boolean"`
+		if doSort then
+			table.sort(typeInfos, compareIdsOfTypes)
+		end
 		return getTypeInfoForListOrCompoundType(state, typeInfos, !(typeTags.TypeInfoCompound), TypeInfoCompound)
 	end
 end
@@ -1462,9 +1466,8 @@ end
 		end
 
 		table.sort(typeNode.components, function(a, b)  return typeIds[a] < typeIds[b]  end) -- @Cleanup @Speed: This is probably unnecessary.
-		table.sort(typeInfos,           function(a, b)  return a.id       < b.id        end)
 
-		typeInfoRepresented = getTypeInfoForCompoundType(state, typeInfos)
+		typeInfoRepresented = getTypeInfoForCompoundType(state, typeInfos, true)
 		typeInfo            = getTypeInfoForBuiltinType(state, "type")
 
 	else
@@ -4397,7 +4400,7 @@ end
 			end
 
 			if values[3] and values[3].nodeType == !(nodeTypes.AstLiteral) and values[3].value == 0 then
-				typeError(state, values[3], "The step value is 0.")
+				typeError(state, values[3], "For loop: The step value is 0.")
 			end
 
 			if
@@ -4410,9 +4413,9 @@ end
 				local step = values[3] and values[3].value or 1
 
 				if step > 0 and i2 < i1 then
-					typeError(state, values[2], "The final value is lower than the starting value in ascending loop.")
+					typeError(state, values[2], "For loop: The final value is lower than the starting value in ascending loop.")
 				elseif step < 0 and i2 > i1 then
-					typeError(state, values[2], "The final value is higher than the starting value in descending loop.")
+					typeError(state, values[2], "For loop: The final value is higher than the starting value in descending loop.")
 				end
 			end
 
@@ -4433,7 +4436,7 @@ end
 
 			if objType.tag == !(typeTags.TypeInfoArray) then
 				if names[3] then
-					typeError(state, names[3], "Too many names for short-form array loop. (Expected at most a value name and an index name.)")
+					typeError(state, names[3], "For loop: Too many names for short-form array loop. (Expected at most a value name and an index name.)")
 				end
 				local name1 = (names[1] and names[1].name) or "it"
 				local name2 = (names[2] and names[2].name) or "itIndex"
@@ -4442,7 +4445,7 @@ end
 
 			elseif objType.tag == !(typeTags.TypeInfoVararg) then
 				if names[3] then
-					typeError(state, names[3], "Too many names for short-form vararg loop. (Expected at most a value name and an index name.)")
+					typeError(state, names[3], "For loop: Too many names for short-form vararg loop. (Expected at most a value name and an index name.)")
 				end
 				local name1 = (names[1] and names[1].name) or "it"
 				local name2 = (names[2] and names[2].name) or "itIndex"
@@ -4451,7 +4454,7 @@ end
 
 			elseif objType.tag == !(typeTags.TypeInfoTable) then
 				if names[3] then
-					typeError(state, names[3], "Too many names for short-form table loop. (Expected at most a value name and a key name.)")
+					typeError(state, names[3], "For loop: Too many names for short-form table loop. (Expected at most a value name and a key name.)")
 				end
 				local name1    = (names[1] and names[1].name) or "it"
 				local name2    = (names[2] and names[2].name) or "itIndex"
@@ -4470,47 +4473,71 @@ end
 				local decl = findMemberDeclaration(state, structInfo.astNode, "!iterator")
 				if not decl then
 					-- @Incomplete: Fall back to array-like behavior if structInfo.kind==STRUCT_KIND_ARRAY and there's no default iterator.
-					typeError(state, objExpr, "%s has no default iterator.", getFriendlyTypeInfoName(structInfo))
-				end
-
-				local iterStarter     = decl.value
-				local iterStarterType = iterStarter.inferredType
-
-				if iterStarterType.tag ~= !(typeTags.TypeInfoFunction) then
-					typeError(state, iterStarter, "The !iterator value must be a function. (This is %s)", getFriendlyTypeInfoName(iterStarterType))
+					typeError(state, objExpr, "For loop: %s has no default iterator.", getFriendlyTypeInfoName(structInfo))
 				elseif decl.overloadOf then
-					typeError(state, objExpr, "The default iterator for %s is overloaded which is currently not supported.", getFriendlyTypeInfoName(structInfo))
+					typeError(state, decl, "This declaration is overloaded which is currently not supported for default iterators.")
 				end
 
-				local iterTypeInfo = iterStarterType.argumentTypesOut[1]
+				local iterLambda   = followIdentifiersToConstantValue(decl.value)
+				local iterTypeInfo = iterLambda.inferredType
 
-				if not iterTypeInfo then
-					typeError(state, iterStarter, "Expected function to return an iterator as the first value.")
-				elseif iterTypeInfo.tag ~= !(typeTags.TypeInfoFunction) then
+				if iterTypeInfo.tag ~= !(typeTags.TypeInfoFunction) then
+					typeError(state, decl.value, "The !iterator value must be a function. (This is %s)", getFriendlyTypeInfoName(iterTypeInfo))
+				end
+
+				local intType = getTypeInfoForBuiltinType(state, "int")
+
+				if #iterTypeInfo.argumentTypesIn ~= 2 then
 					typeError(
-						state, iterStarter.argumentsOut.arguments[1],
-						"Expected function to return an iterator as the first value. (This returns %s)",
-						getFriendlyTypeInfoName(iterTypeInfo)
+						state, iterLambda.argumentsIn.arguments[1],
+						"Default iterators for structs must take exactly two values - the struct instance and a control value. (This returns %d)",
+						#iterTypeInfo.argumentTypesOut
 					)
-				elseif #iterTypeInfo.argumentTypesOut ~= 2 then
+				elseif not isTypeCompatibleWith(structInfo, iterTypeInfo.argumentTypesIn[1]) then
 					typeError(
-						state, iterStarter.argumentsOut.arguments[1],
+						state, iterLambda.argumentsIn.arguments[1],
+						"The default iterator must take %s as the first argument. (This is %s)",
+						getFriendlyTypeInfoName(structInfo),
+						getFriendlyTypeInfoName(iterTypeInfo.argumentTypesIn[1])
+					)
+				elseif iterTypeInfo.argumentTypesIn[2] ~= intType then
+					typeError(
+						state, iterLambda.argumentsIn.arguments[2],
+						"The default iterator must take an int as the second argument. (This is %s)",
+						getFriendlyTypeInfoName(iterTypeInfo.argumentTypesIn[2])
+					)
+				end
+
+				local intOrNoneType = getTypeInfoForCompoundType(state, {intType, getTypeInfoForBuiltinType(state, "none")}, true)
+
+				if #iterTypeInfo.argumentTypesOut ~= 2 then
+					typeError(
+						state, iterLambda.argumentsOut.arguments[1],
 						"Default iterators for structs must return exactly two values - a control value and the current value. (This returns %d)",
 						#iterTypeInfo.argumentTypesOut
 					)
+				elseif iterTypeInfo.argumentTypesOut[1] ~= intOrNoneType then
+					typeError(
+						state, iterLambda.argumentsOut.arguments[1],
+						"The default iterator must return int|none as the first argument. (This is %s)",
+						getFriendlyTypeInfoName(iterTypeInfo.argumentTypesOut[1])
+					)
 				end
+				-- Note: We don't care what type the second returned value is.
 
 				if names[3] then
-					typeError(state, names[3], "Too many names for short-form struct loop. (Expected at most a value name and a control value name.)")
+					typeError(state, names[3], "For loop: Too many names for short-form struct loop. (Expected at most a value name and a control value name.)")
 				end
 				names[1] = names[1] or newIdentifier(forLoop, forLoop.token, "itIndex")
 				names[2] = names[2] or newIdentifier(forLoop, forLoop.token, "it")
 
 				-- Convert FOR_SHORT into FOR_ITERATOR.
-				local call  = astNewNode(AstCall, decl.token, forLoop)
-				call.callee = astCopy(decl.name, nil, call)
-				addToQueue(state, call.callee, call, "callee", !(PIPE_INFER))
-				pokeAndQueueUnqueuedNodeIntoTree(state, objExpr, call, call.arguments,1)
+				values[1] = astCopy(decl.name, nil, forLoop)
+				values[2] = objExpr
+				values[3] = newLiteral(forLoop, forLoop.token, !(LITERAL_INTEGER), 0, intType)
+				objExpr.queued.key = 2
+				addToQueue(state, values[1], values,1, !(PIPE_INFER))
+				addToQueue(state, values[3], values,3, !(PIPE_INFER))
 
 				forLoop.forType = !(FOR_ITERATOR)
 				-- Continue to after the reverse check below.
@@ -4518,7 +4545,7 @@ end
 			else
 				typeError(
 					state, objExpr,
-					"Cannot iterate over values in type group '%s'. (Type is %s)",
+					"For loop: Cannot iterate over values in type group '%s'. (Type is %s)",
 					TYPE_TAG_NAMES[objType.tag],
 					getFriendlyTypeInfoName(objType)
 				)
@@ -4527,7 +4554,7 @@ end
 			if forLoop.reverse and not (objType.tag == !(typeTags.TypeInfoArray) or objType.tag == !(typeTags.TypeInfoVararg)) then
 				typeError(
 					state, objExpr,
-					"Only arrays can be iterated in reverse. (This is %s)",
+					"For loop: Only arrays can be iterated in reverse. (This is %s)",
 					getFriendlyTypeInfoName(objType)
 				)
 			end
@@ -4623,7 +4650,7 @@ end
 				elseif #typeInfo > 2 then
 					local typeInfos = {unpack(typeInfo)}
 					removeItem(typeInfos, getTypeInfoForBuiltinType(state, "none"))
-					typeInfo = getTypeInfoForCompoundType(state, typeInfos)
+					typeInfo = getTypeInfoForCompoundType(state, typeInfos, false)
 				else
 					typeInfo = typeInfo[2].tag == !(typeTags.TypeInfoNone) and typeInfo[1] or typeInfo[2] or errorInternal()
 				end
@@ -6094,7 +6121,7 @@ local function simplifyBinary(state, binary)
 			s, count = count, s
 		end
 
-		local literal = newLiteral(binary.parent, binary.token, !(LITERAL_FLOAT), s:rep(count), typeInfo)
+		local literal = newLiteral(binary.parent, binary.token, !(LITERAL_STRING), s:rep(count), typeInfo)
 		replaceQueuedNodeAndUnqueueOldTree(state, binary, literal)
 		moveToNextRelevantPipe(state, literal, !(PIPE_INFER))
 
@@ -6375,13 +6402,13 @@ function _G.doesStructInherit(structInfoToCheck, otherStructInfo)
 	return false
 end
 
+function _G.compareIdsOfTypes(a, b)
+	return a.id < b.id
+end
+
 -- singleTypeInfo = adjustTypeToOne( state, expressionForError, typeInfo [, adjustVarargToIncludeNil=false ] )
 -- Types that aren't single: TypeInfoVararg and TypeInfoList.
 do
-	local function compareIdsOfTypes(a, b)
-		return a.id < b.id
-	end
-
 	local function adjustVarargItemTypeToOneAndToIncludeNil(state, itemType)
 		if !!(anyV(`itemType.tag`, typeTags.TypeInfoNone,typeTags.TypeInfoAny)) then
 			return itemType
@@ -6390,17 +6417,13 @@ do
 		local nilTypeInfo = getTypeInfoForBuiltinType(state, "none")
 
 		if itemType.tag ~= !(typeTags.TypeInfoCompound) then
-			local typeInfos = {itemType, nilTypeInfo}
-			table.sort(typeInfos, compareIdsOfTypes)
-			return getTypeInfoForCompoundType(state, typeInfos)
+			return getTypeInfoForCompoundType(state, {itemType, nilTypeInfo}, true)
 		end
 
 		local compound = itemType
 		if indexOf(compound, nilTypeInfo) then  return compound  end
 
-		local typeInfos = {nilTypeInfo, unpack(compound)}
-		table.sort(typeInfos, compareIdsOfTypes)
-		return getTypeInfoForCompoundType(state, typeInfos)
+		return getTypeInfoForCompoundType(state, {nilTypeInfo, unpack(compound)}, true)
 	end
 
 	function _G.adjustTypeToOne(state, exprForError, typeInfo, adjustVarargToIncludeNil)
