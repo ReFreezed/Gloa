@@ -402,6 +402,10 @@ _G.!structAst"AstLambda:_AstScopeExpression"{
 	{`bakeDeclarations`,  {},  astRef="array"}, -- []AstDeclaration
 	{`bakeValues`,        {},  astRef="array"}, -- []AstExpression
 
+	{`bodyTextLambda`,    nil, astRef="node"}, -- AstLambda
+
+	{`metaOnly`,          false}, -- If this is set then this won't get written to the final output - only to the metaprogram.
+
 	-- Type phase:
 	{`foreignSourceId`,   ""}, -- Is foreignSource and foreignSourceName combined.
 
@@ -1928,12 +1932,8 @@ function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 	return true
 end
 
-function _G.parseBlock(state, parent)
-	-- Note: We assume the '{' has been eaten already.
-
-	local blockStartToken     = state.nextToken-1
-	local block               = astNewNode(AstBlock, blockStartToken, parent)
-
+-- success = parseBlockStatements( state, block )
+function _G.parseBlockStatements(state, block)
 	!if DEBUG then
 		--[[
 		setmetatable(block, {__newindex=function(block, k, v)
@@ -1943,14 +1943,13 @@ function _G.parseBlock(state, parent)
 		--]]
 	!end
 
-	local statementStartToken = blockStartToken
-	local lastNodeType        = 0
+	local lastNodeType = 0
 
 	while true do
 		local tokType, tokValue, token = peekNextToken(state)
 
 		if not tokType then
-			!ERROR_OR_RETURN `errorParsing(state, blockStartToken, "Unfinished block.")`
+			!ERROR_OR_RETURN_FALSE `errorParsing(state, block.token, "Unfinished block.")`
 
 		elseif isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"}") then
 			eatNextToken(state)
@@ -1976,16 +1975,24 @@ function _G.parseBlock(state, parent)
 					or getLast(block.statements).values[1]    and " (Note: The function has return arguments.)"
 					or                                            " (Note: The function has no return arguments.)"
 
-				!ERROR_OR_RETURN `errorParsing(state, state.nextToken, "Unreachable code after %s statement.%s", nodeTitle, extra)`
+				!ERROR_OR_RETURN_FALSE `errorParsing(state, state.nextToken, "Unreachable code after %s statement.%s", nodeTitle, extra)`
 			end
 
-			statementStartToken = state.nextToken
-			!DO_OR_RETURN `parseOneStatementButSometimesMoreAndAddToBlock(state, block)`
+			!DO_OR_RETURN_FALSE `parseOneStatementButSometimesMoreAndAddToBlock(state, block)`
 
 			local statement = getLast(block.statements)
 			lastNodeType    = statement.nodeType -- This is for return/break/continue check.
 		end
 	end
+
+	return true
+end
+
+function _G.parseBlock(state, parent)
+	-- Note: We assume the '{' has been eaten already.
+
+	local block = astNewNode(AstBlock, state.nextToken-1, parent)
+	!DO_OR_RETURN `parseBlockStatements(state, block)`
 
 	return block
 end
@@ -2612,6 +2619,51 @@ function _G.parseLambda(state, parent)
 		end
 
 		lambda.bodyEndToken = state.nextToken-1
+
+	elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"body_text") then
+		local token = state.nextToken
+		eatNextToken(state)
+
+		tokType, tokValue = eatNextToken(state)
+		if not isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"{") then
+			!ERROR_OR_RETURN `errorParsingAfterPrevious(state, "Expected '{'.")`
+		end
+
+		do
+			local bodyTextLambda    = astNewNode(AstLambda, token, lambda)
+			bodyTextLambda.metaOnly = true
+			lambda.bodyTextLambda   = bodyTextLambda
+			table.insert(lambda.statements, bodyTextLambda)
+
+			local argsOut               = astNewNode(AstArguments, token, bodyTextLambda)
+			bodyTextLambda.argumentsOut = argsOut
+			table.insert(bodyTextLambda.statements, argsOut)
+
+			local arg            = astNewNode(AstArgument, token, argsOut)
+			argsOut.arguments[1] = arg
+
+			local decl           = astNewNode(AstDeclaration, token, arg)
+			arg.declaration      = decl
+
+			decl.name            = newIdentifier(decl, token, "_1", decl)
+
+			local typeNode       = astNewNode(AstType, token, decl)
+			typeNode.kind        = !(TYPE_KIND_SIMPLE_BUILTIN)
+			typeNode.typeName    = "string"
+			decl.type            = typeNode
+
+			!SET_OR_RETURN `local block = parseBlock(state, bodyTextLambda)`
+			bodyTextLambda.body         = block
+			table.insert(bodyTextLambda.statements, block)
+		end
+
+		local block = astNewNode(AstBlock, token, lambda) -- Empty until bodyTextLambda has run.
+		lambda.body = block
+		table.insert(lambda.statements, block)
+
+		lambda.bodyEndToken                = state.nextToken-1 -- The '}'.
+		lambda.bodyTextLambda.bodyEndToken = lambda.bodyEndToken
+
 	else
 		lambda.bodyEndToken = state.nextToken-1 -- Dummy value that shouldn't be used since there's no body.
 	end
@@ -3233,19 +3285,19 @@ end
 
 
 -- errorParsing( compilationState, tokenIndex, formatString, ... )
-function _G.errorParsing(state, i, s, ...)
+function _G.errorParsing(state, token, s, ...)
 	local tokens = state.tokens
 
-	local path
-		=  tokens.file[i]
-		or tokens.file[1] -- Not great, but better than crashing.
+	local buffer
+		=  tokens.buffer[token]
+		or tokens.buffer[1] -- Not great, but better than crashing.
 		or errorInternal("No tokens.")
 
-	local buffer = state.fileBuffers[path] or errorInternal("No file buffer for '%s'.", path)
+	local path = tokens.file[token] or tokens.file[1]
 
 	local ptr
-		=  tokens.position1[i]
-		or i <= 1 and 1
+		=  tokens.position1[token]
+		or token <= 1 and 1
 		or tokens.count > 0 and tokens.position2[tokens.count]+1
 		or #buffer
 
@@ -3258,9 +3310,8 @@ function _G.parserMessage(file, state, token, label, s, ...)
 	if type(file) ~= "userdata" then  return parserMessage(io.stdout, file, state, token, label, s, ...)  end
 
 	local tokens = state.tokens
-	local path   = tokens.file[token]      or errorInternal("No tokens.")
-	local buffer = state.fileBuffers[path] or errorInternal("No file buffer for '%s'.", path)
-	reportMessageInFile(file, buffer, path, tokens.position1[token], label, "Parser", s, ...)
+	local path   = tokens.file[token] or errorInternal("No tokens.")
+	reportMessageInFile(file, tokens.buffer[token], path, tokens.position1[token], label, "Parser", s, ...)
 end
 
 -- parserMessageAfter( [ outputFile=io.stdout, ] compilationState, token, label, formatString, ... )
@@ -3268,9 +3319,8 @@ function _G.parserMessageAfter(file, state, token, label, s, ...)
 	if type(file) ~= "userdata" then  return parserMessage(io.stdout, file, state, token, label, s, ...)  end
 
 	local tokens = state.tokens
-	local path   = tokens.file[token]      or errorInternal("No tokens.")
-	local buffer = state.fileBuffers[path] or errorInternal("No file buffer for '%s'.", path)
-	reportMessageInFile(file, buffer, path, tokens.position2[token]+1, label, "Parser", s, ...)
+	local path   = tokens.file[token] or errorInternal("No tokens.")
+	reportMessageInFile(file, tokens.buffer[token], path, tokens.position2[token]+1, label, "Parser", s, ...)
 end
 
 -- parserMessageLine( [ outputFile=io.stdout, ] compilationState, token, label, formatString, ... )
@@ -3281,7 +3331,7 @@ function _G.parserMessageLine(file, state, token, label, s, ...)
 	local path   = tokens.file[token] or errorInternal("No tokens.")
 
 	-- Temp until tokens.line1 has useful values.
-	local buffer     = state.fileBuffers[path] or errorInternal("No file buffer for '%s'.", path)
+	local buffer     = tokens.buffer[token]
 	local ptr        = tokens.position1[token]
 	local _, nlCount = buffer:sub(1, ptr-1):gsub("\n", "%0")
 	local ln         = nlCount+1
@@ -3291,19 +3341,19 @@ function _G.parserMessageLine(file, state, token, label, s, ...)
 end
 
 -- errorParsingAfter( compilationState, tokenIndex, formatString, ... )
-function _G.errorParsingAfter(state, i, s, ...)
+function _G.errorParsingAfter(state, token, s, ...)
 	local tokens = state.tokens
 
-	local path
-		=  tokens.file[i]
-		or tokens.file[1] -- Not great, but better than crashing.
+	local buffer
+		=  tokens.buffer[token]
+		or tokens.buffer[1] -- Not great, but better than crashing.
 		or errorInternal("No tokens.")
 
-	local buffer = state.fileBuffers[path] or errorInternal("No file buffer for '%s'.", path)
+	local path = tokens.file[token] or tokens.file[1]
 
 	local ptr
-		=  tokens.position2[i] and tokens.position2[i]+1
-		or i <= 1 and 1
+		=  tokens.position2[token] and tokens.position2[token]+1
+		or token <= 1 and 1
 		or tokens.count > 0 and tokens.position2[tokens.count]+1
 		or #buffer
 
@@ -3350,8 +3400,8 @@ end
 function _G.nodeError(state, node, agent, s, ...)
 	local tokens = state.tokens
 	local token  = node.token
-	local path   = tokens.file[token]      or errorInternal("No tokens.")
-	local buffer = state.fileBuffers[path] or errorInternal("No file buffer for '%s'.", path)
+	local path   = tokens.file[token] or errorInternal("No tokens.")
+	local buffer = tokens.buffer[token]
 	!TRACE(2)
 	errorInFile(buffer, path, tokens.position1[token], agent, s, ...)
 end
@@ -3360,8 +3410,8 @@ end
 function _G.nodeErrorAfter(state, node, agent, s, ...)
 	local tokens = state.tokens
 	local token  = node.token
-	local path   = tokens.file[token]      or errorInternal("No tokens.")
-	local buffer = state.fileBuffers[path] or errorInternal("No file buffer for '%s'.", path)
+	local path   = tokens.file[token] or errorInternal("No tokens.")
+	local buffer = tokens.buffer[token]
 	!TRACE(2)
 	errorInFile(buffer, path, tokens.position2[token]+1, agent, s, ...)
 end
@@ -3372,8 +3422,8 @@ function _G.nodeMessage(file, state, node, label, agent, s, ...)
 
 	local tokens = state.tokens
 	local token  = node.token
-	local path   = tokens.file[token]      or errorInternal("No tokens.")
-	local buffer = state.fileBuffers[path] or errorInternal("No file buffer for '%s'.", path)
+	local path   = tokens.file[token] or errorInternal("No tokens.")
+	local buffer = tokens.buffer[token]
 	reportMessageInFile(file, buffer, path, tokens.position1[token], label, agent, s, ...)
 end
 
@@ -4298,23 +4348,24 @@ end
 
 
 
--- isNodeAt( state, node, filePath [, lineNumber=any ] )
+--[[ isNodeAt( state, node, filePath [, lineNumber=any ] )
 function _G.isNodeAt(state, node, targetPath, targetLn)
 	local token  = node.token
 	local tokens = state.tokens
 	local path   = tokens.file[token] or errorInternal("No tokens.")
 
 	if path ~= targetPath then  return false  end
-	if not targetLn       then  return true  end
+	if not targetLn       then  return true   end
 
 	-- Temp until tokens.line1 has useful values.
-	local buffer     = state.fileBuffers[path] or errorInternal("No file buffer for '%s'.", path)
+	local buffer     = tokens.buffer[token]
 	local ptr        = tokens.position1[token]
 	local _, nlCount = buffer:sub(1, ptr-1):gsub("\n", "%0")
 	local ln         = nlCount+1
 
 	return ln == targetLn
 end
+--]]
 
 
 

@@ -10,7 +10,7 @@
 --==============================================================
 
 	getToken, isToken, isTokenLiteral, isTokenBuiltinType, isTokenAssigning
-	readAndTokenizeFile
+	readAndTokenizeString, readAndTokenizeFile
 	tokenize, insertToken
 
 --============================================================]]
@@ -112,6 +112,7 @@ _G.!struct"Tokens"{ -- SOA
 	{`value`,     {}}, -- Depends on the type.
 	{`extra`,     {}}, -- Depends on the type.
 	{`file`,      {}},
+	{`buffer`,    {}}, -- The actual source string (which may not be from the file).
 	{`position1`, {}}, -- Start byte.
 	{`position2`, {}}, -- End byte.
 	{`line1`,     {}}, -- Start line.
@@ -121,20 +122,21 @@ _G.!struct"Tokens"{ -- SOA
 	{`lineCount`, 0},
 }
 
-function _G.tokenize(s, path, tokens, increaseTotalLineCount)
+function _G.tokenize(s, path, tokens, increaseTotalLineCount, lnStart)
 	local getByte = string.byte
 
 	local tokTypes      = tokens.type
 	local tokValues     = tokens.value
 	local tokExtras     = tokens.extra
 	local tokFiles      = tokens.file
+	local tokBuffers    = tokens.buffer
 	local tokPositions1 = tokens.position1
 	local tokPositions2 = tokens.position2
 	local tokLines1     = tokens.line1
 	local tokLines2     = tokens.line2
 
 	local ptr   = 1
-	local ln    = 1
+	local ln    = lnStart
 	local lnPtr = 1
 
 	local forceIdentifier = false
@@ -215,7 +217,7 @@ function _G.tokenize(s, path, tokens, increaseTotalLineCount)
 		elseif s:find("^!%a", ptr) then
 			ptr = ptr+1
 
-			local i1, i2, word = s:find("^(%a+)", ptr)
+			local i1, i2, word = s:find("^(%a[%w_]+)", ptr)
 			if not DIRECTIVE_WORDS[word] then
 				errorInFile(s, path, ptr, "Tokenizer", "Unknown directive '%s'.", word)
 			end
@@ -507,6 +509,7 @@ function _G.tokenize(s, path, tokens, increaseTotalLineCount)
 			tokValues[tokens.count]     = tokValue
 			tokExtras[tokens.count]     = tokExtra
 			tokFiles[tokens.count]      = path
+			tokBuffers[tokens.count]    = s
 			tokPositions1[tokens.count] = tokenPos
 			tokPositions2[tokens.count] = ptr-1
 			tokLines1[tokens.count]     = ln
@@ -527,12 +530,12 @@ function _G.tokenize(s, path, tokens, increaseTotalLineCount)
 	end
 
 	if increaseTotalLineCount then
-		tokens.lineCount = tokens.lineCount+ln
+		tokens.lineCount = tokens.lineCount+ln-lnStart+1
 	end
 end
 
--- insertToken( tokens, tokenType, tokenValue [, path=tokens.file[1] ] )
-function _G.insertToken(tokens, tokType, tokValue, path)
+-- insertToken( tokens, tokenType, tokenValue [, buffer="", path=tokens.file[1] ] )
+function _G.insertToken(tokens, tokType, tokValue, buffer, path)
 	local count             = tokens.count+1
 	tokens.count            = count
 	tokens.type [count]     = tokType
@@ -541,7 +544,8 @@ function _G.insertToken(tokens, tokType, tokValue, path)
 	tokens.position2[count] = 1
 	tokens.line1[count]     = 1
 	tokens.line2[count]     = 1
-	tokens.file[count]      = path or tokens.file[1]
+	tokens.buffer[count]    = buffer or ""
+	tokens.file[count]      = path   or tokens.file[1]
 	tokens.inserted[count]  = true
 end
 
@@ -585,23 +589,12 @@ end
 do
 	local BRACKETS = {["("]=")", ["{"]="}", ["["]="]"}
 
-	function _G.readAndTokenizeFile(state, path, increaseTotalLineCount)
-		!ifDEBUG `profilerPause()`
-		assert(not state.fileBuffers[path], path)
-
-		local s, err = getFileContents(path, true)
-		if not s then
-			errorLine("Lexer", "Could not read file '%s'. (%s)", path, err)
-		end
-		s = s:gsub("\r\n?", "\n") -- Normalize line endings.  @Robustness: Handle the uncommon occurrence of \n\r.
-
-		state.fileBuffers[path] = s
-
+	function _G.readAndTokenizeString(state, path, increaseTotalLineCount, s, lnStart)
 		local tokens     = state.tokens
 		local startToken = tokens.count+1
 
 		local startTime = os.clock()
-		tokenize(s, path, tokens, increaseTotalLineCount)
+		tokenize(s, path, tokens, increaseTotalLineCount, lnStart)
 		local endTime = os.clock()
 
 		-- Quickly check for stray/unmatched brackets.
@@ -639,6 +632,22 @@ do
 		end
 
 		!ifDEBUG `profilerUnpause()`
+		return startTime, endTime
+	end
+
+	function _G.readAndTokenizeFile(state, path, increaseTotalLineCount)
+		!ifDEBUG `profilerPause()`
+		assert(not state.fileBuffers[path], path)
+
+		local s, err = getFileContents(path, true)
+		if not s then
+			errorLine("Lexer", "Could not read file '%s'. (%s)", path, err)
+		end
+		s = s:gsub("\r\n?", "\n") -- Normalize line endings.  @Robustness: Handle the uncommon occurrence of \n\r.
+
+		state.fileBuffers[path] = s
+
+		local startTime, endTime = readAndTokenizeString(state, path, increaseTotalLineCount, s, 1)
 		return startTime, endTime
 	end
 end
