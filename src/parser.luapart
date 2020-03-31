@@ -202,8 +202,14 @@ _G.!structAst"AstVariantOf:_AstExpression"{
 _G.!structAst"AstTypeInfo:_AstExpression"{
 	{`expression`,    nil, ast="node"}, -- AstExpression
 	-- Type phase:
-	{`declaration`,   nil}, -- AstDeclaration for the TypeInfo* struct in preload.
 	{`valueTypeInfo`, nil}, -- TypeInfo
+	-- Bytecode phase:
+	{`valueConstant`, nil}, -- Constant
+}
+_G.!structAst"AstLocation:_AstExpression"{
+	{`expression`,    nil, ast="node"}, -- AstExpression
+	-- Type phase:
+	{`target`,        nil}, -- AstNode
 	-- Bytecode phase:
 	{`valueConstant`, nil}, -- Constant
 }
@@ -3033,6 +3039,27 @@ function _G.parseExpression(state, parent, prevOpPrecedence, expectLvalue)
 		else
 			!ERROR_OR_RETURN `errorParsingLast(state, "There is no compiler-provided value named '%s'.", tokValue)`
 		end
+
+	-- Source code location.
+	elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"location") then
+		local loc = astNewNode(AstLocation, exprStartToken, parent)
+
+		tokType, tokValue = eatNextToken(state)
+		if not isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"(") then
+			!ERROR_OR_RETURN `errorParsingAfterPrevious(state, "Expected '('.")`
+		end
+
+		tokType, tokValue = peekNextToken(state)
+		if not isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),")") then
+			!SET_OR_RETURN `loc.expression = parseExpression(state, loc)`
+		end
+
+		tokType, tokValue = eatNextToken(state)
+		if not isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),")") then
+			!ERROR_OR_RETURN `errorParsingAfterPrevious(state, "Expected ')'.")`
+		end
+
+		expr = loc
 
 	elseif isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"_") then
 		!ERROR_OR_RETURN `errorParsingLast(state, "Invalid place for a blank name.")`

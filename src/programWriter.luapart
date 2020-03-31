@@ -273,9 +273,9 @@ function _G.writeIdentifierName(state, writer, ident)
 	writer.file:write(name)
 end
 
-function _G.writeStringLiteral(writer, name)
-	local s = F("%q", name):gsub("\\\n", "\\n")
-	writer.file:write(s)
+function _G.writeStringLiteral(writer, s)
+	local lua = F("%q", s):gsub("\\\n", "\\n")
+	writer.file:write(lua)
 end
 
 -- writeStringConcatenation( state, writer, indent, nextLocalN, localsStack, left:AstNode|string, right:AstNode|string )
@@ -847,6 +847,10 @@ function _G.writeExpression(state, writer, indent, nextLocalN, localsStack, expr
 	elseif expr.nodeType == !(nodeTypes.AstTypeInfo) then
 		local typeInfoNode = expr
 		writeConstantValueOrReference(state, writer, typeInfoNode.valueConstant, typeInfoNode)
+
+	elseif expr.nodeType == !(nodeTypes.AstLocation) then
+		local loc = expr
+		writeConstantValueOrReference(state, writer, loc.valueConstant, loc)
 
 	elseif expr.nodeType == !(nodeTypes.AstConditional) then
 		local conditional = expr
@@ -1726,6 +1730,7 @@ local function writeTypeInfo(state, writer, typeInfo)
 	local typeInfoType = getTypeInfoForBuiltinType(state, "type")
 	local typeInfoBool = getTypeInfoForBuiltinType(state, "bool")
 
+	-- Note: This table must be synced with the preload module!
 	file:write("{tag=", tag)
 	if state.settings.outputDebugInfo then
 		file:write("--[[TypeTag.", TYPE_NAMES[tag]:upper(), "]]")
@@ -1847,6 +1852,16 @@ function _G.writeConstantValue(state, writer, const)
 	elseif const.kind == !(CONST_KIND_TYPE_INFO) then
 		writeTypeInfo(state, writer, const.value)
 
+	elseif const.kind == !(CONST_KIND_LOCATION) then
+		local target = const.value
+		local tokens = state.tokens
+		local token  = target.token
+
+		-- Note: This table must be synced with the preload module!
+		file:write("{filePath=")
+		writeStringLiteral(writer, tokens.file[token])
+		file:write(", lineNumber=", tokens.line1[token], ", position=", tokens.position1[token], "}")
+
 	elseif const.kind == !(CONST_KIND_NULL) then
 		file:write("nil")
 
@@ -1854,6 +1869,8 @@ function _G.writeConstantValue(state, writer, const)
 		-- Note: The constants must be written in the same order as they were allocated for these
 		-- views to work (which is what should happen naturally because of how dependencies work).
 		writeAccess(state, writer, 1, 1, {}, const.value)
+
+	--------------------------------
 
 	elseif const.kind ~= !(CONST_KIND_NORMAL) then
 		errorInternal("Incomplete: Handle constant kind '%s'.", (CONST_KIND_TITLES[const.kind] or "?"))

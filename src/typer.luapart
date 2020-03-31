@@ -13,7 +13,8 @@
 	checkBinaryOperation
 	crawl
 	createTypeNodeFromInfo
-	findDeclaration, findPublicDeclarationInScope, findMemberDeclaration, findDynamicMemberDeclaration, isDeclarationVisibleToNode, printDeclarationChain
+	findDeclaration, findPublicDeclarationInScope, findMemberDeclaration, findDynamicMemberDeclaration, canNodeSeeDeclaration, printDeclarationChain
+	findInferredPreloadDeclaration
 	followIdentifiersToConstantValue
 	getAssignmentValue
 	getDeclarationValue, isDeclarationGlobal, isDeclarationConstant, isDeclarationWritable, isDeclarationImperative, shouldDeclarationValueDefinitivelyBeConstant
@@ -428,7 +429,7 @@ function _G.findDeclaration(state, startNode, name, declToIgnore)
 		end
 
 		for _, decl in ipairs(scope.declarations) do
-			if decl ~= declToIgnore and decl.name.name == name and isDeclarationVisibleToNode(state, decl, startNode) then
+			if decl ~= declToIgnore and decl.name.name == name and canNodeSeeDeclaration(state, startNode, decl) then
 				return decl, nil
 			end
 		end
@@ -459,7 +460,7 @@ function _G.findDeclaration(state, startNode, name, declToIgnore)
 							isDeclarationConstant(decl)
 							or (
 								using.variableDeclaration
-								and isDeclarationVisibleToNode(state, using.variableDeclaration, startNode)
+								and canNodeSeeDeclaration(state, startNode, using.variableDeclaration)
 							)
 						)
 					then
@@ -470,7 +471,7 @@ function _G.findDeclaration(state, startNode, name, declToIgnore)
 		end
 
 		for _, decl in ipairs(scope.declarationsInTree[name] or EMPTY_TABLE) do
-			if decl ~= declToIgnore and isDeclarationVisibleToNode(state, decl, startNode) then
+			if decl ~= declToIgnore and canNodeSeeDeclaration(state, startNode, decl) then
 				return decl, nil
 			end
 		end
@@ -517,7 +518,7 @@ function _G.findDynamicMemberDeclaration(state, scope, name)
 	return nil
 end
 
-function _G.isDeclarationVisibleToNode(state, decl, node)
+function _G.canNodeSeeDeclaration(state, node, decl)
 	-- It doesn't matter if this is true and we're in a declarative scope because we check that in the loop below.
 	local canSeeImperativeVariables = (decl.kind == !(DECL_KIND_LOCAL_VAR) --[[or decl.kind == !(DECL_KIND_READ_ONLY)]])
 
@@ -611,6 +612,27 @@ function _G.printDeclarationChain(file, state, decl, typeName)
 
 		if not decl then  break  end
 	end
+end
+
+
+
+-- declaration = findInferredPreloadDeclaration( state, dependent, name, tag )
+-- Returns nil if waiting.
+function _G.findInferredPreloadDeclaration(state, dependent, name, tag)
+	local module = itemWith2(state.globalScope.fileScopes, "isModule",true, "moduleName","preload")
+		or errorInternal(2, state, dependent, "'preload' module not loaded.")
+
+	local decl = findPublicDeclarationInScope(state, module, name)
+		or errorInternal(2, state, dependent, "No declaration '%s' in 'preload' module.", name)
+
+	if not decl.name.inferredType then
+		!DEPEND_AND_RETURN(`dependent`, DEPEND_NODE_INFERRED, `decl`, `nil`)
+	end
+
+	!ASSERT(`decl.valueTypeInfo`,            nil, `decl`)
+	!ASSERT(`decl.valueTypeInfo.tag == tag`, nil, `decl`)
+
+	return decl
 end
 
 
@@ -943,14 +965,15 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 		end
 
 		if
-			not ident
+			-- Don't care about polymorphism/overloads in these contexts.
+			vararg
+			or (parent.nodeType == !(nodeTypes.AstLocation))
 			or (parent.nodeType == !(nodeTypes.AstCall)  and ident == parent.callee)
 			or (parent.nodeType == !(nodeTypes.AstDebug) and parent.action == "print")
 		then
 			-- void
 
 		-- Overloaded names refer to multiple things, so that's an error!
-		-- @Incomplete: Add a way to refer to a specific overload.
 		elseif decl.overloadOf then
 			local declBase = ident.declaration
 			declBase       = getOverloadBase(declBase) or declBase
@@ -3066,10 +3089,10 @@ end
 
 		if not constDecl then
 			if typeRepresented then
-				-- We don't allow StructType.dynamicMember except in !type_of and !type_info.
-				local foundNode = astFindParent(access, !!(CONST_SET{ nodeTypes.AstTypeOf, nodeTypes.AstTypeInfo, unpack(scopeNodeTypes) }))
+				-- We don't allow StructType.dynamicMember except in certain contexts.
+				local foundNode = astFindParent(access, !!(CONST_SET{ nodeTypes.AstTypeOf, nodeTypes.AstTypeInfo, nodeTypes.AstLocation, unpack(scopeNodeTypes) }))
 
-				if not !!(CONST_SET{ nodeTypes.AstTypeOf, nodeTypes.AstTypeInfo })[foundNode.nodeType] then
+				if not !!(CONST_SET{ nodeTypes.AstTypeOf, nodeTypes.AstTypeInfo, nodeTypes.AstLocation })[foundNode.nodeType] then
 					typeError(state, access.member, "Dynamic member '%s' is not accessible in static context.", memberName)
 				end
 			end
@@ -3762,22 +3785,47 @@ end
 
 	!ASSERT `typeInfoStructName`
 
-	local module = itemWith1(state.globalScope.fileScopes, "moduleName", "preload") or errorInternal()
-	local decl   = findPublicDeclarationInScope(state, module, typeInfoStructName)  or errorInternal()
+	local decl = findInferredPreloadDeclaration(state, typeInfoNode, typeInfoStructName, !(TYPE_STRUCT))
+	if not decl then  return  end
 
-	if not decl.name.inferredType then
-		!DEPEND_AND_RETURN(`typeInfoNode`, DEPEND_NODE_INFERRED, `decl`)
-	end
-
-	assert(decl.valueTypeInfo)
-	assert(decl.valueTypeInfo.tag == !(TYPE_STRUCT))
-
-	typeInfoNode.declaration   = decl
 	typeInfoNode.valueTypeInfo = typeRepresented
 	typeInfoNode.inferredType  = decl.valueTypeInfo
-
 	moveToNextRelevantPipe(state, typeInfoNode)
-	-- @Incomplete: Allow type_info to exist in constant context and simplify it here.
+end
+
+!NODE_INFERRER `function nodeInferrers.AstLocation(state, loc)`
+	local target = loc.expression
+	if target and not target.inferredType then
+		!DEPEND_AND_RETURN(`loc`, DEPEND_NODE_INFERRED, `target`)
+	end
+
+	local decl = findInferredPreloadDeclaration(state, loc, "SourceCodeLocation", !(TYPE_STRUCT))
+	if not decl then  return  end
+
+	if not target then
+		target = loc
+
+	else
+		local original = astGetOriginal(target)
+
+		if original.nodeType == !(nodeTypes.AstIdentifier) then
+			target = original.declaration or errorInternal(state, original, "Missing declaration for identifier.")
+
+		elseif original.nodeType == !(nodeTypes.AstAccess) then
+			if target.nodeType == !(nodeTypes.AstIdentifier) then
+				target = target.declaration -- This is probably a variable or enum constant.
+			else
+				errorInternal(state, loc, "@Incomplete: Locations of certain kinds of lookup targets.")
+			end
+
+		else
+			typeError(state, target, "Cannot get the location of this expression.")
+		end
+	end
+
+	loc.inferredType = decl.valueTypeInfo
+	loc.target       = target
+	moveToNextRelevantPipe(state, loc)
 end
 
 !NODE_INFERRER `function nodeInferrers.AstCast(state, cast)`
@@ -5098,6 +5146,9 @@ local function visitNodesForRunning(state, dependent, unit, visited, deepTopScop
 			if decl.kind == !(DECL_KIND_STATIC) or decl.parent.nodeType == !(nodeTypes.AstNamespace) then
 				table.insert(deepTopScopeDeclarations, decl)
 			end
+
+		elseif !!(CONST_SET{ nodeTypes.AstLiteral, nodeTypes.AstForeign, nodeTypes.AstTypeInfo, nodeTypes.AstLocation })[node.nodeType] then
+			return !(VISIT_IGNORE_CHILDREN)
 		end
 	end)
 end
@@ -5139,6 +5190,10 @@ function _G.crawl(state, unit, crawled, forMeta)
 
 			crawled[decl.valueConstant] = true
 
+		elseif !!(CONST_SET{ nodeTypes.AstLiteral, nodeTypes.AstForeign, nodeTypes.AstTypeInfo, nodeTypes.AstLocation })[node.nodeType] then
+			crawled[node.valueConstant] = true
+			return !(VISIT_IGNORE_CHILDREN)
+
 		--
 
 		elseif node.nodeType == !(nodeTypes.AstLambda) then
@@ -5152,9 +5207,6 @@ function _G.crawl(state, unit, crawled, forMeta)
 			if lambda.valueConstant then
 				crawled[lambda.valueConstant] = true
 			end
-
-		elseif !!(CONST_SET{ nodeTypes.AstLiteral, nodeTypes.AstForeign, nodeTypes.AstTypeInfo })[node.nodeType] then
-			crawled[node.valueConstant] = true
 		end
 	end)
 end
@@ -5541,6 +5593,7 @@ local ALWAYS_CONST = !(Set{
 })
 local NEVER_CONST = !(Set{
 	nodeTypes.AstCall,
+	nodeTypes.AstLocation, -- @Incomplete: Make !location() a constant expression.
 	nodeTypes.AstTypeInfo, -- @Incomplete: Make type_info() a constant expression.
 	nodeTypes.AstVararg,
 })

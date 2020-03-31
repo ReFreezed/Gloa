@@ -89,7 +89,7 @@ local !struct"Constant"{
 	{`name`,       ""},  -- Only used for constants that are objects.  @Incomplete: Separate name for metaprogram (which may be limited) and final name.
 	{`nameLocked`, false},
 
-	{`kind`,       CONST_KIND_NORMAL}, -- CONST_KIND_NORMAL|CONST_KIND_FOREIGN|CONST_KIND_TYPE_INFO|CONST_KIND_NULL|CONST_KIND_VIEW
+	{`kind`,       CONST_KIND_NORMAL}, -- See bcAllocateConstantValueIfNew().
 	{`valueType`,  nil}, -- TypeInfo
 	{`value`,      nil},
 
@@ -102,10 +102,11 @@ local !struct"Constant"{
 -- constant, isNew = bcAllocateConstantValueIfNew( state, CONST_KIND_NORMAL,    functionSignature, lambdaWithBody,  nodeForError )
 -- constant, isNew = bcAllocateConstantValueIfNew( state, CONST_KIND_NORMAL,    tableLikeTypeInfo, tableNode,       nodeForError )
 -- constant, isNew = bcAllocateConstantValueIfNew( state, CONST_KIND_NORMAL,    typeTypeInfo,      representedType, nodeForError )
--- constant, isNew = bcAllocateConstantValueIfNew( state, CONST_KIND_FOREIGN,   dummyTypeInfo,     foreign,         nodeForError )
+-- constant, isNew = bcAllocateConstantValueIfNew( state, CONST_KIND_FOREIGN,   dummyTypeInfo,     foreign,         nodeForError ) -- @Cleanup: Can we allow dummyTypeInfo to be nil?
 -- constant, isNew = bcAllocateConstantValueIfNew( state, CONST_KIND_TYPE_INFO, dummyTypeInfo,     typeInfo,        nodeForError )
--- constant, isNew = bcAllocateConstantValueIfNew( state, CONST_KIND_NULL,      dummyTypeInfo,     nil,             nodeForError )
+-- constant, isNew = bcAllocateConstantValueIfNew( state, CONST_KIND_LOCATION,  dummyTypeInfo,     targetNode,      nodeForError )
 -- constant, isNew = bcAllocateConstantValueIfNew( state, CONST_KIND_VIEW,      dummyTypeInfo,     access,          nodeForError )
+-- constant, isNew = bcAllocateConstantValueIfNew( state, CONST_KIND_NULL,      dummyTypeInfo,     nil,             nodeForError )
 function _G.bcAllocateConstantValueIfNew(state, kind, typeInfo, v, nodeForError)
 	local tag          = typeInfo.tag
 	local kindIsNormal = kind == !(CONST_KIND_NORMAL)
@@ -153,13 +154,10 @@ function _G.bcAllocateConstantValueIfNew(state, kind, typeInfo, v, nodeForError)
 		elseif kind == !(CONST_KIND_FOREIGN) then
 			if const.value.sourceId == v.sourceId then  return const, false  end
 
-		elseif kind == !(CONST_KIND_TYPE_INFO) then
-			if const.value == v then  return const, false  end
-
 		elseif kind == !(CONST_KIND_NULL) then
 			return const, false -- NULL is always the same value (nil).
 
-		elseif kind == !(CONST_KIND_VIEW) then
+		elseif !!(CONST_SET{ CONST_KIND_TYPE_INFO, CONST_KIND_LOCATION, CONST_KIND_VIEW })[kind] then
 			if const.value == v then  return const, false  end
 
 		else
@@ -548,6 +546,12 @@ function _G.bcEmit(state, node)
 		local typeInfo             = getTypeInfoForBuiltinType(state, "void") -- (What this is probably doesn't matter here.)
 		typeInfoNode.valueConstant = bcAllocateConstantValueIfNew(state, !(CONST_KIND_TYPE_INFO), typeInfo, typeInfoNode.valueTypeInfo, typeInfoNode)
 		moveToPipe(state, typeInfoNode, !(PIPE_DONE))
+
+	elseif node.nodeType == !(nodeTypes.AstLocation) then
+		local loc         = node
+		local typeInfo    = getTypeInfoForBuiltinType(state, "void") -- (What this is probably doesn't matter here.)
+		loc.valueConstant = bcAllocateConstantValueIfNew(state, !(CONST_KIND_LOCATION), typeInfo, loc.target, loc)
+		moveToPipe(state, loc, !(PIPE_DONE))
 
 	elseif node.nodeType == !(nodeTypes.AstNull) then
 		local null         = node
