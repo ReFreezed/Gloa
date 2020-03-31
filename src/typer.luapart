@@ -2486,6 +2486,12 @@ end
 		checkIfValuesMatchArgumentTypes(state, call, realArguments, realArgumentTypes, calleeTypeInfo.argumentTypesIn)
 	end
 
+	if callee.nodeType == !(nodeTypes.AstIdentifier) and isDeclarationConstant(callee.declaration) then
+		local lambda = followIdentifiersToConstantValue(callee.declaration.value)
+		!ASSERT("lambda.nodeType == "..nodeTypes.AstLambda)
+		call.wantLocation = lambda.wantCallerLocation
+	end
+
 	call.inferredType = getTypeInfoForList(state, calleeTypeInfo.argumentTypesOut)
 	moveToNextRelevantPipe(state, call)
 end
@@ -3090,9 +3096,14 @@ end
 		if not constDecl then
 			if typeRepresented then
 				-- We don't allow StructType.dynamicMember except in certain contexts.
-				local foundNode = astFindParent(access, !!(CONST_SET{ nodeTypes.AstTypeOf, nodeTypes.AstTypeInfo, nodeTypes.AstLocation, unpack(scopeNodeTypes) }))
+				local foundNode = astFindParent(access, !!(CONST_SET{
+					nodeTypes.AstTypeOf, nodeTypes.AstTypeInfo, nodeTypes.AstLocation,
+					unpack(scopeNodeTypes)
+				}))
 
-				if not !!(CONST_SET{ nodeTypes.AstTypeOf, nodeTypes.AstTypeInfo, nodeTypes.AstLocation })[foundNode.nodeType] then
+				if not !!(CONST_SET{
+					nodeTypes.AstTypeOf, nodeTypes.AstTypeInfo, nodeTypes.AstLocation,
+				})[foundNode.nodeType] then
 					typeError(state, access.member, "Dynamic member '%s' is not accessible in static context.", memberName)
 				end
 			end
@@ -3803,7 +3814,7 @@ end
 	if not decl then  return  end
 
 	if not target then
-		target = loc
+		target = loc -- Note: If loc is !caller_location then this isn't the actual target.
 
 	else
 		local original = astGetOriginal(target)
@@ -5147,7 +5158,10 @@ local function visitNodesForRunning(state, dependent, unit, visited, deepTopScop
 				table.insert(deepTopScopeDeclarations, decl)
 			end
 
-		elseif !!(CONST_SET{ nodeTypes.AstLiteral, nodeTypes.AstForeign, nodeTypes.AstTypeInfo, nodeTypes.AstLocation })[node.nodeType] then
+		elseif node.nodeType == !(nodeTypes.AstLocation) then
+			return !(VISIT_IGNORE_CHILDREN)
+
+		elseif !!(CONST_SET{ nodeTypes.AstLiteral, nodeTypes.AstForeign, nodeTypes.AstTypeInfo })[node.nodeType] then
 			return !(VISIT_IGNORE_CHILDREN)
 		end
 	end)
@@ -5190,7 +5204,14 @@ function _G.crawl(state, unit, crawled, forMeta)
 
 			crawled[decl.valueConstant] = true
 
-		elseif !!(CONST_SET{ nodeTypes.AstLiteral, nodeTypes.AstForeign, nodeTypes.AstTypeInfo, nodeTypes.AstLocation })[node.nodeType] then
+		elseif node.nodeType == !(nodeTypes.AstLocation) then
+			local loc = node
+			if not loc.ofCaller then
+				crawled[loc.valueConstant] = true
+			end
+			return !(VISIT_IGNORE_CHILDREN)
+
+		elseif !!(CONST_SET{ nodeTypes.AstLiteral, nodeTypes.AstForeign, nodeTypes.AstTypeInfo })[node.nodeType] then
 			crawled[node.valueConstant] = true
 			return !(VISIT_IGNORE_CHILDREN)
 
@@ -5204,8 +5225,14 @@ function _G.crawl(state, unit, crawled, forMeta)
 				return !(VISIT_IGNORE_CHILDREN)
 			end
 
-			if lambda.valueConstant then
+			if lambda.valueConstant then -- @Robustness: When is this not set? Be more clear!
 				crawled[lambda.valueConstant] = true
+			end
+
+		elseif node.nodeType == !(nodeTypes.AstCall) then
+			local call = node
+			if call.wantLocation then
+				crawled[call.locationConstant] = true
 			end
 		end
 	end)
@@ -5593,7 +5620,6 @@ local ALWAYS_CONST = !(Set{
 })
 local NEVER_CONST = !(Set{
 	nodeTypes.AstCall,
-	nodeTypes.AstLocation, -- @Incomplete: Make !location() a constant expression.
 	nodeTypes.AstTypeInfo, -- @Incomplete: Make type_info() a constant expression.
 	nodeTypes.AstVararg,
 })
@@ -5652,6 +5678,10 @@ function _G.isExpressionConstant(state, expr, foreignIsConst)
 		-- Technically foreign values are seen as constant at runtime, but since we don't
 		-- know what they are at compile-time we (usually) treat them as runtime values.
 		return foreignIsConst
+
+	elseif nodeType == !(nodeTypes.AstLocation) then
+		local loc = expr
+		return loc.ofCaller -- @Incomplete: Make !location() a constant expression (that can be simplified).
 
 	else
 		errorUnhandledNodeType(state, expr)

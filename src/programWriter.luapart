@@ -638,31 +638,37 @@ function _G.writeExpression(state, writer, indent, nextLocalN, localsStack, expr
 
 					if argLast and not argLast.isRequired then
 						local argExprLast = getLast(call.arguments)
-						if
-							argExprLast and (
-								(
-									argExprLast.inferredType.tag == !(TYPE_VARARG)
-									and not argExprLast.surroundedByParentheses
-								)
-								or (
-									argExprLast.inferredType.tag == !(TYPE_LIST)
-									and not argExprLast.surroundedByParentheses
-									and argExprLast.inferredType[2]
-								)
+
+						if argExprLast and (
+							(
+								argExprLast.inferredType.tag == !(TYPE_VARARG)
+								and not argExprLast.surroundedByParentheses
 							)
-						then
+							or (
+								argExprLast.inferredType.tag == !(TYPE_LIST)
+								and not argExprLast.surroundedByParentheses
+								and argExprLast.inferredType[2]
+							)
+						) then
 							-- :DisallowListAsLastValueToFunctionWithOptionalArguments
 							nodeError(state, callee, "ProgramWriter", "@Incomplete: Handle optional arguments if the last value in a call is a list of things.")
 						end
 
-						for i = #call.arguments+1, #lambda.argumentsIn.arguments do
+						local argsInList = lambda.argumentsIn.arguments
+
+						for i = #call.arguments+1, #argsInList do
 							if not first then  file:write(", ")  end
 							first = false
 
-							local arg = lambda.argumentsIn.arguments[i]
+							local valueExpr = argsInList[i].declaration.value
 
-							if arg.declaration.value then -- Varargs are optional but have no default value (or zero default values, since it's a list).
-								writeExpression(state, writer, indent, nextLocalN, localsStack, arg.declaration.value)
+							if not valueExpr then
+								-- void  Varargs are optional but have no default value (or zero default values, since it's a list).
+							elseif valueExpr.nodeType == !(nodeTypes.AstLocation) and valueExpr.ofCaller then
+								local const = call.locationConstant or errorInternal(state, call, "Missing caller location data.")
+								writeConstantValueOrReference(state, writer, const, valueExpr)
+							else
+								writeExpression(state, writer, indent, nextLocalN, localsStack, valueExpr)
 							end
 						end
 					end

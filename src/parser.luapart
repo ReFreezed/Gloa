@@ -186,10 +186,14 @@ _G.!structAst"AstTable:_AstExpression"{
 	{`highestGeneratedIndex`, 0},
 }
 _G.!structAst"AstCall:_AstExpression"{
-	{`callee`,                    nil, ast="node"},  -- AstExpression
-	{`arguments`,                 {},  ast="array"}, -- []AstExpression
-	{`isMethod`,                  false},
-	{`surroundedByParentheses`,   false},
+	{`callee`,                  nil, ast="node"},  -- AstExpression
+	{`arguments`,               {},  ast="array"}, -- []AstExpression
+	{`isMethod`,                false},
+	{`surroundedByParentheses`, false},
+	-- Type phase:
+	{`wantLocation`,            false}, -- Set if the called function has wantCallerLocation set (i.e. !caller_location is used somewhere).
+	-- Bytecode phase:
+	{`locationConstant`,        nil},   -- Constant  Optimization: Instead of generating this for every call we only do it if the callee may require it.
 }
 _G.!structAst"AstTypeOf:_AstExpression"{
 	{`expression`, nil, ast="node"}, -- AstExpression
@@ -207,7 +211,8 @@ _G.!structAst"AstTypeInfo:_AstExpression"{
 	{`valueConstant`, nil}, -- Constant
 }
 _G.!structAst"AstLocation:_AstExpression"{
-	{`expression`,    nil, ast="node"}, -- AstExpression
+	{`expression`,    nil, ast="node"}, -- AstExpression  If this is empty then the target is the location node itself.
+	{`ofCaller`,      false},           -- Used as default values for function arguments.
 	-- Type phase:
 	{`target`,        nil}, -- AstNode
 	-- Bytecode phase:
@@ -411,6 +416,7 @@ _G.!structAst"AstLambda:_AstScopeExpression"{
 	{`bodyTextLambda`,    nil, astRef="node"}, -- AstLambda
 
 	{`metaOnly`,          false}, -- If this is set then this won't get written to the final output - only to the metaprogram.
+	{`wantCallerLocation`,false},
 
 	-- Type phase:
 	{`foreignSourceId`,   ""}, -- Is foreignSource and foreignSourceName combined.
@@ -842,7 +848,23 @@ function _G.parseArguments(state, parent, isInput)
 					assert(decl.name.nodeType == !(nodeTypes.AstIdentifier))
 				end
 
-				!SET_OR_RETURN `decl.value = parseExpression(state, decl)` -- @Speed: Parse once then just copy the first one.
+				tokType, tokValue = peekNextToken(state)
+
+				-- @Speed: Parse the value once, then just copy the first one.
+				if isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"caller_location") then
+					eatNextToken(state)
+
+					if parent.nodeType ~= !(nodeTypes.AstLambda) then
+						!ERROR_OR_RETURN `errorParsingLast(state, "!caller_location can only be used among function arguments.")`
+					end
+
+					local loc    = astNewNode(AstLocation, token, decl)
+					loc.ofCaller = true
+					decl.value   = loc
+
+				else
+					!SET_OR_RETURN `decl.value = parseExpression(state, decl)`
+				end
 			end
 
 		elseif gotDefaultValue and not gotVararg then
@@ -2445,8 +2467,13 @@ function _G.parseLambda(state, parent)
 		-- Add declarations for values that will be baked (only types so far).
 		for _, arg in ipairs(args.arguments) do
 			astVisitAllNodes(arg, function(node)
-				if node.nodeType ~= !(nodeTypes.AstBake) then  return  end
+				if node.nodeType == !(nodeTypes.AstLocation) then
+					local loc = node
+					if loc.ofCaller then  lambda.wantCallerLocation = true  end
+					return
+				end
 
+				if node.nodeType ~= !(nodeTypes.AstBake) then  return  end
 				lambda.isPolymorphic = true
 
 				local bake  = node
