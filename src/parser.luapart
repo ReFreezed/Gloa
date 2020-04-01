@@ -231,8 +231,8 @@ _G.!structAst"AstImport:_AstExpression"{
 	{`fileScope`,  nil, astRef="node"}, -- AstFileScope
 }
 _G.!structAst"AstForeign:_AstExpression"{
-	{`source`,        ""}, -- "compiler"|"lua"|"method"
-	{`sourceName`,    ""}, -- May be inferred from declaration.
+	{`source`,        ""},           -- "compiler"|"lua"|"method"
+	{`sourceName`,    nil, ast=nil}, -- AstLiteral (string)  Never inferred. The name may be inferred from a declaration.
 	-- Type phase:
 	{`sourceId`,      ""}, -- Is source and sourceName combined.
 	-- Bytecode phase:
@@ -396,26 +396,26 @@ _G.!structAst"AstEnum:_AstScopeExpression"{
 _G.!structAst"AstLambda:_AstScopeExpression"{
 	_scopeType = "imperative",
 
-	{`captures`,          {},  ast="array"},   -- []AstIdentifier
-	{`argumentsIn`,       nil, astRef="node"}, -- AstArguments
-	{`argumentsOut`,      nil, astRef="node"}, -- AstArguments
+	{`captures`,          {},  ast="array"},    -- []AstIdentifier
+	{`argumentsIn`,       nil, astRef="node"},  -- AstArguments
+	{`argumentsOut`,      nil, astRef="node"},  -- AstArguments
 	{`takingVararg`,      false},
 
-	{`body`,              nil, astRef="node"}, -- AstBlock  (If this is nil then the lambda is a function signature. If bodyIsForeign is set then this is a dummy block.)
-	{`bodyIsForeign`,     false}, -- @Cleanup: Use AstForeign instead of all this stuff.
+	{`body`,              nil, astRef="node"},  -- AstBlock  (If this is nil then the lambda is a function signature. If bodyIsForeign is set then this is a dummy block.)
+	{`bodyIsForeign`,     false},               -- @Cleanup: Use AstForeign instead of all this stuff.
 	{`foreignSource`,     ""},
-	{`foreignSourceName`, ""},
+	{`foreignSourceName`, nil, ast=nil},        -- AstLiteral (string)  Never inferred. The name may be inferred from a declaration.
 
-	{`bodyEndToken`,      1}, -- For better error messages.
+	{`bodyEndToken`,      1},                   -- For better error messages.
 
 	{`isPolymorphic`,     false},
 	{`polymorphs`,        {},  astRef="array"}, -- []AstDeclaration
 	{`bakeDeclarations`,  {},  astRef="array"}, -- []AstDeclaration
 	{`bakeValues`,        {},  astRef="array"}, -- []AstExpression
 
-	{`bodyTextLambda`,    nil, astRef="node"}, -- AstLambda
+	{`bodyTextLambda`,    nil, astRef="node"},  -- AstLambda
 
-	{`metaOnly`,          false}, -- If this is set then this won't get written to the final output - only to the metaprogram.
+	{`metaOnly`,          false},               -- If this is set then this won't get written to the final output - only to the metaprogram.
 	{`wantCallerLocation`,false},
 
 	-- Type phase:
@@ -544,7 +544,7 @@ function _G.parseForeign(state, parent)
 	tokType, tokValue = peekNextToken(state)
 	if isToken(tokType,tokValue, !(TOKEN_STRING)) then
 		eatNextToken(state)
-		foreign.sourceName = tokValue
+		foreign.sourceName = newLiteral(foreign, state.nextToken-1, !(LITERAL_STRING), tokValue)
 	else
 		-- void  (foreign.sourceName will be the name of whatever declared constant the foreign is attached to.)
 		!ERROR_OR_RETURN `errorParsingAfterLast(state, "@Incomplete: Infer foreign.sourceName")` -- TEMP
@@ -2645,7 +2645,7 @@ function _G.parseLambda(state, parent)
 		tokType, tokValue = peekNextToken(state)
 		if isToken(tokType,tokValue, !(TOKEN_STRING)) then
 			eatNextToken(state)
-			lambda.foreignSourceName = tokValue
+			lambda.foreignSourceName = newLiteral(lambda, state.nextToken-1, !(LITERAL_STRING), tokValue)
 		else
 			-- void  (lambda.foreignSourceName will be the name of whatever declared constant the lambda is attached to.)
 			!ERROR_OR_RETURN `errorParsingAfterLast(state, "@Incomplete: Infer lambda.foreignSourceName")` -- TEMP
@@ -3755,8 +3755,10 @@ do
 			elseif node.nodeType == !(nodeTypes.AstForeign) then
 				local foreign = node
 				if foreign.inferredType then  write(" (", getFriendlyTypeInfoName(foreign.inferredType), ")")  end
-				write(" (", foreign.source, " ", foreign.sourceName, ")")
-				write("\n")
+				write(" (", foreign.source, ")")
+				!!(CHILD_PRINT_START)
+				if foreign.sourceName then  printNode(foreign.sourceName, indent+1, printed, printChildren)  end
+				!!(CHILD_PRINT_END)
 
 			elseif node.nodeType == !(nodeTypes.AstUsing) then
 				local using = node

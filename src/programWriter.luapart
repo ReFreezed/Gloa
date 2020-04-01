@@ -212,19 +212,19 @@ local foreignApiCompilerSymbolsDuringCompilation = {}
 do !(do) @insert "compilerApi.luapart" !(end) end
 
 for k in pairs(compilerApi) do
-	foreignApiCompilerSymbols[k]                  = `function() error("Function not available during runtime.") end`
+	foreignApiCompilerSymbols[k]                  = `function() error("Function not available during runtime.") end` -- This should only ever get written if settings.keepDeadCode is set.
 	foreignApiCompilerSymbolsDuringCompilation[k] = "_COMPILER."..k
 end
 
 local LUA_KEYWORDS = !(Set{"and","break","do","else","elseif","end","false","for","function","goto","if","in","local","nil","not","or","repeat","return","then","true","until","while"})
 
 _G.!struct"WriterState"{
-	{`c`,                 nil}, -- CompilationState
-	{`file`,              nil},
+	{`file`,              nil}, -- Real or virtual file.
 	{`outputRuntime`,     false},
 
 	{`foreignN`,          0},
 	{`foreignReferences`, {}},
+	{`foreignOnlyAvailableDuringCompilation`, {}},
 
 	{`loopDepth`,         0},
 	{`loopStack`,         {}},  -- [](AstFor|AstWhile)  (Only used for loops with named breaks inside.)
@@ -596,8 +596,9 @@ function _G.writeExpression(state, writer, indent, nextLocalN, localsStack, expr
 					file:write(")")
 				end
 
-				file:write(":", const.value.foreignSourceName)
-				if state.settings.outputDebugInfo and const.value.foreignSourceName ~= ident.name then
+				local lambda = const.value
+				file:write(":", lambda.foreignSourceName.value)
+				if state.settings.outputDebugInfo and lambda.foreignSourceName.value ~= ident.name then
 					file:write(formatInfoComment(ident.name)) -- Not sure this is that helpful...
 				end
 
@@ -710,7 +711,7 @@ function _G.writeExpression(state, writer, indent, nextLocalN, localsStack, expr
 
 	elseif expr.nodeType == !(nodeTypes.AstLiteral) then
 		local literal = expr
-		writeConstantValue(state, writer, literal.valueConstant)
+		writeConstantValue(state, writer, literal.valueConstant, literal)
 
 	elseif expr.nodeType == !(nodeTypes.AstIdentifier) then
 		local ident = expr
@@ -1538,6 +1539,13 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 	writeDefers(state, writer, indent, nextLocalN, localsStack, indentStr, defers)
 end
 
+function _G.writeForeignReference(state, writer, foreignSourceId, nodeForError)
+	if writer.foreignOnlyAvailableDuringCompilation[foreignSourceId] and writer.outputRuntime and not state.settings.keepDeadCode then
+		nodeError(state, nodeForError, "ProgramWriter", "Trying to write runtime reference to compile-time-only symbol.")
+	end
+	writer.file:write(writer.foreignReferences[foreignSourceId])
+end
+
 function _G.writeFunction(state, writer, indent, nextLocalN, localsStack, lambda)
 	!ASSERT `not lambda.body[1]` -- Statements should be in lambda.body.statements!
 	!ASSERT `not lambda.isPolymorphic`
@@ -1547,7 +1555,7 @@ function _G.writeFunction(state, writer, indent, nextLocalN, localsStack, lambda
 	addLineMapping(state, writer, lambda.token)
 
 	if lambda.bodyIsForeign then
-		file:write(writer.foreignReferences[lambda.foreignSourceId])
+		writeForeignReference(state, writer, lambda.foreignSourceId, lambda.foreignSourceName)
 		return
 	end
 
@@ -1590,7 +1598,7 @@ function _G.writeForeignImportIfNew(state, writer, typeInfo, foreignSource, fore
 	assert(foreignSourceId ~= "")
 
 	if writer.foreignReferences[foreignSourceId] then  return  end
-	if foreignSource == "method"                 then  return  end
+	if foreignSource == "method"                 then  return  end -- Methods are "imported" when they are called.
 
 	-- @Incomplete: Compiler setting for runtime checks of anything originating from foreign sources.
 	-- (We can probably wrap the importing code in something here using typeInfo.)
@@ -1628,8 +1636,17 @@ function _G.writeForeignImportIfNew(state, writer, typeInfo, foreignSource, fore
 		end
 
 	elseif foreignSource == "compiler" then
-		local symbols = writer.outputRuntime and foreignApiCompilerSymbols or foreignApiCompilerSymbolsDuringCompilation
-		local lua     = symbols[foreignSourceName] or foreignApiCompilerSymbols[foreignSourceName] or errorInternal("%s", foreignSourceName)
+		local lua = nil
+
+		if not writer.outputRuntime then
+			lua = foreignApiCompilerSymbolsDuringCompilation[foreignSourceName]
+		elseif foreignApiCompilerSymbolsDuringCompilation[foreignSourceName] then
+			writer.foreignOnlyAvailableDuringCompilation[foreignSourceId] = true
+		end
+
+		if not lua then
+			lua = foreignApiCompilerSymbols[foreignSourceName] or errorInternal("%s", foreignSourceName)
+		end
 
 		if state.settings.outputDebugInfo then
 			writer.foreignReferences[foreignSourceId] = F("_FOREIGN[%d--[[%s]]]", foreignN, foreignSourceId)
@@ -1847,13 +1864,13 @@ local function writeTypeInfo(state, writer, typeInfo)
 	end
 end
 
-function _G.writeConstantValue(state, writer, const)
+function _G.writeConstantValue(state, writer, const, nodeForError)
 	local file = writer.file
 	local tag  = const.valueType.tag
 
 	if const.kind == !(CONST_KIND_FOREIGN) then
 		local foreign = const.value
-		file:write(writer.foreignReferences[foreign.sourceId])
+		writeForeignReference(state, writer, foreign.sourceId, nodeForError)
 
 	elseif const.kind == !(CONST_KIND_TYPE_INFO) then
 		writeTypeInfo(state, writer, const.value)
@@ -1879,7 +1896,7 @@ function _G.writeConstantValue(state, writer, const)
 	--------------------------------
 
 	elseif const.kind ~= !(CONST_KIND_NORMAL) then
-		errorInternal("Incomplete: Handle constant kind '%s'.", (CONST_KIND_TITLES[const.kind] or "?"))
+		errorInternal(state, nodeForError, "Incomplete: Handle constant kind '%s'.", (CONST_KIND_TITLES[const.kind] or "?"))
 
 	elseif not const.isObject then
 		if tag ~= !(TYPE_ENUM) then
@@ -1915,15 +1932,15 @@ function _G.writeConstantValue(state, writer, const)
 		writeExpression(state, writer, 1, 1, {}, tableNode)
 
 	elseif !!(CONST_SET{ TYPE_ANY, TYPE_NAMESPACE, TYPE_COMPOUND, TYPE_LIST })[tag] then
-		errorInternal("Cannot write invalid value type '%s'.", TYPE_NAMES[tag])
+		errorInternal(state, nodeForError, "Cannot write invalid value type '%s'.", TYPE_NAMES[tag])
 	else
-		errorInternal("Incomplete: Handle constant value of type '%s'.", (TYPE_NAMES[tag] or "?"))
+		errorInternal(state, nodeForError, "Incomplete: Handle constant value of type '%s'.", (TYPE_NAMES[tag] or "?"))
 	end
 end
 
 function _G.writeConstantValueOrReference(state, writer, const, nodeForError)
 	if not const.isObject then
-		writeConstantValue(state, writer, const)
+		writeConstantValue(state, writer, const, nodeForError)
 		return
 	end
 
@@ -2003,11 +2020,11 @@ function _G.writeForeignImports(state, writer, constants, asGlobals, relevantObj
 		elseif const.kind == !(CONST_KIND_NORMAL) and const.valueType.tag == !(TYPE_FUNCTION) and const.value.bodyIsForeign then
 			-- @Polish: Treat function constants pointing to the same foreign function as the same constant.
 			local lambda = const.value
-			writeForeignImportIfNew(state, writer, const.valueType, lambda.foreignSource, lambda.foreignSourceName, lambda.foreignSourceId, lambda.token, asGlobals)
+			writeForeignImportIfNew(state, writer, const.valueType, lambda.foreignSource, lambda.foreignSourceName.value, lambda.foreignSourceId, lambda.token, asGlobals)
 
 		elseif const.kind == !(CONST_KIND_FOREIGN) then
 			local foreign = const.value
-			writeForeignImportIfNew(state, writer, foreign.inferredType, foreign.source, foreign.sourceName, foreign.sourceId, foreign.token, asGlobals)
+			writeForeignImportIfNew(state, writer, foreign.inferredType, foreign.source, foreign.sourceName.value, foreign.sourceId, foreign.token, asGlobals)
 		end
 	end
 end
@@ -2024,7 +2041,7 @@ function _G.writeConstantObjectsExceptFunctions(state, writer, constants, asGlob
 			file:write("\t")
 			if not asGlobals then  file:write("local ")  end
 			file:write(const.name, " = ")
-			writeConstantValue(state, writer, const)
+			writeConstantValue(state, writer, const, const.value)
 			writeEol(state, writer)
 		end
 	end
@@ -2400,16 +2417,14 @@ end
 
 
 function _G.validateForeignSource(state, foreignSource, foreignSourceName, nodeForError)
-	-- @UX: Make error arrow always point at the !foreign token.
-
 	if foreignSource == "lua" then
-		if not (foreignSourceName:find"^[%w_]+$" or foreignSourceName:find"^[%w_]+%.[%w_]+$" or loadstring(F("return(%s)", foreignSourceName))) then
-			nodeError(state, nodeForError, "ForeignValidator", "This is not a valid Lua symbol: '%s'", foreignSourceName)
+		if not (foreignSourceName:find"^[%w_]+$" or foreignSourceName:find"^[%a_][%w_]*%.[%a_][%w_]*$" or loadstring(F("return(%s)", foreignSourceName))) then
+			nodeError(state, nodeForError, "ForeignValidator", "This is not a valid Lua symbol.")
 		end
 
 	elseif foreignSource == "compiler" then
 		if not foreignApiCompilerSymbols[foreignSourceName] then
-			nodeError(state, nodeForError, "ForeignValidator", "This is not a valid compiler symbol: '%s'", foreignSourceName)
+			nodeError(state, nodeForError, "ForeignValidator", "This is not a valid compiler symbol.")
 		end
 
 	elseif foreignSource == "method" then
