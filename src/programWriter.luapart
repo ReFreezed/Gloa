@@ -209,10 +209,8 @@ local foreignApiCompilerSymbols = {
 
 local foreignApiCompilerSymbolsDuringCompilation = {}
 
-do !(do) @insert "compilerApi.luapart" !(end) end
-
 for k in pairs(compilerApi) do
-	foreignApiCompilerSymbols[k]                  = `function() error("Function not available during runtime.") end` -- This should only ever get written if settings.keepDeadCode is set.
+	foreignApiCompilerSymbols[k]                  = `function() error("Function not available during runtime.") end` -- This should only ever get written if keepDeadCode is set.
 	foreignApiCompilerSymbolsDuringCompilation[k] = "_COMPILER."..k
 end
 
@@ -248,7 +246,7 @@ end
 local function addLineMappingDummy(state, writer, path)
 	local ln = writer.currentOutputLine
 	if writer.lineMappingLines[ln] then  return  end
-	writer.lineMappingFiles[ln] = path or state.globalScope.fileScopes[1].path
+	writer.lineMappingFiles[ln] = path or state.pathToFirstFile
 	writer.lineMappingLines[ln] = 0
 end
 
@@ -598,7 +596,7 @@ function _G.writeExpression(state, writer, indent, nextLocalN, localsStack, expr
 
 				local lambda = const.value
 				file:write(":", lambda.foreignSourceName.value)
-				if state.settings.outputDebugInfo and lambda.foreignSourceName.value ~= ident.name then
+				if outputDebugInfo and lambda.foreignSourceName.value ~= ident.name then
 					file:write(formatInfoComment(ident.name)) -- Not sure this is that helpful...
 				end
 
@@ -735,7 +733,7 @@ function _G.writeExpression(state, writer, indent, nextLocalN, localsStack, expr
 	elseif expr.nodeType == !(nodeTypes.AstType) then
 		local typeNode = expr
 		file:write(F("%d", typeNode.representedType.id)) -- @Cleanup: We probably have a constant for the type ID to use with writeConstantValue() here who cares...
-		if state.settings.outputDebugInfo then
+		if outputDebugInfo then
 			file:write(formatInfoComment(getFriendlyTypeInfoName(typeNode.representedType)))
 		end
 
@@ -1011,7 +1009,7 @@ local function allocateName(state, writer, localsStack, name, n, shortPrefix, lo
 
 	if name == "_" then
 		localName = "_"
-	elseif state.settings.outputDebugInfo then
+	elseif outputDebugInfo then
 		localName = unicodeToLuaIdentifier(name)
 		if isNameAllocated(state, writer, localsStack, localName) then
 			localName = localName..longInfix..n
@@ -1099,9 +1097,8 @@ end
 function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, isElseif)
 	!ASSERT `not block[1]`
 
-	local file            = writer.file
-	local outputDebugInfo = state.settings.outputDebugInfo
-	local indentStr       = ("\t"):rep(indent)
+	local file      = writer.file
+	local indentStr = ("\t"):rep(indent)
 
 	if not block.statements[1] then
 		if outputDebugInfo then
@@ -1540,7 +1537,7 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 end
 
 function _G.writeForeignReference(state, writer, foreignSourceId, nodeForError)
-	if writer.foreignOnlyAvailableDuringCompilation[foreignSourceId] and writer.outputRuntime and not state.settings.keepDeadCode then
+	if writer.foreignOnlyAvailableDuringCompilation[foreignSourceId] and writer.outputRuntime and not keepDeadCode then
 		nodeError(state, nodeForError, "ProgramWriter", "Trying to write runtime reference to compile-time-only symbol.")
 	end
 	writer.file:write(writer.foreignReferences[foreignSourceId])
@@ -1585,7 +1582,7 @@ function _G.writeFunction(state, writer, indent, nextLocalN, localsStack, lambda
 
 	if lambda.body.statements[1] then
 		writeBlock(state, writer, indent+1, nextLocalN, localsStack, lambda.body)
-	elseif state.settings.outputDebugInfo then
+	elseif outputDebugInfo then
 		file:write(indentStr, "\t-- Empty function.")
 		writeEol(state, writer)
 	end
@@ -1618,7 +1615,7 @@ function _G.writeForeignImportIfNew(state, writer, typeInfo, foreignSource, fore
 	addLineMapping(state, writer, token) -- Must happen after _FOREIGN is declared.
 
 	if foreignSource == "lua" then
-		if state.settings.outputDebugInfo then
+		if outputDebugInfo then
 			writer.foreignReferences[foreignSourceId] = F("_FOREIGN[%d%s]", foreignN, formatInfoComment(foreignSourceId))
 			file:write("\t_FOREIGN[", F("%d", foreignN), "]")
 		else
@@ -1648,7 +1645,7 @@ function _G.writeForeignImportIfNew(state, writer, typeInfo, foreignSource, fore
 			lua = foreignApiCompilerSymbols[foreignSourceName] or errorInternal("%s", foreignSourceName)
 		end
 
-		if state.settings.outputDebugInfo then
+		if outputDebugInfo then
 			writer.foreignReferences[foreignSourceId] = F("_FOREIGN[%d--[[%s]]]", foreignN, foreignSourceId)
 			file:write("\t_FOREIGN[", F("%d", foreignN), "]")
 		else
@@ -1724,7 +1721,7 @@ local function writeNormalSimpleConstant(state, writer, typeInfo, v, isEnum)
 		local typeInfo = v
 		file:write(F("%d", typeInfo.id))
 
-		if state.settings.outputDebugInfo and not isEnum then
+		if outputDebugInfo and not isEnum then
 			file:write(formatInfoComment(getFriendlyTypeInfoName(typeInfo)))
 		end
 
@@ -1742,7 +1739,7 @@ local function writeTypeInfo(state, writer, typeInfo)
 		return templateToLua(
 			trimTemplate`
 				file:write("}")
-				if state.settings.outputDebugInfo then  file:write("--[[$typeInfoStructName]]")  end
+				if outputDebugInfo then  file:write("--[[$typeInfoStructName]]")  end
 			`,
 			{typeInfoStructName=typeInfoStructName}
 		)
@@ -1755,7 +1752,7 @@ local function writeTypeInfo(state, writer, typeInfo)
 
 	-- Note: This table must be synced with the preload module!
 	file:write("{tag=", tag)
-	if state.settings.outputDebugInfo then
+	if outputDebugInfo then
 		file:write("--[[TypeTag.", TYPE_NAMES[tag]:upper(), "]]")
 	end
 	file:write(", id=", typeInfo.id)
@@ -1919,7 +1916,7 @@ function _G.writeConstantValue(state, writer, const, nodeForError)
 			writeNormalSimpleConstant(state, writer, enumInfo.memberTypeInfo, literal.value, true)
 		end
 
-		if state.settings.outputDebugInfo then
+		if outputDebugInfo then
 			file:write("--[[", enumInfo.name, ".", memberName, "]]")
 		end
 
@@ -2188,7 +2185,7 @@ function _G.writeProgram(state, writer)
 
 	local relevantObjects = nil
 
-	if not state.settings.keepDeadCode then
+	if not keepDeadCode then
 		relevantObjects = {}
 
 		if outputType == !(OUTPUT_TYPE_LUA_APP) then
@@ -2287,7 +2284,7 @@ function _G.writeProgram(state, writer)
 	-- End of user code.
 	file:write("end") ; writeEol(state, writer)
 
-	if state.settings.outputDebugInfo then
+	if outputDebugInfo then
 		!(
 		-- Size of line mapping information in bytes in a small test program:
 		--

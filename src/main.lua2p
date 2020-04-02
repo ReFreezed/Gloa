@@ -61,8 +61,9 @@ xpcall(function()
 
 
 
-	!-- We want the resulting Glóa compiler to be a single file, so we use @insert instead of requiring modules here.
+	!-- We want the resulting Glóa compiler to be a single file, so we use @insert instead of requiring modules here. Note: The order matters!
 	do !(do) @insert "preprocessorStuffAndGlobals.luapart" !(end) end
+	do !(do) @insert "messagerEnums.luapart" !(end) end
 	do !(do) @insert "functions.luapart"     !(end) end
 	do !(do) @insert "lexer.luapart"         !(end) end
 	do !(do) @insert "parser.luapart"        !(end) end
@@ -70,6 +71,8 @@ xpcall(function()
 	do !(do) @insert "typer.luapart"         !(end) end
 	do !(do) @insert "bytecode.luapart"      !(end) end -- @Cleanup: Rename to something better.
 	do !(do) @insert "runner.luapart"        !(end) end
+	do !(do) @insert "messager.luapart"      !(end) end
+	do !(do) @insert "compilerApi.luapart"   !(end) end
 	do !(do) @insert "programWriter.luapart" !(end) end
 
 
@@ -77,11 +80,11 @@ xpcall(function()
 	-- Parse arguments.
 	local pathsToCompile    = {}
 	local disableGc         = false
-	local silent            = false
-	local outputDebugInfo   = false
-	local keepDeadCode      = false
 	_G.compilerArguments    = {}
 	_G.metaprogramArguments = {}
+	_G.silent               = false
+	_G.outputDebugInfo      = false
+	_G.keepDeadCode         = false
 
 	!if DEBUG then
 	_G.debug_onlyParse      = false
@@ -124,15 +127,15 @@ xpcall(function()
 				table.insert(compilerArguments, arg)
 				i = i+1
 			elseif arg == "--silent" then
-				silent = true
+				_G.silent = true
 				table.insert(compilerArguments, arg)
 				i = i+1
 			elseif arg == "--debug" then
-				outputDebugInfo = true
+				_G.outputDebugInfo = true
 				table.insert(compilerArguments, arg)
 				i = i+1
 			elseif arg == "--nostrip" then
-				keepDeadCode = true
+				_G.keepDeadCode = true
 				table.insert(compilerArguments, arg)
 				i = i+1
 
@@ -219,9 +222,6 @@ xpcall(function()
 		{`outputType`,      OUTPUT_TYPE_LUA_APP},
 		{`outputFilePath`,  ""},
 		{`entryPointName`,  "main"},
-		-- Other:
-		{`outputDebugInfo`, false},
-		{`keepDeadCode`,    false},
 	}
 
 	local !struct"CompilationState"{
@@ -229,8 +229,20 @@ xpcall(function()
 		{`tokens`,            nil},   -- Tokens (struct)
 		{`settings`,          nil},   -- CompilationSettings
 
+		{`pathToFirstFile`,   ""},
 		{`projectDirectory`,  ""},
 		{`mainFileBasename`,  ""},
+
+		{`timeParsing`,       0.0},
+		{`timeParsingInPipes`,0.0},
+		{`timePipesStart`,    0.0},
+		{`timePipes`,         0.0},
+		{`timeOutput`,        0.0},
+
+		{`sendMessages`,      false},
+		{`phase`,             0},
+		{`messages`,          {}},
+		{`nextMessageToSend`, 1},
 
 		-- Parser:
 		{`globalScope`,       nil},   -- AstGlobalScope
@@ -243,6 +255,11 @@ xpcall(function()
 		{`queueWaiting`,      {}},
 		{`allQueueds`,        {}},
 		{`dependencies`,      {}},
+		-- Debug:
+		{`finalPipe`,         PIPE_DONE-1},
+		{`queuedUpdates`,     0},
+		{`queueActiveMaxSize`,0},
+		{`pipeCycles`,        0},
 
 		-- Typer:
 		{`lastTypeId`,        0},
@@ -264,10 +281,7 @@ xpcall(function()
 
 	local timeDoingSubCompilations = 0
 
-	function _G.compileProgram(pathToFirstFile)
-		local timeStartCompiling            = os.clock()
-		local timeDoingSubCompilationsStart = timeDoingSubCompilations
-
+	function _G.compilationInitState(pathToFirstFile)
 		local state  = CompilationState()
 		state.tokens = Tokens()
 
@@ -275,6 +289,7 @@ xpcall(function()
 		--   C:/app/main.gloa > C:/app
 		--   ../main.gloa     > ..
 		--   main.gloa        > .
+		state.pathToFirstFile  = pathToFirstFile
 		state.projectDirectory = pathToFirstFile:gsub("/?[^/]+$", ""):gsub("^$", ".")
 		state.mainFileBasename = pathToFirstFile:match"([^/]+)%.gloa$"
 
@@ -282,219 +297,224 @@ xpcall(function()
 			errorLine("Compiler", "Expected the file to compile to end with '.gloa': %s", pathToFirstFile)
 		end
 
-		local settings           = CompilationSettings()
-		settings.outputDebugInfo = outputDebugInfo
-		settings.keepDeadCode    = keepDeadCode
-		settings.outputFilePath  = pathToFirstFile:gsub("%.gloa$", "")..".lua"
-		state.settings           = settings
+		local settings          = CompilationSettings()
+		settings.outputFilePath = pathToFirstFile:gsub("%.gloa$", "")..".lua"
+		state.settings          = settings
 
+		!if DEBUG then
+			if debug_onlyInferTypes then  state.finalPipe = !(PIPE_INFER)  end
+		!end
 
+		return state
+	end
 
-		-- Start compiling.
+	function _G.compilationStart(state)
+		local pathToFirstFile = state.pathToFirstFile
 		if not silent then  print("Compiling "..pathToFirstFile:gsub("^.*/", ""))  end
 
 		insertToken(state.tokens, !(TOKEN_DIRECTIVE),"import", "",pathToFirstFile)
 		insertToken(state.tokens, !(TOKEN_STRING),"preload",   "",pathToFirstFile)
 
-		local timeStartLexing, timeEndLexing = readAndTokenizeFile(state, pathToFirstFile, true)
-
-		local timeStartParsing = os.clock()
-		local globalScope      = parseGlobalScope(state, pathToFirstFile)
-		local timeEndParsing   = os.clock()
+		local timeStart   = os.clock()
+		readAndTokenizeFile(state, pathToFirstFile, true)
+		parseGlobalScope(state, pathToFirstFile)
+		state.timeParsing = os.clock()-timeStart
 
 		if peekNextToken(state) then
 			errorParsingNext(state, "Expected the end of the file.")
 		end
+	end
 
-
-
-		-- Run pipes.
-		!ifDEBUG `profilerStart()`
-		local timeStartPipes = os.clock()
+	-- compilationFinished = compilationDoOneCycle( state )
+	function _G.compilationDoOneCycle(state)
+		!local FINAL_PIPE = (DEBUG and `state.finalPipe` or toLua(PIPE_DONE-1))
 
 		!if DEBUG then
-		local queuedUpdates      = 0
-		local queueActiveMaxSize = 0
-		local pipeCycles         = 0
+			state.queueActiveMaxSize = math.max(state.queueActiveMaxSize, #state.queueActive)
+			state.pipeCycles         = state.pipeCycles+1
+			-- print("cycle", state.pipeCycles)
 		!end
 
-		!ifDEBUG`if not debug_onlyParse then`
-			local finalPipe = !(PIPE_DONE-1)
+		local nextQueueActive = {}
+		local didSomething    = false
+		local i               = 1
 
-			!if DEBUG then
-				if debug_onlyInferTypes then  finalPipe = !(PIPE_INFER)  end
-			!end
+		while true do
+			local queued = state.queueActive[i] -- Note: New nodes (or nodes to reinfer) may be inserted into queueActive during this loop.
+			if not queued then  break  end
 
-			addToQueueRecursively(state, globalScope)
-
-			for cycle = 1, math.huge do
-				-- print("cycle", cycle)
-
-				!if DEBUG then
-					queueActiveMaxSize = math.max(queueActiveMaxSize, #state.queueActive)
-					pipeCycles         = cycle
-				!end
-
-				local nextQueueActive = {}
-				local didSomething    = false
-				local i               = 1
-
-				while true do
-					local queued = state.queueActive[i] -- Note: New nodes (or nodes to reinfer) may be inserted into queueActive during this loop.
-					if not queued then  break  end
-
-					if queued.unqueued then
-						-- void
-					elseif queued.waitingOn then
-						table.insert(state.queueWaiting, queued)
-					else
-						if queued.pipe == !(PIPE_INFER) then
-							inferNode(state, queued.node)
-							didSomething = true
-							!ifDEBUG `queuedUpdates = queuedUpdates+1`
-						elseif queued.pipe == !(PIPE_BYTECODE) then
-							bcEmit(state, queued.node)
-							didSomething = true
-							!ifDEBUG `queuedUpdates = queuedUpdates+1`
-						end
-
-						if queued.unqueued then
-							-- void
-						elseif queued.waitingOn then
-							table.insert(state.queueWaiting, queued)
-						elseif queued.pipe <= finalPipe then
-							table.insert(nextQueueActive, queued)
-						else
-							-- void
-						end
-					end
-
-					i = i+1
+			if queued.unqueued then
+				-- void
+			elseif queued.waitingOn then
+				table.insert(state.queueWaiting, queued)
+			else
+				if queued.pipe == !(PIPE_INFER) then
+					inferNode(state, queued.node)
+					didSomething = true
+					!ifDEBUG `state.queuedUpdates = state.queuedUpdates+1`
+				elseif queued.pipe == !(PIPE_BYTECODE) then
+					bcEmit(state, queued.node)
+					didSomething = true
+					!ifDEBUG `state.queuedUpdates = state.queuedUpdates+1`
 				end
 
-				state.queueActive = nextQueueActive
-
-				if not (state.queueWaiting[1] or state.queueActive[1]) then
-					!if DEBUG then
-						for _, queued in ipairs(state.allQueueds) do
-							if not (queued.pipe > finalPipe or queued.unqueued) then
-								errorInternal(state, queued.node)
-							end
-						end
-					!end
-
-					break
+				if queued.unqueued then
+					-- void
+				elseif queued.waitingOn then
+					table.insert(state.queueWaiting, queued)
+				elseif queued.pipe <= !!(FINAL_PIPE) then
+					table.insert(nextQueueActive, queued)
+				else
+					-- void
 				end
+			end
 
-				if not didSomething then  errorPipesAreStuck(state)  end
-
-				local currentQueueWaiting = state.queueWaiting
-				state.queueWaiting        = {}
-
-				for _, queued in ipairs(currentQueueWaiting) do
-					local dependencyCurrent = not queued.unqueued and queued.waitingOn
-
-					while dependencyCurrent do
-						local dependency  = dependencyCurrent
-						dependencyCurrent = nil
-
-						!local DEPENDENCY_FULFILLED = `
-							dependencyCurrent = dependency.next
-							queued.waitingOn  = dependencyCurrent
-						`
-
-						if dependency.dependType == !(DEPEND_DECLARATION) then
-							if dependency.extraData then
-								if findPublicDeclarationInScope(state, dependency.extraData, dependency.dependOn) then
-									!!(DEPENDENCY_FULFILLED)
-								end
-							else
-								-- @Speed: Only call findDeclaration() if it's reported that a declaration with the awaited name has been added to the tree.
-								if findDeclaration(state, queued.node, dependency.dependOn) then
-									!!(DEPENDENCY_FULFILLED)
-								end
-							end
-						elseif dependency.dependType == !(DEPEND_MEMBER_DECLARATION) then
-							if findMemberDeclaration(state, dependency.extraData, dependency.dependOn) then
-								!!(DEPENDENCY_FULFILLED)
-							end
-
-						elseif dependency.dependType == !(DEPEND_NODE_INFERRED) then
-							-- Note: dependOn.node is not necessarily an expression which is why we also check the pipe.
-							if dependency.dependOn.node.inferredType or dependency.dependOn.pipe > !(PIPE_INFER) then
-								!!(DEPENDENCY_FULFILLED)
-							end
-						elseif dependency.dependType == !(DEPEND_NODE_INFERRED_FULLY) then
-							if dependency.dependOn.pipe > !(PIPE_INFER) then
-								!!(DEPENDENCY_FULFILLED)
-							end
-
-						elseif dependency.dependType == !(DEPEND_STRUCT_MEMBERS_READY) then
-							if dependency.dependOn.hasMembers then
-								!!(DEPENDENCY_FULFILLED)
-							end
-
-						elseif dependency.dependType == !(DEPEND_NODE_EMITTED) then
-							if dependency.dependOn.pipe > !(PIPE_BYTECODE) then
-								!!(DEPENDENCY_FULFILLED)
-							end
-
-						elseif dependency.dependType == !(DEPEND_CONSTANT_READY) then
-							if dependency.dependOn.isReady then
-								!!(DEPENDENCY_FULFILLED)
-							end
-
-						else
-							errorInternal("%d", dependency.dependType)
-						end
-					end
-
-					if queued.unqueued then
-						-- void
-					elseif queued.waitingOn then
-						table.insert(state.queueWaiting, queued)
-					else
-						table.insert(state.queueActive, queued)
-					end
-				end
-
-				!if DEBUG then
-					-- Guard against an infinite loop.
-					if cycle == 1000 then  errorPipesAreInfiniteLooping(state, finalPipe)  end
-				!end
-			end--for cycle
-		!ifDEBUG`end`
-
-		local timeEndPipes = os.clock()
-		!ifDEBUG `profilerStop()`
-
-
-
-		-- Write program.
-		if settings.outputFilePath == pathToFirstFile then
-			errorLine("Compiler", "The input path is the same as the output path. (%s)", pathToFirstFile)
+			i = i+1
 		end
 
-		local timeStartOutput = os.clock()
+		state.queueActive = nextQueueActive
 
-		!ifDEBUG`if not (debug_onlyParse or debug_onlyInferTypes) then`
-			if settings.outputType ~= !(OUTPUT_TYPE_NONE) then
-				local writer         = WriterState()
-				writer.file          = assert(io.open(settings.outputFilePath, "w"))
-				writer.outputRuntime = true
-				writeProgram(state, writer)
+		if not (state.queueWaiting[1] or state.queueActive[1]) then
+			!if DEBUG then
+				for _, queued in ipairs(state.allQueueds) do
+					if not (queued.pipe > !!(FINAL_PIPE) or queued.unqueued) then
+						errorInternal(state, queued.node)
+					end
+				end
+			!end
+
+			return true
+		end
+
+		if not didSomething then  errorPipesAreStuck(state)  end
+
+		local currentQueueWaiting = state.queueWaiting
+		state.queueWaiting        = {}
+
+		for _, queued in ipairs(currentQueueWaiting) do
+			local dependencyCurrent = not queued.unqueued and queued.waitingOn
+
+			while dependencyCurrent do
+				local dependency  = dependencyCurrent
+				dependencyCurrent = nil
+
+				!local DEPENDENCY_FULFILLED = `
+					dependencyCurrent = dependency.next
+					queued.waitingOn  = dependencyCurrent
+				`
+
+				if dependency.dependType == !(DEPEND_DECLARATION) then
+					if dependency.extraData then
+						if findPublicDeclarationInScope(state, dependency.extraData, dependency.dependOn) then
+							!!(DEPENDENCY_FULFILLED)
+						end
+					else
+						-- @Speed: Only call findDeclaration() if it's reported that a declaration with the awaited name has been added to the tree.
+						if findDeclaration(state, queued.node, dependency.dependOn) then
+							!!(DEPENDENCY_FULFILLED)
+						end
+					end
+				elseif dependency.dependType == !(DEPEND_MEMBER_DECLARATION) then
+					if findMemberDeclaration(state, dependency.extraData, dependency.dependOn) then
+						!!(DEPENDENCY_FULFILLED)
+					end
+
+				elseif dependency.dependType == !(DEPEND_NODE_INFERRED) then
+					-- Note: dependOn.node is not necessarily an expression which is why we also check the pipe.
+					if dependency.dependOn.node.inferredType or dependency.dependOn.pipe > !(PIPE_INFER) then
+						!!(DEPENDENCY_FULFILLED)
+					end
+				elseif dependency.dependType == !(DEPEND_NODE_INFERRED_FULLY) then
+					if dependency.dependOn.pipe > !(PIPE_INFER) then
+						!!(DEPENDENCY_FULFILLED)
+					end
+
+				elseif dependency.dependType == !(DEPEND_STRUCT_MEMBERS_READY) then
+					if dependency.dependOn.hasMembers then
+						!!(DEPENDENCY_FULFILLED)
+					end
+
+				elseif dependency.dependType == !(DEPEND_NODE_EMITTED) then
+					if dependency.dependOn.pipe > !(PIPE_BYTECODE) then
+						!!(DEPENDENCY_FULFILLED)
+					end
+
+				elseif dependency.dependType == !(DEPEND_CONSTANT_READY) then
+					if dependency.dependOn.isReady then
+						!!(DEPENDENCY_FULFILLED)
+					end
+
+				else
+					errorInternal("%d", dependency.dependType)
+				end
+			end
+
+			if queued.unqueued then
+				-- void
+			elseif queued.waitingOn then
+				table.insert(state.queueWaiting, queued)
+			else
+				table.insert(state.queueActive, queued)
+			end
+		end
+
+		!if DEBUG then
+			-- Guard against an infinite loop.
+			if state.pipeCycles == 1000 then  errorPipesAreInfiniteLooping(state, !!(FINAL_PIPE))  end
+		!end
+
+		return false
+	end
+
+	function _G.maybeWriteProgram(state)
+		if state.settings.outputType == !(OUTPUT_TYPE_NONE) then  return  end
+
+		!ifDEBUG `if debug_onlyParse or debug_onlyInferTypes then  return  end`
+
+		local pathToFirstFile = state.pathToFirstFile
+		if state.settings.outputFilePath == pathToFirstFile then
+			errorLine("Compiler", "The output path is the same as the input path. (%s)", pathToFirstFile)
+		end
+
+		local timeStart = os.clock()
+
+		local writer         = WriterState()
+		writer.file          = assert(io.open(state.settings.outputFilePath, "w"))
+		writer.outputRuntime = true
+		writeProgram(state, writer)
+
+		state.timeOutput = os.clock()-timeStart
+	end
+
+	function _G.compileProgram(pathToFirstFile)
+		local timeCompilingStart            = os.clock()
+		local timeDoingSubCompilationsStart = timeDoingSubCompilations
+
+		local state = compilationInitState(pathToFirstFile)
+		compilationStart(state)
+
+		-- Pipes.
+		!ifDEBUG `profilerStart()`
+		state.timePipesStart = os.clock()
+
+		!ifDEBUG`if not debug_onlyParse then`
+			addToQueueRecursively(state, state.globalScope)
+
+			for cycle = 1, math.huge do
+				if compilationDoOneCycle(state) then  break  end
 			end
 		!ifDEBUG`end`
 
-		local timeEndOutput = os.clock()
+		state.timePipes = os.clock() - state.timePipesStart - state.timeParsingInPipes
+		!ifDEBUG `profilerStop()`
+		--
 
+		maybeWriteProgram(state)
 
-
-		-- All done!
-		local timeEndCompilation = os.clock()
+		local timeCompilation = os.clock()-timeCompilingStart
 
 		!ifNotDEBUG`if not silent then`
-			!ifDEBUG`if debug_onlyParse then  astPrintTree(globalScope)  end`
+			!ifDEBUG `if debug_onlyParse then  astPrintTree(state.globalScope)  end`
 
 			local tokens        = state.tokens
 			local subTime       = timeDoingSubCompilations-timeDoingSubCompilationsStart
@@ -514,7 +534,7 @@ xpcall(function()
 					end
 
 					lineCountCode = lineCountCode+tokens.line2[token]-tokens.line1[token]
-					lastLine  = tokens.line2[token]
+					lastLine      = tokens.line2[token]
 				end
 			end
 
@@ -528,20 +548,19 @@ xpcall(function()
 				"██████████████████████ ",
 			}
 
-			printf(!((DEBUG and OK[1] or "Successfully compiled ").."%s"), pathToFirstFile)
+			printf(!((DEBUG and OK[1] or "Successfully compiled ").."%s"), state.pathToFirstFile)
 
 			if subTime > 0 then
-			printf(!((DEBUG and OK[2] or "").."Total:   %.3f (+%.3f) sec"), timeEndCompilation-timeStartCompiling-subTime, subTime)
+			printf(!((DEBUG and OK[2] or "").."Total:   %.3f (+%.3f) sec"), timeCompilation-subTime, subTime)
 			else
-			printf(!((DEBUG and OK[2] or "").."Total:   %.3f sec"        ), timeEndCompilation-timeStartCompiling-subTime)
+			printf(!((DEBUG and OK[2] or "").."Total:   %.3f sec"        ), timeCompilation-subTime)
 			end
-			printf(!((DEBUG and OK[3] or "").."Lexing:  %.3f sec"), timeEndLexing  - timeStartLexing)
-			printf(!((DEBUG and OK[4] or "").."Parsing: %.3f sec"), timeEndParsing - timeStartParsing)
-			printf(!((DEBUG and OK[5] or "").."Pipes:   %.3f sec"), timeEndPipes   - timeStartPipes - subTime)
-			printf(!((DEBUG and OK[6] or "").."Output:  %.3f sec"), timeEndOutput  - timeStartOutput)
+			printf(!((DEBUG and OK[3] or "").."Parsing: %.3f sec"), state.timeParsing)
+			printf(!((DEBUG and OK[4] or "").."Pipes:   %.3f sec"), state.timePipes-subTime)
+			printf(!((DEBUG and OK[5] or "").."Output:  %.3f sec"), state.timeOutput)
 
 			printf(
-				!((DEBUG and OK[7] or "").."%d LOC in %d file%s (%d lines including empty lines and comments)"),
+				!((DEBUG and OK[6] or "").."%d LOC in %d file%s (%d lines including empty lines and comments)"),
 				lineCountCode,
 				#state.globalScope.fileScopes-1,
 				(state.globalScope.fileScopes[3] and "s" or ""),
@@ -560,8 +579,8 @@ xpcall(function()
 				end
 
 				printf(
-					!((DEBUG and OK[8] or "").."Updates:%d Cycles:%d Queue:%d/%d Deps:%d (%s)"),
-					queuedUpdates, pipeCycles, queueActiveMaxSize, #state.allQueueds, #state.dependencies,
+					!((DEBUG and OK[7] or "").."Updates:%d Cycles:%d Queue:%d/%d Deps:%d (%s)"),
+					state.queuedUpdates, state.pipeCycles, state.queueActiveMaxSize, #state.allQueueds, #state.dependencies,
 					table.concat(depencyCountTexts, " ")
 				)
 			!end
@@ -569,7 +588,7 @@ xpcall(function()
 			print()
 		!ifNotDEBUG`end`
 
-		timeDoingSubCompilations = timeDoingSubCompilationsStart + timeEndCompilation - timeStartCompiling
+		timeDoingSubCompilations = timeDoingSubCompilationsStart+timeCompilation
 	end
 
 	for _, path in ipairs(pathsToCompile) do

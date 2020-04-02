@@ -2,7 +2,7 @@
 --=
 --=  Compiler API
 --=
---=  Everything here is reflected in modules/compiler.gloa
+--=  Everything in compilerApi is reflected in modules/compiler.gloa
 --=
 --=-------------------------------------------------------------
 --=
@@ -19,7 +19,13 @@
 --============================================================]]
 
 local function getCurrentCompilationState()
-	return getfenv(3)._STATE or errorInternal()
+	!(
+	-- Level 1 = this function
+	-- Level 2 = function in this file
+	-- Level 3 = user's metaprogram (hopefully!)
+	local LEVEL = 3
+	)
+	return getfenv(!(LEVEL))._STATE or errorInternal("Unknown environment.")
 end
 
 _G.compilerApi = {}
@@ -28,15 +34,19 @@ _G.compilerApi = {}
 
 function compilerApi.compile(path)
 	local state = getCurrentCompilationState()
-	path        = isPathAbsolute(path) and path or state.projectDirectory.."/"..path
+
+	if not isPathAbsolute(path) then
+		path = state.projectDirectory.."/"..path
+	end
 
 	compileProgram(path)
 end
 
 
 
-function compilerApi.getBuildOptions()
-	local state = getCurrentCompilationState()
+-- options = getBuildOptions( [ state=current ] )
+function compilerApi.getBuildOptions(state)
+	state = state or getCurrentCompilationState()
 
 	local options = {
 		-- See BuildOptions in modules/compiler.gloa
@@ -48,14 +58,17 @@ function compilerApi.getBuildOptions()
 	return options
 end
 
-function compilerApi.setBuildOptions(options)
+-- setBuildOptions( [ state=current, ] options )
+function compilerApi.setBuildOptions(state, options)
+	if not options then
+		state, options = getCurrentCompilationState(), state
+	end
+
 	if options.outputType ~= !(OUTPUT_TYPE_NONE) and options.outputFilePath == "" then
 		error("options.outputFilePath is empty.", 2)
 	elseif options.outputType == !(OUTPUT_TYPE_LUA_APP) and options.entryPointName == "" then
 		error("options.entryPointName is empty.", 2)
 	end
-
-	local state = getCurrentCompilationState()
 
 	state.settings.outputType     = options.outputType
 	state.settings.outputFilePath = options.outputFilePath
@@ -72,6 +85,125 @@ end
 
 function compilerApi.getCompilerArguments()
 	return {unpack(compilerArguments)}
+end
+
+
+
+function compilerApi.compilerReportError(filename, lineNumber, column, message)
+	local state = getCurrentCompilationState()
+	errorInternal("@Incomplete: compilerReportError")
+end
+
+
+
+function compilerApi.newCompilation(path)
+	if not isPathAbsolute(path) then
+		path = getCurrentCompilationState().projectDirectory.."/"..path
+	end
+
+	local state        = compilationInitState(path)
+	state.sendMessages = true
+	return state
+end
+
+!(
+local PHASE_START       = 0
+local PHASE_PIPES       = 1
+local PHASE_OUTPUT_PRE  = 2
+local PHASE_OUTPUT_POST = 3
+local PHASE_COMPLETE    = 4
+)
+
+-- finished, message = compilerApi.compilerWaitForMessage( state )
+function compilerApi.compilerWaitForMessage(state)
+	--
+	-- Not sure if the message queueing system is any good. It may be preferred to send
+	-- messages as they appear instead of queueing them. Maybe use coroutines here?
+	--
+	!local RETURN_NEXT_MESSAGE = trimTemplate`
+		state.nextMessageToSend = state.nextMessageToSend+1
+		return true, state.messages[state.nextMessageToSend-1]
+	`
+	!local MAYBE_RETURN_NEXT_MESSAGE = trimTemplate`
+		local message = state.messages[state.nextMessageToSend]
+		if message then
+			state.nextMessageToSend = state.nextMessageToSend+1
+			return true, message
+		end
+	`
+
+	!!(MAYBE_RETURN_NEXT_MESSAGE)
+
+	if state.phase == !(PHASE_START) then
+		compilationStart(state)
+		addToQueueRecursively(state, state.globalScope)
+
+		-- @UX: We get this message after only the first file has been parsed,
+		-- which is too early! (Not sure when exactly it should be sent though
+		-- as more parsing may happen because of a static if somewhere. Maybe
+		-- the message is actually pretty useless.)
+		state.phase   = state.phase+1
+		local message = newMessage(!(MESSAGE_COMPILATION_PHASE))
+		message.phase = !(COMPILATION_PHASE_SOURCE_CODE_PARSED)
+		table.insert(state.messages, message)
+		!!(RETURN_NEXT_MESSAGE)
+	end
+
+	if state.phase == !(PHASE_PIPES) then
+		while true do
+			if compilationDoOneCycle(state) then  break  end
+			!!(MAYBE_RETURN_NEXT_MESSAGE)
+		end
+
+		state.phase = state.phase+1
+		!!(MAYBE_RETURN_NEXT_MESSAGE)
+	end
+
+	if state.phase == !(PHASE_OUTPUT_PRE) then
+		if state.settings.outputType == !(OUTPUT_TYPE_NONE) then
+			state.phase = state.phase+1
+
+		else
+			state.phase        = state.phase+1
+			local message      = newMessage(!(MESSAGE_COMPILATION_PHASE))
+			message.phase      = !(COMPILATION_PHASE_PRE_WRITE_OUTPUT)
+			message.outputPath = state.settings.outputFilePath
+			table.insert(state.messages, message)
+			!!(RETURN_NEXT_MESSAGE)
+		end
+	end
+
+	if state.phase == !(PHASE_OUTPUT_POST) then
+		if state.settings.outputType == !(OUTPUT_TYPE_NONE) then
+			state.phase = state.phase+1
+
+		else
+			maybeWriteProgram(state)
+
+			state.phase        = state.phase+1
+			local message      = newMessage(!(MESSAGE_COMPILATION_PHASE))
+			message.phase      = !(COMPILATION_PHASE_POST_WRITE_OUTPUT)
+			message.outputPath = state.settings.outputFilePath
+			table.insert(state.messages, message)
+			!!(RETURN_NEXT_MESSAGE)
+		end
+	end
+
+	if state.phase == !(PHASE_COMPLETE) then
+		state.phase = state.phase+1
+
+		local message = newMessage(!(MESSAGE_COMPLETE))
+		table.insert(state.messages, message)
+		!!(RETURN_NEXT_MESSAGE)
+	end
+
+	return false, nil -- Compilation has finished!
+end
+
+function compilerApi.compilerFinish(state)
+	local waitForMessage = compilerApi.compilerWaitForMessage
+
+	while waitForMessage(state) do --[[void]] end
 end
 
 

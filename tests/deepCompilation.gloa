@@ -12,12 +12,16 @@
 	options.outputType = BuildOutputType.NONE
 	setBuildOptions(options)
 
-	-- compileApps({
-	-- 	"deepCompilation.1.gloa",
-	-- 	"deepCompilation.2.gloa",
-	-- })
+	local FILENAMES :: {
+		"deepCompilation.1.gloa",
+		"deepCompilation.2.gloa",
+	}
 
+	compileApps(FILENAMES)
 	compileLuaModule()
+	compileUsingMessageSystem(FILENAMES[1])
+
+	print("All sub-compilations done!")
 }
 
 local compileApps :: (filenames:[]string) {
@@ -63,4 +67,48 @@ local compileLuaModule :: () {
 	printf("foo = %s", luaModule.foo)
 	luaModule.func()
 	printf("round(11.65) = %d", luaModule.round(11.65))
+}
+
+local compileUsingMessageSystem :: (filename:string) {
+	print("Intercepted compilation of "..filename.."...")
+
+	local state = newCompilation(filename)
+	defer compilerFinish(state)
+
+	while true {
+		using CompilerMessage.Kind
+
+		local hasMessage, message = compilerWaitForMessage(state)
+		if not hasMessage  break
+
+		if message.kind == {
+			case COMPILATION_PHASE:
+				local phaseMessage = cast(CompilerMessageCompilationPhase) message
+				using phaseMessage.phase
+
+				if !complete phaseMessage.phase == {
+					case SOURCE_CODE_PARSED:
+						print("Message phase SOURCE_CODE_PARSED")
+					case PRE_WRITE_OUTPUT:
+						print("Message phase PRE_WRITE_OUTPUT "..phaseMessage.outputPath)
+					case POST_WRITE_OUTPUT:
+						print("Message phase POST_WRITE_OUTPUT "..phaseMessage.outputPath)
+				}
+
+			case FILE:
+				local fileMessage = cast(CompilerMessageFile) message
+				print("Message file "..fileMessage.path)
+
+			case CODE_TYPECHECKED:
+				local typechecked = cast(CompilerMessageCodeTypechecked) message
+				local decl        = typechecked.declaration
+				printf("Message typechecked %s @ %s:%d", decl.name, decl.filepath, decl.lineNumber)
+
+			case COMPLETE:
+				print("Message complete")
+
+			case:
+				printf("Message (kind=%d)", cast(int) message.kind)
+		}
+	}
 }

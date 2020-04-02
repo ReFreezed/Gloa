@@ -2540,7 +2540,11 @@ end
 		!DEPEND_AND_RETURN(`decl`, DEPEND_NODE_INFERRED, `identOrVararg`)
 	end
 
+	local scope    = astFindParentScope(decl)
+	local isConst  = isDeclarationConstant(decl)
 	local typeExpr = decl.type
+
+	local isForeignVariableMember = (not isConst and decl.parent == scope and scope.nodeType == !(nodeTypes.AstStruct) and scope.isForeign)
 
 	if typeExpr then
 		if not typeExpr.inferredType then
@@ -2550,15 +2554,17 @@ end
 		local typeInfoRepresented = requireTypeRepresentedByExpression(state, typeExpr)
 
 		if decl.parent.nodeType == !(nodeTypes.AstArgument) then
-			-- void  (Ignore function arguments.)
+			-- void  Ignore function arguments.
 		elseif typeInfoRepresented.tag ~= !(TYPE_COMPOUND) then
-			-- void
-		elseif isDeclarationConstant(decl) then
+			-- void  Only compound types have a higher requirement on the value at the moment.
+		elseif isConst then
 			typeError(
 				state, decl.name,
 				"Constants cannot be compound types. (Type is %s)",
 				getFriendlyTypeInfoName(typeInfoRepresented)
 			)
+		elseif isForeignVariableMember then
+			-- void  These never need a value.
 		elseif not valueExpr then
 			typeError(
 				state, decl.name,
@@ -2570,10 +2576,8 @@ end
 
 	-- @Incomplete: decl.notes (if we make them structured, which we should!)
 
-	local scope = astFindParentScope(decl)
-
 	if valueExpr then
-		if valueExpr.inferredType.tag == !(TYPE_NAMESPACE) and not isDeclarationConstant(decl) then
+		if valueExpr.inferredType.tag == !(TYPE_NAMESPACE) and not isConst then
 			typeError(state, valueExpr, "References to namespaces must be constant.")
 		end
 
@@ -2618,11 +2622,11 @@ end
 				typeError(
 					state, astGetExpressionVisuallyFurthestToTheLeft(valueExpr),
 					"Value for declared %s '%s' is not a constant expression.%s",
-					(isDeclarationConstant(decl) and "constant" or "variable"),
+					(isConst and "constant" or "variable"),
 					identOrVararg.name,
 					(
 						(valueExpr.nodeType == !(nodeTypes.AstLambda) and valueExpr.captures[1] and " (Functions with captures are not constant.)") or
-						(not isDeclarationConstant(decl) and isScopeDeclarative(scope) and " (All values in declarative scopes must be constant.)") or
+						(not isConst and isScopeDeclarative(scope) and " (All values in declarative scopes must be constant.)") or
 						""
 					)
 				)
@@ -2633,14 +2637,31 @@ end
 		doesTypeHaveAnyDefaultValue(identOrVararg.inferredType)
 		-- Ignore missing values for arguments (which are then required arguments).
 		or decl.parent.nodeType == !(nodeTypes.AstArgument)
-		-- Variables in foreign structs do not need initial values since those structs never get constructed locally anyway. (This also makes method declarations look nicer.)
-		or (not isDeclarationConstant(decl) and decl.parent == scope and scope.nodeType == !(nodeTypes.AstStruct) and scope.isForeign)
+		-- Variables in foreign structs do not need initial values since those structs never get constructed locally anyway.
+		or isForeignVariableMember
 	) then
-		!ASSERT `not isDeclarationConstant(decl)` -- This should have been detected in inferIdentifierOrVararg() (I think).
+		!ASSERT `not isConst` -- This should have been detected in inferIdentifierOrVararg() (I think).
 		typeError(state, identOrVararg, "Variables in type group '%s' must have a specified initial value.", TYPE_NAMES[identOrVararg.inferredType.tag])
 	end
 
 	moveToNextRelevantPipe(state, decl)
+
+	if scope.nodeType == !(nodeTypes.AstFileScope) and state.sendMessages then
+		local message = newMessage(!(MESSAGE_CODE_TYPECHECKED))
+		table.insert(state.messages, message)
+
+		local codeDecl          = CodeDeclaration()
+		codeDecl.serial         = decl.s
+		codeDecl.typeInfo       = nil -- @Incomplete: Generate type info for user from identOrVararg.inferredType.
+		codeDecl.filepath       = state.tokens.file[decl.token]
+		codeDecl.lineNumber     = state.tokens.line1[decl.token]
+		codeDecl.filePosition   = state.tokens.position1[decl.token]
+		codeDecl.name           = identOrVararg.name
+		codeDecl.expressions[1] = nil -- @Incomplete: Generate child CodeNodes.
+		codeDecl.rootExpression = nil -- @Incomplete: Generate child CodeNodes.
+		codeDecl.isConstant     = isConst
+		message.declaration     = codeDecl
+	end
 end
 
 !!local LITERAL_TYPE_TO_BUILTIN_TYPE_NAME = {
@@ -4016,13 +4037,13 @@ end
 
 			local startToken = tokens.count+1
 
-			-- @Incomplete: Include these times in the compilation stats.
-			local timeStartLexing, timeEndLexing = readAndTokenizeFile(state, path, (not isPreload))
+			local timeStart          = os.clock()
+			readAndTokenizeFile(state, path, (not isPreload))
 			!ASSERT(`state.fileBuffers[path]`, `path`)
-
-			local timeStartParsing = os.clock()
-			local fileScope        = parseFileScope(state, globalScope, path, (not import.isLoad), import.importName)
-			local timeEndParsing   = os.clock()
+			local fileScope          = parseFileScope(state, globalScope, path, (not import.isLoad), import.importName)
+			local timeParsing        = os.clock()  - timeStart
+			state.timeParsing        = timeParsing + state.timeParsing
+			state.timeParsingInPipes = timeParsing + state.timeParsingInPipes
 
 			if peekNextToken(state) then
 				errorParsingNext(state, "Expected the end of the file.")
@@ -4071,20 +4092,16 @@ end
 		if typeInfo.tag == !(TYPE_STRUCT) then
 			local structInfo = typeInfo
 			usingScope       = structInfo.astNode
-
 			if not isDeclarationConstant(decl) then
 				using.variableDeclaration = decl
 			end
-
 		elseif typeInfo.tag == !(TYPE_ENUM) then
-			-- Using an enum value is the same as using the enum type. Is this good?
+			-- Using an enum value is the same as using the enum type. Is this good? :UsingEnumValueOrType
 			local enumInfo = typeInfo
 			usingScope     = enumInfo.astNode
-
 		elseif typeInfo.tag == !(TYPE_NAMESPACE) then
 			local namespaceInfo = typeInfo
 			usingScope          = namespaceInfo.scope
-
 		else
 			typeError(state, ident, "Invalid or unsupported type group (%s) in 'using' expression.", TYPE_NAMES[typeInfo.tag])
 		end
@@ -4096,13 +4113,22 @@ end
 		if typeInfo.tag == !(TYPE_STRUCT) then
 			local structInfo = typeInfo
 			usingScope       = structInfo.astNode
-
 		elseif typeInfo.tag == !(TYPE_ENUM) then
 			local enumInfo = typeInfo
 			usingScope     = enumInfo.astNode
-
 		else
 			typeError(state, typeNode, "Invalid or unsupported type group (%s) in 'using' expression.", TYPE_NAMES[typeInfo.tag])
+		end
+
+	elseif expr.nodeType == !(nodeTypes.AstAccess) then
+		local access = expr
+		if typeInfo.tag == !(TYPE_ENUM) then
+			-- :UsingEnumValueOrType
+			local enumInfo = typeInfo
+			usingScope     = enumInfo.astNode
+		else
+			-- @Incomplete: Support using struct instance members which themselves are structs: using myObj.otherObj
+			typeError(state, access, "Invalid or unsupported type group (%s) in 'using' expression.", TYPE_NAMES[typeInfo.tag])
 		end
 
 	else

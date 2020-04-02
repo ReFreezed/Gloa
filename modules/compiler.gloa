@@ -2,6 +2,8 @@
 --=
 --=  Glóa compiler module
 --=
+--=  Note: Some functions here can only be used at compile time.
+--=
 --==============================================================
 
 	BuildOptions
@@ -13,7 +15,7 @@
 
 --============================================================]]
 
-export compile :: (path:string) !foreign compiler "compile"
+export compile :: (filepath:string) !foreign compiler "compile"
 
 export BuildOutputType :: enum {
 	NONE       :: 0,
@@ -25,9 +27,104 @@ export BuildOptions :: !foreign struct {
 	outputFilePath = "",
 	entryPointName = "main",
 }
-export getBuildOptions :: () -> BuildOptions     !foreign compiler "getBuildOptions"
-export setBuildOptions :: (options:BuildOptions) !foreign compiler "setBuildOptions"
+export getBuildOptions :: (                      ) -> BuildOptions       !foreign compiler "getBuildOptions"
+export getBuildOptions :: (state:CompilationState) -> BuildOptions       !foreign compiler "getBuildOptions"
+export setBuildOptions :: (                        options:BuildOptions) !foreign compiler "setBuildOptions"
+export setBuildOptions :: (state:CompilationState, options:BuildOptions) !foreign compiler "setBuildOptions"
 
 export getProjectDirectory :: () -> string !foreign compiler "getProjectDirectory"
 
 export getCompilerArguments :: () -> []string !foreign compiler "getCompilerArguments"
+
+export compilerReportError :: (filename:string, lineNumber:int, column:int, message:string) !foreign compiler "compilerReportError"
+
+export CompilationState :: !foreign struct {}
+
+export newCompilation         :: (pathToFirstFile:string) -> CompilationState !foreign compiler "newCompilation"
+export compilerWaitForMessage :: (state:CompilationState) -> (hasMessage:bool, message:CompilerMessage) !foreign compiler "compilerWaitForMessage"
+export compilerFinish         :: (state:CompilationState) !foreign compiler "compilerFinish"
+
+--
+-- Messages
+--
+
+export CompilationPhase :: enum {
+	SOURCE_CODE_PARSED :: 1,
+	PRE_WRITE_OUTPUT   :: 2,
+	POST_WRITE_OUTPUT  :: 3,
+}
+
+export CompilerMessage :: !foreign struct {
+	Kind :: enum {
+		CODE_TYPECHECKED  :: 1, -- CompilerMessageCodeTypechecked
+		COMPILATION_PHASE :: 2, -- CompilerMessageCompilationPhase
+		COMPLETE          :: 3, -- CompilerMessage
+		FILE              :: 4, -- CompilerMessageFile
+	},
+	kind: Kind,
+}
+export CompilerMessageFile :: !foreign struct {
+	using CompilerMessage,
+	path: string,
+}
+export CompilerMessageCompilationPhase :: !foreign struct {
+	using CompilerMessage,
+	phase: CompilationPhase,
+	outputPath: string, -- Set if phase is *_WRITE_OUTPUT.
+}
+export CompilerMessageCodeTypechecked :: !foreign struct {
+	using CompilerMessage,
+	declaration: CodeDeclaration, -- Only top-level declarations.
+}
+
+--
+-- Code nodes
+--
+
+export CodeNode :: !foreign struct {
+	Kind :: enum {
+		DECLARATION,
+		IDENTIFIER,
+		LITERAL,
+		OPERATOR_EXPRESSION,
+		-- @Incomplete...
+	},
+
+	kind: Kind,
+	serial: int,
+
+	typeInfo: none,--TypeInfo, -- @Incomplete!
+
+	filepath: string,
+	lineNumber: string,
+	filePosition: string,
+}
+
+export CodeDeclaration :: !foreign struct {
+	using CodeNode,
+	name:           string,
+	expressions:    []CodeNode, -- Flattened array of expressions expressing the assigned value, if any. @Incomplete
+	rootExpression: none,--CodeNode, -- @Incomplete
+	isConstant:     bool,
+}
+
+export CodeIdentifier :: !foreign struct {
+	using CodeNode,
+	name:        string,
+	declaration: CodeDeclaration,
+}
+
+export CodeLiteral :: !foreign struct {
+	using CodeNode,
+	value: int|float|bool|string, -- Use .typeInfo to know what exactly this is.
+}
+
+export CodeOperator :: !foreign struct {
+	using CodeNode,
+	operator: string, -- "+"|"//"|"or"|"#"|"?:"|etc.
+	left:     CodeNode|none, -- Not set for unary operators.
+	middle:   CodeNode|none, -- Only set for ternary operators.
+	right:    CodeNode,
+}
+
+-- @Incomplete...
