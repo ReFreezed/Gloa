@@ -225,52 +225,54 @@ xpcall(function()
 	}
 
 	local !struct"CompilationState"{
-		{`fileBuffers`,       {}},
-		{`tokens`,            nil},   -- Tokens (struct)
-		{`settings`,          nil},   -- CompilationSettings
+		{`fileBuffers`,           {}},
+		{`tokens`,                nil},   -- Tokens (struct)
+		{`settings`,              nil},   -- CompilationSettings
 
-		{`pathToFirstFile`,   ""},
-		{`projectDirectory`,  ""},
-		{`mainFileBasename`,  ""},
+		{`pathToFirstFile`,       ""},
+		{`projectDirectory`,      ""},
+		{`mainFileBasename`,      ""},
 
-		{`timeParsing`,       0.0},
-		{`timeParsingInPipes`,0.0},
-		{`timePipesStart`,    0.0},
-		{`timePipes`,         0.0},
-		{`timeOutput`,        0.0},
+		{`timeParsing`,           0.0},
+		{`timeParsingInPipes`,    0.0},
+		{`timePipesStart`,        0.0},
+		{`timePipes`,             0.0},
+		{`timeOutput`,            0.0},
 
-		{`sendMessages`,      false},
-		{`phase`,             0},
-		{`messages`,          {}},
-		{`nextMessageToSend`, 1},
+		{`sendMessages`,          false},
+		{`phase`,                 0},
+		{`messages`,              {}},
+		{`nextMessageToSend`,     1},
 
 		-- Parser:
-		{`globalScope`,       nil},   -- AstGlobalScope
-		{`nextToken`,         1},
-		{`soft`,              false}, -- Enabling this will make parsing functions return nil on error instead of triggering an actual error.
-		{`luaPreloads`,       {}},    -- All !preload strings.
+		{`globalScope`,           nil},   -- AstGlobalScope
+		{`nextToken`,             1},
+		{`soft`,                  false}, -- Enabling this will make parsing functions return nil on error instead of triggering an actual error.
+		{`luaPreloads`,           {}},    -- All !preload strings.
 
 		-- Pipes:
-		{`queueActive`,       {}},
-		{`queueWaiting`,      {}},
-		{`allQueueds`,        {}},
-		{`dependencies`,      {}},
+		{`queueActive`,           {}},
+		{`queueWaiting`,          {}},
+		{`allQueueds`,            {}},
+		{`dependencies`,          {}},
 		-- Debug:
-		{`finalPipe`,         PIPE_DONE-1},
-		{`queuedUpdates`,     0},
-		{`queueActiveMaxSize`,0},
-		{`pipeCycles`,        0},
+		{`finalPipe`,             PIPE_DONE-1},
+		{`queuedUpdates`,         0},
+		{`queuedUpdatesPerCycle`, {}},
+		{`queueActiveMaxSize`,    0},
+		{`queueWaitingMaxSize`,   0},
+		{`pipeCycles`,            0},
 
 		-- Typer:
-		{`lastTypeId`,        0},
-		{`allTypeInfos`,      {}},
+		{`lastTypeId`,            0},
+		{`allTypeInfos`,          {}},
 
 		-- Bytecode:
-		{`constants`,         {}},
-		{`constantN`,         0},
-		{`functionN`,         0},     -- Same as constantN, but for function constants.
-		{`topScopeNames`,     RESERVED_TOP_SCOPE_NAMES},
-		{`bytecodes`,         {}},    -- Code for the interpreter to run.
+		{`constants`,             {}},
+		{`constantN`,             0},
+		{`functionN`,             0},     -- Same as constantN, but for function constants.
+		{`topScopeNames`,         RESERVED_TOP_SCOPE_NAMES},
+		{`bytecodes`,             {}},    -- Code for the interpreter to run.
 
 		-- Runner:
 		{`runnerEnvironment`,     {}},
@@ -327,54 +329,100 @@ xpcall(function()
 
 	-- compilationFinished = compilationDoOneCycle( state )
 	function _G.compilationDoOneCycle(state)
-		!local FINAL_PIPE = (DEBUG and `state.finalPipe` or toLua(PIPE_DONE-1))
+		!local EXTRA_STATS = DEBUG and false
+		!local FINAL_PIPE  = DEBUG and `state.finalPipe` or toLua(PIPE_DONE-1)
 
 		!if DEBUG then
-			state.queueActiveMaxSize = math.max(state.queueActiveMaxSize, #state.queueActive)
-			state.pipeCycles         = state.pipeCycles+1
+			state.queueActiveMaxSize  = math.max(state.queueActiveMaxSize,  #state.queueActive)
+			state.queueWaitingMaxSize = math.max(state.queueWaitingMaxSize, #state.queueWaiting)
+			state.pipeCycles          = state.pipeCycles+1
 			-- print("cycle", state.pipeCycles)
 		!end
 
-		local nextQueueActive = {}
 		local didSomething    = false
 		local i               = 1
 
+		local queueActive     = state.queueActive
+		local queueWaiting    = state.queueWaiting
+		local nextQueueActive = {}
+
+		local insert          = table.insert
+		local inferNode       = inferNode
+		local bcEmit          = bcEmit
+
+		!if EXTRA_STATS then
+			local updatesThisCycle = {
+				total = 0,
+				!(
+				for nodeType = 1, #nodeTypeNames do
+					__LUA("0,")
+				end
+				)
+			}
+			state.queuedUpdatesPerCycle[state.pipeCycles] = updatesThisCycle
+		!end
+
 		while true do
-			local queued = state.queueActive[i] -- Note: New nodes (or nodes to reinfer) may be inserted into queueActive during this loop.
+			local queued = queueActive[i] -- Note: New nodes (or nodes to reinfer) may be inserted into queueActive during this loop.
 			if not queued then  break  end
 
 			if queued.unqueued then
 				-- void
+
 			elseif queued.waitingOn then
-				table.insert(state.queueWaiting, queued)
+				insert(queueWaiting, queued)
+
 			else
+				!(
+				local DID_SOMETHING = "didSomething = true"
+
+				if DEBUG then
+					DID_SOMETHING = DID_SOMETHING.." state.queuedUpdates = state.queuedUpdates+1"
+
+					if EXTRA_STATS then
+						DID_SOMETHING = DID_SOMETHING
+							.." updatesThisCycle.total                 = updatesThisCycle.total                 + 1"
+							.." updatesThisCycle[queued.node.nodeType] = updatesThisCycle[queued.node.nodeType] + 1"
+							-- .." if state.pipeCycles == 8 then  astPrint(queued.node) ; where(state, queued.node)  end"
+					end
+				end
+				)
+
 				if queued.pipe == !(PIPE_INFER) then
+					!!(DID_SOMETHING)
 					inferNode(state, queued.node)
-					didSomething = true
-					!ifDEBUG `state.queuedUpdates = state.queuedUpdates+1`
+
+					--[[ This decreases node update count but somehow makes compilation slower. I dunno, man...
+					if queued.pipe == !(PIPE_BYTECODE) then
+						!ifDEBUG`if not debug_onlyInferTypes then`
+							bcEmit(state, queued.node)
+						!ifDEBUG`end`
+					end
+					--]]
+
 				elseif queued.pipe == !(PIPE_BYTECODE) then
+					!!(DID_SOMETHING)
 					bcEmit(state, queued.node)
-					didSomething = true
-					!ifDEBUG `state.queuedUpdates = state.queuedUpdates+1`
 				end
 
 				if queued.unqueued then
 					-- void
 				elseif queued.waitingOn then
-					table.insert(state.queueWaiting, queued)
+					insert(queueWaiting, queued)
 				elseif queued.pipe <= !!(FINAL_PIPE) then
-					table.insert(nextQueueActive, queued)
+					insert(nextQueueActive, queued)
 				else
 					-- void
 				end
 			end
 
 			i = i+1
-		end
+		end--while queueActive[i]
 
-		state.queueActive = nextQueueActive
+		queueActive       = nextQueueActive
+		state.queueActive = queueActive
 
-		if not (state.queueWaiting[1] or state.queueActive[1]) then
+		if not (queueWaiting[1] or queueActive[1]) then
 			!if DEBUG then
 				for _, queued in ipairs(state.allQueueds) do
 					if not (queued.pipe > !!(FINAL_PIPE) or queued.unqueued) then
@@ -388,8 +436,9 @@ xpcall(function()
 
 		if not didSomething then  errorPipesAreStuck(state)  end
 
-		local currentQueueWaiting = state.queueWaiting
-		state.queueWaiting        = {}
+		local currentQueueWaiting = queueWaiting
+		queueWaiting              = {}
+		state.queueWaiting        = queueWaiting
 
 		for _, queued in ipairs(currentQueueWaiting) do
 			local dependencyCurrent = not queued.unqueued and queued.waitingOn
@@ -452,11 +501,11 @@ xpcall(function()
 			if queued.unqueued then
 				-- void
 			elseif queued.waitingOn then
-				table.insert(state.queueWaiting, queued)
+				insert(queueWaiting, queued)
 			else
-				table.insert(state.queueActive, queued)
+				insert(queueActive, queued)
 			end
-		end
+		end--for currentQueueWaiting
 
 		!if DEBUG then
 			-- Guard against an infinite loop.
@@ -579,10 +628,39 @@ xpcall(function()
 				end
 
 				printf(
-					!((DEBUG and OK[7] or "").."Updates:%d Cycles:%d Queue:%d/%d Deps:%d (%s)"),
-					state.queuedUpdates, state.pipeCycles, state.queueActiveMaxSize, #state.allQueueds, #state.dependencies,
+					!((DEBUG and OK[7] or "").."Updates:%d Cycles:%d Queue:%d(a=%d,w=%d) Consts:%d Deps:%d (%s)"),
+					state.queuedUpdates, state.pipeCycles, #state.allQueueds, state.queueActiveMaxSize, state.queueWaitingMaxSize, #state.constants, #state.dependencies,
 					table.concat(depencyCountTexts, " ")
 				)
+
+				!if EXTRA_STATS then
+					print()
+
+					for cycle = 1, state.pipeCycles do
+						local updatesThisCycle  = state.queuedUpdatesPerCycle[cycle]
+						local relevantNodeTypes = {}
+						local perNodeTypeTexts  = {}
+
+						for nodeType = 1, !(#nodeTypeNames) do
+							if updatesThisCycle[nodeType] > 0 then
+								table.insert(relevantNodeTypes, nodeType)
+							end
+						end
+
+						table.sort(relevantNodeTypes, function(a, b)
+							return updatesThisCycle[a] > updatesThisCycle[b]
+						end)
+
+						for _, nodeType in ipairs(relevantNodeTypes) do
+							table.insert(
+								perNodeTypeTexts,
+								F("%s=%d", AST_NODE_TYPE_NAMES[nodeType]:gsub("^Ast", ""), updatesThisCycle[nodeType])
+							)
+						end
+
+						printf("Cycle %-4d %-7d - %s", cycle, updatesThisCycle.total, table.concat(perNodeTypeTexts, " "))
+					end
+				!end
 			!end
 
 			print()
