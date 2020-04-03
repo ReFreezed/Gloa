@@ -22,6 +22,8 @@ Options:
     --nostrip  Disable automatic removal of dead code. (May trigger runtime errors on start-up!)
     --silent   Disable output to stdout. (Errors and warnings are still printed to stderr.)
     --         Start of arguments for metaprogram.]]
+
+local EXTRA_STATS = DEBUG and false
 )
 
 local args = {...}
@@ -253,8 +255,9 @@ xpcall(function()
 		-- Pipes:
 		{`queueActive`,           {}},
 		{`queueWaiting`,          {}},
+		{`priorityStack`,         {}},
 		{`allQueueds`,            {}},
-		{`dependencies`,          {}},
+		{`allDependencies`,       {}},
 		-- Debug:
 		{`finalPipe`,             PIPE_DONE-1},
 		{`queuedUpdates`,         0},
@@ -262,6 +265,7 @@ xpcall(function()
 		{`queueActiveMaxSize`,    0},
 		{`queueWaitingMaxSize`,   0},
 		{`pipeCycles`,            0},
+		{`prioriyCount`,          0},
 
 		-- Typer:
 		{`lastTypeId`,            0},
@@ -329,8 +333,7 @@ xpcall(function()
 
 	-- compilationFinished = compilationDoOneCycle( state )
 	function _G.compilationDoOneCycle(state)
-		!local EXTRA_STATS = DEBUG and false
-		!local FINAL_PIPE  = DEBUG and `state.finalPipe` or toLua(PIPE_DONE-1)
+		!local FINAL_PIPE = DEBUG and `state.finalPipe` or toLua(PIPE_DONE-1)
 
 		!if DEBUG then
 			state.queueActiveMaxSize  = math.max(state.queueActiveMaxSize,  #state.queueActive)
@@ -344,7 +347,9 @@ xpcall(function()
 
 		local queueActive     = state.queueActive
 		local queueWaiting    = state.queueWaiting
+		local priorityStack   = state.priorityStack
 		local nextQueueActive = {}
+		local gotPrioritized  = {}
 
 		local insert          = table.insert
 		local inferNode       = inferNode
@@ -363,11 +368,24 @@ xpcall(function()
 		!end
 
 		while true do
-			local queued = queueActive[i] -- Note: New nodes (or nodes to reinfer) may be inserted into queueActive during this loop.
-			if not queued then  break  end
+			local priority = priorityStack[1]
+			local queued
+
+			if priority then
+				local len          = #priorityStack
+				queued             = priorityStack[len]
+				priorityStack[len] = nil
+				!ifDEBUG `state.prioriyCount = state.prioriyCount+1`
+			else
+				queued = queueActive[i] -- Note: New nodes (or nodes to reinfer) may be inserted into queueActive during this loop.
+				if not queued then  break  end
+			end
 
 			if queued.unqueued then
 				-- void
+
+			elseif gotPrioritized[queued] then
+				-- void  WARNING: Make sure we don't queue prioritized nodes multiple times!
 
 			elseif queued.waitingOn then
 				insert(queueWaiting, queued)
@@ -383,7 +401,7 @@ xpcall(function()
 						DID_SOMETHING = DID_SOMETHING
 							.." updatesThisCycle.total                 = updatesThisCycle.total                 + 1"
 							.." updatesThisCycle[queued.node.nodeType] = updatesThisCycle[queued.node.nodeType] + 1"
-							-- .." if state.pipeCycles == 8 then  astPrint(queued.node) ; where(state, queued.node)  end"
+							-- .." if state.pipeCycles >= 89 then  print('Cycle '..state.pipeCycles) ; astPrint(queued.node) ; where(state, queued.node)  end"
 					end
 				end
 				)
@@ -392,10 +410,20 @@ xpcall(function()
 					!!(DID_SOMETHING)
 					inferNode(state, queued.node)
 
+					if queued.pipe > !(PIPE_INFER) then
+						fulfillDependencies(state, queued.node, !(DEPEND_NODE_INFERRED))
+						fulfillDependencies(state, queued.node, !(DEPEND_NODE_INFERRED_FULLY))
+					elseif queued.node.inferredType then
+						fulfillDependencies(state, queued.node, !(DEPEND_NODE_INFERRED))
+					end
+
 					--[[ This decreases node update count but somehow makes compilation slower. I dunno, man...
 					if queued.pipe == !(PIPE_BYTECODE) then
 						!ifDEBUG`if not debug_onlyInferTypes then`
 							bcEmit(state, queued.node)
+							if queued.pipe > !(PIPE_BYTECODE) then
+								fulfillDependencies(state, queued.node, !(DEPEND_NODE_EMITTED))
+							end
 						!ifDEBUG`end`
 					end
 					--]]
@@ -403,6 +431,10 @@ xpcall(function()
 				elseif queued.pipe == !(PIPE_BYTECODE) then
 					!!(DID_SOMETHING)
 					bcEmit(state, queued.node)
+
+					if queued.pipe > !(PIPE_BYTECODE) then
+						fulfillDependencies(state, queued.node, !(DEPEND_NODE_EMITTED))
+					end
 				end
 
 				if queued.unqueued then
@@ -416,7 +448,11 @@ xpcall(function()
 				end
 			end
 
-			i = i+1
+			if priority then
+				gotPrioritized[queued] = true
+			else
+				i = i+1
+			end
 		end--while queueActive[i]
 
 		queueActive       = nextQueueActive
@@ -597,19 +633,19 @@ xpcall(function()
 				"██████████████████████ ",
 			}
 
-			printf(!((DEBUG and OK[1] or "Successfully compiled ").."%s"), state.pathToFirstFile)
+			printf(!((DEBUG and OK[  N(1)] or "Successfully compiled ").."%s"), state.pathToFirstFile)
 
 			if subTime > 0 then
-			printf(!((DEBUG and OK[2] or "").."Total:   %.3f (+%.3f) sec"), timeCompilation-subTime, subTime)
+			printf(!((DEBUG and OK[incN()] or "").."Total:   %.3f (+%.3f) sec"), timeCompilation-subTime, subTime)
 			else
-			printf(!((DEBUG and OK[2] or "").."Total:   %.3f sec"        ), timeCompilation-subTime)
+			printf(!((DEBUG and OK[   N()] or "").."Total:   %.3f sec"        ), timeCompilation-subTime)
 			end
-			printf(!((DEBUG and OK[3] or "").."Parsing: %.3f sec"), state.timeParsing)
-			printf(!((DEBUG and OK[4] or "").."Pipes:   %.3f sec"), state.timePipes-subTime)
-			printf(!((DEBUG and OK[5] or "").."Output:  %.3f sec"), state.timeOutput)
+			printf(!((DEBUG and OK[incN()] or "").."Parsing: %.3f sec"), state.timeParsing)
+			printf(!((DEBUG and OK[incN()] or "").."Pipes:   %.3f sec"), state.timePipes-subTime)
+			printf(!((DEBUG and OK[incN()] or "").."Output:  %.3f sec"), state.timeOutput)
 
 			printf(
-				!((DEBUG and OK[6] or "").."%d LOC in %d file%s (%d lines including empty lines and comments)"),
+				!((DEBUG and OK[incN()] or "").."%d LOC in %d file%s (%d lines including empty lines and comments)"),
 				lineCountCode,
 				#state.globalScope.fileScopes-1,
 				(state.globalScope.fileScopes[3] and "s" or ""),
@@ -618,7 +654,7 @@ xpcall(function()
 
 			!if DEBUG then
 				local dependencyCount = {}
-				for _, dependency in ipairs(state.dependencies) do
+				for _, dependency in ipairs(state.allDependencies) do
 					dependencyCount[dependency.dependType] = (dependencyCount[dependency.dependType] or 0)+1
 				end
 
@@ -628,8 +664,16 @@ xpcall(function()
 				end
 
 				printf(
-					!((DEBUG and OK[7] or "").."Updates:%d Cycles:%d Queue:%d(a=%d,w=%d) Consts:%d Deps:%d (%s)"),
-					state.queuedUpdates, state.pipeCycles, #state.allQueueds, state.queueActiveMaxSize, state.queueWaitingMaxSize, #state.constants, #state.dependencies,
+					!((DEBUG and OK[incN()] or "").."Cycles:%d Updates:%d Prio:%d Queue:%d(a=%d,w=%d) Consts:%d"),
+					state.pipeCycles,
+					state.queuedUpdates,
+					state.prioriyCount,
+					#state.allQueueds, state.queueActiveMaxSize, state.queueWaitingMaxSize,
+					#state.constants
+				)
+				printf(
+					!((DEBUG and OK[incN()] or "").."Deps:%d (%s)"),
+					#state.allDependencies,
 					table.concat(depencyCountTexts, " ")
 				)
 

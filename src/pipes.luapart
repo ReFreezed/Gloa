@@ -9,7 +9,7 @@
 --=
 --==============================================================
 
-	addDependency, getExistingDependency
+	addDependency, getExistingDependency, fulfillDependencies
 	addToQueueRecursively, pokeAndQueueUnqueuedNodeIntoTree, unqueue, unqueueChildrenRecursively, replaceQueuedNode, replaceQueuedNodeAndUnqueueOldTree, cutOutPartOfNodeTree
 	errorPipesAreStuck, errorPipesAreInfiniteLooping
 	moveToPipe, moveToNextRelevantPipe, moveTreeToNextRelevantPipe, moveChildrenToNextRelevantPipe
@@ -70,14 +70,18 @@ function _G.addDependency(state, dependent, dependType, dependOn, extraData)
 	end
 	--]]
 
-	dependent = dependent.queued
+	dependent        = dependent.queued
+	local dependency = Dependency()
 
 	if !!(CONST_SET{ DEPEND_NODE_INFERRED, DEPEND_NODE_INFERRED_FULLY, DEPEND_NODE_EMITTED })[dependType] then
 		assert(dependent ~= dependOn.node)
 		dependOn = dependOn.queued or errorInternal(state, dependOn)
+		table.insert(dependOn.waiters, dependency)
+
+	elseif dependType == !(DEPEND_STRUCT_MEMBERS_READY) then
+		table.insert(dependOn.astNode.queued.waiters, dependency)
 	end
 
-	local dependency      = Dependency()
 	dependency.dependent  = dependent
 	dependency.dependType = dependType
 	dependency.dependOn   = dependOn
@@ -93,7 +97,7 @@ function _G.addDependency(state, dependent, dependType, dependOn, extraData)
 		dependent.waitingOn = dependency
 	end
 
-	table.insert(state.dependencies, dependency)
+	table.insert(state.allDependencies, dependency)
 
 	!if DEBUG then
 		--[[
@@ -145,7 +149,25 @@ function _G.getExistingDependency(state, dependent, dependType, dependOn)
 		dependOn = dependOn.queued
 	end
 
-	return itemWith3(state.dependencies, "dependent",dependent, "dependType",dependType, "dependOn",dependOn)
+	return itemWith3(state.allDependencies, "dependent",dependent, "dependType",dependType, "dependOn",dependOn)
+end
+
+function _G.fulfillDependencies(state, node, dependType)
+	local waiters = node.queued.waiters
+
+	for i, dependency in ipairsr(waiters) do
+		if dependency.dependType == dependType then
+			removeUnordered(waiters, i)
+
+			local dependent = dependency.dependent
+			if dependent.waitingOn == dependency then
+				dependent.waitingOn = dependency.next
+			end
+			if not dependent.waitingOn then
+				table.insert(state.priorityStack, dependent)
+			end
+		end
+	end
 end
 
 
@@ -156,6 +178,7 @@ local !struct"Queued"{
 	{`key`,       nil}, -- String or integer.
 	{`pipe`,      PIPE_NONE},
 	{`waitingOn`, nil}, -- Dependency
+	{`waiters`,   {}},  -- []Dependency  Others waiting on this.
 	{`unqueued`,  false},
 }
 
@@ -214,11 +237,21 @@ do
 		local nodesToAdd = {}
 		registerNodesToAddToQueue(state, topNode, nodesToAdd)
 
-		astVisitAllNodesLeavesFirst(topNode, function(node, container, key)
-			if nodesToAdd[node] then
-				addToQueue(state, node, (container or container0), (key or key0), pipe)
+		local function add(node, container, key)
+			if not nodesToAdd[node] then  return  end
+
+			if node.nodeType == !(nodeTypes.AstDeclaration) and node.assignment then
+				local assignment = node.assignment
+				for i, valueExpr in ipairs(assignment.values) do
+					astVisitAllNodesLeavesFirst(valueExpr, add, assignment.values, i)
+				end
 			end
-		end)
+
+			addToQueue(state, node, (container or container0), (key or key0), pipe)
+			nodesToAdd[node] = nil
+		end
+
+		astVisitAllNodesLeavesFirst(topNode, add)
 	end
 end
 
@@ -260,11 +293,21 @@ do
 		local nodesToAdd = {}
 		registerNodesToAddToQueue(state, topNode, nodesToAdd)
 
-		astVisitAllNodesLeavesFirst(topNode, function(node, container, key)
-			if nodesToAdd[node] then
-				addToQueue(state, node, container, key, pipe)
+		local function add(node, container, key)
+			if not nodesToAdd[node] then  return  end
+
+			if node.nodeType == !(nodeTypes.AstDeclaration) and node.assignment then
+				local assignment = node.assignment
+				for i, valueExpr in ipairs(assignment.values) do
+					astVisitAllNodesLeavesFirst(valueExpr, add, assignment.values, i)
+				end
 			end
-		end)
+
+			addToQueue(state, node, container, key, pipe)
+			nodesToAdd[node] = nil
+		end
+
+		astVisitAllNodesLeavesFirst(topNode, add)
 	end
 end
 

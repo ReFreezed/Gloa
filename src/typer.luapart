@@ -3237,7 +3237,9 @@ end
 
 		local ident = astCopy(decl.name, access.token, access.parent)
 		replaceQueuedNodeAndUnqueueOldTree(state, access, ident)
+
 		-- Stay in the current pipe so we get simplified. (Needed? Or maybe we can @Speed things up here?)
+		inferNode(state, ident)
 
 	elseif typeObject.tag == !(TYPE_NAMESPACE) then
 		assert(isDirectObject)
@@ -3256,7 +3258,9 @@ end
 
 		local ident = astCopy(decl.name, access.token, access.parent)
 		replaceQueuedNodeAndUnqueueOldTree(state, access, ident)
+
 		-- Stay in the current pipe so we get simplified. (Needed? Or maybe we can @Speed things up here?)
+		inferNode(state, ident)
 
 	else
 		typeError(state, access, "Values of type '%s' do not have members.", getFriendlyTypeInfoName(typeObject))
@@ -3606,9 +3610,8 @@ end
 				getFriendlyTypeInfoName(argType1)
 			)
 
-		-- elseif not argType1.astNode.isForeign and not argType1.hasMembers then
-		-- 	-- @Incomplete: We create circular dependencies in some cases by doing this. No good!
-		-- 	!DEPEND_AND_RETURN(`lambda`, DEPEND_STRUCT_MEMBERS_READY, `argType1`) -- We need this for isForeign to be valid.
+		elseif not argType1.astNode.isForeign and not argType1.hasMembers then
+			!DEPEND_AND_RETURN(`lambda`, DEPEND_STRUCT_MEMBERS_READY, `argType1`) -- We need this for isForeign to be valid.
 
 		elseif not argType1.astNode.isForeign then
 			typeError2(state,
@@ -5038,6 +5041,8 @@ end
 	end
 	structInfo.hasMembers = true
 
+	fulfillDependencies(state, struct, !(DEPEND_STRUCT_MEMBERS_READY))
+
 	if structInfo.keyType and (structInfo.members[1] or struct.declarations[1]) and structInfo.keyType.tag == !(TYPE_STRING) then
 		-- Note: We trigger this error for static members too, not just dynamic, as some lookups would otherwise be ambigous.
 		typeError(state, typeSourceNodeK, "Strongly typed tables with string keys cannot also have members.")
@@ -5595,10 +5600,6 @@ end
 	local typeInfoExpected = getExpectedTypeInfo(state, null, false, "NULL value", null)
 	if not typeInfoExpected then  return  end
 
-	-- if not isTypeTableLike(typeInfoExpected) then
-	-- 	typeError(state, null, "Null only works in place of table-like objects.")
-	-- end
-
 	null.inferredType = typeInfoExpected
 	moveToNextRelevantPipe(state, null)
 end
@@ -5872,46 +5873,7 @@ end
 
 
 
-local function createLambdaArgumentsFromTypes(state, typeInfos, lambda)
-	local args = astNewNode(AstArguments, lambda.token, lambda)
-
-	for i, argTypeInfo in ipairs(typeInfos) do
-		local arg          = astNewNode(AstArgument,    lambda.token, args)
-		local decl         = astNewNode(AstDeclaration, lambda.token, arg)
-		local ident        = astNewNode(AstIdentifier,  lambda.token, decl)
-
-		ident.name         = "_"..i
-		ident.declaration  = decl
-		ident.inferredType = argTypeInfo
-
-		decl.name          = ident
-
-		arg.declaration    = decl
-		arg.group          = i
-
-		-- @Incomplete: Handle default values for input arguments. (Needed?)
-
-		args.arguments[i] = arg
-	end
-
-	return args
-end
-
-local function createLambdaFromSignature(state, funcSig, parent)
-	local lambda = astNewNode(AstLambda, parent.token, parent)
-
-	if funcSig.argumentTypesIn[1] then
-		lambda.argumentsIn = createLambdaArgumentsFromTypes(state, funcSig.argumentTypesIn, lambda)
-		table.insert(lambda.statements, lambda.argumentsIn)
-	end
-	if funcSig.argumentTypesOut[1] then
-		lambda.argumentsOut = createLambdaArgumentsFromTypes(state, funcSig.argumentTypesOut, lambda)
-		table.insert(lambda.statements, lambda.argumentsOut)
-	end
-
-	return lambda
-end
-
+-- inferredTypeNode = createTypeNodeFromInfo( state, typeRepresented, token, parent )
 function _G.createTypeNodeFromInfo(state, typeRepresented, token, parent)
 	local typeNode            = astNewNode(AstType, token, parent)
 	local isBuiltin, typeName = isTypeBuiltin(typeRepresented)
@@ -5920,34 +5882,34 @@ function _G.createTypeNodeFromInfo(state, typeRepresented, token, parent)
 	typeNode.representedType = typeRepresented
 
 	if isBuiltin then
-		typeNode.kind           = !(TYPE_KIND_SIMPLE_BUILTIN)
-		typeNode.typeName       = typeName
+		typeNode.kind              = !(TYPE_KIND_SIMPLE_BUILTIN)
+		typeNode.typeName          = typeName
 
 	elseif typeRepresented.tag == !(TYPE_STRUCT) then
-		local structInfo        = typeRepresented
-		typeNode.kind           = structInfo.isPolymorphic and !(TYPE_KIND_POLY_STRUCT) or !(TYPE_KIND_SIMPLE_USER)
-		typeNode.typeName       = structInfo.name
+		local structInfo           = typeRepresented
+		typeNode.kind              = structInfo.isPolymorphic and !(TYPE_KIND_POLY_STRUCT) or !(TYPE_KIND_SIMPLE_USER)
+		typeNode.typeName          = structInfo.name
 
 	elseif typeRepresented.tag == !(TYPE_ENUM) then
-		local enumInfo          = typeRepresented
-		typeNode.kind           = !(TYPE_KIND_SIMPLE_USER)
-		typeNode.typeName       = enumInfo.name
+		local enumInfo             = typeRepresented
+		typeNode.kind              = !(TYPE_KIND_SIMPLE_USER)
+		typeNode.typeName          = enumInfo.name
 
 	elseif typeRepresented.tag == !(TYPE_FUNCTION) then
-		local funcSig           = typeRepresented
-		typeNode.kind           = !(TYPE_KIND_FUNCTION)
-		typeNode.functionHeader = createLambdaFromSignature(state, funcSig, typeNode) -- Is this really needed? I doubt it. @Cleanup
+		local funcSig              = typeRepresented
+		typeNode.kind              = !(TYPE_KIND_FUNCTION)
+		-- typeNode.functionHeader = ? -- This is not needed.
 
 	elseif typeRepresented.tag == !(TYPE_COMPOUND) then
-		typeNode.kind           = !(TYPE_KIND_COMPOUND)
+		typeNode.kind              = !(TYPE_KIND_COMPOUND)
 
 	elseif typeRepresented.tag == !(TYPE_ARRAY) then
-		local arraySig          = typeRepresented
-		typeNode.kind           = !(TYPE_KIND_ARRAY)
-		typeNode.arrayItemType  = createTypeNodeFromInfo(state, arraySig.itemType, token, typeNode)
+		local arraySig             = typeRepresented
+		typeNode.kind              = !(TYPE_KIND_ARRAY)
+		typeNode.arrayItemType     = createTypeNodeFromInfo(state, arraySig.itemType, token, typeNode)
 
 	elseif typeRepresented.tag == !(TYPE_VARARG) then
-		errorInternal() -- When do we get here?
+		errorInternal(state, typeNode) -- When do we get here?
 	else
 		!ifDEBUG `print(getFriendlyTypeInfoName(typeRepresented))`
 		errorInternal("Incomplete: Handle type group '%s'.", TYPE_NAMES[typeRepresented.tag])
@@ -5996,8 +5958,6 @@ function _G.simplifyTypeExpression(state, expr, typeRepresented)
 	moveChildrenToNextRelevantPipe(state, typeNode)
 
 	replaceQueuedNodeAndUnqueueOldTree(state, expr, typeNode)
-
-	return typeNode
 end
 
 local function simplifyCast(state, cast)
