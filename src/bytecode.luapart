@@ -1,8 +1,6 @@
 --[[============================================================
 --=
---=  Bytecode
---=
---=  @Cleanup: Rename all bytecode stuff as there's no actual bytecode anywhere!
+--=  Constant and top-scope name emitter
 --=
 --=-------------------------------------------------------------
 --=
@@ -11,77 +9,12 @@
 --=
 --==============================================================
 
-	bcAllocate*
-	bcEmit*
-	bcError, bcErrorAfter, bcMessage
+	allocateConstant*, allocateTopScopeName
+	emitError, emitErrorAfter, emitMessage
+	emitNode, emit*
+	maybeSetConstantName
 
 --============================================================]]
-
-!(
---[[
-local BC_CODES = {
-	-- name            args    description
-
-	`BC_MOVE`,      -- A B     R(A) := R(B)
-	`BC_LOADK`,     -- A Bx    R(A) := Kst(Bx)
-	`BC_LOADBOOL`,  -- A B C   R(A) := (Bool)B; if (C) pc++
-	`BC_LOADNIL`,   -- A B     R(A) := ... := R(B) := nil
-	`BC_GETUPVAL`,  -- A B     R(A) := UpValue[B]
-
-	`BC_GETGLOBAL`, -- A Bx    R(A) := Gbl[Kst(Bx)]
-	`BC_GETTABLE`,  -- A B C   R(A) := R(B)[RK(C)]
-
-	`BC_SETGLOBAL`, -- A Bx    Gbl[Kst(Bx)] := R(A)
-	`BC_SETUPVAL`,  -- A B     UpValue[B] := R(A)
-	`BC_SETTABLE`,  -- A B C   R(A)[RK(B)] := RK(C)
-
-	`BC_NEWTABLE`,  -- A B C   R(A) := {} (size = B,C)
-
-	`BC_SELF`,      -- A B C   R(A+1) := R(B); R(A) := R(B)[RK(C)]
-
-	`BC_ADD`,       -- A B C   R(A) := RK(B) +  RK(C)
-	`BC_SUB`,       -- A B C   R(A) := RK(B) -  RK(C)
-	`BC_MUL`,       -- A B C   R(A) := RK(B) *  RK(C)
-	`BC_DIV`,       -- A B C   R(A) := RK(B) /  RK(C)
-	`BC_IDIV`,      -- A B C   R(A) := RK(B) // RK(C)
-	`BC_MOD`,       -- A B C   R(A) := RK(B) %  RK(C)
-	`BC_POW`,       -- A B C   R(A) := RK(B) ^  RK(C)
-	`BC_UNM`,       -- A B     R(A) := -R(B)
-	`BC_NOT`,       -- A B     R(A) := not R(B)
-	`BC_LEN`,       -- A B     R(A) := length of R(B)
-
-	`BC_CONCAT`,    -- A B C   R(A) := R(B).. ... ..R(C)
-
-	`BC_JUMP`,      -- A sBx   pc+=sBx; if (A) close all upvalues >= R(A - 1)
-
-	`BC_EQ`,        -- A B C   if ((RK(B) == RK(C)) ~= A) then pc++
-	`BC_LT`,        -- A B C   if ((RK(B) <  RK(C)) ~= A) then pc++
-	`BC_LE`,        -- A B C   if ((RK(B) <= RK(C)) ~= A) then pc++
-
-	`BC_TEST`,      -- A C     if not (R(A) <=> C) then pc++
-	`BC_TESTSET`,   -- A B C   if (R(B) <=> C) then R(A) := R(B) else pc++
-
-	`BC_CALL`,      -- A B C   R(A), ..., R(A+C-1) := R(A)(R(A+1), ..., R(A+B-1))
-	`BC_TAILCALL`,  -- A B C   return R(A)(R(A+1), ..., R(A+B-1))
-	`BC_RETURN`,    -- A B     return R(A), ..., R(A+B-1)
-
-	`BC_FORLOOP`,   -- A sBx   R(A)+=R(A+2); if R(A) <?= R(A+1) then { pc+=sBx; R(A+3)=R(A) }
-	`BC_FORPREP`,   -- A sBx   R(A)-=R(A+2); pc+=sBx
-
-	`BC_TFORCALL`,  -- A C     R(A+3), ..., R(A+2+C) := R(A)(R(A+1), R(A+2));
-	`BC_TFORLOOP`,  -- A sBx   if R(A+1) ~= nil then { R(A)=R(A+1); pc += sBx }
-
-	`BC_SETLIST`,   -- A B C   R(A)[(C-1)*FPF+i] := R(A+i), 1 <= i <= B
-
-	`BC_CLOSURE`,   -- A Bx    R(A) := closure(KPROTO[Bx], R(A), ..., R(A+n))
-
-	`BC_VARARG`,    -- A B     R(A), R(A+1), ..., R(A+B-1) = vararg
-}
-for bcode, bcodeName in ipairs(BC_CODES) do
-	_G[bcodeName] = bcode
-end
---]]
-)
 
 
 
@@ -89,7 +22,7 @@ local !struct"Constant"{
 	{`name`,       ""},  -- Only used for constants that are objects.  @Incomplete: Separate name for metaprogram (which may be limited) and final name.
 	{`nameLocked`, false},
 
-	{`kind`,       CONST_KIND_NORMAL}, -- See bcAllocateConstantValueIfNew().
+	{`kind`,       CONST_KIND_NORMAL}, -- See allocateConstantIfNew().
 	{`valueType`,  nil}, -- TypeInfo
 	{`value`,      nil},
 
@@ -97,17 +30,17 @@ local !struct"Constant"{
 	{`isReady`,    false},
 }
 
--- constant, isNew = bcAllocateConstantValueIfNew( state, CONST_KIND_NORMAL,    simpleTypeInfo,    literalValue,    nodeForError )
--- constant, isNew = bcAllocateConstantValueIfNew( state, CONST_KIND_NORMAL,    enumTypeInfo,      memberName,      nodeForError ) -- Note: Enums are actually simple types but have special handling in some places.
--- constant, isNew = bcAllocateConstantValueIfNew( state, CONST_KIND_NORMAL,    functionSignature, lambdaWithBody,  nodeForError )
--- constant, isNew = bcAllocateConstantValueIfNew( state, CONST_KIND_NORMAL,    tableLikeTypeInfo, tableNode,       nodeForError )
--- constant, isNew = bcAllocateConstantValueIfNew( state, CONST_KIND_NORMAL,    typeTypeInfo,      representedType, nodeForError )
--- constant, isNew = bcAllocateConstantValueIfNew( state, CONST_KIND_FOREIGN,   dummyTypeInfo,     foreign,         nodeForError ) -- @Cleanup: Can we allow dummyTypeInfo to be nil?
--- constant, isNew = bcAllocateConstantValueIfNew( state, CONST_KIND_TYPE_INFO, dummyTypeInfo,     typeInfo,        nodeForError )
--- constant, isNew = bcAllocateConstantValueIfNew( state, CONST_KIND_LOCATION,  dummyTypeInfo,     targetNode,      nodeForError )
--- constant, isNew = bcAllocateConstantValueIfNew( state, CONST_KIND_VIEW,      dummyTypeInfo,     access,          nodeForError )
--- constant, isNew = bcAllocateConstantValueIfNew( state, CONST_KIND_NULL,      dummyTypeInfo,     nil,             nodeForError )
-function _G.bcAllocateConstantValueIfNew(state, kind, typeInfo, v, nodeForError)
+-- constant, isNew = allocateConstantIfNew( state, CONST_KIND_NORMAL,    simpleTypeInfo,    literalValue,    nodeForError )
+-- constant, isNew = allocateConstantIfNew( state, CONST_KIND_NORMAL,    enumTypeInfo,      memberName,      nodeForError ) -- Note: Enums are actually simple types but have special handling in some places.
+-- constant, isNew = allocateConstantIfNew( state, CONST_KIND_NORMAL,    functionSignature, lambdaWithBody,  nodeForError )
+-- constant, isNew = allocateConstantIfNew( state, CONST_KIND_NORMAL,    tableLikeTypeInfo, tableNode,       nodeForError )
+-- constant, isNew = allocateConstantIfNew( state, CONST_KIND_NORMAL,    typeTypeInfo,      representedType, nodeForError )
+-- constant, isNew = allocateConstantIfNew( state, CONST_KIND_FOREIGN,   dummyTypeInfo,     foreign,         nodeForError ) -- @Cleanup: Can we allow dummyTypeInfo to be nil?
+-- constant, isNew = allocateConstantIfNew( state, CONST_KIND_TYPE_INFO, dummyTypeInfo,     typeInfo,        nodeForError )
+-- constant, isNew = allocateConstantIfNew( state, CONST_KIND_LOCATION,  dummyTypeInfo,     targetNode,      nodeForError )
+-- constant, isNew = allocateConstantIfNew( state, CONST_KIND_VIEW,      dummyTypeInfo,     access,          nodeForError )
+-- constant, isNew = allocateConstantIfNew( state, CONST_KIND_NULL,      dummyTypeInfo,     nil,             nodeForError )
+function _G.allocateConstantIfNew(state, kind, typeInfo, v, nodeForError)
 	local tag          = typeInfo.tag
 	local kindIsNormal = kind == !(CONST_KIND_NORMAL)
 
@@ -193,9 +126,9 @@ function _G.bcAllocateConstantValueIfNew(state, kind, typeInfo, v, nodeForError)
 	return const, true
 end
 
--- constant, isNew = bcAllocateConstantValueForExpressionIfNew( state, expression, dependent )
+-- constant, isNew = allocateConstantForExpressionIfNew( state, expression, dependent )
 -- Returns nil on failure and the dependent is now waiting.
-function _G.bcAllocateConstantValueForExpressionIfNew(state, expr, dependent)
+function _G.allocateConstantForExpressionIfNew(state, expr, dependent)
 	local nodeType = expr.nodeType
 	local typeInfo = expr.inferredType
 
@@ -215,14 +148,14 @@ function _G.bcAllocateConstantValueForExpressionIfNew(state, expr, dependent)
 		assert(not lambda.isPolymorphic)
 
 		local isNew
-		lambda.valueConstant, isNew = bcAllocateConstantValueIfNew(state, !(CONST_KIND_NORMAL), typeInfo, lambda, dependent)
+		lambda.valueConstant, isNew = allocateConstantIfNew(state, !(CONST_KIND_NORMAL), typeInfo, lambda, dependent)
 
 		return lambda.valueConstant, isNew
 
 	elseif nodeType == !(nodeTypes.AstType) then
 		local typeNode = expr
 		typeInfo       = getTypeInfoForBuiltinType(state, "type")
-		return bcAllocateConstantValueIfNew(state, !(CONST_KIND_NORMAL), typeInfo, typeNode.representedType, dependent)
+		return allocateConstantIfNew(state, !(CONST_KIND_NORMAL), typeInfo, typeNode.representedType, dependent)
 
 	elseif nodeType == !(nodeTypes.AstStruct) then
 		local struct     = expr
@@ -231,10 +164,10 @@ function _G.bcAllocateConstantValueForExpressionIfNew(state, expr, dependent)
 		-- @Incomplete: Wait for statements to get inferred (when we got struct self-referencing working).
 		-- (Or maybe they're always already inferred at this point? 2020-03-22)
 
-		local const, isNew = bcAllocateConstantValueIfNew(state, !(CONST_KIND_NORMAL), typeInfo, structInfo, dependent)
+		local const, isNew = allocateConstantIfNew(state, !(CONST_KIND_NORMAL), typeInfo, structInfo, dependent)
 
 		if isNew and outputDebugInfo and structInfo.name ~= "" then
-			bcMaybeSetConstantName(state, const, structInfo.name)
+			maybeSetConstantName(state, const, structInfo.name)
 		end
 
 		return const, isNew
@@ -242,10 +175,10 @@ function _G.bcAllocateConstantValueForExpressionIfNew(state, expr, dependent)
 	elseif nodeType == !(nodeTypes.AstEnum) then
 		local enum         = expr
 		local enumInfo     = enum.representedType
-		local const, isNew = bcAllocateConstantValueIfNew(state, !(CONST_KIND_NORMAL), typeInfo, enumInfo, dependent)
+		local const, isNew = allocateConstantIfNew(state, !(CONST_KIND_NORMAL), typeInfo, enumInfo, dependent)
 
 		if isNew and outputDebugInfo and enumInfo.name ~= "" then
-			bcMaybeSetConstantName(state, const, enumInfo.name)
+			maybeSetConstantName(state, const, enumInfo.name)
 		end
 
 		return const, isNew
@@ -255,28 +188,28 @@ function _G.bcAllocateConstantValueForExpressionIfNew(state, expr, dependent)
 
 		if typeInfo.tag == !(TYPE_ENUM) then
 			local enumInfo = typeInfo
-			return bcAllocateConstantValueIfNew(state, !(CONST_KIND_NORMAL), enumInfo, ident.name, dependent)
+			return allocateConstantIfNew(state, !(CONST_KIND_NORMAL), enumInfo, ident.name, dependent)
 
 		else
 			local decl = ident.declaration
-			if decl.queued.pipe <= !(PIPE_BYTECODE) then
+			if decl.queued.pipe <= !(PIPE_EMIT) then
 				!DEPEND_AND_RETURN(`dependent`, DEPEND_NODE_EMITTED, `decl`, nil, `nil`)
 			end
-			return bcAllocateConstantValueForExpressionIfNew(state, decl.value, dependent)
+			return allocateConstantForExpressionIfNew(state, decl.value, dependent)
 		end
 
 	elseif nodeType == !(nodeTypes.AstCast) then
 		-- The cast is probably from/to 'any'.
 		local cast = expr
-		return bcAllocateConstantValueForExpressionIfNew(state, cast.expression, dependent)
+		return allocateConstantForExpressionIfNew(state, cast.expression, dependent)
 
 	elseif nodeType == !(nodeTypes.AstForeign) then
 		local foreign = expr
-		return bcAllocateConstantValueIfNew(state, !(CONST_KIND_FOREIGN), typeInfo, foreign, dependent) -- Note: What typeInfo is doesn't matter here.
+		return allocateConstantIfNew(state, !(CONST_KIND_FOREIGN), typeInfo, foreign, dependent) -- Note: What typeInfo is doesn't matter here.
 
 	elseif nodeType == !(nodeTypes.AstTable) then
 		local tableNode    = expr
-		local const, isNew = bcAllocateConstantValueIfNew(state, !(CONST_KIND_NORMAL), typeInfo, tableNode, dependent)
+		local const, isNew = allocateConstantIfNew(state, !(CONST_KIND_NORMAL), typeInfo, tableNode, dependent)
 
 		if
 			isNew
@@ -287,16 +220,16 @@ function _G.bcAllocateConstantValueForExpressionIfNew(state, expr, dependent)
 			local assignment = tableNode.parent
 			local i          = indexOf(assignment.values, tableNode) or errorInternal()
 			local decl       = assignment.declarations[i]
-			bcMaybeSetConstantName(state, const, decl.name.name)
+			maybeSetConstantName(state, const, decl.name.name)
 		end
 
 		return const, isNew
 
 	elseif nodeType == !(nodeTypes.AstNull) then
-		return bcAllocateConstantValueIfNew(state, !(CONST_KIND_NULL), typeInfo, nil, dependent) -- Note: What typeInfo is doesn't matter here.
+		return allocateConstantIfNew(state, !(CONST_KIND_NULL), typeInfo, nil, dependent) -- Note: What typeInfo is doesn't matter here.
 
 	elseif nodeType == !(nodeTypes.AstAccess) then
-		return bcAllocateConstantValueIfNew(state, !(CONST_KIND_VIEW), typeInfo, expr, dependent) -- Note: What typeInfo is doesn't matter here.
+		return allocateConstantIfNew(state, !(CONST_KIND_VIEW), typeInfo, expr, dependent) -- Note: What typeInfo is doesn't matter here.
 
 	else
 		errorUnhandledNodeType(state, expr)
@@ -304,7 +237,7 @@ function _G.bcAllocateConstantValueForExpressionIfNew(state, expr, dependent)
 	errorInternal(state, expr)
 end
 
-function _G.bcAllocateTopScopeName(state, name)
+function _G.allocateTopScopeName(state, name)
 	local i = #state.topScopeNames+1
 	local topScopeName
 
@@ -323,7 +256,7 @@ function _G.bcAllocateTopScopeName(state, name)
 	return topScopeName
 end
 
-function _G.bcMaybeSetConstantName(state, const, name)
+function _G.maybeSetConstantName(state, const, name)
 	if const.nameLocked then  return  end
 
 	local constName = unicodeToLuaIdentifier(name)
@@ -339,43 +272,48 @@ end
 
 
 
---[[
-local function createNodeWithDefaultValueForType(state, parent, typeInfo)
-	local tag = typeInfo.tag
+local function doesScopeReturn(state, scope)
+	-- @Incomplete: Ignore static statements. (Maybe let scopes have .statementsDynamic and .statementsStatic?)
+	local statement = getLast(scope.statements)
 
-	if BUILTIN_TYPE_TAG_TO_LITERAL_TYPE[tag] then
-		local literal        = astNewNode(AstLiteral, parent.token, parent)
-		literal.literalType  = BUILTIN_TYPE_TAG_TO_LITERAL_TYPE[tag]
-		literal.inferredType = typeInfo
+	if not statement then
+		return false
 
-		if tag == !(TYPE_BOOL) then
-			literal.value = false
-		elseif tag == !(TYPE_INT) then
-			literal.value = 0
-		elseif tag == !(TYPE_NONE) then
-			literal.value = nil
-		elseif tag == !(TYPE_FLOAT) then
-			literal.value = 0
-		elseif tag == !(TYPE_STRING) then
-			literal.value = ""
-		else
-			errorInternal("%d", tag)
+	elseif statement.nodeType == !(nodeTypes.AstReturn) then
+		return true
+
+	elseif statement.nodeType == !(nodeTypes.AstIf) then
+		local ifBranch = statement
+		return ifBranch.branchFalse ~= nil
+			and doesScopeReturn(state, ifBranch.branchTrue)
+			and doesScopeReturn(state, ifBranch.branchFalse)
+
+	elseif statement.nodeType == !(nodeTypes.AstBlock) then
+		local block = statement
+		return doesScopeReturn(state, block)
+
+	elseif statement.nodeType == !(nodeTypes.AstWhile) or statement.nodeType == !(nodeTypes.AstFor) then
+		local loop = statement
+		return doesScopeReturn(state, loop.body)
+
+	elseif statement.nodeType == !(nodeTypes.AstSwitch) then
+		local switch = statement
+		for _, case in ipairs(switch.cases) do
+			if not doesScopeReturn(state, case.body) then  return false  end
 		end
-
-		return literal
+		return true
 
 	else
-		errorInternal("Incomplete: Handle type group '%s'.", (TYPE_NAMES[tag] or "?"))
+		return false
 	end
+	errorInternal(state, statement)
 end
---]]
 
-function _G.bcEmitForLambda(state, lambda)
-	lambda.valueConstant = bcAllocateConstantValueIfNew(state, !(CONST_KIND_NORMAL), lambda.inferredType, lambda, lambda)
+function _G.emitLambda(state, lambda)
+	lambda.valueConstant = allocateConstantIfNew(state, !(CONST_KIND_NORMAL), lambda.inferredType, lambda, lambda)
 
 	if lambda.bodyIsForeign then
-		-- @Incomplete: Emit for foreign function.
-		lambda.valueConstant.isReady = true -- @Cleanup: We can probably set this in bcAllocateConstantValueIfNew(). (Should we though? Maybe.)
+		lambda.valueConstant.isReady = true -- @Cleanup: We can probably set this in allocateConstantIfNew(). (Should we though? Maybe.)
 		moveToPipe(state, lambda, !(PIPE_DONE))
 		return
 	end
@@ -385,60 +323,17 @@ function _G.bcEmitForLambda(state, lambda)
 		if node.queued.pipe > !(PIPE_INFER) then  return                           end
 		!DEPEND_AND_RETURN(`lambda`, DEPEND_NODE_EMITTED, `node`, nil, toLua(VISIT_BREAK))
 	end)
-
 	if lambda.queued.waitingOn then  return  end
 
-	-- Ensure there are return statements at the end of every branch in the lambda body.
-	-- @Incomplete: Ignore constant declarations and their assignments.
-	-- @Incomplete: Handle branches that all have their own return statements.
-	local body          = lambda.body
-	local lastStatement = getLast(body.statements)
-
-	if not (lastStatement and lastStatement.nodeType == !(nodeTypes.AstReturn)) then
-		if lambda.inferredType.argumentTypesOut[1] then
-			local errFunc, errNode
-			if lastStatement then
-				errFunc, errNode = bcErrorAfter, astGetExpressionVisuallyFurthestToTheRight(lastStatement)
-			else
-				errFunc, errNode = bcError, body
-			end
-			errFunc(state, errNode, "Expected a return statement at the end of the function body.")
-		end
-
-		local returnNode = astNewNode(AstReturn, lambda.bodyEndToken, body)
-
-		--[[ We don't have default return values (yet?).
-		for i, argTypeInfo in ipairs(lambda.inferredType.argumentTypesOut) do
-			local valueExpr = createNodeWithDefaultValueForType(state, returnNode, argTypeInfo)
-			returnNode.values[i] = valueExpr
-		end
-		--]]
-
-		local i            = #body.statements+1
-		body.statements[i] = returnNode
-		addToQueueRecursively(state, returnNode, body.statements, i, !(PIPE_DONE))
+	if lambda.inferredType.argumentTypesOut[1] and not doesScopeReturn(state, lambda.body) then
+		nodeError(state, lambda.bodyEndToken, "Emitter", "Expected a return statement at the end of the function body.")
 	end
-
-	-- @Incomplete: Insert defer blocks at the end of the block they're in and
-	-- before return/continue/break statements. (Probably not needed until we're
-	-- actualy generating bytecode.)
-
-	-- @Incomplete: Generate bytecode.
-	local bcs = lambda.bytecodes
-
-	--[[ TEMP:
-	local returnValuePosition1 = 0
-	local returnValueCount     = 0
-	table.insert(bcs, !(BC_RETURN))         -- [A B] return R(A), ..., R(A+B-1)
-	table.insert(bcs, returnValuePosition1) -- A
-	table.insert(bcs, returnValueCount)     -- B
-	--]]
 
 	lambda.valueConstant.isReady = true
 	moveToPipe(state, lambda, !(PIPE_DONE))
 end
 
-function _G.bcEmitForDeclaration(state, decl)
+function _G.emitDeclaration(state, decl)
 	-- @Robustness: We should probably use shouldDeclarationValueDefinitivelyBeConstant() here somewhere.
 
 	if isDeclarationConstant(decl) then
@@ -452,9 +347,9 @@ function _G.bcEmitForDeclaration(state, decl)
 		local const
 		if decl.name.inferredType.tag == !(TYPE_ENUM) then
 			local enumInfo = decl.name.inferredType
-			const          = bcAllocateConstantValueIfNew(state, !(CONST_KIND_NORMAL), enumInfo, decl.name.name, decl)
+			const          = allocateConstantIfNew(state, !(CONST_KIND_NORMAL), enumInfo, decl.name.name, decl)
 		else
-			const          = bcAllocateConstantValueForExpressionIfNew(state, valueExpr, decl)
+			const          = allocateConstantForExpressionIfNew(state, valueExpr, decl)
 		end
 		if not const then  return  end -- A dependency was added and we're now waiting.
 
@@ -467,21 +362,21 @@ function _G.bcEmitForDeclaration(state, decl)
 				!ASSERT("decl.parent.nodeType == "..nodeTypes.AstStruct) -- Only structs can have !call declarations at the moment. 2020-03-22
 				name = decl.parent.representedType.name
 				if name ~= "" then
-					bcMaybeSetConstantName(state, const, name.."_call")
+					maybeSetConstantName(state, const, name.."_call")
 				end
 
 			elseif name == "!iterator" then -- @Ugly detection.
 				!ASSERT("decl.parent.nodeType == "..nodeTypes.AstStruct) -- Only structs can have !iterator declarations at the moment. 2020-03-28
 				name = decl.parent.representedType.name
 				if name ~= "" then
-					bcMaybeSetConstantName(state, const, name.."_iterator")
+					maybeSetConstantName(state, const, name.."_iterator")
 				end
 
 			-- elseif name:byte(1) == !(getByte"!") then
-			-- 	bcMaybeSetConstantName(state, const, name:sub(2))
+			-- 	maybeSetConstantName(state, const, name:sub(2))
 
 			else
-				bcMaybeSetConstantName(state, const, name)
+				maybeSetConstantName(state, const, name)
 			end
 		end
 
@@ -489,13 +384,13 @@ function _G.bcEmitForDeclaration(state, decl)
 		local valueExpr = decl.value
 
 		if valueExpr then
-			local const = bcAllocateConstantValueForExpressionIfNew(state, valueExpr, decl)
+			local const = allocateConstantForExpressionIfNew(state, valueExpr, decl)
 			if not const then  return  end -- A dependency was added and we're now waiting.
 
 			decl.valueConstant = const
 		end
 
-		decl.topScopeName = bcAllocateTopScopeName(state, decl.name.name)
+		decl.topScopeName = allocateTopScopeName(state, decl.name.name)
 
 	else
 		local scope = astFindParentScope(decl)
@@ -504,14 +399,14 @@ function _G.bcEmitForDeclaration(state, decl)
 			local valueExpr = getDeclarationValue(decl)
 
 			if valueExpr then
-				local const = bcAllocateConstantValueForExpressionIfNew(state, valueExpr, decl)
+				local const = allocateConstantForExpressionIfNew(state, valueExpr, decl)
 				if not const then  return  end -- A dependency was added and we're now waiting.
 
 				decl.valueConstant = const
 			end
 
 			if !!(CONST_SET{ nodeTypes.AstFileScope, nodeTypes.AstGlobalScope, nodeTypes.AstNamespace })[scope.nodeType] then
-				decl.topScopeName = bcAllocateTopScopeName(state, decl.name.name)
+				decl.topScopeName = allocateTopScopeName(state, decl.name.name)
 			end
 		end
 	end
@@ -519,52 +414,52 @@ function _G.bcEmitForDeclaration(state, decl)
 	moveToPipe(state, decl, !(PIPE_DONE))
 end
 
-function _G.bcEmit(state, node)
+function _G.emitNode(state, node)
 	local nodeType = node.nodeType
 
 	if nodeType == !(nodeTypes.AstLiteral) then
 		local literal         = node
-		literal.valueConstant = bcAllocateConstantValueIfNew(state, !(CONST_KIND_NORMAL), literal.inferredType, literal.value, literal)
+		literal.valueConstant = allocateConstantIfNew(state, !(CONST_KIND_NORMAL), literal.inferredType, literal.value, literal)
 		moveToPipe(state, literal, !(PIPE_DONE))
 
 	elseif nodeType == !(nodeTypes.AstLambda) then
 		local lambda = node
 		assert(lambda.body)
 		assert(not lambda.isPolymorphic)
-		bcEmitForLambda(state, lambda)
+		emitLambda(state, lambda) -- Calls moveToPipe().
 
 	elseif nodeType == !(nodeTypes.AstDeclaration) then
 		local decl = node
-		bcEmitForDeclaration(state, decl)
+		emitDeclaration(state, decl) -- Calls moveToPipe().
 
 	elseif nodeType == !(nodeTypes.AstForeign) then
-		local foreign         = node
-		local dummyType       = getTypeInfoForBuiltinType(state, "void")
-		foreign.valueConstant = bcAllocateConstantValueIfNew(state, !(CONST_KIND_FOREIGN), dummyType, foreign, foreign)
+		local foreign              = node
+		local dummyType            = getTypeInfoForBuiltinType(state, "void")
+		foreign.valueConstant      = allocateConstantIfNew(state, !(CONST_KIND_FOREIGN), dummyType, foreign, foreign)
 		moveToPipe(state, foreign, !(PIPE_DONE))
 
 	elseif nodeType == !(nodeTypes.AstTypeInfo) then
 		local typeInfoNode         = node
 		local dummyType            = getTypeInfoForBuiltinType(state, "void")
-		typeInfoNode.valueConstant = bcAllocateConstantValueIfNew(state, !(CONST_KIND_TYPE_INFO), dummyType, typeInfoNode.valueTypeInfo, typeInfoNode)
+		typeInfoNode.valueConstant = allocateConstantIfNew(state, !(CONST_KIND_TYPE_INFO), dummyType, typeInfoNode.valueTypeInfo, typeInfoNode)
 		moveToPipe(state, typeInfoNode, !(PIPE_DONE))
 
 	elseif nodeType == !(nodeTypes.AstLocation) then
-		local loc         = node
-		local dummyType   = getTypeInfoForBuiltinType(state, "void")
-		loc.valueConstant = bcAllocateConstantValueIfNew(state, !(CONST_KIND_LOCATION), dummyType, loc.target, loc)
+		local loc                  = node
+		local dummyType            = getTypeInfoForBuiltinType(state, "void")
+		loc.valueConstant          = allocateConstantIfNew(state, !(CONST_KIND_LOCATION), dummyType, loc.target, loc)
 		moveToPipe(state, loc, !(PIPE_DONE))
 
-	elseif nodeType == !(nodeTypes.AstCall) then
-		local call            = node
-		local dummyType       = getTypeInfoForBuiltinType(state, "void")
-		call.locationConstant = bcAllocateConstantValueIfNew(state, !(CONST_KIND_LOCATION), dummyType, call.callee, call)
+	elseif nodeType == !(nodeTypes.AstCall) then -- The called function should have a !caller_location.
+		local call                 = node
+		local dummyType            = getTypeInfoForBuiltinType(state, "void")
+		call.locationConstant      = allocateConstantIfNew(state, !(CONST_KIND_LOCATION), dummyType, call.callee, call)
 		moveToPipe(state, call, !(PIPE_DONE))
 
 	elseif nodeType == !(nodeTypes.AstNull) then
-		local null         = node
-		local dummyType    = getTypeInfoForBuiltinType(state, "void")
-		null.valueConstant = bcAllocateConstantValueIfNew(state, !(CONST_KIND_NULL), dummyType, nil, null)
+		local null                 = node
+		local dummyType            = getTypeInfoForBuiltinType(state, "void")
+		null.valueConstant         = allocateConstantIfNew(state, !(CONST_KIND_NULL), dummyType, nil, null)
 		moveToPipe(state, null, !(PIPE_DONE))
 
 	else
@@ -574,18 +469,18 @@ end
 
 
 
-function _G.bcError(state, node, s, ...)
-	return nodeError(state, node, "Bytecode", s, ...)
+function _G.emitError(state, node, s, ...)
+	return nodeError(state, node, "Emitter", s, ...)
 end
 
-function _G.bcErrorAfter(state, node, s, ...)
-	return nodeErrorAfter(state, node, "Bytecode", s, ...)
+function _G.emitErrorAfter(state, node, s, ...)
+	return nodeErrorAfter(state, node, "Emitter", s, ...)
 end
 
--- bcMessage( [ outputFile=io.stdout, ] compilationState, node, label, formatString, ... )
-function _G.bcMessage(file, state, node, label, s, ...)
-	if type(file) ~= "userdata" then  return bcMessage(io.stdout, file, state, node, label, s, ...)  end
-	return nodeMessage(file, state, node, label, "Bytecode", s, ...)
+-- emitMessage( [ outputFile=io.stdout, ] compilationState, node, label, formatString, ... )
+function _G.emitMessage(file, state, node, label, s, ...)
+	if type(file) ~= "userdata" then  return emitMessage(io.stdout, file, state, node, label, s, ...)  end
+	return nodeMessage(file, state, node, label, "Emitter", s, ...)
 end
 
 

@@ -146,7 +146,7 @@ _G.!structAst"AstBlank:AstIdentifier"{
 _G.!structAst"AstLiteral:_AstExpression"{
 	{`literalType`,   0},
 	{`value`,         nil}, -- The value depends on what literalType is. Could be a number, string or whatever.
-	-- Bytecode phase:
+	-- Emit phase:
 	{`valueConstant`, nil}, -- Constant
 }
 _G.!structAst"AstType:_AstExpression"{
@@ -192,7 +192,7 @@ _G.!structAst"AstCall:_AstExpression"{
 	{`surroundedByParentheses`, false},
 	-- Type phase:
 	{`wantLocation`,            false}, -- Set if the called function has wantCallerLocation set (i.e. !caller_location is used somewhere).
-	-- Bytecode phase:
+	-- Emit phase:
 	{`locationConstant`,        nil},   -- Constant  Optimization: Instead of generating this for every call we only do it if the callee may require it.
 }
 _G.!structAst"AstTypeOf:_AstExpression"{
@@ -207,7 +207,7 @@ _G.!structAst"AstTypeInfo:_AstExpression"{
 	{`expression`,    nil, ast="node"}, -- AstExpression
 	-- Type phase:
 	{`valueTypeInfo`, nil}, -- TypeInfo
-	-- Bytecode phase:
+	-- Emit phase:
 	{`valueConstant`, nil}, -- Constant
 }
 _G.!structAst"AstLocation:_AstExpression"{
@@ -215,7 +215,7 @@ _G.!structAst"AstLocation:_AstExpression"{
 	{`ofCaller`,      false},           -- Used as default values for function arguments.
 	-- Type phase:
 	{`target`,        nil}, -- AstNode
-	-- Bytecode phase:
+	-- Emit phase:
 	{`valueConstant`, nil}, -- Constant
 }
 _G.!structAst"AstCast:_AstExpression"{
@@ -235,7 +235,7 @@ _G.!structAst"AstForeign:_AstExpression"{
 	{`sourceName`,    nil, ast=nil}, -- AstLiteral (string)  Never inferred. The name may be inferred from a declaration.
 	-- Type phase:
 	{`sourceId`,      ""}, -- Is source and sourceName combined.
-	-- Bytecode phase:
+	-- Emit phase:
 	{`valueConstant`, nil}, -- Constant
 }
 _G.!structAst"AstConditional:_AstExpression"{
@@ -299,7 +299,7 @@ _G.!structAst"AstDeclaration:_AstNode"{
 	{`overloadOf`,           nil, astRef="node"}, -- AstDeclaration  (If this is self then we're the base declaration for the overloads and the overloads array should be filled.)
 	{`overloadsLocked`,      false},
 
-	-- Bytecode phase:
+	-- Emit phase:
 	{`valueConstant`,        nil}, -- Constant
 	{`topScopeName`,         ""},
 	{`localName`,            ""},
@@ -421,9 +421,8 @@ _G.!structAst"AstLambda:_AstScopeExpression"{
 	-- Type phase:
 	{`foreignSourceId`,   ""}, -- Is foreignSource and foreignSourceName combined.
 
-	-- Bytecode phase:
+	-- Emit phase:
 	{`valueConstant`,     nil}, -- Constant
-	{`bytecodes`,         {}, doNotCopy=true}, -- Filled if we're not a function signature.
 }
 _G.!structAst"AstNamespace:_AstScopeExpression"{
 	_scopeType = "declarative",
@@ -432,7 +431,7 @@ _G.!structAst"AstNamespace:_AstScopeExpression"{
 _G.!structAst"AstIf:_AstNode"{
 	{`condition`,   nil, ast="node"}, -- AstExpression
 	{`branchTrue`,  nil, ast="node"}, -- AstBlock
-	{`branchFalse`, nil, ast="node"}, -- AstBlock
+	{`branchFalse`, nil, ast="node"}, -- AstBlock  May be nil.
 }
 _G.!structAst"AstStaticIf:AstIf"{}
 _G.!structAst"AstWhile:_AstNode"{
@@ -3450,20 +3449,22 @@ end
 
 
 
--- nodeError( compilationState, node, agent, formatString, ... )
-function _G.nodeError(state, node, agent, s, ...)
+-- nodeError( compilationState, node,  agent, formatString, ... )
+-- nodeError( compilationState, token, agent, formatString, ... )
+function _G.nodeError(state, nodeOrToken, agent, s, ...)
 	local tokens = state.tokens
-	local token  = node.token
+	local token  = type(nodeOrToken) == "table" and nodeOrToken.token or nodeOrToken
 	local path   = tokens.file[token] or errorInternal("No tokens.")
 	local buffer = tokens.buffer[token]
 	!TRACE(2)
 	errorInFile(buffer, path, tokens.position1[token], agent, s, ...)
 end
 
--- nodeErrorAfter( compilationState, node, agent, formatString, ... )
-function _G.nodeErrorAfter(state, node, agent, s, ...)
+-- nodeErrorAfter( compilationState, node,  agent, formatString, ... )
+-- nodeErrorAfter( compilationState, token, agent, formatString, ... )
+function _G.nodeErrorAfter(state, nodeOrToken, agent, s, ...)
 	local tokens = state.tokens
-	local token  = node.token
+	local token  = type(nodeOrToken) == "table" and nodeOrToken.token or nodeOrToken
 	local path   = tokens.file[token] or errorInternal("No tokens.")
 	local buffer = tokens.buffer[token]
 	!TRACE(2)
@@ -4328,6 +4329,7 @@ function _G.astGetExpressionVisuallyFurthestToTheLeft(expr, onlyFollowCalls)
 	end
 end
 
+--[[
 -- expression = astGetExpressionVisuallyFurthestToTheRight( expression )
 function _G.astGetExpressionVisuallyFurthestToTheRight(expr)
 	while expr.replacing do  expr = expr.replacing  end
@@ -4370,7 +4372,11 @@ function _G.astGetExpressionVisuallyFurthestToTheRight(expr)
 
 	elseif expr.nodeType == !(nodeTypes.AstConditional) then
 		local conditional = expr
-		return astGetExpressionVisuallyFurthestToTheLeft(conditional.branchFalse, false)
+		return astGetExpressionVisuallyFurthestToTheRight(conditional.branchFalse)
+
+	elseif expr.nodeType == !(nodeTypes.AstIf) or expr.nodeType == !(nodeTypes.AstStaticIf) then
+		local ifOrStaticIf = expr
+		return astGetExpressionVisuallyFurthestToTheRight(ifOrStaticIf.branchFalse or ifOrStaticIf.branchTrue)
 
 	-- @Incomplete: Handle many more nodes...
 
@@ -4382,6 +4388,7 @@ function _G.astGetExpressionVisuallyFurthestToTheRight(expr)
 		return expr
 	end
 end
+--]]
 
 -- expression = astGetCalleeVisuallyFurthestToTheLeft( call )
 function _G.astGetCalleeVisuallyFurthestToTheLeft(call)
