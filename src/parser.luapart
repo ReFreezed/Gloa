@@ -280,10 +280,10 @@ _G.!structAst"AstArguments:_AstNode"{
 }
 
 _G.!structAst"AstDeclaration:_AstNode"{
-	{`name`,                 nil, ast="node"},  -- AstIdentifier|AstVararg
-	{`type`,                 nil, ast="node"},  -- AstType  (If this is nil then the type is inferred from the value.)
-	{`value`,                nil, ast="node"},  -- AstExpression  (Either this or assignment should be set, or neither for getting the default value for the type.)
-	{`notes`,                {},  ast="array"}, -- []AstNote  @Incomplete: Notes.
+	{`name`,                 nil, ast="node"},  -- AstIdentifier|AstVararg|AstBlank
+	{`type`,                 nil, ast="node"},  -- AstType  If this is nil then the type is inferred from the value.
+	{`value`,                nil, ast="node"},  -- AstExpression  Either this or assignment should be set, or neither for getting the default value for the type.
+	{`notes`,                {},  ast="array"}, -- []AstExpression
 
 	{`kind`,                 DECL_KIND_LOCAL_VAR}, -- DECL_KIND_LOCAL_VAR|DECL_KIND_LOCAL_CONST|DECL_KIND_EXPORT_VAR|DECL_KIND_EXPORT_CONST|DECL_KIND_STATIC  @Incomplete: DECL_KIND_READ_ONLY  Note: Globals are exports.
 	{`canShadow`,            false},
@@ -1370,6 +1370,27 @@ function _G.parseDeclarationStatement(state, scope, imperative, declType)
 	end
 
 	if declType == !(DECLARATION_NORMAL) then  eatTrailingSemicolon(state)  end
+
+	-- Notes (after any semicolon).
+	tokType, tokValue = peekNextToken(state)
+
+	if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"@") then
+		local token            = state.nextToken
+		local prevOpPrecedence = !(math.min(OPERATOR_PRECEDENCE.call, OPERATOR_PRECEDENCE.access)-1)
+
+		for _, decl in ipairs(declarations) do
+			state.nextToken = token
+
+			repeat
+				eatNextToken(state) -- '@'
+
+				!SET_OR_RETURN_FALSE `local note = parseExpression(state, decl, prevOpPrecedence)`
+				table.insert(decl.notes, note)
+
+				tokType, tokValue = peekNextToken(state)
+			until not isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"@")
+		end
+	end
 
 	--
 	-- Everything's done! Now we can modify the scope.
@@ -3453,7 +3474,7 @@ end
 -- nodeError( compilationState, token, agent, formatString, ... )
 function _G.nodeError(state, nodeOrToken, agent, s, ...)
 	local tokens = state.tokens
-	local token  = type(nodeOrToken) == "table" and nodeOrToken.token or nodeOrToken
+	local token  = type(nodeOrToken) == "int" and nodeOrToken or nodeOrToken.token
 	local path   = tokens.file[token] or errorInternal("No tokens.")
 	local buffer = tokens.buffer[token]
 	!TRACE(2)
@@ -3464,7 +3485,7 @@ end
 -- nodeErrorAfter( compilationState, token, agent, formatString, ... )
 function _G.nodeErrorAfter(state, nodeOrToken, agent, s, ...)
 	local tokens = state.tokens
-	local token  = type(nodeOrToken) == "table" and nodeOrToken.token or nodeOrToken
+	local token  = type(nodeOrToken) == "int" and nodeOrToken or nodeOrToken.token
 	local path   = tokens.file[token] or errorInternal("No tokens.")
 	local buffer = tokens.buffer[token]
 	!TRACE(2)

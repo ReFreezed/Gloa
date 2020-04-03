@@ -2540,6 +2540,12 @@ end
 		!DEPEND_AND_RETURN(`decl`, DEPEND_NODE_INFERRED, `identOrVararg`)
 	end
 
+	for _, note in ipairs(decl.notes) do
+		if not note.inferredType then
+			!DEPEND_AND_RETURN(`decl`, DEPEND_NODE_INFERRED, `note`)
+		end
+	end
+
 	local scope    = astFindParentScope(decl)
 	local isConst  = isDeclarationConstant(decl)
 	local typeExpr = decl.type
@@ -2644,6 +2650,13 @@ end
 		typeError(state, identOrVararg, "Variables in type group '%s' must have a specified initial value.", TYPE_NAMES[identOrVararg.inferredType.tag])
 	end
 
+	for _, note in ipairs(decl.notes) do
+		local typeRepresented = requireTypeRepresentedByExpression(state, note)
+		if typeRepresented.tag ~= !(TYPE_STRUCT) then
+			typeError(state, note, "Expected a struct type. (This is %s)", getFriendlyTypeInfoName(typeRepresented))
+		end
+	end
+
 	moveToNextRelevantPipe(state, decl)
 
 	if scope.nodeType == !(nodeTypes.AstFileScope) and state.sendMessages then
@@ -2660,7 +2673,13 @@ end
 		codeDecl.expressions[1] = nil -- @Incomplete: Generate child CodeNodes.
 		codeDecl.rootExpression = nil -- @Incomplete: Generate child CodeNodes.
 		codeDecl.isConstant     = isConst
-		message.declaration     = codeDecl
+
+		for i, note in ipairs(decl.notes) do
+			local typeRepresented = getTypeRepresentedByExpression(note)
+			codeDecl.notes[i]     = typeRepresented.id
+		end
+
+		message.declaration = codeDecl
 	end
 end
 
