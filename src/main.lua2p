@@ -29,12 +29,17 @@ local EXTRA_STATS = DEBUG and false
 local args = {...}
 
 do
+	--
 	-- Note: We create a sandbox environment for the compiler and leave the
 	-- default environment for the metaprogram to use instead of the other way
 	-- around. Otherwise modules loaded by the metaprogram may not work if
 	-- they're expected to modify the (default) environment. The compiler
-	-- doesn't require any modules by itself so this work just fine.
-
+	-- doesn't require any modules by itself so this should work just fine.
+	--
+	-- However! There may be problems when the metaprogram compiles other
+	-- subprograms as they currently share the same (fallback) environment.
+	-- (See runnerSetup.) Not sure if there's a perfect solution here...
+	--
 	local defaultGlobals      = {}
 	local compilerEnvironment = {} -- :CompilerEnvironment
 
@@ -51,8 +56,9 @@ do
 end
 
 local gotCriticalError = false
+local allStates        = {}
 
-xpcall(function()
+local function runCompiler()
 	local timeStartInitial = os.clock()
 
 	!if DEBUG then
@@ -227,6 +233,8 @@ xpcall(function()
 	}
 
 	local !struct"CompilationState"{
+		{`id`,                    0},
+
 		{`fileBuffers`,           {}},
 		{`tokens`,                nil},   -- Tokens (struct)
 		{`settings`,              nil},   -- CompilationSettings
@@ -278,17 +286,24 @@ xpcall(function()
 		{`topScopeNames`,         RESERVED_TOP_SCOPE_NAMES},
 
 		-- Runner:
+		{`runnerPath`,            ""},
 		{`runnerEnvironment`,     {}},
+		{`runnerLineMappings`,    nil},
 		{`runnerWriter`,          nil}, -- WriterState
+		{`runnerWrittenLines`,    0},
 		{`runnerWrittenObjects`,  {}},
 		{`runnerWrittenPreloads`, 0},
 	}
 
+	local nextStateId              = 1
 	local timeDoingSubCompilations = 0
 
 	function _G.compilationInitState(pathToFirstFile)
 		local state  = CompilationState()
 		state.tokens = Tokens()
+
+		state.id     = nextStateId
+		nextStateId  = nextStateId+1
 
 		-- Project directory result examples:
 		--   C:/app/main.gloa > C:/app
@@ -310,6 +325,7 @@ xpcall(function()
 			if debug_onlyInferTypes then  state.finalPipe = !(PIPE_INFER)  end
 		!end
 
+		table.insert(allStates, state)
 		return state
 	end
 
@@ -728,17 +744,75 @@ xpcall(function()
 	!ifDEBUG `profilerPrint()`
 
 	exit()
+end
 
-end, function(err)
-	err = tostring(err):gsub("^[%w/.]+:%d+: ", "")
+function _G.compilerErrorHandler(err)
+	err = tostring(err):gsub("^[-%w_/.]+:%d+: ", "")
 
 	if gotCriticalError then
-		io.stderr:write(debug.traceback("Error: Internal error: Critical Lua error: Error in xpcall() error handler: "..err, 2))
+		io.stderr:write(debug.traceback("Error: Internal error: Error in xpcall() error handler: "..err, 2))
 		os.exit(1)
 	end
-
 	gotCriticalError = true -- For some reason this function is also the error handler for itself. What the heck, Lua...
 
-	printerr(debug.traceback("Error: Internal error: Critical Lua error: "..err, 2))
+	local traceback    = debug.traceback("Error: Critical Lua error: "..err, 2)
+	local line1        = traceback:match"\n(\t[^\n]*)"
+	local isInUserCode = false
+
+	if line1 then
+		local luaLocation, filepath, ln, message = line1:match"^\t(([^:]+):(%d+)): (.+)"
+
+		local state = itemWith1(allStates, "runnerPath", filepath)
+		if state then
+			local lineMappings = state.runnerLineMappings
+			ln                 = tonumber(ln)
+			isInUserCode       = lineMappings.lines[ln] ~= nil
+		end
+	end
+
+	io.stderr:write("\n")
+
+	local lastWasIsCompiler = false
+
+	for line in traceback:gmatch"[^\n]+" do
+		local luaLocation, filepath, ln, message = line:match"^\t(([^:]+):(%d+)): (.+)"
+		local written = false
+
+		local state = itemWith1(allStates, "runnerPath", filepath)
+		if state then
+			local lineMappings = state.runnerLineMappings
+			ln                 = tonumber(ln)
+
+			if lineMappings.lines[ln] then
+				local luaLocationStr = " <"..luaLocation..">"
+				io.stderr:write(
+					"\t",
+					lineMappings.files[ln], ":", lineMappings.lines[ln],
+					": ",
+					message,
+					(not message:find(luaLocationStr, 1, true) and luaLocationStr or ""),
+					"\n"
+				)
+				written = true
+			end
+		end
+
+		if written then
+			lastWasIsCompiler = false
+
+		elseif not (isInUserCode and line:find"^\t") then
+			io.stderr:write(line, "\n")
+			lastWasIsCompiler = false
+
+		elseif not lastWasIsCompiler then
+			io.stderr:write("\t[Compiler]\n")
+			-- io.stderr:write("\t(...)\n")
+			lastWasIsCompiler = true
+		end
+	end
+
+	io.stderr:write("\n")
 	exit(1) -- Don't use exitFailure()! :ExitFailureOverride
-end)
+end
+
+xpcall(runCompiler, compilerErrorHandler)

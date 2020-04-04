@@ -21,22 +21,32 @@ function _G.runnerSetup(state)
 	local writer = state.runnerWriter
 	if writer then  return  end
 
-	state.runnerEnvironment = DEFAULT_ENVIRONMENT
-	--[[ :CompilerEnvironment
-	for k, v in pairs(DEFAULT_GLOBALS) do
-		state.runnerEnvironment[k] = v
-	end
-	state.runnerEnvironment._G = state.runnerEnvironment
-	]]
-
-	state.runnerEnvironment.metaprogramArguments = metaprogramArguments
-	state.runnerEnvironment.compilerArguments    = compilerArguments
-	state.runnerEnvironment._STATE               = state
-	state.runnerEnvironment._COMPILER            = compilerApi
+	state.runnerPath = ".gloa.metaprogram"..state.id..".lua"
+	os.remove(state.runnerPath)
 
 	writer             = WriterState()
 	writer.file        = newVirtualFile()
 	state.runnerWriter = writer
+
+	--[[ Should we copy these fields so the user can do pairs(_G)?
+	for k, v in pairs(DEFAULT_GLOBALS) do
+		state.runnerEnvironment[k] = v
+	end
+	--]]
+	state.runnerEnvironment._G = state.runnerEnvironment
+
+	state.runnerEnvironment.metaprogramArguments = metaprogramArguments
+	state.runnerEnvironment.compilerArguments    = compilerArguments
+	state.runnerEnvironment.compilerErrorHandler = compilerErrorHandler
+	state.runnerEnvironment._STATE               = state
+	state.runnerEnvironment._COMPILER            = compilerApi
+
+	setmetatable(state.runnerEnvironment, {__index=DEFAULT_ENVIRONMENT}) -- :CompilerEnvironment
+
+	state.runnerLineMappings = {
+		files = writer.lineMappingFiles,
+		lines = writer.lineMappingLines,
+	}
 
 	writeCompilerSymbols(state, writer)
 end
@@ -47,19 +57,17 @@ function _G.runnerConvertBufferToChunk(state)
 	local file = state.runnerWriter.file
 	local lua  = file:getBuffer()
 
-	local chunk, err = loadstring(lua, "@(metaprogram)")
-	if not chunk then
-		!if DEBUG then
-			print(lua)
-		!end
-		errorInternal("%s", err)
-	end
+	local debugFile = assert(io.open(state.runnerPath, "a")) -- @Speed: Can we keep this file open?
+	debugFile:write(lua)
+	debugFile:close()
 
-	-- !ifDEBUG `print(lua)`
+	local chunk, err = loadstring(("\n"):rep(state.runnerWrittenLines)..lua, "@"..state.runnerPath)
+	if not chunk then  errorInternal("%s", err)  end
 
 	file:clearBuffer()
 	setfenv(chunk, state.runnerEnvironment)
 
+	state.runnerWrittenLines = state.runnerWriter.currentOutputLine-1
 	return chunk
 end
 
@@ -67,7 +75,7 @@ function _G.runnerRunBufferAsChunk(state)
 	if state.runnerWriter.file:isBufferEmpty() then  return  end
 
 	local chunk = runnerConvertBufferToChunk(state)
-	chunk() -- @Incomplete: Better error messages using xpcall().
+	chunk()
 end
 
 

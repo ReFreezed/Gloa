@@ -147,12 +147,12 @@ local COMPILER_SYMBOL_PAIRS = {
 	-- Used for short-form array loops in reverse.
 	`_IPAIRSR`, trimTemplate`
 		(function()
-			local function inext(arr, i)
+			local function iprev(arr, i)
 				i = i-1
 				if i > 0 then  return i, arr[i]  end
 			end
 			return function(arr)
-				return inext, arr, #arr+1
+				return iprev, arr, #arr+1
 			end
 		end)()
 	`,
@@ -1988,18 +1988,16 @@ end
 function _G.writeCompilerSymbols(state, writer)
 	local file = writer.file
 
-	file:write("local lineMappings = {paths={},files={},lines={}}")
-	writeEol(state, writer)
-
 	if writer.outputRuntime then
-		file:write("local programArguments = {...}") -- Should we use 'arg' here? It has additional stuff in index 0 and below. metaprogramArguments needs to be updated too.
-	else
-		file:write("local programArguments = metaprogramArguments")
-	end
-	writeEol(state, writer)
+		file:write("local lineMappings      = {paths={},files={},lines={}}") ; writeEol(state, writer)
+		file:write("local programArguments  = {...}") ; writeEol(state, writer) -- Should we use 'arg' here? It has additional stuff in index 0 and below. metaprogramArguments needs to be updated too.
+		file:write!("local gloaErrorHandler = "..ERROR_HANDLER) ; writeEol(state, writer)
 
-	file:write!("local gloaErrorHandler = "..ERROR_HANDLER)
-	writeEol(state, writer)
+	else
+		-- Note: lineMappings is not used in metaprograms because gloaErrorHandler() is different.
+		file:write("local programArguments  = metaprogramArguments") ; writeEol(state, writer)
+		file:write("local gloaErrorHandler  = compilerErrorHandler") ; writeEol(state, writer)
+	end
 
 	-- @Polish: Only output symbols actually used in the program.
 	!for i = 1, #COMPILER_SYMBOL_PAIRS, 2 do
