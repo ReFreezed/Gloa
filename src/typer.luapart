@@ -3281,6 +3281,37 @@ end
 		-- Stay in the current pipe so we get simplified. (Needed? Or maybe we can @Speed things up here?)
 		inferNode(state, ident)
 
+	elseif typeObject.tag == !(TYPE_STRING) then
+		local strExpr   = access.object
+		local indexExpr = access.member
+
+		if typeMember.tag ~= !(TYPE_INT) then
+			typeError(state, indexExpr, "Expected a byte position of type int. (Got %s)", getFriendlyTypeInfoName(typeMember))
+		elseif indexExpr.nodeType == !(nodeTypes.AstLiteral) and indexExpr.value <= 0 then
+			typeError(state, indexExpr, "Byte position is not positive. (It is %d)", indexExpr.value)
+		end
+
+		access.inferredType = typeObject
+
+		if not (isExpressionConstant(state, strExpr, false) and isExpressionConstant(state, indexExpr, false)) then
+			moveToNextRelevantPipe(state, access)
+			return
+		end
+
+		assert(strExpr.nodeType   == !(nodeTypes.AstLiteral))
+		assert(indexExpr.nodeType == !(nodeTypes.AstLiteral))
+
+		local s = strExpr.value
+		local i = indexExpr.value
+
+		if i > #s then
+			typeError(state, indexExpr, "Byte position is greater than the length of the string. (Index is %d, length is %d)", i, #s)
+		end
+
+		local literal = newLiteral(access.parent, access.token, !(LITERAL_STRING), s:sub(i, i), typeObject) -- The value may be "".
+		replaceQueuedNodeAndUnqueueOldTree(state, access, literal)
+		moveToNextRelevantPipe(state, literal, !(PIPE_INFER))
+
 	else
 		typeError(state, access, "Values of type '%s' do not have members.", getFriendlyTypeInfoName(typeObject))
 	end
