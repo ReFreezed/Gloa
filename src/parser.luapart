@@ -440,8 +440,9 @@ _G.!structAst"AstWhile:_AstNode"{
 	{`hasNamedBreaks`, false},
 }
 _G.!struct"SwitchCase"{
-	{`value`, nil}, -- AstExpression
-	{`body`,  nil}, -- AstBlock
+	{`value`,       nil}, -- AstExpression
+	{`body`,        nil}, -- AstBlock
+	{`fallThrough`, false},
 }
 _G.!structAst"AstSwitch:_AstNode"{
 	{`value`,    nil, ast="node"},  -- AstExpression
@@ -1591,14 +1592,14 @@ function _G.parseSwitch(state, parent, statementStartToken, valueExpr, complete)
 	valueExpr.parent = switch
 
 	local gotDefault = false
-	local lastCaseToken
+	local lastCaseToken, lastThroughToken
 
 	while true do
 		local tokType, tokValue = eatNextToken(state)
 		if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"}") then
 			break
 		elseif not isToken(tokType,tokValue, !(TOKEN_KEYWORD),"case") then
-			!ERROR_OR_RETURN `errorParsingLast(state, "Expected 'case'.")`
+			!ERROR_OR_RETURN `errorParsingLast(state, "Expected 'case' or '}'.")`
 		elseif gotDefault then
 			!ERROR_OR_RETURN `errorParsing(state, lastCaseToken, "The default case must be last.")`
 		end
@@ -1620,16 +1621,32 @@ function _G.parseSwitch(state, parent, statementStartToken, valueExpr, complete)
 			!ERROR_OR_RETURN `errorParsingAfterPrevious(state, "Expected ':'.")`
 		end
 
-		!SET_OR_RETURN `local body = astNewNode(AstBlock, state.nextToken, switch)`
-		case.body                  = body
+		tokType, tokValue = peekNextToken(state)
 
-		while true do
-			tokType, tokValue = peekNextToken(state)
-			if isToken(tokType,tokValue, !(TOKEN_KEYWORD),"case") or isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"}") then
-				break
+		if isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"through") then
+			eatNextToken(state) -- '!through'
+
+			case.fallThrough = true
+			lastThroughToken = state.nextToken-1
+
+		else
+			!SET_OR_RETURN `local body = astNewNode(AstBlock, state.nextToken, switch)`
+			case.body                  = body
+
+			while true do
+				tokType, tokValue = peekNextToken(state)
+				if isToken(tokType,tokValue, !(TOKEN_KEYWORD),"case") or isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"}") then
+					break
+				elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"through") then
+					!ERROR_OR_RETURN `errorParsingNext(state, "!through must currently be right after 'case'.")`
+				end
+				!DO_OR_RETURN `parseOneStatementButSometimesMoreAndAddToBlock(state, body)`
 			end
-			!DO_OR_RETURN `parseOneStatementButSometimesMoreAndAddToBlock(state, body)`
 		end
+	end
+
+	if switch.cases[1] and getLast(switch.cases).fallThrough then
+		!ERROR_OR_RETURN `errorParsing(state, lastThroughToken, "Cannot fall through the last case.")`
 	end
 
 	return switch
@@ -4190,10 +4207,11 @@ do
 			local casesCopy = copy.$field
 
 			for i, case in ipairs(node.$field) do
-				local caseCopy = SwitchCase()
-				caseCopy.value = case.value and copyTree(case.value, token, copy, copies)
-				caseCopy.body  = case.body  and copyTree(case.body,  token, copy, copies)
-				casesCopy[i]   = caseCopy
+				local caseCopy       = SwitchCase()
+				caseCopy.value       = case.value and copyTree(case.value, token, copy, copies)
+				caseCopy.body        = case.body  and copyTree(case.body,  token, copy, copies)
+				caseCopy.fallThrough = case.fallThrough
+				casesCopy[i]         = caseCopy
 			end
 		`
 

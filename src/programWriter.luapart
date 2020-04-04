@@ -1493,23 +1493,39 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 			writeEol(state, writer)
 
 			if switch.cases[1] then
+				local fallingThrough = false
+
 				for i, case in ipairs(switch.cases) do
-					if case.value then
-						file:write(indentStr)
-						if i > 1 then  file:write("else")  end
-						file:write("if _SWITCH == ")
-						writeExpression(state, writer, indent, nextLocalN, localsStack, case.value)
-						file:write(" then")
+					if fallingThrough then
+						if case.fallThrough or case.value then
+							file:write(" or")
+						end
+					elseif not case.value then
+						-- void
+					elseif i == 1 then
+						file:write(indentStr, "if")
 					else
-						if i == 1 then
+						file:write(indentStr, "elseif")
+					end
+
+					if case.value then
+						file:write(" _SWITCH == ")
+						writeExpression(state, writer, indent, nextLocalN, localsStack, case.value)
+					end
+
+					if not case.fallThrough then
+						if case.value or fallingThrough then
+							file:write(" then")
+						elseif i == 1 then
 							file:write(indentStr, "do")
 						else
 							file:write(indentStr, "else")
 						end
+						writeEol(state, writer)
+						writeBlock(state, writer, indent+1, nextLocalN, localsStack, case.body)
 					end
 
-					writeEol(state, writer)
-					writeBlock(state, writer, indent+1, nextLocalN, localsStack, case.body)
+					fallingThrough = case.fallThrough
 				end
 
 				file:write(indentStr, "end") ; writeEol(state, writer)
