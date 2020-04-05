@@ -280,9 +280,9 @@ _G.!structAst"AstArguments:_AstNode"{
 }
 
 _G.!structAst"AstDeclaration:_AstNode"{
-	{`name`,                 nil, ast="node"},  -- AstIdentifier|AstVararg|AstBlank
 	{`type`,                 nil, ast="node"},  -- AstType  If this is nil then the type is inferred from the value.
 	{`value`,                nil, ast="node"},  -- AstExpression  Either this or assignment should be set, or neither for getting the default value for the type.
+	{`name`,                 nil, ast="node"},  -- AstIdentifier|AstVararg|AstBlank
 	{`notes`,                {},  ast="array"}, -- []AstExpression
 
 	{`kind`,                 DECL_KIND_LOCAL_VAR}, -- DECL_KIND_LOCAL_VAR|DECL_KIND_LOCAL_CONST|DECL_KIND_EXPORT_VAR|DECL_KIND_EXPORT_CONST|DECL_KIND_STATIC  @Incomplete: DECL_KIND_READ_ONLY  Note: Globals are exports.
@@ -306,15 +306,13 @@ _G.!structAst"AstDeclaration:_AstNode"{
 }
 
 _G.!structAst"AstAssignment:_AstNode"{
-	{`targets`,          {},  ast="array"},    -- []AstExpression
-	{`values`,           {},  ast="array"},    -- []AstExpression
+	{`targets`,         {},  ast="array"},    -- []AstExpression
+	{`values`,          {},  ast="array"},    -- []AstExpression
 
-	{`forDeclaration`,   false},
-	{`declarations`,     nil, astRef="array"}, -- []AstDeclaration  (Is set if forDeclaration is set.)
+	{`forDeclaration`,  false},
+	{`declarations`,    nil, astRef="array"}, -- []AstDeclaration  (Is set if forDeclaration is set.)
 
-	{`binaryOperation`,  ""}, -- Empty means plain assignment.
-
-	{`addedByPolymorph`, false},
+	{`binaryOperation`, ""}, -- Empty means plain assignment.
 }
 
 !structAst"_AstJump:_AstNode"{}
@@ -336,7 +334,8 @@ _G.!structAst"AstDefer:_AstNode"{
 }
 
 !structAst"_AstScope:_AstNode"{
-	{`statements`,         {}, ast="array"},    -- []AstNode
+	{`statementsStatic`,   {}, ast="array"},    -- []AstNode
+	{`statementsDynamic`,  {}, ast="array"},    -- []AstNode
 	{`declarations`,       {}, astRef="array"}, -- []AstDeclaration  (Note that inner blocks have their own declarations.)
 	{`imports`,            {}, astRef="array"}, -- []AstImport
 	{`usings`,             {}, astRef="array"}, -- []AstUsing
@@ -360,7 +359,7 @@ _G.!structAst"AstGlobalScope:_AstScope"{
 }
 _G.!structAst"AstFor:_AstScope"{
 	_scopeType = "imperative",
-	{`expressions`,    {},  ast="array"},   -- []AstExpression  @Cleanup: Move these into AstFor.statements?
+	{`expressions`,    {},  ast="array"},   -- []AstExpression  @Cleanup: Move these into AstFor.statementsDynamic?
 	{`names`,          {},  ast=nil    },   -- []AstIdentifier  These are never inferred, but instead copied to declarations. @Cleanup: Can we get rid of this in favor of the copy we currently make?
 	{`forType`,        FOR_NUMERIC},        -- @Cleanup: Rename to "kind"?
 	{`body`,           nil, astRef="node"}, -- AstBlock
@@ -990,7 +989,7 @@ function _G.parseStruct(state, parent)
 			decl.parent = struct
 			decl.kind   = !(DECL_KIND_LOCAL_CONST)
 
-			table.insert(struct.statements,       decl)
+			table.insert(struct.statementsStatic, decl)
 			table.insert(struct.declarations,     decl)
 			table.insert(struct.bakeDeclarations, decl)
 		end
@@ -1019,7 +1018,7 @@ function _G.parseStruct(state, parent)
 
 		elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"assert","print") then
 			!SET_OR_RETURN `local debugNode = parseDebugNode(state, struct)`
-			table.insert(struct.statements, debugNode)
+			table.insert(struct.statementsStatic, debugNode)
 
 		elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"using") and not (
 			tokType2 == !(TOKEN_IDENTIFIER)
@@ -1027,8 +1026,8 @@ function _G.parseStruct(state, parent)
 		) then
 			eatNextToken(state)
 			!SET_OR_RETURN `local expr = parseExpression(state, struct)`
-			table.insert(struct.statements, expr)
-			table.insert(struct.inherits,   expr)
+			table.insert(struct.statementsStatic, expr)
+			table.insert(struct.inherits,         expr)
 
 		elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"key","value") then
 			eatNextToken(state)
@@ -1397,13 +1396,14 @@ function _G.parseDeclarationStatement(state, scope, imperative, declType)
 	-- Everything's done! Now we can modify the scope.
 	--
 
+	local statements = (imperative and scope.statementsDynamic or scope.statementsStatic)
 	for i = 1, #declarations do
-		table.insert(scope.statements,   declarations[i])
+		table.insert(statements,         declarations[i])
 		table.insert(scope.declarations, declarations[i])
 	end
 
 	if assignment then
-		table.insert(scope.statements, assignment)
+		table.insert(scope.statementsDynamic, assignment)
 	end
 
 	if isUsing then
@@ -1415,10 +1415,18 @@ function _G.parseDeclarationStatement(state, scope, imperative, declType)
 			ident.declaration = decl
 			using.expression  = ident
 
-			table.insert(scope.statements, using)
-			table.insert(scope.usings,     using)
+			table.insert(scope.statementsStatic, using)
+			table.insert(scope.usings,           using)
 		end
 	end
+
+	!if DEBUG then
+		local decl1 = declarations[1]
+		if decl1.kind == !(DECL_KIND_LOCAL_CONST) or decl1.kind == !(DECL_KIND_EXPORT_CONST) then
+			assert(decl1.value)
+			assert(not assignment)
+		end
+	!end
 
 	return true
 end
@@ -1508,21 +1516,21 @@ function _G.parseDebugNode(state, parent)
 	return debugNode
 end
 
-local function parseIfBranch(state, ifOrStaticIf, isFileScope)
+local function parseIfBranch(state, ifOrStaticIf, isFileScopeOrNamespace)
 	local block
 
-	if isFileScope then
+	if isFileScopeOrNamespace then
 		!ASSERT("ifOrStaticIf.nodeType == "..nodeTypes.AstStaticIf)
 
 		local tokType, tokValue, token = peekNextToken(state)
 
-		-- This block will never get inferred - it's just for storing statements we
-		-- may potentially use. (Should we have a dedicated node type for this?)
+		-- This block will never get inferred - it's just for storing statements we may potentially use.
+		-- (Should we have a dedicated node type for this? Probably not needed.)
 		block = astNewNode(AstBlock, token, ifOrStaticIf)
 
 		if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"{") then
 			eatNextToken(state) -- '{'
-			!DO_OR_RETURN `parseFileScopeOrNamespaceStatements(state, block, false, false)` -- @Cleanup: Make a parseBlockOrScopedStatement() equivalent for file scope/namepaces.
+			!DO_OR_RETURN `parseFileScopeOrNamespaceStatements(state, block, false, false)`
 		else
 			!DO_OR_RETURN `parseFileScopeOrNamespaceStatements(state, block, false, true)`
 		end
@@ -1534,14 +1542,14 @@ local function parseIfBranch(state, ifOrStaticIf, isFileScope)
 	return block
 end
 
-function _G.parseIfOrStaticIf(state, parent, isFileScope)
+function _G.parseIfOrStaticIf(state, parent, isFileScopeOrNamespace)
 	local tokType, tokValue, token = eatNextToken(state)
 	!ASSERT(F("isToken(tokType,tokValue, %d,%q) or isToken(tokType,tokValue, %d,%q)", TOKEN_KEYWORD,"if", TOKEN_DIRECTIVE,"if"))
 
 	local AstNodeType                       = tokType == !(TOKEN_KEYWORD) and AstIf or AstStaticIf
 	local ifOrStaticIf                      = astNewNode(AstNodeType, token, parent)
 	!SET_OR_RETURN `ifOrStaticIf.condition  = parseExpression(state, ifOrStaticIf)`
-	!SET_OR_RETURN `ifOrStaticIf.branchTrue = parseIfBranch(state, ifOrStaticIf, isFileScope)`
+	!SET_OR_RETURN `ifOrStaticIf.branchTrue = parseIfBranch(state, ifOrStaticIf, isFileScopeOrNamespace)`
 
 	tokType, tokValue = peekNextToken(state)
 
@@ -1556,7 +1564,7 @@ function _G.parseIfOrStaticIf(state, parent, isFileScope)
 			end
 		end
 
-		!SET_OR_RETURN `ifOrStaticIf.branchFalse = parseIfBranch(state, ifOrStaticIf, isFileScope)`
+		!SET_OR_RETURN `ifOrStaticIf.branchFalse = parseIfBranch(state, ifOrStaticIf, isFileScopeOrNamespace)`
 	end
 
 	return ifOrStaticIf
@@ -1681,25 +1689,25 @@ function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 		local returnNode = astNewNode(AstReturn, state.nextToken, block)
 
 		eatNextToken(state)
+
+		--
+		-- Note: Considering this following @Ambigous situation we have to check whether any values should be returned.
+		-- As a bonus we also figure if we're even inside a function, though I'm not sure this'll work when we have static code. @Robustness
+		--
+		--   if x return
+		--   func() -- Returned expression, or separate statement after 'if'?
+		--
+		local lambda = getLambda(returnNode)
+		if not lambda then
+			-- This shouldn't happen as this function shouldn't be called by anything that does not parse return statements.
+			!ERROR_OR_RETURN_FALSE `errorParsingNext(state, "Internal compiler error: Not inside a function.")`
+		end
+
 		tokType, tokValue = peekNextToken(state)
-
-		if not isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"}") then
-			--
-			-- Note: Considering this following @Ambigous situation we have to check whether any values should be returned.
-			-- As a bonus we also figure if we're even inside a function, though I'm not sure this'll work when we have static code. @Robustness
-			--
-			--   if x return
-			--   func() -- Returned expression, or separate statement after 'if'?
-			--
-			local lambda = getLambda(returnNode)
-			if not lambda then
-				-- This shouldn't happen as this function shouldn't be called by anything that does not parse return statements.
-				!ERROR_OR_RETURN_FALSE `errorParsingNext(state, "Internal compiler error: Not inside a function.")`
-			end
-
-			if lambda.argumentsOut and lambda.argumentsOut.arguments[1] then
-				!DO_OR_RETURN_FALSE `parseExpressionList(state, returnNode, returnNode.values)`
-			end
+		if isToken(tokType,tokValue, !(TOKEN_KEYWORD),"void") then -- We allow 'return void' both for vararg functions and functions with no return values.
+			eatNextToken(state)
+		elseif lambda.argumentsOut then
+			!DO_OR_RETURN_FALSE `parseExpressionList(state, returnNode, returnNode.values)`
 		end
 
 		statement = returnNode
@@ -1933,7 +1941,7 @@ function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 		end
 
 		!SET_OR_RETURN_FALSE `forLoop.body = parseBlockOrScopedStatement(state, forLoop)`
-		table.insert(forLoop.statements, forLoop.body)
+		table.insert(forLoop.statementsStatic, forLoop.body)
 
 		statement = forLoop
 
@@ -1991,7 +1999,24 @@ function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 	end
 
 	!ASSERT `statement`
-	table.insert(block.statements, statement)
+
+	local statements = (
+		!!(CONST_SET{
+			nodeTypes.AstAssignment,
+			nodeTypes.AstBlock,
+			nodeTypes.AstBreak, nodeTypes.AstContinue,
+			nodeTypes.AstCall,
+			nodeTypes.AstDefer,
+			nodeTypes.AstFor,
+			nodeTypes.AstIf, nodeTypes.AstStaticIf, -- AstStaticIf may have a mixture of static and dynamic statements.
+			nodeTypes.AstReturn,
+			nodeTypes.AstSwitch,
+			nodeTypes.AstWhile,
+		})[statement.nodeType]
+		and block.statementsDynamic
+		or  block.statementsStatic
+	)
+	table.insert(statements, statement)
 
 	eatTrailingSemicolon(state)
 	return true
@@ -2037,7 +2062,7 @@ function _G.parseBlockStatements(state, block)
 
 				local extra
 					=  lastNodeType ~= !(nodeTypes.AstReturn) and ""
-					or getLast(block.statements).values[1]    and " (Note: The function has return arguments.)"
+					or getLambda(block).argumentsOut          and " (Note: The function has return arguments.)"
 					or                                            " (Note: The function has no return arguments.)"
 
 				!ERROR_OR_RETURN_FALSE `errorParsing(state, state.nextToken, "Unreachable code after %s statement.%s", nodeTitle, extra)`
@@ -2045,8 +2070,8 @@ function _G.parseBlockStatements(state, block)
 
 			!DO_OR_RETURN_FALSE `parseOneStatementButSometimesMoreAndAddToBlock(state, block)`
 
-			local statement = getLast(block.statements)
-			lastNodeType    = statement.nodeType -- This is for return/break/continue check.
+			local statement = getLast(block.statementsDynamic)
+			lastNodeType    = statement and statement.nodeType or 0
 		end
 	end
 
@@ -2117,12 +2142,12 @@ function _G.parseRun(state, parent, mustBeExpression)
 		eatNextToken(state)
 
 		if mustBeExpression then
-			!ERROR_OR_RETURN `errorParsingLast(state, "Expected an expression.")`
+			!ERROR_OR_RETURN `errorParsingLast(state, "Expected an expression. This is seen as a code block.")`
 		end
 
 		!SET_OR_RETURN `local block = parseBlock(state, lambda)`
 		lambda.body                 = block
-		table.insert(lambda.statements, block)
+		table.insert(lambda.statementsStatic, block)
 
 	else
 		local expectValue = not isScope(parent)
@@ -2130,7 +2155,7 @@ function _G.parseRun(state, parent, mustBeExpression)
 		if expectValue then
 			local args          = astNewNode(AstArguments, token, lambda)
 			lambda.argumentsOut = args
-			table.insert(lambda.statements, args)
+			table.insert(lambda.statementsStatic, args)
 
 			local arg         = astNewNode(AstArgument, token, args)
 			args.arguments[1] = arg
@@ -2151,14 +2176,14 @@ function _G.parseRun(state, parent, mustBeExpression)
 
 		local block = astNewNode(AstBlock, token, lambda)
 		lambda.body = block
-		table.insert(lambda.statements, block)
+		table.insert(lambda.statementsStatic, block)
 
 		local exprStartToken = state.nextToken
 
 		if expectValue then
-			local returnNode        = astNewNode(AstReturn, token, block)
-			returnNode.runDirective = runNode
-			block.statements[1]     = returnNode
+			local returnNode           = astNewNode(AstReturn, token, block)
+			returnNode.runDirective    = runNode
+			block.statementsDynamic[1] = returnNode
 			!SET_OR_RETURN `returnNode.values[1] = parseExpression(state, returnNode)`
 		else
 			!DO_OR_RETURN `parseOneStatementButSometimesMoreAndAddToBlock(state, block)`
@@ -2220,8 +2245,8 @@ function _G.parseFileScopeOrNamespaceStatements(state, scope, isTopLevel, single
 
 			import.exported = true
 
-			table.insert(scope.statements, import)
-			table.insert(scope.imports,    import)
+			table.insert(scope.statementsStatic, import)
+			table.insert(scope.imports,          import)
 
 		elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"export_value") then
 			eatNextToken(state)
@@ -2263,25 +2288,25 @@ function _G.parseFileScopeOrNamespaceStatements(state, scope, isTopLevel, single
 		elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"import","load") then
 			-- @Incomplete: Warn about duplicate imports? Maybe not necessay as things will only ever be imported once anyway.
 			!SET_OR_RETURN_FALSE `local import = parseImportOrLoad(state, scope)`
-			table.insert(scope.statements, import)
-			table.insert(scope.imports,    import)
+			table.insert(scope.statementsStatic, import)
+			table.insert(scope.imports,          import)
 
 		elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"using") then
 			!SET_OR_RETURN_FALSE `local using = parseUsing(state, scope)`
-			table.insert(scope.statements, using)
-			table.insert(scope.usings,     using)
+			table.insert(scope.statementsStatic, using)
+			table.insert(scope.usings,           using)
 
 		elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"assert","print") then
 			!SET_OR_RETURN_FALSE `local debugNode = parseDebugNode(state, scope)`
-			table.insert(scope.statements, debugNode)
+			table.insert(scope.statementsStatic, debugNode)
 
 		elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"if") then
 			!SET_OR_RETURN_FALSE `local ifOrStaticIf = parseIfOrStaticIf(state, scope, true)`
-			table.insert(scope.statements, ifOrStaticIf)
+			table.insert(scope.statementsStatic, ifOrStaticIf)
 
 		elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"run") then
 			!SET_OR_RETURN_FALSE `local runNode = parseRun(state, scope, false)`
-			table.insert(scope.statements, runNode)
+			table.insert(scope.statementsStatic, runNode)
 
 		elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"preload") then
 			eatNextToken(state)
@@ -2403,8 +2428,8 @@ function _G.parseGlobalScope(state, firstFilePath)
 
 	local firstFileScope = parseFileScope(state, globalScope, firstFilePath, false, state.mainFileBasename)
 
-	table.insert(globalScope.statements, firstFileScope)
-	table.insert(globalScope.fileScopes, firstFileScope)
+	table.insert(globalScope.statementsStatic, firstFileScope)
+	table.insert(globalScope.fileScopes,       firstFileScope)
 
 	astMoveRelevantThingsFromFileScopeToGlobalScope(state, firstFileScope)
 	return globalScope
@@ -2540,16 +2565,16 @@ function _G.parseLambda(state, parent)
 				-- Note: We're not setting decl.type nor decl.value, leaving the declaration unfinished.
 				-- It should be ok as polymorphic functions shouldn't get inferred.
 
-				table.insert(lambda.statements,       decl)
+				table.insert(lambda.statementsStatic, decl)
 				table.insert(lambda.declarations,     decl)
 				table.insert(lambda.bakeDeclarations, decl)
 
 				return !(VISIT_IGNORE_CHILDREN)
 			end)
 		end
-
 		if gotError then  return nil  end
-		table.insert(lambda.statements, args)
+
+		table.insert(lambda.statementsStatic, args)
 
 		for _, arg in ipairs(args.arguments) do
 			table.insert(lambda.declarations, arg.declaration)
@@ -2575,8 +2600,8 @@ function _G.parseLambda(state, parent)
 				ident.declaration = decl
 				using.expression  = ident
 
-				table.insert(lambda.statements, using)
-				table.insert(lambda.usings,     using)
+				table.insert(lambda.statementsStatic, using)
+				table.insert(lambda.usings,           using)
 			end
 		end
 
@@ -2651,7 +2676,7 @@ function _G.parseLambda(state, parent)
 
 		if args then
 			lambda.argumentsOut = args
-			table.insert(lambda.statements, args)
+			table.insert(lambda.statementsStatic, args)
 		end
 	end
 
@@ -2663,7 +2688,7 @@ function _G.parseLambda(state, parent)
 
 		!SET_OR_RETURN `local block = parseBlock(state, lambda)`
 		lambda.body                 = block
-		table.insert(lambda.statements, block)
+		table.insert(lambda.statementsStatic, block)
 
 		lambda.bodyEndToken = state.nextToken-1 -- The '}'.
 
@@ -2673,7 +2698,7 @@ function _G.parseLambda(state, parent)
 
 		local block = astNewNode(AstBlock, state.nextToken-1, lambda) -- Dummy block.
 		lambda.body = block
-		table.insert(lambda.statements, block)
+		table.insert(lambda.statementsStatic, block)
 
 		tokType, tokValue = eatNextToken(state)
 		if not isToken(tokType,tokValue, !(TOKEN_IDENTIFIER)) then
@@ -2707,11 +2732,11 @@ function _G.parseLambda(state, parent)
 			local bodyTextLambda    = astNewNode(AstLambda, token, lambda)
 			bodyTextLambda.metaOnly = true
 			lambda.bodyTextLambda   = bodyTextLambda
-			table.insert(lambda.statements, bodyTextLambda)
+			table.insert(lambda.statementsStatic, bodyTextLambda)
 
 			local argsOut               = astNewNode(AstArguments, token, bodyTextLambda)
 			bodyTextLambda.argumentsOut = argsOut
-			table.insert(bodyTextLambda.statements, argsOut)
+			table.insert(bodyTextLambda.statementsStatic, argsOut)
 
 			local arg            = astNewNode(AstArgument, token, argsOut)
 			argsOut.arguments[1] = arg
@@ -2728,12 +2753,12 @@ function _G.parseLambda(state, parent)
 
 			!SET_OR_RETURN `local block = parseBlock(state, bodyTextLambda)`
 			bodyTextLambda.body         = block
-			table.insert(bodyTextLambda.statements, block)
+			table.insert(bodyTextLambda.statementsStatic, block)
 		end
 
 		local block = astNewNode(AstBlock, token, lambda) -- Empty until bodyTextLambda has run.
 		lambda.body = block
-		table.insert(lambda.statements, block)
+		table.insert(lambda.statementsStatic, block)
 
 		lambda.bodyEndToken                = state.nextToken-1 -- The '}'.
 		lambda.bodyTextLambda.bodyEndToken = lambda.bodyEndToken
@@ -3720,7 +3745,6 @@ do
 					end
 					write(")")
 				end
-				if assignment.addedByPolymorph then  write(" (addedByPolymorph)")  end
 				write(" (", assignment.binaryOperation, "=)")
 				!!(CHILD_PRINT_START)
 				printNodeList(assignment.targets, indent+1, printed, printChildren)
@@ -3814,12 +3838,6 @@ do
 				if vararg.surroundedByParentheses then  write(" (adjustTo1)")  end
 				write("\n")
 
-			elseif node.nodeType == !(nodeTypes.AstGlobalScope) then
-				local globalScope = node
-				!!(CHILD_PRINT_START)
-				printNodeList(globalScope.statements, indent+1, printed, printChildren)
-				!!(CHILD_PRINT_END)
-
 			elseif node.nodeType == !(nodeTypes.AstDebug) then
 				local debugNode = node
 				!!(CHILD_PRINT_START)
@@ -3904,7 +3922,8 @@ do
 					if node.keyType   then  printNode(node.keyType,   indent+1, printed, printChildren, "K")  end
 					if node.valueType then  printNode(node.valueType, indent+1, printed, printChildren, "V")  end
 				end
-				printNodeList(node.statements, indent+1, printed, printChildren)
+				printNodeList(node.statementsStatic,  indent+1, printed, printChildren, "STATIC")
+				printNodeList(node.statementsDynamic, indent+1, printed, printChildren, "DYNAMIC")
 				if node.nodeType == !(nodeTypes.AstFileScope) then
 					if node.valueToExport then  printNode(node.valueToExport, indent+1, printed, printChildren, "EXPORT")  end
 				end
@@ -4371,67 +4390,6 @@ function _G.astGetExpressionVisuallyFurthestToTheLeft(expr, onlyFollowCalls)
 		return expr
 	end
 end
-
---[[
--- expression = astGetExpressionVisuallyFurthestToTheRight( expression )
-function _G.astGetExpressionVisuallyFurthestToTheRight(expr)
-	while expr.replacing do  expr = expr.replacing  end
-
-	if expr.nodeType == !(nodeTypes.AstCall) then
-		local call = expr
-		return call.arguments[1] and astGetExpressionVisuallyFurthestToTheRight(getLast(call.arguments)) or call
-
-	elseif expr.nodeType == !(nodeTypes.AstBinary) then
-		local binary = expr
-		return astGetExpressionVisuallyFurthestToTheRight(binary.right)
-
-	elseif expr.nodeType == !(nodeTypes.AstAccess) then
-		local access = expr
-		return astGetExpressionVisuallyFurthestToTheRight(access.member)
-
-	elseif expr.nodeType == !(nodeTypes.AstReturn) then
-		local returnNode = expr
-		return returnNode.values[1] and astGetExpressionVisuallyFurthestToTheRight(getLast(returnNode.values)) or returnNode
-
-	elseif expr.nodeType == !(nodeTypes.AstType) then
-		local typeNode = expr
-		return
-			typeNode.functionHeader and astGetExpressionVisuallyFurthestToTheRight(typeNode.functionHeader)      or
-			typeNode.arrayItemType  and astGetExpressionVisuallyFurthestToTheRight(typeNode.arrayItemType)       or
-			typeNode.arguments      and astGetExpressionVisuallyFurthestToTheRight(getLast(typeNode.arguments))  or
-			typeNode.components[1]  and astGetExpressionVisuallyFurthestToTheRight(getLast(typeNode.components)) or
-			typeNode
-
-	elseif expr.nodeType == !(nodeTypes.AstDeclaration) then
-		local decl = expr
-		return
-			decl.assignment and astGetExpressionVisuallyFurthestToTheRight(decl.assignment) or
-			decl.type       and astGetExpressionVisuallyFurthestToTheRight(decl.type)       or
-			decl.name
-
-	elseif expr.nodeType == !(nodeTypes.AstAssignment) then
-		local assignment = expr
-		return astGetExpressionVisuallyFurthestToTheRight(getLast(assignment.values))
-
-	elseif expr.nodeType == !(nodeTypes.AstConditional) then
-		local conditional = expr
-		return astGetExpressionVisuallyFurthestToTheRight(conditional.branchFalse)
-
-	elseif expr.nodeType == !(nodeTypes.AstIf) or expr.nodeType == !(nodeTypes.AstStaticIf) then
-		local ifOrStaticIf = expr
-		return astGetExpressionVisuallyFurthestToTheRight(ifOrStaticIf.branchFalse or ifOrStaticIf.branchTrue)
-
-	-- @Incomplete: Handle many more nodes...
-
-	elseif expr.statements then
-		local scope = expr
-		return scope.statements[1] and astGetExpressionVisuallyFurthestToTheRight(getLast(scope.statements)) or scope
-
-	else
-		return expr
-	end
-end
---]]
 
 -- expression = astGetCalleeVisuallyFurthestToTheLeft( call )
 function _G.astGetCalleeVisuallyFurthestToTheLeft(call)

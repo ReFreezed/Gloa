@@ -522,9 +522,13 @@ function _G.canNodeSeeDeclaration(state, node, decl)
 	-- It doesn't matter if this is true and we're in a declarative scope because we check that in the loop below.
 	local canSeeImperativeVariables = (decl.kind == !(DECL_KIND_LOCAL_VAR) --[[or decl.kind == !(DECL_KIND_READ_ONLY)]])
 
-	local name                      = decl.name.name
-	local nodeScope, nodeScopeChild = astFindParentScope(node)
-	local nodeScope0                = nodeScope
+	local name                     = decl.name.name
+	local nodeScope, nodeStatement = astFindParentScope(node)
+	local nodeScope0               = nodeScope
+
+	if nodeStatement.nodeType == !(nodeTypes.AstDeclaration) then
+		nodeStatement = nodeStatement.assignment or nodeStatement -- Not sure if needed. See :DeclarationAssignment
+	end
 
 	while true do
 		if not indexOf(nodeScope.declarations, decl) then
@@ -554,21 +558,17 @@ function _G.canNodeSeeDeclaration(state, node, decl)
 
 			-- Note: If the node is inside the initial assignment then we need to treat the declaration
 			-- and the assignment as if they were the same statement. Otherwise the assignment will be
-			-- able to see it's own declarations, which is illegal!
-			local declScope, declScopeChild = astFindParentScope(decl.assignment or decl)
+			-- able to see it's own declarations, which is illegal! :DeclarationAssignment
+			local declScope, declStatement = astFindParentScope(decl.assignment or decl)
 
 			if declScope == block then
-				local imperativeIndexForDecl = indexOf(block.statements, declScopeChild) or errorInternal()
-				local imperativeIndexForNode = indexOf(block.statements, nodeScopeChild) or errorInternal()
-
-				return (imperativeIndexForDecl < imperativeIndexForNode)
-
-			else
-				-- The declaration is probably from a using. The only things you can use right
-				-- now are structs and enums, both being declarative scopes. 2020-01-03
-				!ASSERT `isScopeDeclarative(declScope)`
-				return true
+				return (declStatement.token < nodeStatement.token)
 			end
+
+			-- The declaration is probably from a using. The only things you can use right
+			-- now are structs and enums, both being declarative scopes. 2020-01-03
+			!ASSERT `isScopeDeclarative(declScope)`
+			return true
 
 		else
 			errorUnhandledNodeType(state, nodeScope)
@@ -580,7 +580,7 @@ function _G.canNodeSeeDeclaration(state, node, decl)
 			canSeeImperativeVariables = false
 		end
 
-		nodeScope, nodeScopeChild = astFindParentScope(nodeScope)
+		nodeScope, nodeStatement = astFindParentScope(nodeScope)
 		if not nodeScope then  return false  end -- This shouldn't happen I don't think, unless decl and node is not part of the same tree.
 	end
 end
@@ -1824,7 +1824,12 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 	local lambda = decl.value or errorInternal(state, decl)
 	assert(lambda.nodeType == !(nodeTypes.AstLambda))
 
-	for _, statement in ipairs(lambda.statements) do
+	for _, statement in ipairs(lambda.statementsStatic) do
+		if statement.queued and statement.queued.pipe <= !(PIPE_INFER) then
+			!DEPEND_AND_RETURN(`call`, DEPEND_NODE_INFERRED, `statement`)
+		end
+	end
+	for _, statement in ipairs(lambda.statementsDynamic) do
 		if statement.queued and statement.queued.pipe <= !(PIPE_INFER) then
 			!DEPEND_AND_RETURN(`call`, DEPEND_NODE_INFERRED, `statement`)
 		end
@@ -1949,9 +1954,9 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 		morphLambda.isPolymorphic = false
 		morphLambda.polymorphs    = {}
 
-		for i, statement in ipairsr(morphLambda.statements) do
-			if !!(CONST_SET{ nodeTypes.AstDeclaration, nodeTypes.AstAssignment })[statement.nodeType] and statement.addedByPolymorph then
-				table.remove(morphLambda.statements, i) -- Should be fast enough. There shouldn't be that many statements in lambdas.
+		for i, statement in ipairsr(morphLambda.statementsStatic) do
+			if statement.nodeType == !(nodeTypes.AstDeclaration) and statement.addedByPolymorph then
+				table.remove(morphLambda.statementsStatic, i) -- Should be fast enough. There shouldn't be that many statements in lambdas.
 			end
 		end
 
@@ -2122,8 +2127,8 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 				local declBaked  = arg.declaration
 				declBaked.parent = morphLambda
 				declBaked.checkedRedeclaration = true -- @Hack to prevent redeclaration errors between polymorphed lambda and base lambda.
-				table.insert(morphLambda.statements,   declBaked)
-				table.insert(morphLambda.declarations, declBaked)
+				table.insert(morphLambda.statementsStatic, declBaked)
+				table.insert(morphLambda.declarations,     declBaked)
 				-- table.insert(morphLambda.bakeDeclarations, declBaked) -- Should we do this? It may be useless.
 
 				-- Reuse valueExpr instead of making a copy. Note that this is the
@@ -2144,7 +2149,7 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 		end
 
 		if not morphLambda.argumentsIn.arguments[1] then
-			removeItem(morphLambda.statements, morphLambda.argumentsIn)
+			removeItem(morphLambda.statementsStatic, morphLambda.argumentsIn)
 			morphLambda.argumentsIn = nil
 		end
 
@@ -2153,11 +2158,11 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 	end
 
 	-- Update the source lambda, add queueds etc.
-	local i              = #lambda.statements+1
-	lambda.statements[i] = morphDecl
+	local i                    = #lambda.statementsStatic+1
+	lambda.statementsStatic[i] = morphDecl
 
 	addUnqueuedChildrenToQueueRecursively(state, morphDecl, !(PIPE_INFER))
-	addToQueue(state, morphDecl, lambda.statements, i, !(PIPE_INFER))
+	addToQueue(state, morphDecl, lambda.statementsStatic, i, !(PIPE_INFER))
 
 	for _, declBaked in ipairs(morphLambda.bakeDeclarations) do
 		local valueExpr         = declBaked.value
@@ -2321,9 +2326,9 @@ local function handlePolymorphicStruct(state, call)
 		morphStruct.isPolymorphic = false
 		morphStruct.polymorphs    = {}
 
-		for i, statement in ipairsr(morphStruct.statements) do
-			if !!(CONST_SET{ nodeTypes.AstDeclaration, nodeTypes.AstAssignment })[statement.nodeType] and statement.addedByPolymorph then
-				table.remove(morphStruct.statements, i) -- This line should only trigger at most twice per polymorph.
+		for i, statement in ipairsr(morphStruct.statementsStatic) do
+			if statement.nodeType == !(nodeTypes.AstDeclaration) and statement.addedByPolymorph then
+				table.remove(morphStruct.statementsStatic, i) -- This line should only trigger at most twice per polymorph.
 			end
 		end
 	end
@@ -2340,9 +2345,9 @@ local function handlePolymorphicStruct(state, call)
 	end
 
 	-- Update the source struct, add queueds etc.
-	local i              = #struct.statements+1
-	struct.statements[i] = morphDecl
-	addToQueueRecursively(state, morphDecl, struct.statements, i, !(PIPE_INFER))
+	local i                    = #struct.statementsStatic+1
+	struct.statementsStatic[i] = morphDecl
+	addToQueueRecursively(state, morphDecl, struct.statementsStatic, i, !(PIPE_INFER))
 
 	-- Change the call into a type node.
 	local morphTypeNode       = astNewNode(AstType, typeNode.token, call.parent)
@@ -2531,8 +2536,13 @@ end
 
 !NODE_INFERRER `function nodeInferrers.AstDeclaration(state, decl)`
 	local valueExpr = getDeclarationValue(decl, true)
-	if valueExpr and not valueExpr.inferredType then -- @Robustness: Should we check queued.pipe here instead of inferredType?
-		!DEPEND_AND_RETURN(`decl`, DEPEND_NODE_INFERRED_FULLY, `valueExpr`) -- FULLY is needed if valueExpr is an AstTable.
+
+	if valueExpr and not valueExpr.inferredType then
+		if valueExpr.nodeType == !(nodeTypes.AstTable) then
+			!DEPEND_AND_RETURN(`decl`, DEPEND_NODE_INFERRED_FULLY, `valueExpr`)
+		else
+			!DEPEND_AND_RETURN(`decl`, DEPEND_NODE_INFERRED, `valueExpr`)
+		end
 	end
 
 	local identOrVararg = decl.name
@@ -4115,8 +4125,8 @@ end
 
 			!ifDEBUG `profilerUnpause()`
 
-			table.insert(globalScope.statements, fileScope)
-			table.insert(globalScope.fileScopes, fileScope)
+			table.insert(globalScope.statementsStatic, fileScope)
+			table.insert(globalScope.fileScopes,       fileScope)
 
 			if import.isLoad then
 				astMoveRelevantThingsFromFileScopeToGlobalScope(state, fileScope)
@@ -4341,25 +4351,48 @@ end
 	local scope = staticIf.parent
 	assert(isScope(scope))
 
-	local statements     = scope.statements
-	local statementIndex = indexOf(statements, staticIf) or errorInternal(state, staticIf)
-	local statementsNew  = {}
-	local newlyDeclared  = {}
+	local statementsStatic  = scope.statementsStatic
+	local targetContainer   = staticIf.queued.container
+	local insertionIndex    = staticIf.queued.key
+	local containerIsStatic = targetContainer == statementsStatic
+
+	local statementsNew = {}
+	local newlyDeclared = {} -- Keys are declarations and name strings.
 
 	local branchToUse = (cond.value and staticIf.branchTrue or staticIf.branchFalse)
 
 	if branchToUse then
-		!ASSERT("branchToUse.nodeType == "..nodeTypes.AstBlock)
+		-- Static ifs in static context should only have static statements,
+		-- but in dynamic context there may be both static and dynamic.
+		if containerIsStatic and branchToUse.statementsDynamic[1] then
+			errorInternal(state, branchToUse.statementsDynamic[1], "Dynamic statement(s) in static context.")
+		end
+
 		addUnqueuedChildrenToQueueRecursively(state, branchToUse) -- Note: We update the queueds in a moment.
 
-		for iNew, statement in ipairs(branchToUse.statements) do
+		local statementsNewContainer = (containerIsStatic and branchToUse.statementsStatic or branchToUse.statementsDynamic)
+
+		for iNew, statement in ipairs(statementsNewContainer) do
 			if statement.nodeType == !(nodeTypes.AstDeclaration) and statement.canShadow then
-				-- @Incomplete: Make this work?
-				typeError(state, statement, "Cannot have shadowing declarations directly inside !if blocks.")
+				typeError(state, statement, "Cannot have shadowing declarations directly inside !if blocks.") -- @Incomplete: Make this work?
 			end
 			statement.parent    = scope
 			statementsNew[iNew] = statement
 		end
+
+		if not containerIsStatic then
+			for _, statement in ipairs(branchToUse.statementsStatic) do
+				if statement.nodeType == !(nodeTypes.AstDeclaration) and statement.canShadow then
+					typeError(state, statement, "Cannot have shadowing declarations directly inside !if blocks.") -- @Incomplete: Make this work?
+				end
+				local iNew             = #statementsStatic+1
+				statement.parent       = scope
+				statement.container    = statementsStatic
+				statement.key          = iNew
+				statementsStatic[iNew] = statement
+			end
+		end
+
 		for _, decl in ipairs(branchToUse.declarations) do
 			table.insert(scope.declarations, decl)
 			newlyDeclared[decl]           = true
@@ -4374,20 +4407,20 @@ end
 		end
 	end
 
-	for i = statementIndex+1, #statements do
-		table.insert(statementsNew, statements[i])
+	for i = insertionIndex+1, #targetContainer do
+		table.insert(statementsNew, targetContainer[i])
 	end
 
 	local iNew = 0
-	for i = statementIndex, math.max(#statements, statementIndex + #statementsNew - 1) do
-		iNew          = iNew+1
-		statements[i] = statementsNew[iNew]
+	for i = insertionIndex, math.max(#targetContainer, insertionIndex + #statementsNew - 1) do
+		iNew               = iNew+1
+		targetContainer[i] = statementsNew[iNew] -- May be nil at the end if the static if was empty and at the end of the scope.
 	end
 
-	for i = statementIndex, #statements do
-		local statement            = statements[i]
-		statement.queued.container = statements
-		statement.queued.key       = i
+	for iNew = insertionIndex, #targetContainer do
+		local statement            = targetContainer[iNew]
+		statement.queued.container = targetContainer
+		statement.queued.key       = iNew
 	end
 
 	moveToPipe(state, staticIf, !(PIPE_DONE)) -- Not sure if needed. @Cleanup
@@ -4520,8 +4553,8 @@ local function addDeclarationInForLoop(state, forLoop, name, typeInfo)
 	ident.inferredType = typeInfo
 	decl.name          = ident
 
-	table.insert(forLoop.statements,   decl)
-	table.insert(forLoop.declarations, decl)
+	table.insert(forLoop.statementsDynamic, decl)
+	table.insert(forLoop.declarations,      decl)
 
 	addToQueueRecursively(state, decl, forLoop, #forLoop, !(PIPE_DONE))
 	moveToNextRelevantPipe(state, decl, !(PIPE_INFER))
@@ -4939,7 +4972,7 @@ end
 	end
 
 	-- Wait for explicit contents to infer.
-	for _, statement in ipairs(struct.statements) do
+	for _, statement in ipairs(struct.statementsStatic) do
 		if statement.queued.pipe <= !(PIPE_INFER) then
 			!DEPEND_AND_RETURN(`struct`, DEPEND_NODE_INFERRED, `statement`)
 		end
@@ -4982,8 +5015,8 @@ end
 	if struct.inherits[1] then
 		for i, typeExpr in ipairs(struct.inherits) do
 			local structInfoToInherit  = requireTypeRepresentedByExpression(state, typeExpr)
-			local insertIndexStatement = indexOf(struct.statements, typeExpr) or errorInternal(state, typeExpr)
-			table.remove(struct.statements, insertIndexStatement)
+			local insertIndexStatement = indexOf(struct.statementsStatic, typeExpr) or errorInternal(state, typeExpr)
+			table.remove(struct.statementsStatic, insertIndexStatement)
 
 			for j = 1, i-1 do
 				local typeExprPrevious   = struct.inherits[j]
@@ -5052,7 +5085,7 @@ end
 			end
 		end
 
-		for i, expr in ipairs(struct.statements) do
+		for i, expr in ipairs(struct.statementsStatic) do
 			expr.queued.key = i
 		end
 	end
@@ -5107,7 +5140,7 @@ end
 end
 
 !NODE_INFERRER `function nodeInferrers.AstEnum(state, enum)`
-	for _, statement in ipairs(enum.statements) do
+	for _, statement in ipairs(enum.statementsStatic) do
 		if statement.nodeType == !(nodeTypes.AstDeclaration) then
 			local decl = statement
 			!ASSERT `decl.value`
@@ -5185,7 +5218,7 @@ end
 		typeError(state, valueExpr, "Cannot export references to raw polymorphic functions.")
 	end
 
-	for _, statement in ipairs(fileScope.statements) do
+	for _, statement in ipairs(fileScope.statementsStatic) do
 		if statement.queued.pipe <= !(PIPE_INFER) then
 			!DEPEND_AND_RETURN(`fileScope`, DEPEND_NODE_INFERRED, `statement`)
 		end
@@ -5195,7 +5228,7 @@ end
 end
 
 !NODE_INFERRER `function nodeInferrers.AstGlobalScope(state, globalScope)`
-	for _, statement in ipairs(globalScope.statements) do
+	for _, statement in ipairs(globalScope.statementsStatic) do
 		if statement.queued.pipe <= !(PIPE_INFER) then
 			!DEPEND_AND_RETURN(`globalScope`, DEPEND_NODE_INFERRED, `statement`)
 		end
@@ -5205,11 +5238,17 @@ end
 end
 
 !NODE_INFERRER `function nodeInferrers.AstBlock(state, block)`
-	for _, statement in ipairs(block.statements) do
+	for _, statement in ipairs(block.statementsStatic) do
 		if statement.queued.pipe <= !(PIPE_INFER) then
 			!DEPEND_AND_RETURN(`block`, DEPEND_NODE_INFERRED, `statement`)
 		end
 	end
+	for _, statement in ipairs(block.statementsDynamic) do
+		if statement.queued.pipe <= !(PIPE_INFER) then
+			!DEPEND_AND_RETURN(`block`, DEPEND_NODE_INFERRED, `statement`)
+		end
+	end
+
 	moveToNextRelevantPipe(state, block)
 end
 
@@ -5637,7 +5676,7 @@ end
 
 	-- Replace the directive with a constant value.
 
-	local returnNode = getLast(runNode.lambda.body.statements)
+	local returnNode = getLast(runNode.lambda.body.statementsDynamic)
 	assert(returnNode.nodeType == !(nodeTypes.AstReturn))
 
 	local typeInfo = returnNode.values[1].inferredType

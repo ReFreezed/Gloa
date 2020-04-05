@@ -76,6 +76,7 @@ function _G.addDependency(state, dependent, dependType, dependOn, extraData)
 	if !!(CONST_SET{ DEPEND_NODE_INFERRED, DEPEND_NODE_INFERRED_FULLY, DEPEND_NODE_EMITTED })[dependType] then
 		assert(dependent ~= dependOn.node)
 		dependOn = dependOn.queued or errorInternal(state, dependOn)
+		-- assert(not itemWith3(dependOn.waiters, "dependent",dependent, "dependType",dependType, "dependOn",dependOn))
 		table.insert(dependOn.waiters, dependency)
 
 	elseif dependType == !(DEPEND_STRUCT_MEMBERS_READY) then
@@ -154,11 +155,10 @@ end
 
 function _G.fulfillDependencies(state, node, dependType)
 	local waiters = node.queued.waiters
+	if not waiters[1] then  return  end
 
-	for i, dependency in ipairsr(waiters) do
+	for _, dependency in ipairs(waiters) do
 		if dependency.dependType == dependType then
-			removeUnordered(waiters, i)
-
 			local dependent = dependency.dependent
 			if dependent.waitingOn == dependency then
 				dependent.waitingOn = dependency.next
@@ -166,6 +166,12 @@ function _G.fulfillDependencies(state, node, dependType)
 			if not dependent.waitingOn then
 				table.insert(state.priorityStack, dependent)
 			end
+		end
+	end
+
+	for i, dependency in ipairsr(waiters) do
+		if dependency.dependType == dependType then
+			removeUnordered(waiters, i) -- @Incomplete: Keep order without being slow! (Needed?)
 		end
 	end
 end

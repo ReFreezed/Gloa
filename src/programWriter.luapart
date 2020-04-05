@@ -1108,7 +1108,7 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 	local file      = writer.file
 	local indentStr = ("\t"):rep(indent)
 
-	if not block.statements[1] then
+	if not block.statementsDynamic[1] then
 		if outputDebugInfo then
 			file:write(indentStr, "-- Empty block.")
 			writeEol(state, writer)
@@ -1121,30 +1121,29 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 	localsStack  = {{}, unpack(localsStack)} -- @Speed: We can probably handle locals like defers.
 	local inDecl = false
 
-	for _, statement in ipairs(block.statements) do
+	for _, statement in ipairs(block.statementsDynamic) do
 		local nodeType = statement.nodeType
 
 		if nodeType == !(nodeTypes.AstDeclaration) then
 			local decl = statement
+			assert(decl.kind == !(DECL_KIND_LOCAL_VAR) --[[or decl.kind == !(DECL_KIND_READ_ONLY)]])
 
-			if decl.kind == !(DECL_KIND_LOCAL_VAR) --[[or decl.kind == !(DECL_KIND_READ_ONLY)]] then
-				decl.localName, nextLocalN = allocateLocalName(state, writer, localsStack, decl.name.name, nextLocalN)
+			decl.localName, nextLocalN = allocateLocalName(state, writer, localsStack, decl.name.name, nextLocalN)
 
-				if decl.assignment then
-					-- The (initial) assignment should be written as the next statement (or after several consecutive declarations).
-					inDecl = true
+			if decl.assignment then
+				-- The (initial) assignment should be written as the next statement (or after several consecutive declarations).
+				inDecl = true
 
+			else
+				local tag = decl.name.inferredType.tag
+				file:write(indentStr, "local ", decl.localName, " = ")
+				if decl.value then
+					writeExpression(state, writer, indent, nextLocalN, localsStack, decl.value)
 				else
-					local tag = decl.name.inferredType.tag
-					file:write(indentStr, "local ", decl.localName, " = ")
-					if decl.value then
-						writeExpression(state, writer, indent, nextLocalN, localsStack, decl.value)
-					else
-						writeDefaultValueForType(state, writer, indent, nextLocalN, localsStack, decl.name.inferredType, decl.name)
-					end
-					file:write(";")
-					writeEol(state, writer)
+					writeDefaultValueForType(state, writer, indent, nextLocalN, localsStack, decl.name.inferredType, decl.name)
 				end
+				file:write(";")
+				writeEol(state, writer)
 			end
 
 		elseif nodeType == !(nodeTypes.AstAssignment) then
@@ -1329,10 +1328,10 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 
 			writeBlock(state, writer, indent+1, nextLocalN, localsStack, ifBranch.branchTrue)
 
-			if not (ifBranch.branchFalse and ifBranch.branchFalse.statements[1]) then
+			if not (ifBranch.branchFalse and ifBranch.branchFalse.statementsDynamic[1]) then
 				-- void
 
-			elseif not ifBranch.branchFalse.statements[2] and ifBranch.branchFalse.statements[1].nodeType == !(nodeTypes.AstIf) then
+			elseif not ifBranch.branchFalse.statementsDynamic[2] and ifBranch.branchFalse.statementsDynamic[1].nodeType == !(nodeTypes.AstIf) then
 				file:write(indentStr, "else") -- This will be followed by "if"
 				writeBlock(state, writer, indent, nextLocalN, localsStack, ifBranch.branchFalse, true)
 
@@ -1539,11 +1538,8 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 				file:write(indentStr, "end") ; writeEol(state, writer)
 			end
 
-		elseif !!(CONST_SET{ nodeTypes.AstImport, nodeTypes.AstUsing, nodeTypes.AstDebug, nodeTypes.AstRun })[nodeType] then
-			-- void  (Ignore these statements.)
-
 		else
-			-- Assume the statement is an expression at this point and let writeExpression() deal errors.
+			-- Assume the statement is an expression at this point and let writeExpression() deal with any errors.
 			file:write(indentStr)
 			writeExpression(state, writer, indent, nextLocalN, localsStack, statement)
 			file:write(";") -- This removes ambiguity is some cases.
@@ -1551,8 +1547,15 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 		end
 	end
 
-	local doWriteDefers = writer.deferStack[deferStartIndex] and not (block.statements[1] ~= nil and getLast(block.statements).nodeType == !(nodeTypes.AstReturn))
-	local defers        = doWriteDefers and {unpack(writer.deferStack, deferStartIndex)} or EMPTY_TABLE
+	local doWriteDefers = (
+		writer.deferStack[deferStartIndex]
+		and not (
+			block.statementsDynamic[1]
+			and getLast(block.statementsDynamic).nodeType == !(nodeTypes.AstReturn)
+		)
+	)
+
+	local defers = doWriteDefers and {unpack(writer.deferStack, deferStartIndex)} or EMPTY_TABLE
 
 	for i = deferStartIndex, #writer.deferStack do
 		writer.deferStack[i] = nil
@@ -1568,7 +1571,7 @@ function _G.writeForeignReference(state, writer, foreignSourceId, nodeForError)
 end
 
 function _G.writeFunction(state, writer, indent, nextLocalN, localsStack, lambda)
-	!ASSERT `not lambda.body[1]` -- Statements should be in lambda.body.statements!
+	!ASSERT `not lambda.body[1]` -- Statements should be in lambda.body.statements*!
 	!ASSERT `not lambda.isPolymorphic`
 
 	local file = writer.file
@@ -1604,7 +1607,7 @@ function _G.writeFunction(state, writer, indent, nextLocalN, localsStack, lambda
 	file:write(")")
 	writeEol(state, writer)
 
-	if lambda.body.statements[1] then
+	if lambda.body.statementsDynamic[1] then
 		writeBlock(state, writer, indent+1, nextLocalN, localsStack, lambda.body)
 	elseif outputDebugInfo then
 		file:write(indentStr, "\t-- Empty function.")

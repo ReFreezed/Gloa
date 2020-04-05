@@ -426,7 +426,11 @@ local function runCompiler()
 					!!(DID_SOMETHING)
 					inferNode(state, queued.node)
 
-					if queued.pipe > !(PIPE_INFER) then
+					if queued.pipe > !(PIPE_EMIT) then
+						fulfillDependencies(state, queued.node, !(DEPEND_NODE_INFERRED))
+						fulfillDependencies(state, queued.node, !(DEPEND_NODE_INFERRED_FULLY))
+						fulfillDependencies(state, queued.node, !(DEPEND_NODE_EMITTED))
+					elseif queued.pipe > !(PIPE_INFER) then
 						fulfillDependencies(state, queued.node, !(DEPEND_NODE_INFERRED))
 						fulfillDependencies(state, queued.node, !(DEPEND_NODE_INFERRED_FULLY))
 					elseif queued.node.inferredType then
@@ -457,7 +461,8 @@ local function runCompiler()
 					-- void
 				elseif queued.waitingOn then
 					insert(queueWaiting, queued)
-				elseif queued.pipe <= !!(FINAL_PIPE) then
+				elseif queued.pipe < !(PIPE_DONE) then
+				-- elseif queued.pipe <= !!(FINAL_PIPE) then -- This doesn't work! Some nodes being inferred wants others to be emitted. :OnlyInferTypes
 					insert(nextQueueActive, queued)
 				else
 					-- void
@@ -477,7 +482,8 @@ local function runCompiler()
 		if not (queueWaiting[1] or queueActive[1]) then
 			!if DEBUG then
 				for _, queued in ipairs(state.allQueueds) do
-					if not (queued.pipe > !!(FINAL_PIPE) or queued.unqueued) then
+					if not (queued.pipe == !(PIPE_DONE) or queued.unqueued) then
+					-- if not (queued.pipe > !!(FINAL_PIPE) or queued.unqueued) then -- :OnlyInferTypes
 						errorInternal(state, queued.node)
 					end
 				end
