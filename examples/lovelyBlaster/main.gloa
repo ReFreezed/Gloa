@@ -39,7 +39,7 @@ export CAMERA_HEIGHT :: 75
 
 export MIN_DISTANCE_TO_CAMERA_EDGE :: 3
 
-export Coords :: []float
+export STAR_DISTANCE_OUTSIDE_SCREEN :: .05 * CAMERA_HEIGHT
 
 export SpawnInstruction :: struct {
 	timeRelative = 0.00,
@@ -55,6 +55,27 @@ export EnemyWave :: struct {
 	difficulty: int,
 	outroTime: float,
 	spawns: []SpawnInstruction,
+}
+
+local Star :: struct {
+	x: float,
+	y: float,
+
+	size:     float, -- 0..1
+	distance: float, -- >1
+}
+
+export Light :: struct {
+	x: float,
+	y: float,
+
+	radiusX: float,
+	radiusY: float,
+
+	r: float,
+	g: float,
+	b: float,
+	a: float,
 }
 
 export Level :: struct {
@@ -74,6 +95,7 @@ export Level :: struct {
 	difficulty     = 0,
 	difficultyTime = -9999.00,
 
+	stars: []Star,
 	lightsToDraw: []Light,
 
 	cameraShake = 0.0,
@@ -135,6 +157,16 @@ local startNewGame :: () {
 	local player        = newEntity(currentLevel, Player, LEVEL_WIDTH/2, .8*CAMERA_HEIGHT)
 	currentLevel.player = player
 	insert(currentLevel.entities, player)
+
+	for 1, 500 {
+		local star: Star = {
+			x        = LEVEL_WIDTH*getRandom(),
+			y        = getRandom(-STAR_DISTANCE_OUTSIDE_SCREEN, CAMERA_HEIGHT+STAR_DISTANCE_OUTSIDE_SCREEN),
+			size     = getRandom()^1.4,
+			distance = getRandom(.3, 1.5),
+		}
+		insert(currentLevel.stars, star)
+	}
 }
 
 local onLoad :: (args:[]string, argsRaw:[]string) {
@@ -213,7 +245,7 @@ local onUpdate :: (dt:float) {
 	!if DEV {
 		if loveIsKeyDown("lctrl","rctrl")
 			dt *= loveIsKeyDown("lshift","rshift") ? 1.0/80 : 1.0/5
-		elseif loveIsKeyDown("<")
+		elseif loveIsKeyDown"<"
 			dt *= loveIsKeyDown("lshift","rshift") ? 1.0*20 : 1.0*5
 	}
 
@@ -262,6 +294,15 @@ local onUpdate :: (dt:float) {
 	for < currentLevel.entities {
 		if it.isDestroyed  remove(currentLevel.entities, itIndex)
 	}
+
+	for currentLevel.stars {
+		it.y += dt / it.distance
+
+		if it.y > CAMERA_HEIGHT+STAR_DISTANCE_OUTSIDE_SCREEN {
+			it.x = LEVEL_WIDTH*getRandom()
+			it.y = -STAR_DISTANCE_OUTSIDE_SCREEN
+		}
+	}
 }
 
 
@@ -285,34 +326,52 @@ local onDraw :: () {
 	loveSetScissor(viewX1, viewY1, viewWidth, viewHeight)
 	loveClear(.5, .05, .1)
 
-	-- World.
+	--
+	-- World
+	--
+
 	local shakeX = .6 * currentLevel.cameraShake * cos(currentLevel.time/.10*TAU)
 	local shakeY = .4 * currentLevel.cameraShake * cos(currentLevel.time/.17*TAU)
 	loveCoordinateSystemTranslate(shakeX, shakeY)
 
+	-- Stars.
+	loveSetBlendMode(LoveBlendMode.ADD)
+	for currentLevel.stars {
+		loveSetColor(1, 1, 1, lerp(.1, .3, it.size))
+		loveDrawAnchored(lightImage, it.x,it.y, .5,.5, 0, lerp(.01, .03, it.size))
+	}
+	loveResetBlendMode()
+
+	-- Entities.
 	for currentLevel.entities  drawEntity(currentLevel, it)
 
+	-- Lights.
 	do {
 		local iw, ih = loveGetDimensions(lightImage)
 
 		loveSetBlendMode(LoveBlendMode.ADD)
 		for currentLevel.lightsToDraw {
-			loveSetColor(1, 1, 1, it.opacity)
+			loveSetColor(it.r, it.g, it.b, it.a)
 			loveDrawAnchored(lightImage, it.x,it.y, .5,.5, 0, it.radiusX/(iw/2),it.radiusY/(ih/2))
 		}
 		loveResetBlendMode()
+
+		currentLevel.lightsToDraw = {}
 	}
 
-	currentLevel.lightsToDraw = {}
 	loveCoordinateSystemTranslate(-shakeX, -shakeY)
 
-	-- HUD.
+	--
+	-- HUD
+	--
+
 	local font  = loveGetFont()
 	local fontH = loveGetHeight(font)
 
 	loveGraphicsReset()
 	loveCoordinateSystemTranslate(round(viewX1), round(viewY1))
 
+	-- Health.
 	for i = 1, player.healthMax {
 		if i > player.health
 			loveSetColor(0, 0, 0)
@@ -324,6 +383,7 @@ local onDraw :: () {
 		loveDrawCircleFill(SPACING+RADIUS + (i-1)*(SPACING+2*RADIUS), SPACING+RADIUS, RADIUS, 32)
 	}
 
+	-- Difficulty.
 	do {
 		local EDGE_SPACING       :: 5
 		local HIGHLIGHT_TIME     :: .70
@@ -348,21 +408,13 @@ local onDraw :: () {
 	}
 
 	!if DEV {
-		if loveIsKeyDown("tab") {
+		if loveIsKeyDown"tab" {
 			local y = viewY2-fontH
 			loveGraphicsReset()
 			loveSetColor(1, 1, 1)
 			loveDrawText(format("Entities: %d", #currentLevel.entities), viewX1, y) ; y -= fontH
 		}
 	}
-}
-
-export Light :: struct {
-	x       = 0.0,
-	y       = 0.0,
-	radiusX = 0.0,
-	radiusY = 0.0,
-	opacity = 0.0,
 }
 
 

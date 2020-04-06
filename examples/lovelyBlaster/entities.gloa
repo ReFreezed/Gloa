@@ -236,7 +236,7 @@ export spawnNextEntity :: (level:Level) {
 
 	if ent.entityType == Follower {
 		local follower  = cast(Follower) ent
-		local curvePath = cast(Coords) instr.data.curve
+		local curvePath = cast([]float) instr.data.curve
 
 		curvePath = {unpack(curvePath)}
 
@@ -247,7 +247,7 @@ export spawnNextEntity :: (level:Level) {
 
 		-- Convert the bezier curve into a path we easily can follow.
 
-		local getPathLength :: (path:Coords) -> float {
+		local getPathLength :: (path:[]float) -> float {
 			local length:float
 			for i = 1, #path-2, 2 {
 				length += distance(path[i],path[i+1], path[i+2],path[i+3])
@@ -255,7 +255,7 @@ export spawnNextEntity :: (level:Level) {
 			return length
 		}
 
-		local getPointOnPath :: (path:Coords, dist:float) -> (x,y:float) {
+		local getPointOnPath :: (path:[]float, dist:float) -> (x,y:float) {
 			local coordCount = #path
 
 			for i = 1, coordCount-2, 2 {
@@ -281,7 +281,7 @@ export spawnNextEntity :: (level:Level) {
 		local APPROXIMATE_SEGMENT_LENGTH :: 3
 		local pathSegments      = max(round(length/APPROXIMATE_SEGMENT_LENGTH), 1)
 		local pathSegmentLength = length/pathSegments
-		local pathToFollow: Coords
+		local pathToFollow: []float
 
 		for i = 0, pathSegments {
 			local x, y = getPointOnPath(path, i*pathSegmentLength)
@@ -561,11 +561,12 @@ export updateEntity :: (level:Level, ent:Entity, dt:float) {
 
 
 export drawEntity :: (level:Level, ent:Entity) {
-	local setColorWithEffects :: (damageEffect:float, r,g,b:float, a=1.0) {
+	local setColorWithEffects :: (damageEffect:float, r,g,b:float, a=1.0) -> (r,g,b:float) {
 		r = lerp(r, 1, damageEffect)
 		g = lerp(g, 1, damageEffect)
 		b = lerp(b, 1, damageEffect)
 		loveSetColor(r, g, b, a)
+		return r, g, b
 	}
 
 	local DAMAGE_EFFECT_TIME :: 0.10
@@ -583,10 +584,12 @@ export drawEntity :: (level:Level, ent:Entity) {
 
 	case Bullet:
 		local bullet = cast(Bullet) ent
+		local r,g,b: float
+
 		if bullet.shotByPlayer
-			setColorWithEffects(damageEffect, 1, 1, 1)
+			r,g,b = setColorWithEffects(damageEffect, 1, 1, 1)
 		else
-			setColorWithEffects(damageEffect, 1, 0, 0)
+			r,g,b = setColorWithEffects(damageEffect, 1, 0, 0)
 
 		loveGraphicsPushTransform()
 		loveCoordinateSystemTranslate(bullet.x, bullet.y)
@@ -594,7 +597,7 @@ export drawEntity :: (level:Level, ent:Entity) {
 		loveDrawEllipseFill(0,0, .3,1.8, 24)
 		loveGraphicsPop()
 
-		drawLight(level, bullet.x,bullet.y, 4,6, .2)
+		drawLight(level, bullet.x,bullet.y, 4,6, r,g,b,.2)
 
 	-- Enemies.
 
@@ -638,7 +641,7 @@ export drawEntity :: (level:Level, ent:Entity) {
 		local a        = 1 - progress^2
 		loveSetColor(1, 1, 1, a)
 		loveDrawCircleFill(spark.x, spark.y, radius, 5)
-		drawLight(level, spark.x,spark.y, 4*radius, .5*a)
+		drawLight(level, spark.x,spark.y, 4*radius, 1,1,1,.5*a)
 
 	case Explosion:
 		local explosion = cast(Explosion) ent
@@ -649,7 +652,7 @@ export drawEntity :: (level:Level, ent:Entity) {
 		loveSetBlendMode(LoveBlendMode.ADD)
 		loveDrawCircleFill(explosion.x, explosion.y, radius, 32)
 		loveResetBlendMode()
-		drawLight(level, explosion.x,explosion.y, 4*radius, .8*a)
+		drawLight(level, explosion.x,explosion.y, 4*radius, 1,1,1,.8*a)
 	}
 
 	-- Collision box.
@@ -659,11 +662,11 @@ export drawEntity :: (level:Level, ent:Entity) {
 	}
 }
 
-local drawLight :: (level:Level, x,y:float, radius:float, opacity:float) {
-	drawLight(level, x,y, radius,radius, opacity)
+local drawLight :: (level:Level, x,y:float, radius:float, r,g,b,a:float) {
+	drawLight(level, x,y, radius,radius, r,g,b,a)
 }
-local drawLight :: (level:Level, x,y:float, radiusX,radiusY:float, opacity:float) {
-	local light:Light = {x=x, y=y, radiusX=radiusX, radiusY=radiusY, opacity=opacity} -- @Speed: Reuse tables.
+local drawLight :: (level:Level, x,y:float, radiusX,radiusY:float, r,g,b,a:float) {
+	local light:Light = {x=x, y=y, radiusX=radiusX, radiusY=radiusY, r=r,g=g,b=b,a=a} -- @Speed: Reuse tables.
 	insert(level.lightsToDraw, light)
 }
 
