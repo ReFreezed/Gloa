@@ -200,12 +200,26 @@ local foreignApiCompilerSymbols = {
 		end)(programArguments)
 	`),
 
-	-- @Incomplete: Make all type infos available to the user program somehow.
-	-- getTypeInfo = !(trimTemplate`
-	-- 	function(T)
-	-- 		return _TYPE_INFO[T]
-	-- 	end
-	-- `),
+	getAllTypes = !(trimTemplate`
+		function(T)
+			if not _TYPES[1000] then
+				return {unpack(_TYPES)}
+			end
+
+			local types = {unpack(_TYPES, 1, 1000)}
+			for i = 1001, #_TYPES do
+				types[i] = _TYPES[i]
+			end
+
+			return types
+		end
+	`),
+
+	getTypeInfo = !(trimTemplate`
+		function(T)
+			return _TYPE_INFO[T]
+		end
+	`),
 }
 
 local foreignApiCompilerSymbolsDuringCompilation = {}
@@ -1415,6 +1429,8 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 					writeEol(state, writer)
 
 				else
+					objType = adjustTypeToOne(state, objExpr, objType, true)
+
 					for i, decl in ipairs(forLoop.declarations) do
 						if i > 1 then  file:write(", ")  end
 						writeIdentifierName(state, writer, decl.name)
@@ -1694,9 +1710,8 @@ function _G.writeForeignImportIfNew(state, writer, typeInfo, foreignSource, fore
 	end
 end
 
-local function writeNormalSimpleConstant(state, writer, typeInfo, v, isEnum)
+local function writeNormalSimpleConstant(state, writer, tag, v, isEnum)
 	local file = writer.file
-	local tag  = typeInfo.tag
 
 	if tag == !(TYPE_BOOL) then
 		file:write(v and "true" or "false")
@@ -1757,6 +1772,8 @@ local function writeNormalSimpleConstant(state, writer, typeInfo, v, isEnum)
 	end
 end
 
+local TYPE_NAMES_UPPER = {}
+
 local function writeTypeInfo(state, writer, typeInfo)
 	local file = writer.file
 
@@ -1773,50 +1790,50 @@ local function writeTypeInfo(state, writer, typeInfo)
 	end
 	)
 
-	local tag          = typeInfo.tag
-	local typeInfoType = getTypeInfoForBuiltinType(state, "type")
-	local typeInfoBool = getTypeInfoForBuiltinType(state, "bool")
+	local tag = typeInfo.tag
 
-	-- Note: This table must be synced with the preload module!
+	-- Note: This table must be synced with preload and messager!
 	file:write("{tag=", tag)
 	if outputDebugInfo then
-		file:write("--[[TypeTag.", TYPE_NAMES[tag]:upper(), "]]")
+		TYPE_NAMES_UPPER[tag] = TYPE_NAMES_UPPER[tag] or TYPE_NAMES[tag]:upper()
+		file:write("--[[TypeTag.", TYPE_NAMES_UPPER[tag], "]]")
 	end
-	file:write(", id=", typeInfo.id)
+	file:write(",id=")
+	writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), typeInfo, false)
 
 	if tag == !(TYPE_ARRAY) then
 		local arraySig = typeInfo
 
-		file:write(", itemType=")
-		writeNormalSimpleConstant(state, writer, typeInfoType, arraySig.itemType, false)
+		file:write(",itemType=")
+		writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), arraySig.itemType, false)
 
 		!!(END_OF_TYPE_INFO"TypeInfoArray")
 
 	elseif tag == !(TYPE_VARARG) then
 		local varargSig = typeInfo
 
-		file:write(", itemType=")
-		writeNormalSimpleConstant(state, writer, typeInfoType, varargSig.itemType, false)
+		file:write(",itemType=")
+		writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), varargSig.itemType, false)
 
 		!!(END_OF_TYPE_INFO"TypeInfoVararg")
 
 	elseif tag == !(TYPE_FUNCTION) then
 		local funcSig = typeInfo
 
-		file:write(", argumentsIn={")
+		file:write(",argumentsIn={")
 		for i, typeInfo in ipairs(funcSig.argumentTypesIn) do
-			if i > 1 then  file:write(", ")  end
+			if i > 1 then  file:write(",")  end
 			file:write("{argumentType=")
-			writeNormalSimpleConstant(state, writer, typeInfoType, typeInfo, false)
+			writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), typeInfo, false)
 			file:write("}")
 		end
 		file:write("}")
 
-		file:write(", argumentsOut={")
+		file:write(",argumentsOut={")
 		for i, typeInfo in ipairs(funcSig.argumentTypesOut) do
-			if i > 1 then  file:write(", ")  end
+			if i > 1 then  file:write(",")  end
 			file:write("{argumentType=")
-			writeNormalSimpleConstant(state, writer, typeInfoType, typeInfo, false)
+			writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), typeInfo, false)
 			file:write("}")
 		end
 		file:write("}")
@@ -1824,16 +1841,16 @@ local function writeTypeInfo(state, writer, typeInfo)
 		!!(END_OF_TYPE_INFO"TypeInfoFunction")
 
 	elseif tag == !(TYPE_STRUCT) then
-		-- @Incomplete: Output struct kind and key/value types. (Remember to update preload.gloa)
+		-- @Incomplete: Output struct kind and key/value types. (Remember to update preload and messager.)
 		local structInfo = typeInfo
 
-		file:write(", members={")
+		file:write(",members={")
 		for i, member in ipairs(structInfo.members) do
-			if i > 1 then  file:write(", ")  end
+			if i > 1 then  file:write(",")  end
 			file:write("{name=")
 			writeStringLiteral(writer, member.name)
-			file:write(", memberType=")
-			writeNormalSimpleConstant(state, writer, typeInfoType, member.typeInfo, false)
+			file:write(",memberType=")
+			writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), member.typeInfo, false)
 			file:write("}")
 		end
 		file:write("}")
@@ -1843,12 +1860,12 @@ local function writeTypeInfo(state, writer, typeInfo)
 	elseif tag == !(TYPE_ENUM) then
 		local enumInfo = typeInfo
 
-		file:write(", memberType=")
-		writeNormalSimpleConstant(state, writer, typeInfoType, enumInfo.memberTypeInfo, false)
+		file:write(",memberType=")
+		writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), enumInfo.memberTypeInfo, false)
 
-		file:write(", members={")
+		file:write(",members={")
 		for i, member in ipairs(enumInfo.members) do
-			if i > 1 then  file:write(", ")  end
+			if i > 1 then  file:write(",")  end
 			file:write("{name=")
 			writeStringLiteral(writer, member.name)
 			file:write("}")
@@ -1860,16 +1877,16 @@ local function writeTypeInfo(state, writer, typeInfo)
 	elseif tag == !(TYPE_COMPOUND) then
 		local compound = typeInfo
 
-		file:write(", types={")
+		file:write(",types={")
 		for i, compoundItem in ipairs(compound) do
-			if i > 1 then  file:write(", ")  end
-			writeNormalSimpleConstant(state, writer, typeInfoType, compoundItem, false)
+			if i > 1 then  file:write(",")  end
+			writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), compoundItem, false)
 		end
 		file:write("}")
 
 		!!(END_OF_TYPE_INFO"TypeInfoCompound")
 
-	elseif !!(CONST_SET{
+	elseif !!(CONST_SET{ -- :SimplePublicTypeInfo
 		TYPE_ANY,
 		TYPE_BOOL,
 		TYPE_FLOAT,
@@ -1878,7 +1895,8 @@ local function writeTypeInfo(state, writer, typeInfo)
 		TYPE_PLACEHOLDER,
 		TYPE_STRING,
 		TYPE_TABLE,
-		TYPE_TYPE
+		TYPE_TYPE,
+		TYPE_VOID,
 	})[tag] then
 		-- void  No more information.
 		!!(END_OF_TYPE_INFO"TypeInfo")
@@ -1897,7 +1915,9 @@ function _G.writeConstantValue(state, writer, const, nodeForError)
 		writeForeignReference(state, writer, foreign.sourceId, nodeForError)
 
 	elseif const.kind == !(CONST_KIND_TYPE_INFO) then
-		writeTypeInfo(state, writer, const.value)
+		local typeInfo = const.value
+		file:write("_TYPE_INFO[", typeInfo.id, "]")
+		-- writeTypeInfo(state, writer, const.value)
 
 	elseif const.kind == !(CONST_KIND_LOCATION) then
 		local target = const.value
@@ -1924,7 +1944,7 @@ function _G.writeConstantValue(state, writer, const, nodeForError)
 
 	elseif not const.isObject then
 		if tag ~= !(TYPE_ENUM) then
-			writeNormalSimpleConstant(state, writer, const.valueType, const.value, false)
+			writeNormalSimpleConstant(state, writer, tag, const.value, false)
 			return
 		end
 
@@ -1936,11 +1956,11 @@ function _G.writeConstantValue(state, writer, const, nodeForError)
 		if enumInfo.memberTypeInfo.tag == !(TYPE_TYPE) then
 			local typeNode = valueExpr
 			!ASSERT("typeNode.nodeType == "..nodeTypes.AstType)
-			writeNormalSimpleConstant(state, writer, enumInfo.memberTypeInfo, typeNode.representedType, true)
+			writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), typeNode.representedType, true)
 		else
 			local literal = valueExpr
 			!ASSERT("literal.nodeType == "..nodeTypes.AstLiteral)
-			writeNormalSimpleConstant(state, writer, enumInfo.memberTypeInfo, literal.value, true)
+			writeNormalSimpleConstant(state, writer, enumInfo.memberTypeInfo.tag, literal.value, true)
 		end
 
 		if outputDebugInfo then
@@ -2020,10 +2040,62 @@ function _G.writeCompilerSymbols(state, writer)
 		file:write("local programArguments  = {...}") ; writeEol(state, writer) -- Should we use 'arg' here? It has additional stuff in index 0 and below. metaprogramArguments needs to be updated too.
 		file:write!("local gloaErrorHandler = "..ERROR_HANDLER) ; writeEol(state, writer)
 
+		-- @Incomplete: Option for excluding type information from the program as it takes up a lot of space.
+		-- @Polish: Also maybe don't write this if no type info is accessed in the written program?
+
+		local first = true
+
+		file:write("local _TYPES = {")
+		for _, typeInfo in ipairs(state.allTypeInfos) do
+			if isTypePublic(typeInfo) then
+				if not typeInfo.isReady then
+					errorInternal("Type info is not ready for '%s'.", getFriendlyTypeInfoName(typeInfo))
+				end
+
+				if not first then  file:write(",")  end
+				first = false
+
+				file:write(typeInfo.id)
+			end
+		end
+		file:write("}") ; writeEol(state, writer)
+
+		local first       = true
+		local sequenceGap = 0
+
+		-- @Incomplete: Option for excluding this. @Polish: Also maybe don't write this if no type info is accessed in the written program?
+		file:write("local _ = nil") ; writeEol(state, writer)
+		file:write("local _TYPE_INFO = {")
+		for typeId, typeInfo in ipairs(state.allTypeInfos) do
+			if isTypePublic(typeInfo) then
+				if not first then  file:write(",")  end
+				first = false
+
+				-- Note: Type index and type ID are the same.
+				if sequenceGap == 0 then
+					-- void
+				elseif sequenceGap < 30 then
+					file:write(("nil,"):rep(sequenceGap))
+					sequenceGap = 0
+				else
+					file:write("[", typeId, "]=")
+				end
+
+				writeTypeInfo(state, writer, typeInfo)
+
+			else
+				sequenceGap = sequenceGap+1
+			end
+		end
+		file:write("}") ; writeEol(state, writer)
+
 	else
 		-- Note: lineMappings is not used in metaprograms because gloaErrorHandler() is different.
-		file:write("local programArguments  = metaprogramArguments") ; writeEol(state, writer)
-		file:write("local gloaErrorHandler  = compilerErrorHandler") ; writeEol(state, writer)
+		file:write("local programArguments = metaprogramArguments") ; writeEol(state, writer)
+		file:write("local gloaErrorHandler = compilerErrorHandler") ; writeEol(state, writer)
+
+		file:write("local _TYPES     = metaprogramTypeIds")   ; writeEol(state, writer)
+		file:write("local _TYPE_INFO = metaprogramTypeTable") ; writeEol(state, writer)
 	end
 
 	-- @Polish: Only output symbols actually used in the program.

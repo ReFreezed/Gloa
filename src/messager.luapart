@@ -2,7 +2,7 @@
 --=
 --=  Messager
 --=
---=  Structs here are reflected in modules/compiler.gloa
+--=  Structs here are reflected in modules/compiler.gloa and modules/preload.gloa
 --=  Relevant enums are in messagerEnums.luapart
 --=
 --=-------------------------------------------------------------
@@ -45,6 +45,130 @@ function _G.newMessage(messageKind)
 	local message = Message()
 	message.kind  = messageKind
 	return message
+end
+
+--
+-- Public-facing type info
+--
+
+function _G.getPublicType(state, typeInfo)
+	local publicType = state.publicTypeInfoById[typeInfo.id]
+	if publicType then  return publicType  end
+
+	!ASSERT `typeInfo.isReady`
+	!ASSERT `isTypePublic(typeInfo)`
+
+	local tag = typeInfo.tag
+
+	-- Note: These tables must be synced with preload and programWriter!
+
+	if tag == !(TYPE_ARRAY) then
+		local arraySig = typeInfo
+
+		publicType = {
+			tag      = tag,
+			id       = arraySig.id,
+			itemType = arraySig.itemType.id,
+		}
+		state.publicTypeInfoById[typeInfo.id] = publicType
+
+	elseif tag == !(TYPE_VARARG) then
+		local varargSig = typeInfo
+
+		publicType = {
+			tag      = tag,
+			id       = varargSig.id,
+			itemType = varargSig.itemType.id,
+		}
+		state.publicTypeInfoById[typeInfo.id] = publicType
+
+	elseif tag == !(TYPE_FUNCTION) then
+		local funcSig = typeInfo
+
+		publicType = {
+			tag          = tag,
+			id           = funcSig.id,
+			argumentsIn  = {},
+			argumentsOut = {},
+		}
+		state.publicTypeInfoById[typeInfo.id] = publicType
+
+		for i, argType in ipairs(funcSig.argumentTypesIn) do
+			publicType.argumentsIn[i] = {argumentType=argType.id}
+		end
+		for i, argType in ipairs(funcSig.argumentTypesOut) do
+			publicType.argumentsOut[i] = {argumentType=argType.id}
+		end
+
+	elseif tag == !(TYPE_STRUCT) then
+		-- @Incomplete: Add struct kind and key/value types. (Remember to update preload.)
+		local structInfo = typeInfo
+
+		publicType = {
+			tag     = tag,
+			id      = structInfo.id,
+			members = {},
+		}
+		state.publicTypeInfoById[typeInfo.id] = publicType
+
+		for i, member in ipairs(structInfo.members) do
+			publicType.members[i] = {name=member.name, memberType=member.typeInfo.id}
+		end
+
+	elseif tag == !(TYPE_ENUM) then
+		local enumInfo = typeInfo
+
+		publicType = {
+			tag        = tag,
+			id         = enumInfo.id,
+			memberType = enumInfo.memberTypeInfo.id,
+			members    = {},
+		}
+		state.publicTypeInfoById[typeInfo.id] = publicType
+
+		for i, member in ipairs(enumInfo.members) do
+			publicType.members[i] = {name=member.name}
+		end
+
+	elseif tag == !(TYPE_COMPOUND) then
+		local compound = typeInfo
+
+		publicType = {
+			tag   = tag,
+			id    = compound.id,
+			types = {},
+		}
+		state.publicTypeInfoById[typeInfo.id] = publicType
+
+		for i, compoundItem in ipairs(compound) do
+			publicType.types[i] = compoundItem.id
+		end
+
+	elseif !!(CONST_SET{ -- :SimplePublicTypeInfo
+		TYPE_ANY,
+		TYPE_BOOL,
+		TYPE_FLOAT,
+		TYPE_INT,
+		TYPE_NONE,
+		TYPE_PLACEHOLDER,
+		TYPE_STRING,
+		TYPE_TABLE,
+		TYPE_TYPE,
+		TYPE_VOID,
+	})[tag] then
+		publicType = {
+			tag      = tag,
+			id       = typeInfo.id,
+			-- No extra type-specific information.
+		}
+		state.publicTypeInfoById[typeInfo.id] = publicType
+
+	else
+		errorInternal("Incomplete: Generate PublicTypeInfo for type group '%s'.", TYPE_TAG_NAMES[tag])
+	end
+
+	table.insert(state.publicTypeInfoIds, typeInfo.id)
+	return publicType
 end
 
 --
