@@ -1,0 +1,92 @@
+--[[============================================================
+--=
+--=  Glóa advanced printing module
+--=
+--==============================================================
+
+	print
+	printf
+	printNice
+
+--============================================================]]
+
+!import "string"
+local basic :: !import "basic"
+
+export print     :: basic.print
+export printf    :: basic.printf
+export printNice :: (v:$T) { _printNice(v, T, 0) }
+
+local _printNice :: (v:any, T:type, indent:int) {
+	-- @Incomplete: Recursive printing for table-likes.
+	-- @Polish: Better member printing.
+	using basic
+
+	local write :: (...:int|float|string|type) !foreign lua "io.write"
+
+	local typeInfo  = getTypeInfo(T)
+	local indentStr = ""--"\t" * indent
+
+	using TypeTag
+
+	if typeInfo.tag == {
+		case INT:
+			printf("%.0f", cast(int) v)
+
+		case FLOAT:
+			local nStr = toString(v)
+			write(nStr)
+			if not find(nStr, ".")  write(".0")
+			write("\n")
+
+		case ENUM:
+			local enumInfo = cast(TypeInfoEnum) typeInfo
+			_printNice(v, enumInfo.memberType, indent)
+
+		case STRING:
+			write(indentStr, '"', cast(string) v, '"\n')
+
+		case TABLE:
+			write(indentStr, toString(v), " {\n")
+			for cast(table) v {
+				write(indentStr, "\t", toString(itIndex), " = ", toString(it), "\n")
+			}
+			write(indentStr, "}\n")
+
+		case ARRAY:
+			write(indentStr, toString(v), " {\n")
+			for cast([]any) v {
+				write(indentStr, "\t", toString(itIndex), " = ", toString(it), "\n")
+			}
+			write(indentStr, "}\n")
+
+		case STRUCT:
+			-- @Incomplete: Handle structInfo.kind. (@Compiler: Implement structInfo.kind)
+			local structInfo = cast(TypeInfoStruct) typeInfo
+			local obj        = cast(table) v
+
+			write(indentStr, toString(v), " {\n")
+			for member: structInfo.members {
+				local name = member.name
+				write(indentStr, "\t", name, " = ", toString(obj[name]), "\n")
+			}
+			write(indentStr, "}\n")
+
+		case TYPE:
+			-- @Incomplete: Print the type info struct instead of just the ID.
+			printf("type: %.0f", cast(int) v)
+
+		case ANY:
+			if getLuaType(v) == {
+				case LuaType.BOOLEAN: _printNice(v, bool,   indent)
+				case LuaType.NIL:     _printNice(v, none,   indent)
+				case LuaType.NUMBER:  _printNice(v, float,  indent)
+				case LuaType.STRING:  _printNice(v, string, indent)
+				case LuaType.TABLE:   _printNice(v, table,  indent)
+				case:                 print(v)
+			}
+
+		case:
+			print(v)
+	}
+}

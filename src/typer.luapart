@@ -131,18 +131,14 @@ local !structTypeInfo"TypeInfoList:_TypeInfo"{ -- Special type used for returns 
 
 
 
--- typeInfo = newTypeInfo( compilationState, TypeInfoCreator, isReady )
-function _G.newTypeInfo(state, TypeInfoCreator, isReady)
+-- typeInfo = newTypeInfo( compilationState, TypeInfoCreator )
+function _G.newTypeInfo(state, TypeInfoCreator)
 	!ifDEBUG `if not TypeInfoCreator then  errorInternal(2, "No TypeInfoCreator specified.")  end`
 
 	state.lastTypeId = state.lastTypeId+1
 
 	local typeInfo   = TypeInfoCreator()
 	typeInfo.id      = state.lastTypeId
-
-	if isReady then
-		markTypeAsReady(state, typeInfo)
-	end
 
 	--[[
 	if typeInfo.id == 22 then
@@ -155,7 +151,6 @@ end
 
 function _G.markTypeAsReady(state, typeInfo)
 	typeInfo.isReady = true
-
 	if state.runnerWriter and isTypePublic(typeInfo) then
 		getPublicType(state, typeInfo)
 	end
@@ -182,10 +177,11 @@ do
 
 		if not typeInfo then
 			local TypeInfoCreator      = BUILTIN_TYPE_STRUCTS[typeName] or errorInternal(tostring(typeName))
-			typeInfo                   = newTypeInfo(state, TypeInfoCreator, true)
+			typeInfo                   = newTypeInfo(state, TypeInfoCreator)
 			builtinTypeInfos[typeName] = typeInfo
 
 			table.insert(state.allTypeInfos, typeInfo)
+			markTypeAsReady(state, typeInfo)
 		end
 
 		return typeInfo
@@ -255,7 +251,7 @@ function _G.getTypeInfoForLambda(state, lambda)
 		end
 	end
 
-	local funcSig         = newTypeInfo(state, TypeInfoFunction, true)
+	local funcSig         = newTypeInfo(state, TypeInfoFunction)
 	funcSig.isPolymorphic = lambda.isPolymorphic
 
 	local placeholderType       = lambda.isPolymorphic and getTypeInfoForBuiltinType(state, "placeholder"  ) or nil
@@ -279,6 +275,7 @@ function _G.getTypeInfoForLambda(state, lambda)
 	end
 
 	table.insert(state.allTypeInfos, funcSig)
+	markTypeAsReady(state, funcSig)
 	return funcSig
 end
 
@@ -290,10 +287,11 @@ do
 			end
 		end
 
-		local typeInfo = newTypeInfo(state, schematicForTypeInfo, true)
+		local typeInfo = newTypeInfo(state, schematicForTypeInfo)
 		copyToArray(typeInfos, typeInfo)
-		table.insert(state.allTypeInfos, typeInfo)
 
+		table.insert(state.allTypeInfos, typeInfo)
+		markTypeAsReady(state, typeInfo)
 		return typeInfo
 	end
 
@@ -319,10 +317,11 @@ do
 			end
 		end
 
-		local typeInfo    = newTypeInfo(state, schematicForTypeInfo, true)
-		typeInfo.itemType = itemType
-		table.insert(state.allTypeInfos, typeInfo)
+		local typeInfo    = newTypeInfo(state, schematicForTypeInfo)
+		typeInfo.itemType = itemType or errorInternal()
 
+		table.insert(state.allTypeInfos, typeInfo)
+		markTypeAsReady(state, typeInfo)
 		return typeInfo
 	end
 
@@ -344,10 +343,11 @@ function _G.getTypeInfoForNamespace(state, scope)
 		end
 	end
 
-	local namespaceInfo = newTypeInfo(state, TypeInfoNamespace, true)
+	local namespaceInfo = newTypeInfo(state, TypeInfoNamespace)
 	namespaceInfo.scope = scope
-	table.insert(state.allTypeInfos, namespaceInfo)
 
+	table.insert(state.allTypeInfos, namespaceInfo)
+	markTypeAsReady(state, namespaceInfo)
 	return namespaceInfo
 end
 
@@ -3980,9 +3980,18 @@ end
 		)
 	`
 
+	cast.inferredType = castType
+
 	if castType == exprType then
-		moveToPipe(state, cast, cast.expression.queued.pipe) -- @Cleanup: Maybe cutOutPartOfNodeTree()/replaceQueuedNode() should do this (or maybe we just keep the wrong queued in cutOutPartOfNodeTree()).
-		cutOutPartOfNodeTree(state, cast, cast.expression)
+		if cast.targetType and !!(CONST_SET{ nodeTypes.AstStruct, nodeTypes.AstEnum })[cast.targetType.nodeType] then
+			-- @Robustness: We cannot unqueue struct and enum nodes as that
+			-- would mess up the types themselves! Can we maybe move these
+			-- nodes somewhere safe?
+			moveToNextRelevantPipe(state, cast)
+		else
+			moveToPipe(state, cast, cast.expression.queued.pipe) -- @Cleanup: Maybe cutOutPartOfNodeTree()/replaceQueuedNode() should do this (or maybe we just keep the wrong queued in cutOutPartOfNodeTree()).
+			cutOutPartOfNodeTree(state, cast, cast.expression)
+		end
 		return
 
 	elseif isTypeCompatibleWith(exprType, castType) or exprTypeTag == !(TYPE_ANY) then
@@ -4023,8 +4032,6 @@ end
 	else
 		!!(INVALID_CAST)
 	end
-
-	cast.inferredType = castType
 
 	moveToNextRelevantPipe(state, cast)
 	simplifyExpressionIfConstant(state, cast)
@@ -4512,6 +4519,8 @@ end
 	if not typeInfo then
 		!DEPEND_AND_RETURN(`switch`, DEPEND_NODE_INFERRED, `switch.value`)
 	end
+	typeInfo = adjustTypeToOne(state, switch.value, typeInfo, true)
+
 	for i, case in ipairs(switch.cases) do
 		if case.body and case.body.queued.pipe <= !(PIPE_INFER) then
 			!DEPEND_AND_RETURN(`switch`, DEPEND_NODE_INFERRED, `case.body`)
@@ -4963,13 +4972,14 @@ end
 
 !NODE_INFERRER `function nodeInferrers.AstStruct(state, struct)`
 	if struct.isPolymorphic then
-		local structInfo         = newTypeInfo(state, TypeInfoStruct, true)
+		local structInfo         = newTypeInfo(state, TypeInfoStruct)
 		structInfo.astNode       = struct
 		-- structInfo.kind          = ?
 		structInfo.isPolymorphic = true
 		structInfo.hasMembers    = true -- Probably doesn't matter.
 
 		table.insert(state.allTypeInfos, structInfo)
+		markTypeAsReady(state, structInfo)
 
 		struct.representedType = structInfo
 		struct.inferredType    = getTypeInfoForBuiltinType(state, "type")
@@ -4982,7 +4992,7 @@ end
 	local structInfo = struct.representedType
 
 	if not structInfo then
-		structInfo         = newTypeInfo(state, TypeInfoStruct, false)
+		structInfo         = newTypeInfo(state, TypeInfoStruct)
 		structInfo.astNode = struct
 
 		if struct.valueType then
@@ -5198,7 +5208,7 @@ end
 		end
 	end
 
-	local enumInfo          = newTypeInfo(state, TypeInfoEnum, true)
+	local enumInfo          = newTypeInfo(state, TypeInfoEnum)
 	enumInfo.astNode        = enum
 	enumInfo.memberTypeInfo = enumMemberInfo or errorInternal()
 
@@ -5228,6 +5238,7 @@ end
 	end
 
 	table.insert(state.allTypeInfos, enumInfo)
+	markTypeAsReady(state, enumInfo)
 
 	enum.representedType = enumInfo
 	enum.inferredType    = getTypeInfoForBuiltinType(state, "type")
