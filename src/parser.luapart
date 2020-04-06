@@ -75,44 +75,36 @@ local function DO_OR_RETURN_FALSE(exprCode)  doOrReturn(exprCode, "false")  end
 
 
 !(
-local nodeTypeN              = 0
-_G.nodeTypes                 = {}
-_G.nodeTypeNames             = {}
+local astTypeToStructName    = {}
+_G.astStructNameToType       = {}
 _G.scopeNodeTypes            = {}
 _G.scopeNodeTypesDeclarative = {}
 _G.scopeNodeTypesImperative  = {}
 
-local function structAst(nameAndParent)
-	return function(fields)
-		local name        = nameAndParent:match"^[%w_]+"
+local function structAst(nameAndParent) return function(fields)
+	local name        = nameAndParent:match"^[%w_]+"
+	local scopeType   = fields._scopeType
+	fields._scopeType = nil
 
-		local scopeType   = fields._scopeType
-		fields._scopeType = nil
+	if not name:find"^_" then
+		local nodeTypeField           = itemWith1(fields._overrides, 1, `nodeType`) or error(name)
+		local nodeType                = nodeTypeField[2] or error(name)
+		astTypeToStructName[nodeType] = name
+		astStructNameToType[name]     = nodeType
 
-		if not name:find"^_" then
-			local overrides          = fields._overrides or {}
-			fields._overrides        = overrides
+		if scopeType then
+			local scopesOfType
+				=  scopeType == "declarative" and scopeNodeTypesDeclarative
+				or scopeType == "imperative"  and scopeNodeTypesImperative
+				or error(scopeType)
 
-			nodeTypeN                = nodeTypeN+1
-			table.insert(overrides, {`nodeType`, nodeTypeN})
-
-			nodeTypes[name]          = nodeTypeN
-			nodeTypeNames[nodeTypeN] = name
-
-			if scopeType then
-				local scopesOfType
-					=  scopeType == "declarative" and scopeNodeTypesDeclarative
-					or scopeType == "imperative"  and scopeNodeTypesImperative
-					or error(scopeType)
-
-				table.insert(scopeNodeTypes, nodeTypeN)
-				table.insert(scopesOfType,   nodeTypeN)
-			end
+			table.insert(scopeNodeTypes, nodeType)
+			table.insert(scopesOfType,   nodeType)
 		end
-
-		struct(nameAndParent)(fields)
 	end
-end
+
+	struct(nameAndParent)(fields)
+end end
 )
 
 !struct"_AstNode"{
@@ -131,25 +123,28 @@ end
 	{`inferredType`, nil}, -- TypeInfo
 }
 _G.!structAst"AstIdentifier:_AstExpression"{
+	_overrides = {{`nodeType`,AST_IDENTIFIER}},
 	{`name`,        ""},
 	-- Type phase:
 	{`declaration`, nil, astRef="node"}, -- AstDeclaration
 	{`fromUsing`,   nil, astRef="node"}, -- AstUsing
 }
 _G.!structAst"AstVararg:AstIdentifier"{
-	_overrides = {{`name`,"..."}},
+	_overrides = {{`nodeType`,AST_VARARG}, {`name`,"..."}},
 	{`surroundedByParentheses`, false},
 }
 _G.!structAst"AstBlank:AstIdentifier"{
-	_overrides = {{`name`,"_"}},
+	_overrides = {{`nodeType`,AST_BLANK}, {`name`,"_"}},
 }
 _G.!structAst"AstLiteral:_AstExpression"{
+	_overrides = {{`nodeType`,AST_LITERAL}},
 	{`literalType`,   0},
 	{`value`,         nil}, -- The value depends on what literalType is. Could be a number, string or whatever.
 	-- Emit phase:
 	{`valueConstant`, nil}, -- Constant
 }
 _G.!structAst"AstType:_AstExpression"{
+	_overrides = {{`nodeType`,AST_TYPE}},
 	{`functionHeader`,  nil, ast="node"},    -- AstLambda without a body. This is used to create the actual function type.
 	{`arrayItemType`,   nil, ast="node"},    -- AstType
 	{`arguments`,       nil, ast="array"},   -- []AstExpression  (Is set for parameterized structs.)
@@ -161,15 +156,18 @@ _G.!structAst"AstType:_AstExpression"{
 	{`declaration`,     nil, astRef="node"}, -- AstDeclaration
 }
 _G.!structAst"AstUnary:_AstExpression"{
+	_overrides = {{`nodeType`,AST_UNARY}},
 	{`expression`, nil, ast="node"}, -- AstExpression
 	{`operation`,  ""},              -- "-" or "not" etc.
 }
 _G.!structAst"AstBinary:_AstExpression"{
+	_overrides = {{`nodeType`,AST_BINARY}},
 	{`left`,      nil, ast="node"}, -- AstExpression
 	{`right`,     nil, ast="node"}, -- AstExpression
 	{`operation`, ""},  -- "+" or "-" etc.
 }
 _G.!structAst"AstAccess:_AstExpression"{
+	_overrides = {{`nodeType`,AST_ACCESS}},
 	{`object`,          nil, ast="node"}, -- AstExpression
 	{`member`,          nil, ast="node"}, -- AstExpression
 	-- Type phase:
@@ -181,11 +179,13 @@ _G.!struct"TableField"{
 	{`keyIsGenerated`, false},
 }
 _G.!structAst"AstTable:_AstExpression"{
+	_overrides = {{`nodeType`,AST_TABLE}},
 	{`fields`,                {},  ast="fields"}, -- []TableField
 	{`trailingExpression`,    nil, ast="node"},   -- AstVararg|AstCall  This expression potentially expands to multiple values in any resulting Lua table.
 	{`highestGeneratedIndex`, 0},
 }
 _G.!structAst"AstCall:_AstExpression"{
+	_overrides = {{`nodeType`,AST_CALL}},
 	{`callee`,                  nil, ast="node"},  -- AstExpression
 	{`arguments`,               {},  ast="array"}, -- []AstExpression
 	{`isMethod`,                false},
@@ -196,14 +196,17 @@ _G.!structAst"AstCall:_AstExpression"{
 	{`locationConstant`,        nil},   -- Constant  Optimization: Instead of generating this for every call we only do it if the callee may require it.
 }
 _G.!structAst"AstTypeOf:_AstExpression"{
+	_overrides = {{`nodeType`,AST_TYPE_OF}},
 	{`expression`, nil, ast="node"}, -- AstExpression
 	-- Type phase:
 	{`representedType`, nil}, -- TypeInfo
 }
 _G.!structAst"AstVariantOf:_AstExpression"{
+	_overrides = {{`nodeType`,AST_VARIANT_OF}},
 	{`call`, nil, ast="node"}, -- AstCall  This may end up being AstType which is a type error.
 }
 _G.!structAst"AstTypeInfo:_AstExpression"{
+	_overrides = {{`nodeType`,AST_TYPE_INFO}},
 	{`expression`,    nil, ast="node"}, -- AstExpression
 	-- Type phase:
 	{`valueTypeInfo`, nil}, -- TypeInfo
@@ -211,6 +214,7 @@ _G.!structAst"AstTypeInfo:_AstExpression"{
 	{`valueConstant`, nil}, -- Constant
 }
 _G.!structAst"AstLocation:_AstExpression"{
+	_overrides = {{`nodeType`,AST_LOCATION}},
 	{`expression`,    nil, ast="node"}, -- AstExpression  If this is empty then the target is the location node itself.
 	{`ofCaller`,      false},           -- Used as default values for function arguments.
 	-- Type phase:
@@ -219,11 +223,13 @@ _G.!structAst"AstLocation:_AstExpression"{
 	{`valueConstant`, nil}, -- Constant
 }
 _G.!structAst"AstCast:_AstExpression"{
+	_overrides = {{`nodeType`,AST_CAST}},
 	{`targetType`, nil, ast="node"}, -- AstType
 	{`expression`, nil, ast="node"}, -- AstExpression
 	{`isImplicit`, false},           -- Implicit casts include e.g. 'if "foo" {...}'
 }
 _G.!structAst"AstImport:_AstExpression"{
+	_overrides = {{`nodeType`,AST_IMPORT}},
 	{`isLoad`,     false},
 	{`importName`, ""},
 	{`exported`,   false},
@@ -231,6 +237,7 @@ _G.!structAst"AstImport:_AstExpression"{
 	{`fileScope`,  nil, astRef="node"}, -- AstFileScope
 }
 _G.!structAst"AstForeign:_AstExpression"{
+	_overrides = {{`nodeType`,AST_FOREIGN}},
 	{`source`,        ""},           -- "compiler"|"lua"|"method"
 	{`sourceName`,    nil, ast=nil}, -- AstLiteral (string)  Never inferred. The name may be inferred from a declaration.
 	-- Type phase:
@@ -239,20 +246,26 @@ _G.!structAst"AstForeign:_AstExpression"{
 	{`valueConstant`, nil}, -- Constant
 }
 _G.!structAst"AstConditional:_AstExpression"{
+	_overrides = {{`nodeType`,AST_CONDITIONAL}},
 	{`condition`,              nil, ast="node"},    -- AstExpression
 	{`branchTrue`,             nil, ast="node"},    -- AstExpression  (If this is nil then condition (or rather conditionAndBranchTrue) is used for this branch.)
 	{`branchFalse`,            nil, ast="node"},    -- AstExpression
 	{`conditionAndBranchTrue`, nil, astRef="node"}, -- AstExpression
 }
 _G.!structAst"AstBake:_AstExpression"{
+	_overrides = {{`nodeType`,AST_BAKE}},
 	{`name`, nil, ast="node"}, -- AstIdentifier
 }
 _G.!structAst"AstRun:_AstExpression"{
+	_overrides = {{`nodeType`,AST_RUN}},
 	{`lambda`, nil, ast="node"}, -- AstLambda
 }
-_G.!structAst"AstNull:_AstExpression"{}
+_G.!structAst"AstNull:_AstExpression"{
+	_overrides = {{`nodeType`,AST_NULL}},
+}
 
 _G.!structAst"AstUsing:_AstNode"{
+	_overrides = {{`nodeType`,AST_USING}},
 	{`expression`,          nil, ast="node"},    -- AstExpression
 	-- Type phase:
 	{`scope`,               nil, astRef="node"}, -- AstScope
@@ -260,11 +273,13 @@ _G.!structAst"AstUsing:_AstNode"{
 }
 
 _G.!structAst"AstDebug:_AstNode"{
+	_overrides = {{`nodeType`,AST_DEBUG}},
 	{`expression`, nil, ast="node"}, -- AstExpression
 	{`action`,     ""},              -- "assert"|"print"
 }
 
 _G.!structAst"AstArgument:_AstNode"{
+	_overrides = {{`nodeType`,AST_ARGUMENT}},
 	{`declaration`, nil, ast="node"}, -- AstDeclaration
 	{`assignment`,  nil, ast="node"}, -- AstAssignment
 	{`group`,       1}, -- Arguments in the same group have the same type. This is a small optimization for the typer.
@@ -276,10 +291,12 @@ _G.!structAst"AstArgument:_AstNode"{
 	{`isRequired`,  false},
 }
 _G.!structAst"AstArguments:_AstNode"{
+	_overrides = {{`nodeType`,AST_ARGUMENTS}},
 	{`arguments`, {}, ast="array"}, -- []AstArgument
 }
 
 _G.!structAst"AstDeclaration:_AstNode"{
+	_overrides = {{`nodeType`,AST_DECLARATION}},
 	{`type`,                 nil, ast="node"},  -- AstType  If this is nil then the type is inferred from the value.
 	{`value`,                nil, ast="node"},  -- AstExpression  Either this or assignment should be set, or neither for getting the default value for the type.
 	{`name`,                 nil, ast="node"},  -- AstIdentifier|AstVararg|AstBlank
@@ -306,6 +323,7 @@ _G.!structAst"AstDeclaration:_AstNode"{
 }
 
 _G.!structAst"AstAssignment:_AstNode"{
+	_overrides = {{`nodeType`,AST_ASSIGNMENT}},
 	{`targets`,         {},  ast="array"},    -- []AstExpression
 	{`values`,          {},  ast="array"},    -- []AstExpression
 
@@ -317,19 +335,23 @@ _G.!structAst"AstAssignment:_AstNode"{
 
 !structAst"_AstJump:_AstNode"{}
 _G.!structAst"AstReturn:_AstJump"{
+	_overrides = {{`nodeType`,AST_RETURN}},
 	{`values`,       {},  ast="array"},   -- []AstExpression
 	{`runDirective`, nil, astRef="node"}, -- AstRun
 }
 _G.!structAst"AstBreak:_AstJump"{
+	_overrides = {{`nodeType`,AST_BREAK}},
 	{`loopName`, nil, ast=nil      }, -- AstIdentifier  (Never inferred.)
 	{`loop`,     nil, astRef="node"}, -- AstFor|AstWhile
 }
 _G.!structAst"AstContinue:_AstJump"{
+	_overrides = {{`nodeType`,AST_CONTINUE}},
 	{`loopName`, nil, ast=nil      }, -- AstIdentifier  (Never inferred.)
 	{`loop`,     nil, astRef="node"}, -- AstFor|AstWhile
 }
 
 _G.!structAst"AstDefer:_AstNode"{
+	_overrides = {{`nodeType`,AST_DEFER}},
 	{`body`, nil, ast="node"}, -- AstBlock
 }
 
@@ -343,9 +365,11 @@ _G.!structAst"AstDefer:_AstNode"{
 	{`declarationsInTree`, {}, doNotCopy=true}, -- Includes all child scopes. Does not include shadows.
 }
 _G.!structAst"AstBlock:_AstScope"{
+	_overrides = {{`nodeType`,AST_BLOCK}},
 	_scopeType = "imperative",
 }
 _G.!structAst"AstFileScope:_AstScope"{
+	_overrides = {{`nodeType`,AST_FILE_SCOPE}},
 	_scopeType = "declarative",
 	{`valueToExport`, nil, ast="node"}, -- Used when outputting a Lua module.
 	{`path`,          ""},
@@ -353,11 +377,13 @@ _G.!structAst"AstFileScope:_AstScope"{
 	{`moduleName`,    ""},
 }
 _G.!structAst"AstGlobalScope:_AstScope"{
+	_overrides = {{`nodeType`,AST_GLOBAL_SCOPE}},
 	_scopeType = "declarative",
 	{`fileScopes`,                 {},  astRef="array"}, -- []AstFileScope
 	{`fileScopeWithValueToExport`, nil, astRef="node"},  -- See AstFileScope.valueToExport
 }
 _G.!structAst"AstFor:_AstScope"{
+	_overrides = {{`nodeType`,AST_FOR}},
 	_scopeType = "imperative",
 	{`expressions`,    {},  ast="array"},   -- []AstExpression  @Cleanup: Move these into AstFor.statementsDynamic?
 	{`names`,          {},  ast=nil    },   -- []AstIdentifier  These are never inferred, but instead copied to declarations. @Cleanup: Can we get rid of this in favor of the copy we currently make?
@@ -372,6 +398,7 @@ _G.!structAst"AstFor:_AstScope"{
 	{`representedType`, nil}, -- TypeInfoStruct|TypeInfoEnum  (Used for AstEnum and AstStruct. Is nil otherwise.)
 }
 _G.!structAst"AstStruct:_AstScopeExpression"{
+	_overrides = {{`nodeType`,AST_STRUCT}},
 	_scopeType = "declarative",
 
 	{`inherits`,              {},  astRef="array"}, -- []AstExpression
@@ -388,11 +415,13 @@ _G.!structAst"AstStruct:_AstScopeExpression"{
 	{`foreignThroughNode`,    nil, astRef="node"},  -- AstNode
 }
 _G.!structAst"AstEnum:_AstScopeExpression"{
+	_overrides = {{`nodeType`,AST_ENUM}},
 	_scopeType = "declarative",
 	{`memberType`, nil, ast="node"}, -- AstType
 	{`autoValue`,  0},
 }
 _G.!structAst"AstLambda:_AstScopeExpression"{
+	_overrides = {{`nodeType`,AST_LAMBDA}},
 	_scopeType = "imperative",
 
 	{`captures`,          {},  ast="array"},    -- []AstIdentifier
@@ -424,16 +453,21 @@ _G.!structAst"AstLambda:_AstScopeExpression"{
 	{`valueConstant`,     nil}, -- Constant
 }
 _G.!structAst"AstNamespace:_AstScopeExpression"{
-	_scopeType = "declarative",
+	_overrides = {{`nodeType`,AST_NAMESPACE}},
+	_scopeType="declarative",
 }
 
 _G.!structAst"AstIf:_AstNode"{
+	_overrides = {{`nodeType`,AST_IF}},
 	{`condition`,   nil, ast="node"}, -- AstExpression
 	{`branchTrue`,  nil, ast="node"}, -- AstBlock
 	{`branchFalse`, nil, ast="node"}, -- AstBlock  May be nil.
 }
-_G.!structAst"AstStaticIf:AstIf"{}
+_G.!structAst"AstStaticIf:AstIf"{
+	_overrides = {{`nodeType`,AST_STATIC_IF}},
+}
 _G.!structAst"AstWhile:_AstNode"{
+	_overrides = {{`nodeType`,AST_WHILE}},
 	{`condition`,      nil, ast="node"}, -- AstExpression
 	{`body`,           nil, ast="node"}, -- AstBlock
 	{`hasNamedBreaks`, false},
@@ -444,12 +478,11 @@ _G.!struct"SwitchCase"{
 	{`fallThrough`, false},
 }
 _G.!structAst"AstSwitch:_AstNode"{
+	_overrides = {{`nodeType`,AST_SWITCH}},
 	{`value`,    nil, ast="node"},  -- AstExpression
 	{`cases`,    {},  ast="cases"}, -- []SwitchCase
 	{`complete`, false},
 }
-
-_G.AST_NODE_TYPE_NAMES = !(nodeTypeNames)
 
 _G.SCOPES                = !(scopeNodeTypes)
 _G.SCOPES_DECLARATIVE    = !(scopeNodeTypesDeclarative)
@@ -631,7 +664,7 @@ function _G.parseTable(state, parent)
 
 	local lastField = fields[#fields]
 
-	if lastField and lastField.keyIsGenerated and lastField.value.nodeType == !(nodeTypes.AstVararg) and not lastField.value.surroundedByParentheses then
+	if lastField and lastField.keyIsGenerated and lastField.value.nodeType == !(AST_VARARG) and not lastField.value.surroundedByParentheses then
 		local vararg    = lastField.value
 		vararg.parent   = tableNode
 		fields[#fields] = nil
@@ -800,7 +833,7 @@ function _G.parseArguments(state, parent, isInput)
 				if i > 1 then
 					-- Make sure (a,b:$T) works.
 					astVisitAllNodes(decl.type, function(node, container, key)
-						if node.nodeType ~= !(nodeTypes.AstBake) then  return  end
+						if node.nodeType ~= !(AST_BAKE) then  return  end
 
 						if not container then
 							container = decl
@@ -841,10 +874,10 @@ function _G.parseArguments(state, parent, isInput)
 
 				local decl = arg.declaration
 
-				if decl.name.nodeType == !(nodeTypes.AstVararg) then
+				if decl.name.nodeType == !(AST_VARARG) then
 					!ERROR_OR_RETURN `errorParsingNext(state, "Varargs cannot have default values.")`
 				else
-					assert(decl.name.nodeType == !(nodeTypes.AstIdentifier))
+					assert(decl.name.nodeType == !(AST_IDENTIFIER))
 				end
 
 				tokType, tokValue = peekNextToken(state)
@@ -853,7 +886,7 @@ function _G.parseArguments(state, parent, isInput)
 				if isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"caller_location") then
 					eatNextToken(state)
 
-					if parent.nodeType ~= !(nodeTypes.AstLambda) then
+					if parent.nodeType ~= !(AST_LAMBDA) then
 						!ERROR_OR_RETURN `errorParsingLast(state, "!caller_location can only be used among function arguments.")`
 					end
 
@@ -900,7 +933,7 @@ function _G.parseArguments(state, parent, isInput)
 
 	if isInput then
 		for _, arg in ipairs(args.arguments) do
-			arg.isRequired = (arg.declaration.value == nil and arg.declaration.name.nodeType ~= !(nodeTypes.AstVararg))
+			arg.isRequired = (arg.declaration.value == nil and arg.declaration.name.nodeType ~= !(AST_VARARG))
 		end
 	else
 		-- @Incomplete: If a !must was specified, set arg.isRequired from first argument to the last !must.
@@ -948,7 +981,7 @@ function _G.parseNamelessArguments(state, parent)
 			break
 		end
 
-		if decl.name.nodeType == !(nodeTypes.AstVararg) then
+		if decl.name.nodeType == !(AST_VARARG) then
 			!ERROR_OR_RETURN `errorParsingLast(state, "Vararg must be the last argument.")`
 		end
 	end
@@ -967,16 +1000,16 @@ function _G.parseStruct(state, parent)
 		local gotError = false
 
 		astVisitAllNodes(args, function(node)
-			if node.nodeType == !(nodeTypes.AstVararg) then
+			if node.nodeType == !(AST_VARARG) then
 				gotError = true
 				!ERROR_OR_RETURN(`errorParsing(state, node.token, "Struct arguments cannot be variable.")`, toLua(VISIT_BREAK))
 
-			elseif node.nodeType == !(nodeTypes.AstArgument) then
+			elseif node.nodeType == !(AST_ARGUMENT) then
 				if node.autobake ~= !(AUTOBAKE_DISABLED) and not state.soft then
 					parserMessageLine(io.stderr, state, node.token, "Warning", "Struct arguments are always auto-baked and thus don't need any $.")
 				end
 
-			elseif node.nodeType == !(nodeTypes.AstBake) then
+			elseif node.nodeType == !(AST_BAKE) then
 				!ERROR_OR_RETURN(`errorParsing(state, node.token, "Placeholder types are not supported in struct arguments.")`, toLua(VISIT_BREAK))
 			end
 		end)
@@ -1307,7 +1340,7 @@ function _G.parseDeclarationStatement(state, scope, imperative, declType)
 
 	elseif declType == !(DECLARATION_ENUM) then
 		local enum = scope
-		!ASSERT("enum.nodeType == "..nodeTypes.AstEnum) -- Note: We don't support !if or anything in enums, so the parent scope should always be the enum.
+		!ASSERT("enum.nodeType == "..AST_ENUM) -- Note: We don't support !if or anything in enums, so the parent scope should always be the enum.
 
 		enum.autoValue        = enum.autoValue+1
 		declarations[1].value = newLiteral(declarations[1], nameListStartToken, !(LITERAL_INTEGER), enum.autoValue)
@@ -1438,7 +1471,7 @@ function _G.parseAssignment(state, parent)
 	!DO_OR_RETURN `parseExpressionList(state, assignment, assignment.targets, true)`
 
 	for i, expr in ipairs(assignment.targets) do
-		if not !!(CONST_SET{ nodeTypes.AstIdentifier, nodeTypes.AstAccess, nodeTypes.AstBlank })[expr.nodeType] then
+		if not !!(CONST_SET{ AST_IDENTIFIER, AST_ACCESS, AST_BLANK })[expr.nodeType] then
 			!ERROR_OR_RETURN `errorParsing(state, expr.token, "Expected assignment target expression to resolve into a variable or namespace access.")`
 		end
 	end
@@ -1520,7 +1553,7 @@ local function parseIfBranch(state, ifOrStaticIf, isFileScopeOrNamespace)
 	local block
 
 	if isFileScopeOrNamespace then
-		!ASSERT("ifOrStaticIf.nodeType == "..nodeTypes.AstStaticIf)
+		!ASSERT("ifOrStaticIf.nodeType == "..AST_STATIC_IF)
 
 		local tokType, tokValue, token = peekNextToken(state)
 
@@ -1571,21 +1604,21 @@ function _G.parseIfOrStaticIf(state, parent, isFileScopeOrNamespace)
 end
 
 local function getBreakableNameFromSimpleExpression(expr)
-	if expr.nodeType == !(nodeTypes.AstIdentifier) then
+	if expr.nodeType == !(AST_IDENTIFIER) then
 		return expr.name
 
-	elseif expr.nodeType == !(nodeTypes.AstUnary) then
-		if expr.operation == "not" and expr.expression.nodeType == !(nodeTypes.AstIdentifier) then
+	elseif expr.nodeType == !(AST_UNARY) then
+		if expr.operation == "not" and expr.expression.nodeType == !(AST_IDENTIFIER) then
 			return expr.expression.name
 		end
 
-	elseif expr.nodeType == !(nodeTypes.AstBinary) then
+	elseif expr.nodeType == !(AST_BINARY) then
 		if expr.left.nodeType == expr.right.nodeType then
 			-- void
-		elseif expr.left.nodeType == !(nodeTypes.AstIdentifier) then
-			if expr.right.nodeType == !(nodeTypes.AstLiteral) then  return expr.left.name   end
-		elseif expr.right.nodeType == !(nodeTypes.AstIdentifier) then
-			if expr.left.nodeType  == !(nodeTypes.AstLiteral) then  return expr.right.name  end
+		elseif expr.left.nodeType == !(AST_IDENTIFIER) then
+			if expr.right.nodeType == !(AST_LITERAL) then  return expr.left.name   end
+		elseif expr.right.nodeType == !(AST_IDENTIFIER) then
+			if expr.left.nodeType  == !(AST_LITERAL) then  return expr.right.name  end
 		end
 	end
 
@@ -1718,10 +1751,10 @@ function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 
 		eatNextToken(state)
 
-		!local constName   = CONST_SET{ nodeTypes.AstFor, nodeTypes.AstWhile, nodeTypes.AstLambda }
+		!local constName   = CONST_SET{ AST_FOR, AST_WHILE, AST_LAMBDA }
 		local loopOrLambda = astFindParent(breakOrContinue, !!(constName))
 
-		if not loopOrLambda or loopOrLambda.nodeType == !(nodeTypes.AstLambda) then
+		if not loopOrLambda or loopOrLambda.nodeType == !(AST_LAMBDA) then
 			!ERROR_OR_RETURN_FALSE `errorParsingLast(state, "Not inside a loop.")`
 		end
 
@@ -1744,8 +1777,8 @@ function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 				--   for 1, 2   break(it)  -- 'it' is an implicit name. (We could make this work if necessary.)
 				--   while x+y  break(x)   -- The condition expression is too complex. (What's "too complex" is debatable. @Revise)
 				if
-					loopOrLambda.nodeType == !(nodeTypes.AstFor)   and itemWith1(loopOrLambda.names, "name", loopName) or
-					loopOrLambda.nodeType == !(nodeTypes.AstWhile) and getBreakableNameFromSimpleExpression(loopOrLambda.condition) == loopName
+					loopOrLambda.nodeType == !(AST_FOR)   and itemWith1(loopOrLambda.names, "name", loopName) or
+					loopOrLambda.nodeType == !(AST_WHILE) and getBreakableNameFromSimpleExpression(loopOrLambda.condition) == loopName
 				then
 					if loopOrLambda == loopClosest then
 						-- void  We don't need a named break if we're breaking from the closest loop. (Should we save this info anyway for the metaprogram?)
@@ -1756,15 +1789,15 @@ function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 					end
 					break
 
-				elseif loopOrLambda.nodeType == !(nodeTypes.AstLambda) then
+				elseif loopOrLambda.nodeType == !(AST_LAMBDA) then
 					break -- Assume the identifier is part of a different statement.
 				end
 
-				!local constName = CONST_SET{ nodeTypes.AstFor, nodeTypes.AstWhile, nodeTypes.AstLambda }
+				!local constName = CONST_SET{ AST_FOR, AST_WHILE, AST_LAMBDA }
 				loopOrLambda     = astFindParent(loopOrLambda, !!(constName))
 			until not loopOrLambda
 
-			if not loopOrLambda or loopOrLambda.nodeType == !(nodeTypes.AstLambda) then
+			if not loopOrLambda or loopOrLambda.nodeType == !(AST_LAMBDA) then
 				!ERROR_OR_RETURN_FALSE `errorParsingLast(state, "Could not find what loop '%s' refers to.", loopName)`
 			end
 
@@ -1979,13 +2012,13 @@ function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 				exitFailure() -- Just to be safe.
 			`
 
-		elseif exprTest.nodeType == !(nodeTypes.AstCall) then
+		elseif exprTest.nodeType == !(AST_CALL) then
 			local call = exprTest
 			--[[ @Incomplete :ParenthesesAmbiguityError
 			if
 				isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"(")
-				and call.callee.nodeType == !(nodeTypes.AstCall)
-				and astGetCalleeVisuallyFurthestToTheLeft(call).nodeType == !(nodeTypes.AstIdentifier)
+				and call.callee.nodeType == !(AST_CALL)
+				and astGetCalleeVisuallyFurthestToTheLeft(call).nodeType == !(AST_IDENTIFIER)
 			then
 				!ERROR_OR_RETURN_FALSE `errorParsing(state, statementStartToken, "Ambigous expression being called.")`
 			end
@@ -2002,16 +2035,16 @@ function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 
 	local statements = (
 		!!(CONST_SET{
-			nodeTypes.AstAssignment,
-			nodeTypes.AstBlock,
-			nodeTypes.AstBreak, nodeTypes.AstContinue,
-			nodeTypes.AstCall,
-			nodeTypes.AstDefer,
-			nodeTypes.AstFor,
-			nodeTypes.AstIf, nodeTypes.AstStaticIf, -- AstStaticIf may have a mixture of static and dynamic statements.
-			nodeTypes.AstReturn,
-			nodeTypes.AstSwitch,
-			nodeTypes.AstWhile,
+			AST_ASSIGNMENT,
+			AST_BLOCK,
+			AST_BREAK, AST_CONTINUE,
+			AST_CALL,
+			AST_DEFER,
+			AST_FOR,
+			AST_IF, AST_STATIC_IF, -- AstStaticIf may have a mixture of static and dynamic statements.
+			AST_RETURN,
+			AST_SWITCH,
+			AST_WHILE,
 		})[statement.nodeType]
 		and block.statementsDynamic
 		or  block.statementsStatic
@@ -2053,15 +2086,15 @@ function _G.parseBlockStatements(state, block)
 			if not state.soft then  parserMessageLine(io.stderr, state, token, "Warning", "Empty statement.")  end
 
 		else
-			if !!(CONST_SET{ nodeTypes.AstReturn, nodeTypes.AstBreak, nodeTypes.AstContinue })[lastNodeType] then
+			if !!(CONST_SET{ AST_RETURN, AST_BREAK, AST_CONTINUE })[lastNodeType] then
 				local nodeTitle
-					=  lastNodeType == !(nodeTypes.AstReturn)   and "return"
-					or lastNodeType == !(nodeTypes.AstBreak)    and "break"
-					or lastNodeType == !(nodeTypes.AstContinue) and "continue"
+					=  lastNodeType == !(AST_RETURN)   and "return"
+					or lastNodeType == !(AST_BREAK)    and "break"
+					or lastNodeType == !(AST_CONTINUE) and "continue"
 					or assert(lastNodeType)
 
 				local extra
-					=  lastNodeType ~= !(nodeTypes.AstReturn) and ""
+					=  lastNodeType ~= !(AST_RETURN) and ""
 					or getLambda(block).argumentsOut          and " (Note: The function has return arguments.)"
 					or                                            " (Note: The function has no return arguments.)"
 
@@ -2239,7 +2272,7 @@ function _G.parseFileScopeOrNamespaceStatements(state, scope, isTopLevel, single
 			end
 
 			!SET_OR_RETURN_FALSE `local import = parseExpression(state, scope, math.huge)`
-			if import.nodeType ~= !(nodeTypes.AstImport) then
+			if import.nodeType ~= !(AST_IMPORT) then
 				errorInternal(state, import, "@Incomplete: Support any expression after 'export'. (Currently supported are !import, !load and !self)")
 			end
 
@@ -2255,7 +2288,7 @@ function _G.parseFileScopeOrNamespaceStatements(state, scope, isTopLevel, single
 			end
 
 			local fileScope = scope
-			!ASSERT("fileScope.nodeType == "..nodeTypes.AstFileScope)
+			!ASSERT("fileScope.nodeType == "..AST_FILE_SCOPE)
 
 			if fileScope.isModule then
 				errorParsingNext(state, "Cannot export values from modules.")
@@ -2533,13 +2566,13 @@ function _G.parseLambda(state, parent)
 		-- Add declarations for values that will be baked (only types so far).
 		for _, arg in ipairs(args.arguments) do
 			astVisitAllNodes(arg, function(node)
-				if node.nodeType == !(nodeTypes.AstLocation) then
+				if node.nodeType == !(AST_LOCATION) then
 					local loc = node
 					if loc.ofCaller then  lambda.wantCallerLocation = true  end
 					return
 				end
 
-				if node.nodeType ~= !(nodeTypes.AstBake) then  return  end
+				if node.nodeType ~= !(AST_BAKE) then  return  end
 				lambda.isPolymorphic = true
 
 				local bake  = node
@@ -2609,7 +2642,7 @@ function _G.parseLambda(state, parent)
 			!ERROR_OR_RETURN `errorParsing(state, lambda.token, "Polymorphic functions cannot have captures.")`
 		end
 
-		if args.arguments[1] and getLast(args.arguments).declaration.name.nodeType == !(nodeTypes.AstVararg) then
+		if args.arguments[1] and getLast(args.arguments).declaration.name.nodeType == !(AST_VARARG) then
 			lambda.takingVararg = true
 		end
 
@@ -2921,7 +2954,7 @@ function _G.parseExpression(state, parent, prevOpPrecedence, expectLvalue)
 		encounteredParentheses = true
 		!SET_OR_RETURN `expr   = parseExpression(state, parent)`
 
-		if !!(CONST_SET{ nodeTypes.AstCall, nodeTypes.AstVararg })[expr.nodeType] then
+		if !!(CONST_SET{ AST_CALL, AST_VARARG })[expr.nodeType] then
 			-- This is so we know whether to adjust the return values to one or not in certain situations.
 			-- Note: Functions with a return argument after the first one marked as #must cannot have their
 			-- return arguments adjusted to one.
@@ -2935,7 +2968,7 @@ function _G.parseExpression(state, parent, prevOpPrecedence, expectLvalue)
 		end
 
 		--[[ @Incomplete :ParenthesesAmbiguityError
-		if expectLvalue and expr.nodeType == !(nodeTypes.AstIdentifier) then
+		if expectLvalue and expr.nodeType == !(AST_IDENTIFIER) then
 			!ERROR_OR_RETURN `errorParsing(state, exprStartToken, "Unexpected parentheses around identifier.")`
 		end
 		--]]
@@ -2989,7 +3022,7 @@ function _G.parseExpression(state, parent, prevOpPrecedence, expectLvalue)
 		if not isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),")") then
 			!ERROR_OR_RETURN `errorParsingAfterPrevious(state, "Expected ')'.")`
 		end
-		if variant.call.nodeType ~= !(nodeTypes.AstCall) then
+		if variant.call.nodeType ~= !(AST_CALL) then
 			!ERROR_OR_RETURN `errorParsing(state, exprStartToken+2, "Expected a call.")`
 		end
 
@@ -3035,7 +3068,7 @@ function _G.parseExpression(state, parent, prevOpPrecedence, expectLvalue)
 	-- Self (parent file scope).
 	elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"self") then
 		local import      = astNewNode(AstImport, exprStartToken, parent)
-		local fileScope   = astFindParent1(import, !(nodeTypes.AstFileScope)) or errorInternal()
+		local fileScope   = astFindParent1(import, !(AST_FILE_SCOPE)) or errorInternal()
 		import.isLoad     = not fileScope.isModule
 		import.importName = fileScope.moduleName
 		import.fileScope  = fileScope
@@ -3349,11 +3382,11 @@ function _G.parseExpression(state, parent, prevOpPrecedence, expectLvalue)
 	end
 
 	if expectLvalue then
-		if expr.nodeType == !(nodeTypes.AstIdentifier) then
+		if expr.nodeType == !(AST_IDENTIFIER) then
 			if encounteredParentheses then
 				!ERROR_OR_RETURN `errorParsing(state, exprStartToken, "Unexpected parentheses around identifier.")` -- :ParenthesesAmbiguityError
 			end
-		elseif expr.nodeType == !(nodeTypes.AstAccess) then
+		elseif expr.nodeType == !(AST_ACCESS) then
 			-- void
 		else
 			tokType, tokValue = peekNextToken(state)
@@ -3503,7 +3536,7 @@ function _G.errorUnhandledNodeType(state, node)
 		astPrintTree(io.stderr, node)
 		-- !ifDEBUG `astPrintTree(io.stderr, state.globalScope)`
 	!end
-	nodeError(state, node, "Debug", "Internal compiler error: Incomplete: Unhandled node type '%s'.", (AST_NODE_TYPE_NAMES[node.nodeType] or node.nodeType))
+	nodeError(state, node, "Debug", "Internal compiler error: Incomplete: Unhandled node type '%s'.", (AST_NAMES[node.nodeType] or node.nodeType))
 end
 
 function _G.errorUnhandledType(state, node, typeInfo)
@@ -3583,7 +3616,7 @@ do
 
 		write(indentStr)
 		if keyName then  write(keyName, " ")  end
-		write(AST_NODE_TYPE_NAMES[node.nodeType] or "?")
+		write(AST_NAMES[node.nodeType] or "?")
 		write(" @", node.s)
 		if node.parent then  write(" ^", node.parent.s)  end
 
@@ -3608,7 +3641,7 @@ do
 		else
 			printed[node] = true
 
-			if node.nodeType == !(nodeTypes.AstIdentifier) then
+			if node.nodeType == !(AST_IDENTIFIER) then
 				local ident = node
 				write(" (", ident.name)
 				if ident.inferredType then  write(", type=", getFriendlyTypeInfoName(ident.inferredType))  end
@@ -3616,14 +3649,14 @@ do
 				if ident.declaration  then  write(", decl=", ident.declaration.s)  end
 				write(")\n")
 
-			elseif node.nodeType == !(nodeTypes.AstUnary) then
+			elseif node.nodeType == !(AST_UNARY) then
 				local unary = node
 				write(" (", unary.operation, ")")
 				!!(CHILD_PRINT_START)
 				if unary.expression then  printNode(unary.expression, indent+1, printed, printChildren)  end
 				!!(CHILD_PRINT_END)
 
-			elseif node.nodeType == !(nodeTypes.AstBinary) then
+			elseif node.nodeType == !(AST_BINARY) then
 				local binary = node
 				write(" (", binary.operation, ")")
 				!!(CHILD_PRINT_START)
@@ -3632,7 +3665,7 @@ do
 				if binary.right then  printNode(binary.right, indent+1, printed, printChildren)  end
 				!!(CHILD_PRINT_END)
 
-			elseif node.nodeType == !(nodeTypes.AstAccess) then
+			elseif node.nodeType == !(AST_ACCESS) then
 				local access = node
 				write(" (")
 				write(
@@ -3645,7 +3678,7 @@ do
 				write(".")
 				write(
 					access.member and (
-						(access.member.nodeType == !(nodeTypes.AstLiteral) and tostring(access.member.value))
+						(access.member.nodeType == !(AST_LITERAL) and tostring(access.member.value))
 						or (access.inferredType and getFriendlyTypeInfoName(access.member.inferredType))
 					)
 					or "?"
@@ -3656,7 +3689,7 @@ do
 				if access.member then  printNode(access.member, indent+1, printed, printChildren)  end
 				!!(CHILD_PRINT_END)
 
-			elseif node.nodeType == !(nodeTypes.AstDeclaration) then
+			elseif node.nodeType == !(AST_DECLARATION) then
 				local decl = node
 				if decl.addedByPolymorph then  write(" (addedByPolymorph)")  end
 				if decl.assignment       then  write(" (assignment ", decl.assignment.s, " i=", decl.assignmentIndex, ")")  end
@@ -3670,7 +3703,7 @@ do
 				if decl.value then  printNode(decl.value, indent+1, printed, printChildren, "VALUE")  end
 				!!(CHILD_PRINT_END)
 
-			elseif node.nodeType == !(nodeTypes.AstTable) then
+			elseif node.nodeType == !(AST_TABLE) then
 				local tableNode = node
 				!!(CHILD_PRINT_START)
 				for i, tableField in ipairs(tableNode.fields) do
@@ -3680,7 +3713,7 @@ do
 				if tableNode.trailingExpression then  printNode(tableNode.trailingExpression, indent+1, printed, printChildren, "...")  end
 				!!(CHILD_PRINT_END)
 
-			elseif node.nodeType == !(nodeTypes.AstCall) then
+			elseif node.nodeType == !(AST_CALL) then
 				local call = node
 				if call.isMethod                then  write(" (method)")         end
 				if call.surroundedByParentheses then  write(" (adjustArgsTo1)")  end
@@ -3689,13 +3722,13 @@ do
 				printNodeList(call.arguments, indent+1, printed, printChildren, "ARG")
 				!!(CHILD_PRINT_END)
 
-			elseif node.nodeType == !(nodeTypes.AstArguments) then
+			elseif node.nodeType == !(AST_ARGUMENTS) then
 				local args = node
 				!!(CHILD_PRINT_START)
 				printNodeList(args.arguments, indent+1, printed, printChildren)
 				!!(CHILD_PRINT_END)
 
-			elseif node.nodeType == !(nodeTypes.AstArgument) then
+			elseif node.nodeType == !(AST_ARGUMENT) then
 				local arg = node
 				if arg.autobake == !(AUTOBAKE_ENABLED)  then  write(" (autobake=may)")   end
 				if arg.autobake == !(AUTOBAKE_REQUIRED) then  write(" (autobake=must)")  end
@@ -3703,7 +3736,7 @@ do
 				if arg.declaration then  printNode(arg.declaration, indent+1, printed, printChildren)  end
 				!!(CHILD_PRINT_END)
 
-			elseif node.nodeType == !(nodeTypes.AstType) then
+			elseif node.nodeType == !(AST_TYPE) then
 				local typeNode = node
 				write(" (", TYPE_KIND_TITLES[typeNode.kind])
 				if typeNode.representedType then
@@ -3724,19 +3757,19 @@ do
 				end
 				!!(CHILD_PRINT_END)
 
-			elseif node.nodeType == !(nodeTypes.AstTypeOf) then
+			elseif node.nodeType == !(AST_TYPE_OF) then
 				local typeOf = node
 				!!(CHILD_PRINT_START)
 				if typeOf.expression then  printNode(typeOf.expression, indent+1, printed, printChildren)  end
 				!!(CHILD_PRINT_END)
 
-			elseif node.nodeType == !(nodeTypes.AstVariantOf) then
+			elseif node.nodeType == !(AST_VARIANT_OF) then
 				local variant = node
 				!!(CHILD_PRINT_START)
 				if variant.call then  printNode(variant.call, indent+1, printed, printChildren)  end
 				!!(CHILD_PRINT_END)
 
-			elseif node.nodeType == !(nodeTypes.AstAssignment) then
+			elseif node.nodeType == !(AST_ASSIGNMENT) then
 				local assignment = node
 				if assignment.forDeclaration then
 					write(" (forDeclaration")
@@ -3752,7 +3785,7 @@ do
 				printNodeList(assignment.values, indent+1, printed, printChildren)
 				!!(CHILD_PRINT_END)
 
-			elseif node.nodeType == !(nodeTypes.AstCast) then
+			elseif node.nodeType == !(AST_CAST) then
 				local cast = node
 				if cast.inferredType then  write(" (", getFriendlyTypeInfoName(cast.inferredType), ")")  end
 				!!(CHILD_PRINT_START)
@@ -3760,7 +3793,7 @@ do
 				if cast.expression then  printNode(cast.expression, indent+1, printed, printChildren)  end
 				!!(CHILD_PRINT_END)
 
-			elseif node.nodeType == !(nodeTypes.AstIf) or node.nodeType == !(nodeTypes.AstStaticIf) then
+			elseif node.nodeType == !(AST_IF) or node.nodeType == !(AST_STATIC_IF) then
 				local ifBranch = node
 				!!(CHILD_PRINT_START)
 				if ifBranch.condition   then  printNode(ifBranch.condition,   indent+1, printed, printChildren)           end
@@ -3768,7 +3801,7 @@ do
 				if ifBranch.branchFalse then  printNode(ifBranch.branchFalse, indent+1, printed, printChildren, "FALSE")  end
 				!!(CHILD_PRINT_END)
 
-			elseif node.nodeType == !(nodeTypes.AstConditional) then
+			elseif node.nodeType == !(AST_CONDITIONAL) then
 				local conditional = node
 				!!(CHILD_PRINT_START)
 				if conditional.condition   then  printNode(conditional.condition,   indent+1, printed, printChildren)           end
@@ -3776,14 +3809,14 @@ do
 				if conditional.branchFalse then  printNode(conditional.branchFalse, indent+1, printed, printChildren, "FALSE")  end
 				!!(CHILD_PRINT_END)
 
-			elseif node.nodeType == !(nodeTypes.AstWhile) then
+			elseif node.nodeType == !(AST_WHILE) then
 				local whileLoop = node
 				!!(CHILD_PRINT_START)
 				if whileLoop.condition then  printNode(whileLoop.condition, indent+1, printed, printChildren)  end
 				if whileLoop.body      then  printNode(whileLoop.body,      indent+1, printed, printChildren)  end
 				!!(CHILD_PRINT_END)
 
-			elseif node.nodeType == !(nodeTypes.AstFor) then
+			elseif node.nodeType == !(AST_FOR) then
 				local forLoop = node
 				write(" (", FOR_TITLES[forLoop.forType])
 				if forLoop.reverse then  write(", reverse")  end
@@ -3794,32 +3827,32 @@ do
 				if forLoop.body then  printNode(forLoop.body, indent+1, printed, printChildren)  end
 				!!(CHILD_PRINT_END)
 
-			elseif node.nodeType == !(nodeTypes.AstReturn) then
+			elseif node.nodeType == !(AST_RETURN) then
 				local returnNode = node
 				if returnNode.runDirective then  write(" (runDirective ", returnNode.runDirective.s, ")")  end
 				!!(CHILD_PRINT_START)
 				printNodeList(returnNode.values, indent+1, printed, printChildren)
 				!!(CHILD_PRINT_END)
 
-			elseif !!(CONST_SET{ nodeTypes.AstBreak, nodeTypes.AstContinue })[node.nodeType] then
+			elseif !!(CONST_SET{ AST_BREAK, AST_CONTINUE })[node.nodeType] then
 				local breakOrContinue = node
 				if breakOrContinue.loopName then  write(" (", breakOrContinue.loopName.name, ")")  end
 				write("\n")
 
-			elseif node.nodeType == !(nodeTypes.AstDefer) then
+			elseif node.nodeType == !(AST_DEFER) then
 				local defer = node
 				!!(CHILD_PRINT_START)
 				if defer.body then  printNode(defer.body, indent+1, printed, printChildren)  end
 				!!(CHILD_PRINT_END)
 
-			elseif node.nodeType == !(nodeTypes.AstImport) then
+			elseif node.nodeType == !(AST_IMPORT) then
 				local import = node
 				write(" (", (import.isLoad and "load " or "import "), import.importName)
 				if import.exported then  write(", exported")  end
 				write(")")
 				write("\n")
 
-			elseif node.nodeType == !(nodeTypes.AstForeign) then
+			elseif node.nodeType == !(AST_FOREIGN) then
 				local foreign = node
 				if foreign.inferredType then  write(" (", getFriendlyTypeInfoName(foreign.inferredType), ")")  end
 				write(" (", foreign.source, ")")
@@ -3827,36 +3860,36 @@ do
 				if foreign.sourceName then  printNode(foreign.sourceName, indent+1, printed, printChildren)  end
 				!!(CHILD_PRINT_END)
 
-			elseif node.nodeType == !(nodeTypes.AstUsing) then
+			elseif node.nodeType == !(AST_USING) then
 				local using = node
 				!!(CHILD_PRINT_START)
 				if using.expression then  printNode(using.expression, indent+1, printed, printChildren)  end
 				!!(CHILD_PRINT_END)
 
-			elseif node.nodeType == !(nodeTypes.AstVararg) then
+			elseif node.nodeType == !(AST_VARARG) then
 				local vararg = node
 				if vararg.surroundedByParentheses then  write(" (adjustTo1)")  end
 				write("\n")
 
-			elseif node.nodeType == !(nodeTypes.AstDebug) then
+			elseif node.nodeType == !(AST_DEBUG) then
 				local debugNode = node
 				!!(CHILD_PRINT_START)
 				printNode(debugNode.expression, indent+1, printed, printChildren)
 				!!(CHILD_PRINT_END)
 
-			elseif node.nodeType == !(nodeTypes.AstBake) then
+			elseif node.nodeType == !(AST_BAKE) then
 				local bake = node
 				!!(CHILD_PRINT_START)
 				printNode(bake.name, indent+1, printed, printChildren)
 				!!(CHILD_PRINT_END)
 
-			elseif node.nodeType == !(nodeTypes.AstRun) then
+			elseif node.nodeType == !(AST_RUN) then
 				local runNode = node
 				!!(CHILD_PRINT_START)
 				printNode(runNode.lambda, indent+1, printed, printChildren)
 				!!(CHILD_PRINT_END)
 
-			elseif node.nodeType == !(nodeTypes.AstLiteral) then
+			elseif node.nodeType == !(AST_LITERAL) then
 				local literal = node
 				write(" (")
 
@@ -3888,7 +3921,7 @@ do
 
 				write(")\n")
 
-			elseif node.nodeType == !(nodeTypes.AstSwitch) then
+			elseif node.nodeType == !(AST_SWITCH) then
 				local switch = node
 				if switch.complete then  write(" (complete)")  end
 				!!(CHILD_PRINT_START)
@@ -3900,31 +3933,31 @@ do
 				!!(CHILD_PRINT_END)
 
 			elseif node.declarations then -- AstScope and substructs.
-				if node.nodeType == !(nodeTypes.AstLambda) then
+				if node.nodeType == !(AST_LAMBDA) then
 					local lambda     = node
-					local assignment = astFindParent1(lambda, !(nodeTypes.AstAssignment))
+					local assignment = astFindParent1(lambda, !(AST_ASSIGNMENT))
 					local i          = assignment and assignment.forDeclaration and indexOf(assignment.values, lambda)
 					if lambda.isPolymorphic then  write(" (polymorphs=", #lambda.polymorphs, ")")  end
 					if i                    then  write(" (", assignment.targets[i].name,     ")")  end
 
-				elseif node.nodeType == !(nodeTypes.AstFileScope) then
+				elseif node.nodeType == !(AST_FILE_SCOPE) then
 					local fileScope = node
 					write(" (", fileScope.path, ")")
 
-				elseif !!(CONST_SET{ nodeTypes.AstStruct, nodeTypes.AstEnum })[node.nodeType] then
+				elseif !!(CONST_SET{ AST_STRUCT, AST_ENUM })[node.nodeType] then
 					local structOrEnum = node
 					local typeInfo     = structOrEnum.representedType
 					if typeInfo and typeInfo.name ~= "" then  write(" (", typeInfo.name, ")")  end
 				end
 
 				!!(CHILD_PRINT_START)
-				if node.nodeType == !(nodeTypes.AstStruct) then
+				if node.nodeType == !(AST_STRUCT) then
 					if node.keyType   then  printNode(node.keyType,   indent+1, printed, printChildren, "K")  end
 					if node.valueType then  printNode(node.valueType, indent+1, printed, printChildren, "V")  end
 				end
 				printNodeList(node.statementsStatic,  indent+1, printed, printChildren, "STATIC")
 				printNodeList(node.statementsDynamic, indent+1, printed, printChildren, "DYNAMIC")
-				if node.nodeType == !(nodeTypes.AstFileScope) then
+				if node.nodeType == !(AST_FILE_SCOPE) then
 					if node.valueToExport then  printNode(node.valueToExport, indent+1, printed, printChildren, "EXPORT")  end
 				end
 				!!(CHILD_PRINT_END)
@@ -4011,7 +4044,7 @@ end
 
 
 function _G.astIsOrIsInModule(node)
-	local fileScope = (node.nodeType == !(nodeTypes.AstFileScope) and node or astFindParent1(node, !(nodeTypes.AstFileScope)))
+	local fileScope = (node.nodeType == !(AST_FILE_SCOPE) and node or astFindParent1(node, !(AST_FILE_SCOPE)))
 	return fileScope ~= nil and fileScope.isModule
 end
 
@@ -4064,7 +4097,7 @@ do
 			end
 		`
 
-		for nodeType, name in ipairs(nodeTypeNames) do
+		for nodeType, name in ipairs(astTypeToStructName) do
 			local fields = structs[name] or error(name)
 
 			__LUA(templateToLua(TEMPLATE_FUNCTION_HEADER, {nodeType=nodeType, name=name}, (nodeType == 1 and -3 or -1)))
@@ -4148,9 +4181,9 @@ do
 			local visitNode     = true
 			local visitChildren = true
 
-			if node.nodeType == !(nodeTypes.AstType) then
+			if node.nodeType == !(AST_TYPE) then
 				visitChildren = false
-			elseif node.nodeType == !(nodeTypes.AstLambda) then
+			elseif node.nodeType == !(AST_LAMBDA) then
 				visitNode     = visitLambdas
 				visitChildren = node == topNode
 			end
@@ -4239,7 +4272,7 @@ do
 			fieldsToIgnore[field[1]] = true
 		end
 
-		for nodeType, name in ipairs(nodeTypeNames) do
+		for nodeType, name in ipairs(astTypeToStructName) do
 			local fields = structs[name] or error(name)
 
 			__LUA(templateToLua(TEMPLATE_FUNCTION_HEADER, {nodeType=nodeType, name=name}, (nodeType == 1 and -3 or -1), -1))
@@ -4317,7 +4350,7 @@ do
 			end
 		`
 
-		for nodeType, name in ipairs(nodeTypeNames) do
+		for nodeType, name in ipairs(astTypeToStructName) do
 			local fields = structs[name] or error(name)
 
 			__LUA(templateToLua(TEMPLATE_FUNCTION_HEADER, {nodeType=nodeType, name=name}, (nodeType == 1 and -3 or -1), -1))
@@ -4367,22 +4400,22 @@ end
 function _G.astGetExpressionVisuallyFurthestToTheLeft(expr, onlyFollowCalls)
 	while expr.replacing do  expr = expr.replacing  end
 
-	if expr.nodeType == !(nodeTypes.AstCall) then
+	if expr.nodeType == !(AST_CALL) then
 		local call = expr
 		return astGetExpressionVisuallyFurthestToTheLeft(call.callee, onlyFollowCalls)
 
 	elseif onlyFollowCalls then
 		return expr
 
-	elseif expr.nodeType == !(nodeTypes.AstBinary) then
+	elseif expr.nodeType == !(AST_BINARY) then
 		local binary = expr
 		return astGetExpressionVisuallyFurthestToTheLeft(binary.left, false)
 
-	elseif expr.nodeType == !(nodeTypes.AstAccess) then
+	elseif expr.nodeType == !(AST_ACCESS) then
 		local access = expr
 		return astGetExpressionVisuallyFurthestToTheLeft(access.object, false)
 
-	elseif expr.nodeType == !(nodeTypes.AstConditional) then
+	elseif expr.nodeType == !(AST_CONDITIONAL) then
 		local conditional = expr
 		return astGetExpressionVisuallyFurthestToTheLeft(conditional.condition, false)
 
@@ -4434,7 +4467,7 @@ end
 
 
 function _G.isLiteral(node, literalType)
-	return node.nodeType == !(nodeTypes.AstLiteral) and node.literalType == literalType
+	return node.nodeType == !(AST_LITERAL) and node.literalType == literalType
 end
 
 

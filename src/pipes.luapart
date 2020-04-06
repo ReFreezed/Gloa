@@ -205,9 +205,9 @@ function _G.addToQueue(state, node, container, key, pipe)
 
 	--[[ Make assignment targets in declaration assignment statements wait for their declaration.
 	if
-		node.nodeType == !(nodeTypes.AstIdentifier)
+		node.nodeType == !(AST_IDENTIFIER)
 		and node.declaration
-		and node.parent.nodeType == !(nodeTypes.AstAssignment)
+		and node.parent.nodeType == !(AST_ASSIGNMENT)
 		and node.parent.forDeclaration
 		and indexOf(node.parent.targets, node)
 	then
@@ -226,12 +226,12 @@ do
 
 			-- :SelectiveQueuing
 
-			if node.nodeType == !(nodeTypes.AstStaticIf) then
+			if node.nodeType == !(AST_STATIC_IF) then
 				local staticIf = node
 				registerNodesToAddToQueue(state, staticIf.condition, nodesToAdd)
 				return !(VISIT_IGNORE_CHILDREN)
 
-			elseif !!(CONST_SET{ nodeTypes.AstLambda, nodeTypes.AstStruct })[node.nodeType] and node.isPolymorphic then
+			elseif !!(CONST_SET{ AST_LAMBDA, AST_STRUCT })[node.nodeType] and node.isPolymorphic then
 				return !(VISIT_IGNORE_CHILDREN) -- We don't need to queue anything inside polymorphic functions or structs (I think).
 			end
 		end)
@@ -246,7 +246,7 @@ do
 		local function add(node, container, key)
 			if not nodesToAdd[node] then  return  end
 
-			if node.nodeType == !(nodeTypes.AstDeclaration) and node.assignment then
+			if node.nodeType == !(AST_DECLARATION) and node.assignment then
 				local assignment = node.assignment
 				for i, valueExpr in ipairs(assignment.values) do
 					astVisitAllNodesLeavesFirst(valueExpr, add, assignment.values, i)
@@ -278,7 +278,7 @@ do
 
 				-- :SelectiveQueuing
 
-				if node.nodeType == !(nodeTypes.AstStaticIf) then
+				if node.nodeType == !(AST_STATIC_IF) then
 					local staticIf = node
 					if not staticIf.condition.queued then
 						nodesToAdd[staticIf.condition] = true
@@ -286,7 +286,7 @@ do
 					end
 					return !(VISIT_IGNORE_CHILDREN)
 
-				elseif !!(CONST_SET{ nodeTypes.AstLambda, nodeTypes.AstStruct })[node.nodeType] and node.isPolymorphic then
+				elseif !!(CONST_SET{ AST_LAMBDA, AST_STRUCT })[node.nodeType] and node.isPolymorphic then
 					return !(VISIT_IGNORE_CHILDREN) -- We don't need to queue anything inside polymorphic functions or structs (I think).
 				end
 			end
@@ -302,7 +302,7 @@ do
 		local function add(node, container, key)
 			if not nodesToAdd[node] then  return  end
 
-			if node.nodeType == !(nodeTypes.AstDeclaration) and node.assignment then
+			if node.nodeType == !(AST_DECLARATION) and node.assignment then
 				local assignment = node.assignment
 				for i, valueExpr in ipairs(assignment.values) do
 					astVisitAllNodesLeavesFirst(valueExpr, add, assignment.values, i)
@@ -409,10 +409,10 @@ function _G.moveToNextRelevantPipe(state, node, fromPipe)
 	if fromPipe == !(PIPE_INFER) then
 		local nodeType = node.nodeType
 
-		if !!(CONST_SET{ nodeTypes.AstLiteral, nodeTypes.AstForeign, nodeTypes.AstTypeInfo })[nodeType] then
+		if !!(CONST_SET{ AST_LITERAL, AST_FOREIGN, AST_TYPE_INFO })[nodeType] then
 			moveToPipe(state, node, !(PIPE_EMIT))
 
-		elseif nodeType == !(nodeTypes.AstDeclaration) then
+		elseif nodeType == !(AST_DECLARATION) then
 			local decl = node
 			if decl.name.inferredType.tag == !(TYPE_NAMESPACE) then
 				moveToPipe(state, decl, !(PIPE_DONE))
@@ -420,7 +420,7 @@ function _G.moveToNextRelevantPipe(state, node, fromPipe)
 				moveToPipe(state, decl, !(PIPE_EMIT))
 			end
 
-		elseif nodeType == !(nodeTypes.AstLambda) then
+		elseif nodeType == !(AST_LAMBDA) then
 			local lambda = node
 			if lambda.isPolymorphic or lambda.captures[1] then
 				moveToPipe(state, lambda, !(PIPE_DONE))
@@ -430,7 +430,7 @@ function _G.moveToNextRelevantPipe(state, node, fromPipe)
 				moveToPipe(state, lambda, !(PIPE_DONE))
 			end
 
-		elseif nodeType == !(nodeTypes.AstLocation) then
+		elseif nodeType == !(AST_LOCATION) then
 			local loc = node
 			if loc.ofCaller then
 				moveToPipe(state, loc, !(PIPE_DONE)) -- The constants are generated at the calling sites instead.
@@ -438,7 +438,7 @@ function _G.moveToNextRelevantPipe(state, node, fromPipe)
 				moveToPipe(state, loc, !(PIPE_EMIT))
 			end
 
-		elseif nodeType == !(nodeTypes.AstCall) then
+		elseif nodeType == !(AST_CALL) then
 			local call = node
 			if call.wantLocation then
 				moveToPipe(state, call, !(PIPE_EMIT))
@@ -525,7 +525,7 @@ function _G.errorPipesAreStuck(state)
 	-- [[ Report undeclared identifier.
 	local function getDeclaredIdentifierWaitingToBeDeclaredWithName(name, queuedToIgnore) -- @Cleanup: What is this even?!?!
 		for _, queued in ipairs(state.allQueueds) do
-			if queued ~= queuedToIgnore and not queued.unqueued and queued.waitingOn and queued.node.nodeType == !(nodeTypes.AstIdentifier) then
+			if queued ~= queuedToIgnore and not queued.unqueued and queued.waitingOn and queued.node.nodeType == !(AST_IDENTIFIER) then
 				local ident = queued.node
 				if ident.parent == ident.declaration and ident.name == name then  return queued  end
 			end
@@ -551,10 +551,10 @@ function _G.errorPipesAreStuck(state)
 				elseif name == "..." then
 					errorParsing(state, node.token, "This is not inside a vararg function.") -- Probably an internal compiler error at this point.
 
-				elseif node.nodeType == !(nodeTypes.AstAccess) then
+				elseif node.nodeType == !(AST_ACCESS) then
 					local access = node
 
-					if access.object.inferredType.tag == !(TYPE_NAMESPACE) and access.object.inferredType.scope.nodeType == !(nodeTypes.AstFileScope) then
+					if access.object.inferredType.tag == !(TYPE_NAMESPACE) and access.object.inferredType.scope.nodeType == !(AST_FILE_SCOPE) then
 						local fileScope = access.object.inferredType.scope
 						!!(REPORT_START)
 						typeError(
@@ -624,14 +624,14 @@ function _G.errorPipesAreStuck(state)
 	local queueds = findQueueds(function(queued, node, dependency, dependOn)
 		return true
 			and dependency.dependType  == !(DEPEND_NODE_INFERRED)
-			and node.nodeType          == !(nodeTypes.AstIdentifier)
-			and dependOn.node.nodeType == !(nodeTypes.AstDeclaration)
+			and node.nodeType          == !(AST_IDENTIFIER)
+			and dependOn.node.nodeType == !(AST_DECLARATION)
 	end)
 	findQueueds(function(queued, node, dependency, dependOn)
 		return true
 			and dependency.dependType  == !(DEPEND_NODE_INFERRED_FULLY)
-			and node.nodeType          == !(nodeTypes.AstIdentifier)
-			and dependOn.node.nodeType == !(nodeTypes.AstDeclaration)
+			and node.nodeType          == !(AST_IDENTIFIER)
+			and dependOn.node.nodeType == !(AST_DECLARATION)
 	end, queueds)
 	for _, queued in ipairs(queueds) do
 		local decl = queued.waitingOn.dependOn.node
@@ -651,14 +651,14 @@ function _G.errorPipesAreStuck(state)
 	local queueds = findQueueds(function(queued, node, dependency, dependOn)
 		return true
 			and dependency.dependType == !(DEPEND_NODE_INFERRED)
-			and node.nodeType         == !(nodeTypes.AstIdentifier)
+			and node.nodeType         == !(AST_IDENTIFIER)
 			and queued.node.parent    == queued.node.declaration
 			and queued.node           ~= queued.node.declaration.value
 	end)
 	findQueueds(function(queued, node, dependency, dependOn)
 		return true
 			and dependency.dependType == !(DEPEND_NODE_INFERRED_FULLY)
-			and node.nodeType         == !(nodeTypes.AstIdentifier)
+			and node.nodeType         == !(AST_IDENTIFIER)
 			and queued.node.parent    == queued.node.declaration
 			and queued.node           ~= queued.node.declaration.value
 	end, queueds)
@@ -744,9 +744,9 @@ function _G.errorPipesAreStuck(state)
 		!!(REPORT_START)
 		printerr()
 		astPrint(queued.node)
-		emitMessage(io.stderr, state, queued.node, "Error", "Internal compiler error: Failed emitting code for %s.", AST_NODE_TYPE_NAMES[queued.node.nodeType])
+		emitMessage(io.stderr, state, queued.node, "Error", "Internal compiler error: Failed emitting code for %s.", AST_NAMES[queued.node.nodeType])
 		astPrint(expr)
-		emitMessage(io.stderr, state, expr,        "Info",  "...it is waiting for this %s to finish.", AST_NODE_TYPE_NAMES[expr.nodeType])
+		emitMessage(io.stderr, state, expr,        "Info",  "...it is waiting for this %s to finish.", AST_NAMES[expr.nodeType])
 		exitFailure()
 		!!(REPORT_END)
 	end
@@ -811,14 +811,14 @@ function _G.outputDependencyGraph(state)
 
 		else
 			local function writeNode(node)
-				file:write("(", AST_NODE_TYPE_NAMES[node.nodeType], " ", node.s)
+				file:write("(", AST_NAMES[node.nodeType], " ", node.s)
 
-				if node.nodeType == !(nodeTypes.AstIdentifier) then
+				if node.nodeType == !(AST_IDENTIFIER) then
 					file:write("\\n", node.name)
-				elseif node.nodeType == !(nodeTypes.AstDeclaration) then
+				elseif node.nodeType == !(AST_DECLARATION) then
 					file:write("\\n", node.name.name)
-				elseif node.nodeType == !(nodeTypes.AstAssignment) then
-					if #node.targets == 1 and node.targets[1].nodeType == !(nodeTypes.AstIdentifier) then
+				elseif node.nodeType == !(AST_ASSIGNMENT) then
+					if #node.targets == 1 and node.targets[1].nodeType == !(AST_IDENTIFIER) then
 						file:write("\\n", node.targets[1].name)
 					end
 				end

@@ -132,7 +132,7 @@ function _G.allocateConstantForExpressionIfNew(state, expr, dependent)
 	local nodeType = expr.nodeType
 	local typeInfo = expr.inferredType
 
-	if nodeType == !(nodeTypes.AstLiteral) then
+	if nodeType == !(AST_LITERAL) then
 		local literal = expr
 		local const   = literal.valueConstant
 
@@ -142,7 +142,7 @@ function _G.allocateConstantForExpressionIfNew(state, expr, dependent)
 
 		return const, false
 
-	elseif nodeType == !(nodeTypes.AstLambda) then
+	elseif nodeType == !(AST_LAMBDA) then
 		local lambda = expr
 		assert(lambda.body) -- We should never get here for lambdas without bodies as those would have been AstTypes.
 		assert(not lambda.isPolymorphic)
@@ -152,12 +152,12 @@ function _G.allocateConstantForExpressionIfNew(state, expr, dependent)
 
 		return lambda.valueConstant, isNew
 
-	elseif nodeType == !(nodeTypes.AstType) then
+	elseif nodeType == !(AST_TYPE) then
 		local typeNode = expr
 		typeInfo       = getTypeInfoForBuiltinType(state, "type")
 		return allocateConstantIfNew(state, !(CONST_KIND_NORMAL), typeInfo, typeNode.representedType, dependent)
 
-	elseif nodeType == !(nodeTypes.AstStruct) then
+	elseif nodeType == !(AST_STRUCT) then
 		local struct     = expr
 		local structInfo = struct.representedType
 
@@ -172,7 +172,7 @@ function _G.allocateConstantForExpressionIfNew(state, expr, dependent)
 
 		return const, isNew
 
-	elseif nodeType == !(nodeTypes.AstEnum) then
+	elseif nodeType == !(AST_ENUM) then
 		local enum         = expr
 		local enumInfo     = enum.representedType
 		local const, isNew = allocateConstantIfNew(state, !(CONST_KIND_NORMAL), typeInfo, enumInfo, dependent)
@@ -183,7 +183,7 @@ function _G.allocateConstantForExpressionIfNew(state, expr, dependent)
 
 		return const, isNew
 
-	elseif nodeType == !(nodeTypes.AstIdentifier) then
+	elseif nodeType == !(AST_IDENTIFIER) then
 		local ident = expr
 
 		if typeInfo.tag == !(TYPE_ENUM) then
@@ -198,23 +198,23 @@ function _G.allocateConstantForExpressionIfNew(state, expr, dependent)
 			return allocateConstantForExpressionIfNew(state, decl.value, dependent)
 		end
 
-	elseif nodeType == !(nodeTypes.AstCast) then
+	elseif nodeType == !(AST_CAST) then
 		-- The cast is probably from/to 'any'.
 		local cast = expr
 		return allocateConstantForExpressionIfNew(state, cast.expression, dependent)
 
-	elseif nodeType == !(nodeTypes.AstForeign) then
+	elseif nodeType == !(AST_FOREIGN) then
 		local foreign = expr
 		return allocateConstantIfNew(state, !(CONST_KIND_FOREIGN), typeInfo, foreign, dependent) -- Note: What typeInfo is doesn't matter here.
 
-	elseif nodeType == !(nodeTypes.AstTable) then
+	elseif nodeType == !(AST_TABLE) then
 		local tableNode    = expr
 		local const, isNew = allocateConstantIfNew(state, !(CONST_KIND_NORMAL), typeInfo, tableNode, dependent)
 
 		if
 			isNew
 			and outputDebugInfo
-			and tableNode.parent.nodeType == !(nodeTypes.AstAssignment)
+			and tableNode.parent.nodeType == !(AST_ASSIGNMENT)
 			and tableNode.parent.forDeclaration
 		then
 			local assignment = tableNode.parent
@@ -225,10 +225,10 @@ function _G.allocateConstantForExpressionIfNew(state, expr, dependent)
 
 		return const, isNew
 
-	elseif nodeType == !(nodeTypes.AstNull) then
+	elseif nodeType == !(AST_NULL) then
 		return allocateConstantIfNew(state, !(CONST_KIND_NULL), typeInfo, nil, dependent) -- Note: What typeInfo is doesn't matter here.
 
-	elseif nodeType == !(nodeTypes.AstAccess) then
+	elseif nodeType == !(AST_ACCESS) then
 		return allocateConstantIfNew(state, !(CONST_KIND_VIEW), typeInfo, expr, dependent) -- Note: What typeInfo is doesn't matter here.
 
 	else
@@ -278,24 +278,24 @@ local function doesScopeReturn(state, scope)
 	if not statement then
 		return false
 
-	elseif statement.nodeType == !(nodeTypes.AstReturn) then
+	elseif statement.nodeType == !(AST_RETURN) then
 		return true
 
-	elseif statement.nodeType == !(nodeTypes.AstIf) then
+	elseif statement.nodeType == !(AST_IF) then
 		local ifBranch = statement
 		return ifBranch.branchFalse ~= nil
 			and doesScopeReturn(state, ifBranch.branchTrue)
 			and doesScopeReturn(state, ifBranch.branchFalse)
 
-	elseif statement.nodeType == !(nodeTypes.AstBlock) then
+	elseif statement.nodeType == !(AST_BLOCK) then
 		local block = statement
 		return doesScopeReturn(state, block)
 
-	elseif statement.nodeType == !(nodeTypes.AstWhile) or statement.nodeType == !(nodeTypes.AstFor) then
+	elseif statement.nodeType == !(AST_WHILE) or statement.nodeType == !(AST_FOR) then
 		local loop = statement
 		return doesScopeReturn(state, loop.body)
 
-	elseif statement.nodeType == !(nodeTypes.AstSwitch) then
+	elseif statement.nodeType == !(AST_SWITCH) then
 		local switch = statement
 		for _, case in ipairs(switch.cases) do
 			if not (case.fallThrough or doesScopeReturn(state, case.body)) then  return false  end
@@ -337,7 +337,7 @@ function _G.emitDeclaration(state, decl)
 
 	if isDeclarationConstant(decl) then
 		local valueExpr = decl.value or errorInternal(state, decl)
-		if valueExpr.nodeType == !(nodeTypes.AstLambda) and valueExpr.isPolymorphic then
+		if valueExpr.nodeType == !(AST_LAMBDA) and valueExpr.isPolymorphic then
 			-- @Cleanup: moveToNextRelevantPipe() should prevent us from getting here.
 			moveToPipe(state, decl, !(PIPE_DONE))
 			return
@@ -358,14 +358,14 @@ function _G.emitDeclaration(state, decl)
 			local name = decl.name.name
 
 			if name == "!call" then -- @Ugly detection.
-				!ASSERT("decl.parent.nodeType == "..nodeTypes.AstStruct) -- Only structs can have !call declarations at the moment. 2020-03-22
+				!ASSERT("decl.parent.nodeType == "..AST_STRUCT) -- Only structs can have !call declarations at the moment. 2020-03-22
 				name = decl.parent.representedType.name
 				if name ~= "" then
 					maybeSetConstantName(state, const, name.."_call")
 				end
 
 			elseif name == "!iterator" then -- @Ugly detection.
-				!ASSERT("decl.parent.nodeType == "..nodeTypes.AstStruct) -- Only structs can have !iterator declarations at the moment. 2020-03-28
+				!ASSERT("decl.parent.nodeType == "..AST_STRUCT) -- Only structs can have !iterator declarations at the moment. 2020-03-28
 				name = decl.parent.representedType.name
 				if name ~= "" then
 					maybeSetConstantName(state, const, name.."_iterator")
@@ -404,7 +404,7 @@ function _G.emitDeclaration(state, decl)
 				decl.valueConstant = const
 			end
 
-			if !!(CONST_SET{ nodeTypes.AstFileScope, nodeTypes.AstGlobalScope, nodeTypes.AstNamespace })[scope.nodeType] then
+			if !!(CONST_SET{ AST_FILE_SCOPE, AST_GLOBAL_SCOPE, AST_NAMESPACE })[scope.nodeType] then
 				decl.topScopeName = allocateTopScopeName(state, decl.name.name)
 			end
 		end
@@ -416,46 +416,46 @@ end
 function _G.emitNode(state, node)
 	local nodeType = node.nodeType
 
-	if nodeType == !(nodeTypes.AstLiteral) then
+	if nodeType == !(AST_LITERAL) then
 		local literal         = node
 		literal.valueConstant = allocateConstantIfNew(state, !(CONST_KIND_NORMAL), literal.inferredType, literal.value, literal)
 		moveToPipe(state, literal, !(PIPE_DONE))
 
-	elseif nodeType == !(nodeTypes.AstLambda) then
+	elseif nodeType == !(AST_LAMBDA) then
 		local lambda = node
 		assert(lambda.body)
 		assert(not lambda.isPolymorphic)
 		emitLambda(state, lambda) -- Calls moveToPipe().
 
-	elseif nodeType == !(nodeTypes.AstDeclaration) then
+	elseif nodeType == !(AST_DECLARATION) then
 		local decl = node
 		emitDeclaration(state, decl) -- Calls moveToPipe().
 
-	elseif nodeType == !(nodeTypes.AstForeign) then
+	elseif nodeType == !(AST_FOREIGN) then
 		local foreign              = node
 		local dummyType            = getTypeInfoForBuiltinType(state, "void")
 		foreign.valueConstant      = allocateConstantIfNew(state, !(CONST_KIND_FOREIGN), dummyType, foreign, foreign)
 		moveToPipe(state, foreign, !(PIPE_DONE))
 
-	elseif nodeType == !(nodeTypes.AstTypeInfo) then
+	elseif nodeType == !(AST_TYPE_INFO) then
 		local typeInfoNode         = node
 		local dummyType            = getTypeInfoForBuiltinType(state, "void")
 		typeInfoNode.valueConstant = allocateConstantIfNew(state, !(CONST_KIND_TYPE_INFO), dummyType, typeInfoNode.valueTypeInfo, typeInfoNode)
 		moveToPipe(state, typeInfoNode, !(PIPE_DONE))
 
-	elseif nodeType == !(nodeTypes.AstLocation) then
+	elseif nodeType == !(AST_LOCATION) then
 		local loc                  = node
 		local dummyType            = getTypeInfoForBuiltinType(state, "void")
 		loc.valueConstant          = allocateConstantIfNew(state, !(CONST_KIND_LOCATION), dummyType, loc.target, loc)
 		moveToPipe(state, loc, !(PIPE_DONE))
 
-	elseif nodeType == !(nodeTypes.AstCall) then -- The called function should have a !caller_location.
+	elseif nodeType == !(AST_CALL) then -- The called function should have a !caller_location.
 		local call                 = node
 		local dummyType            = getTypeInfoForBuiltinType(state, "void")
 		call.locationConstant      = allocateConstantIfNew(state, !(CONST_KIND_LOCATION), dummyType, call.callee, call)
 		moveToPipe(state, call, !(PIPE_DONE))
 
-	elseif nodeType == !(nodeTypes.AstNull) then
+	elseif nodeType == !(AST_NULL) then
 		local null                 = node
 		local dummyType            = getTypeInfoForBuiltinType(state, "void")
 		null.valueConstant         = allocateConstantIfNew(state, !(CONST_KIND_NULL), dummyType, nil, null)

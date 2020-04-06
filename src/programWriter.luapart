@@ -295,7 +295,7 @@ end
 function _G.writeStringConcatenation(state, writer, indent, nextLocalN, localsStack, left, right)
 	if type(left) == "string" then
 		writer.file:write(left)
-	elseif left.nodeType == !(nodeTypes.AstBinary) and left.operation == ".." then
+	elseif left.nodeType == !(AST_BINARY) and left.operation == ".." then
 		writeStringConcatenation(state, writer, indent, nextLocalN, localsStack, left.left, left.right)
 	else
 		writeExpression(state, writer, indent, nextLocalN, localsStack, left)
@@ -305,7 +305,7 @@ function _G.writeStringConcatenation(state, writer, indent, nextLocalN, localsSt
 
 	if type(right) == "string" then
 		writer.file:write(right)
-	elseif right.nodeType == !(nodeTypes.AstBinary) and right.operation == ".." then
+	elseif right.nodeType == !(AST_BINARY) and right.operation == ".." then
 		writeStringConcatenation(state, writer, indent, nextLocalN, localsStack, right.left, right.right)
 	else
 		writeExpression(state, writer, indent, nextLocalN, localsStack, right)
@@ -317,15 +317,15 @@ function _G.shouldOperationHaveSurroundingParentheses(node)
 	local parentNodeType = parent.nodeType
 	return not (
 		!!(CONST_SET{
-			nodeTypes.AstCast, -- Casts should always add their own parentheses.
-			nodeTypes.AstAssignment,
-			nodeTypes.AstCall, -- Both callee and arguments.
-			nodeTypes.AstReturn,
-			nodeTypes.AstIf,
-			nodeTypes.AstFor,
-			nodeTypes.AstWhile
+			AST_CAST, -- Casts should always add their own parentheses.
+			AST_ASSIGNMENT,
+			AST_CALL, -- Both callee and arguments.
+			AST_RETURN,
+			AST_IF,
+			AST_FOR,
+			AST_WHILE
 		})[parentNodeType]
-		or parent.nodeType == !(nodeTypes.AstAccess) and node == parent.member -- The member should be inside [].
+		or parent.nodeType == !(AST_ACCESS) and node == parent.member -- The member should be inside [].
 	)
 end
 
@@ -388,7 +388,7 @@ end
 
 local function isExpressionLiteralStringAndValidLuaIdentifier(expr)
 	return
-		expr.nodeType == !(nodeTypes.AstLiteral)
+		expr.nodeType == !(AST_LITERAL)
 		and expr.literalType == !(LITERAL_STRING)
 		and expr.value:find"^[%a_][%w_]*$" ~= nil
 		and not LUA_KEYWORDS[expr.value]
@@ -401,9 +401,9 @@ function _G.writeAccess(state, writer, indent, nextLocalN, localsStack, access)
 		-- @Incomplete: Compiler setting for runtime checks of array bounds.
 		writeExpression(state, writer, indent, nextLocalN, localsStack, access.object)
 
-		if access.parent.nodeType == !(nodeTypes.AstCall) and access.parent.isMethod then
+		if access.parent.nodeType == !(AST_CALL) and access.parent.isMethod then
 			local stringLiteral = access.member
-			assert(stringLiteral.nodeType == !(nodeTypes.AstLiteral) and stringLiteral.literalType == !(LITERAL_STRING))
+			assert(stringLiteral.nodeType == !(AST_LITERAL) and stringLiteral.literalType == !(LITERAL_STRING))
 
 			if not stringLiteral.value:find"^[%a_][%w_]*$" then
 				errorInternal("@Incomplete: Support method calls using names containing non-ASCII characters.")
@@ -527,7 +527,7 @@ function _G.writeTableConstructorKeyName(writer, name)
 	end
 end
 function _G.writeTableConstructorKey(state, writer, indent, nextLocalN, localsStack, keyExpr)
-	if keyExpr.nodeType == !(nodeTypes.AstLiteral) and keyExpr.literalType == !(LITERAL_STRING) then
+	if keyExpr.nodeType == !(AST_LITERAL) and keyExpr.literalType == !(LITERAL_STRING) then
 		local stringLiteral = keyExpr
 		writeTableConstructorKeyName(writer, stringLiteral.value)
 	else
@@ -549,7 +549,7 @@ end
 local function findTableFieldByNameInStructConstructor(state, tableNode, memberName)
 	for _, tableField in ipairs(tableNode.fields) do
 		local keyExpr = tableField.key
-		if keyExpr.nodeType == !(nodeTypes.AstLiteral) and keyExpr.literalType == !(LITERAL_STRING) and keyExpr.value == memberName then
+		if keyExpr.nodeType == !(AST_LITERAL) and keyExpr.literalType == !(LITERAL_STRING) and keyExpr.value == memberName then
 			return tableField
 		end
 	end
@@ -573,7 +573,7 @@ function _G.writeExpression(state, writer, indent, nextLocalN, localsStack, expr
 	!ASSERT(`expr.inferredType`, nil, `expr`)
 	local file = writer.file
 
-	if expr.nodeType == !(nodeTypes.AstCall) then
+	if expr.nodeType == !(AST_CALL) then
 		local call   = expr
 		local callee = call.callee
 
@@ -583,7 +583,7 @@ function _G.writeExpression(state, writer, indent, nextLocalN, localsStack, expr
 
 		if call.surroundedByParentheses then  file:write("(")  end
 
-		if callee.nodeType == !(nodeTypes.AstIdentifier) and isDeclarationConstant(callee.declaration) then
+		if callee.nodeType == !(AST_IDENTIFIER) and isDeclarationConstant(callee.declaration) then
 			local ident = callee
 			local decl  = ident.declaration
 			local const = decl.valueConstant
@@ -599,12 +599,12 @@ function _G.writeExpression(state, writer, indent, nextLocalN, localsStack, expr
 				callingForeignMethod = true
 				local argExpr        = call.arguments[1] or errorInternal(state, call)
 
-				if argExpr.nodeType == !(nodeTypes.AstIdentifier) then
+				if argExpr.nodeType == !(AST_IDENTIFIER) then
 					-- Note: It doesn't matter if argExpr a reference to a constant or not since it's be an object reference
 					-- either way (unless the type inference borked and argExpr somehow isn't a struct instance).
 					writeExpression(state, writer, indent, nextLocalN, localsStack, argExpr)
 
-				elseif argExpr.nodeType == !(nodeTypes.AstAccess) then
+				elseif argExpr.nodeType == !(AST_ACCESS) then
 					-- Table lookups have precedence over method calls in Lua.
 					writeExpression(state, writer, indent, nextLocalN, localsStack, argExpr)
 
@@ -641,19 +641,19 @@ function _G.writeExpression(state, writer, indent, nextLocalN, localsStack, expr
 		end
 
 		-- Write default values for arguments (if the function isn't foreign).
-		if callee.nodeType == !(nodeTypes.AstIdentifier) then
+		if callee.nodeType == !(AST_IDENTIFIER) then
 			local calleeDecl = callee.declaration
 
 			if isDeclarationConstant(calleeDecl) then
 				local lambda = calleeDecl.value or errorInternal(state, calleeDecl)
 				lambda       = followIdentifiersToConstantValue(lambda)
 
-				!ASSERT("lambda.nodeType == "..nodeTypes.AstLambda, nil, `lambda`)
+				!ASSERT("lambda.nodeType == "..AST_LAMBDA, nil, `lambda`)
 
 				if not lambda.bodyIsForeign then
 					-- Only write a value if the last non-vararg argument is optional.
 					local argLast = lambda.argumentsIn and getLast(lambda.argumentsIn.arguments)
-					if argLast and argLast.declaration.name.nodeType == !(nodeTypes.AstVararg) then
+					if argLast and argLast.declaration.name.nodeType == !(AST_VARARG) then
 						argLast = getLast(lambda.argumentsIn.arguments, 2)
 					end
 
@@ -685,7 +685,7 @@ function _G.writeExpression(state, writer, indent, nextLocalN, localsStack, expr
 
 							if not valueExpr then
 								-- void  Varargs are optional but have no default value (or zero default values, since it's a list).
-							elseif valueExpr.nodeType == !(nodeTypes.AstLocation) and valueExpr.ofCaller then
+							elseif valueExpr.nodeType == !(AST_LOCATION) and valueExpr.ofCaller then
 								local const = call.locationConstant or errorInternal(state, call, "Missing caller location data.")
 								writeConstantValueOrReference(state, writer, const, valueExpr)
 							else
@@ -701,7 +701,7 @@ function _G.writeExpression(state, writer, indent, nextLocalN, localsStack, expr
 
 		if call.surroundedByParentheses then  file:write(")")  end
 
-	elseif expr.nodeType == !(nodeTypes.AstUnary) then
+	elseif expr.nodeType == !(AST_UNARY) then
 		local unary = expr
 
 		if unary.operation == "+" then
@@ -719,7 +719,7 @@ function _G.writeExpression(state, writer, indent, nextLocalN, localsStack, expr
 			if addParens then  file:write(")")  end
 		end
 
-	elseif expr.nodeType == !(nodeTypes.AstBinary) then
+	elseif expr.nodeType == !(AST_BINARY) then
 		local binary = expr
 		writeBinaryOperation(
 			state, writer, indent, nextLocalN, localsStack,
@@ -729,12 +729,12 @@ function _G.writeExpression(state, writer, indent, nextLocalN, localsStack, expr
 			binary.token, binary
 		)
 
-	elseif expr.nodeType == !(nodeTypes.AstLiteral) then
+	elseif expr.nodeType == !(AST_LITERAL) then
 		local literal = expr
 		!ASSERT(`literal.valueConstant`, nil, `literal`)
 		writeConstantValue(state, writer, literal.valueConstant, literal)
 
-	elseif expr.nodeType == !(nodeTypes.AstIdentifier) then
+	elseif expr.nodeType == !(AST_IDENTIFIER) then
 		local ident = expr
 		local decl  = ident.declaration
 		!ASSERT `ident.inferredType`
@@ -746,21 +746,21 @@ function _G.writeExpression(state, writer, indent, nextLocalN, localsStack, expr
 			writeIdentifierName(state, writer, ident)
 		end
 
-	elseif expr.nodeType == !(nodeTypes.AstVararg) then
+	elseif expr.nodeType == !(AST_VARARG) then
 		local vararg = expr
 		file:write(vararg.surroundedByParentheses and "(...)" or "...")
 
-	elseif expr.nodeType == !(nodeTypes.AstBlank) then
+	elseif expr.nodeType == !(AST_BLANK) then
 		file:write("_")
 
-	elseif expr.nodeType == !(nodeTypes.AstType) then
+	elseif expr.nodeType == !(AST_TYPE) then
 		local typeNode = expr
 		file:write(F("%d", typeNode.representedType.id)) -- @Cleanup: We probably have a constant for the type ID to use with writeConstantValue() here who cares...
 		if outputDebugInfo then
 			file:write(formatInfoComment(getFriendlyTypeInfoName(typeNode.representedType)))
 		end
 
-	elseif expr.nodeType == !(nodeTypes.AstLambda) then
+	elseif expr.nodeType == !(AST_LAMBDA) then
 		local lambda = expr
 		if lambda.captures[1] then
 			writeFunction(state, writer, indent, nextLocalN, localsStack, lambda)
@@ -769,23 +769,23 @@ function _G.writeExpression(state, writer, indent, nextLocalN, localsStack, expr
 			writeConstantValueOrReference(state, writer, const, lambda)
 		end
 
-	elseif expr.nodeType == !(nodeTypes.AstAccess) then
+	elseif expr.nodeType == !(AST_ACCESS) then
 		local access = expr
 		writeAccess(state, writer, indent, nextLocalN, localsStack, access)
 
-	elseif expr.nodeType == !(nodeTypes.AstCast) then
+	elseif expr.nodeType == !(AST_CAST) then
 		local cast = expr
 		writeCast(state, writer, indent, nextLocalN, localsStack, cast)
 
-	elseif expr.nodeType == !(nodeTypes.AstTable) then
+	elseif expr.nodeType == !(AST_TABLE) then
 		local tableNode = expr
 		local first     = true
 		file:write("{")
 
 		local function writeGenericTableFieldIfValueIsNotNil(tableField)
 			local valueExpr = tableField.value
-			if valueExpr.nodeType == !(nodeTypes.AstNull) then  return  end
-			if valueExpr.nodeType == !(nodeTypes.AstLiteral) and valueExpr.literalType == !(LITERAL_NIL) then  return  end
+			if valueExpr.nodeType == !(AST_NULL) then  return  end
+			if valueExpr.nodeType == !(AST_LITERAL) and valueExpr.literalType == !(LITERAL_NIL) then  return  end
 
 			if not first then  file:write(", ")  end
 			first = false
@@ -805,7 +805,7 @@ function _G.writeExpression(state, writer, indent, nextLocalN, localsStack, expr
 			local items = {}
 
 			for _, tableField in ipairs(tableNode.fields) do
-				!ASSERT("tableField.key.nodeType == "..nodeTypes.AstLiteral) -- :VariableArrayIndices
+				!ASSERT("tableField.key.nodeType == "..AST_LITERAL) -- :VariableArrayIndices
 
 				local literal     = tableField.key
 				local arrayIndex  = literal.value
@@ -829,8 +829,8 @@ function _G.writeExpression(state, writer, indent, nextLocalN, localsStack, expr
 
 				if not (
 					tableField and (
-						tableField.value.nodeType == !(nodeTypes.AstNull)
-						or (tableField.value.nodeType == !(nodeTypes.AstLiteral) and tableField.value.literalType == !(LITERAL_NIL))
+						tableField.value.nodeType == !(AST_NULL)
+						or (tableField.value.nodeType == !(AST_LITERAL) and tableField.value.literalType == !(LITERAL_NIL))
 					)
 					-- or (default value is NULL/nil) -- @Polish
 				) then
@@ -868,24 +868,24 @@ function _G.writeExpression(state, writer, indent, nextLocalN, localsStack, expr
 
 		file:write("}")
 
-	elseif expr.nodeType == !(nodeTypes.AstForeign) then
+	elseif expr.nodeType == !(AST_FOREIGN) then
 		local foreign = expr
 		writeConstantValueOrReference(state, writer, foreign.valueConstant, foreign)
 
-	elseif expr.nodeType == !(nodeTypes.AstTypeInfo) then
+	elseif expr.nodeType == !(AST_TYPE_INFO) then
 		local typeInfoNode = expr
 		writeConstantValueOrReference(state, writer, typeInfoNode.valueConstant, typeInfoNode)
 
-	elseif expr.nodeType == !(nodeTypes.AstLocation) then
+	elseif expr.nodeType == !(AST_LOCATION) then
 		local loc = expr
 		writeConstantValueOrReference(state, writer, loc.valueConstant, loc)
 
-	elseif expr.nodeType == !(nodeTypes.AstConditional) then
+	elseif expr.nodeType == !(AST_CONDITIONAL) then
 		local conditional = expr
 		local hasVararg   = false
 
 		astVisitAllNodes(conditional, function(node)
-			if node.nodeType == !(nodeTypes.AstVararg) then
+			if node.nodeType == !(AST_VARARG) then
 				hasVararg = true
 				return !(VISIT_BREAK)
 			elseif isScope(node) then
@@ -923,7 +923,7 @@ function _G.writeExpression(state, writer, indent, nextLocalN, localsStack, expr
 		elseif conditional.conditionAndBranchTrue ~= conditional.condition then
 			-- (function(x) if x then return x else return y end end)(x)
 			local cast = conditional.condition
-			assert(cast.nodeType   == !(nodeTypes.AstCast))
+			assert(cast.nodeType   == !(AST_CAST))
 			assert(cast.expression == conditional.conditionAndBranchTrue)
 			assert(cast.isImplicit)
 
@@ -952,7 +952,7 @@ function _G.writeExpression(state, writer, indent, nextLocalN, localsStack, expr
 			file:write(")")
 		end
 
-	elseif expr.nodeType == !(nodeTypes.AstNull) then
+	elseif expr.nodeType == !(AST_NULL) then
 		file:write("nil")
 
 	elseif expr.inferredType.tag == !(TYPE_NAMESPACE) then
@@ -1139,7 +1139,7 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 	for _, statement in ipairs(block.statementsDynamic) do
 		local nodeType = statement.nodeType
 
-		if nodeType == !(nodeTypes.AstDeclaration) then
+		if nodeType == !(AST_DECLARATION) then
 			local decl = statement
 			assert(decl.kind == !(DECL_KIND_LOCAL_VAR) --[[or decl.kind == !(DECL_KIND_READ_ONLY)]])
 
@@ -1161,7 +1161,7 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 				writeEol(state, writer)
 			end
 
-		elseif nodeType == !(nodeTypes.AstAssignment) then
+		elseif nodeType == !(AST_ASSIGNMENT) then
 			local assignment = statement
 
 			-- Plain assignment.
@@ -1176,7 +1176,7 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 				for i, targetExpr in ipairs(assignment.targets) do
 					if i > 1 then  file:write(", ")  end
 					writeExpression(state, writer, indent, nextLocalN, localsStack, targetExpr)
-					hasBlank = (hasBlank or targetExpr.nodeType == !(nodeTypes.AstBlank))
+					hasBlank = (hasBlank or targetExpr.nodeType == !(AST_BLANK))
 				end
 
 				file:write(" = ")
@@ -1205,7 +1205,7 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 				local accessN = 0
 
 				for _, targetExpr in ipairs(assignment.targets) do
-					if targetExpr.nodeType == !(nodeTypes.AstAccess) then
+					if targetExpr.nodeType == !(AST_ACCESS) then
 						local access = targetExpr
 
 						if not first then  file:write(", ")  end
@@ -1228,7 +1228,7 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 				first = true
 
 				for _, targetExpr in ipairs(assignment.targets) do
-					if targetExpr.nodeType == !(nodeTypes.AstAccess) then
+					if targetExpr.nodeType == !(AST_ACCESS) then
 						local access = targetExpr
 
 						if not first then  file:write(", ")  end
@@ -1259,7 +1259,7 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 					if not first then  file:write(", ")  end
 					first = false
 
-					if target.nodeType == !(nodeTypes.AstAccess) then
+					if target.nodeType == !(AST_ACCESS) then
 						accessN = accessN+1
 						target  = F("_OBJECT%d[_MEMBER%d]", accessN, accessN)
 						file:write(target)
@@ -1297,13 +1297,13 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 
 			inDecl = false
 
-		elseif nodeType == !(nodeTypes.AstReturn) then
+		elseif nodeType == !(AST_RETURN) then
 			local returnNode = statement
 
 			-- @Incomplete: Evaluate return values before running defers (right?).
 			writeDefers(state, writer, indent, nextLocalN, localsStack, indentStr, writer.deferStack)
 
-			if block.parent.nodeType == !(nodeTypes.AstLambda) and not returnNode.values[1] then
+			if block.parent.nodeType == !(AST_LAMBDA) and not returnNode.values[1] then
 				if outputDebugInfo then
 					file:write(indentStr, "-- return")
 					writeEol(state, writer)
@@ -1319,7 +1319,7 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 				writeEol(state, writer)
 			end
 
-		elseif nodeType == !(nodeTypes.AstBlock) then
+		elseif nodeType == !(AST_BLOCK) then
 			local block = statement
 
 			file:write(indentStr, "do")
@@ -1330,7 +1330,7 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 			file:write(indentStr, "end")
 			writeEol(state, writer)
 
-		elseif nodeType == !(nodeTypes.AstIf) then
+		elseif nodeType == !(AST_IF) then
 			-- @Optimize: Don't output empty branches.
 			local ifBranch = statement
 
@@ -1346,7 +1346,7 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 			if not (ifBranch.branchFalse and ifBranch.branchFalse.statementsDynamic[1]) then
 				-- void
 
-			elseif not ifBranch.branchFalse.statementsDynamic[2] and ifBranch.branchFalse.statementsDynamic[1].nodeType == !(nodeTypes.AstIf) then
+			elseif not ifBranch.branchFalse.statementsDynamic[2] and ifBranch.branchFalse.statementsDynamic[1].nodeType == !(AST_IF) then
 				file:write(indentStr, "else") -- This will be followed by "if"
 				writeBlock(state, writer, indent, nextLocalN, localsStack, ifBranch.branchFalse, true)
 
@@ -1361,7 +1361,7 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 				writeEol(state, writer)
 			end
 
-		elseif nodeType == !(nodeTypes.AstWhile) then
+		elseif nodeType == !(AST_WHILE) then
 			-- @Optimize: Don't output an empty body.
 			local whileLoop = statement
 
@@ -1372,7 +1372,7 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 
 			writeLoopBodyAndFooter(state, writer, whileLoop, indent, nextLocalN, localsStack, deferStartIndex)
 
-		elseif nodeType == !(nodeTypes.AstFor) then
+		elseif nodeType == !(AST_FOR) then
 			-- @Optimize: Don't output an empty body.
 			local forLoop     = statement
 			local localsStack = {{}, unpack(localsStack)}
@@ -1407,7 +1407,7 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 				file:write(indentStr, "for ")
 
 				if objType.tag == !(TYPE_VARARG) then
-					!ASSERT("objExpr.nodeType == "..nodeTypes.AstVararg)
+					!ASSERT("objExpr.nodeType == "..AST_VARARG)
 
 					addLineMapping(state, writer, objExpr.token)
 					writeIdentifierName(state, writer, forLoop.declarations[1].name)
@@ -1488,7 +1488,7 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 				writeLoopBodyAndFooter(state, writer, forLoop, indent, nextLocalN, localsStack, deferStartIndex)
 			end
 
-		elseif nodeType == !(nodeTypes.AstBreak) then
+		elseif nodeType == !(AST_BREAK) then
 			local breakNode = statement
 
 			local deferStartIndexBreak = writer.loopDeferIndices[writer.loopDepth] or errorInternal()
@@ -1505,11 +1505,11 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 
 			writeEol(state, writer)
 
-		elseif nodeType == !(nodeTypes.AstDefer) then
+		elseif nodeType == !(AST_DEFER) then
 			local defer = statement
 			table.insert(writer.deferStack, defer)
 
-		elseif nodeType == !(nodeTypes.AstSwitch) then
+		elseif nodeType == !(AST_SWITCH) then
 			local switch = statement
 
 			file:write(indentStr, "local _SWITCH = ")
@@ -1568,7 +1568,7 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 		writer.deferStack[deferStartIndex]
 		and not (
 			block.statementsDynamic[1]
-			and getLast(block.statementsDynamic).nodeType == !(nodeTypes.AstReturn)
+			and getLast(block.statementsDynamic).nodeType == !(AST_RETURN)
 		)
 	)
 
@@ -1611,7 +1611,7 @@ function _G.writeFunction(state, writer, indent, nextLocalN, localsStack, lambda
 
 			local decl = arg.declaration
 
-			if decl.name.nodeType == !(nodeTypes.AstVararg) then
+			if decl.name.nodeType == !(AST_VARARG) then
 				decl.localName = "..."
 			else
 				decl.localName = allocateArgumentName(state, writer, localsStack, decl.name.name, i)
@@ -1956,11 +1956,11 @@ function _G.writeConstantValue(state, writer, const, nodeForError)
 
 		if enumInfo.memberTypeInfo.tag == !(TYPE_TYPE) then
 			local typeNode = valueExpr
-			!ASSERT("typeNode.nodeType == "..nodeTypes.AstType)
+			!ASSERT("typeNode.nodeType == "..AST_TYPE)
 			writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), typeNode.representedType, true)
 		else
 			local literal = valueExpr
-			!ASSERT("literal.nodeType == "..nodeTypes.AstLiteral)
+			!ASSERT("literal.nodeType == "..AST_LITERAL)
 			writeNormalSimpleConstant(state, writer, enumInfo.memberTypeInfo.tag, literal.value, true)
 		end
 
@@ -2257,7 +2257,7 @@ function _G.writeProgram(state, writer)
 				entryPointName
 			)
 		end
-		!ASSERT("mainLambda.nodeType == "..nodeTypes.AstLambda)
+		!ASSERT("mainLambda.nodeType == "..AST_LAMBDA)
 
 		if mainFuncDecl.overloadOf then
 			nodeError(state, mainFuncDecl.name, "ProgramWriter", "Program entry point name must not be overloaded.")
@@ -2269,13 +2269,13 @@ function _G.writeProgram(state, writer)
 	end
 
 	astVisitAllNodes(globalScope, function(node)
-		if node.nodeType == !(nodeTypes.AstDeclaration) then
+		if node.nodeType == !(AST_DECLARATION) then
 			local decl = node
 			if decl.kind == !(DECL_KIND_STATIC) then
 				table.insert(topScopeDeclarations, decl)
 			end
 
-		elseif node.nodeType == !(nodeTypes.AstNamespace) then
+		elseif node.nodeType == !(AST_NAMESPACE) then
 			local namespace = node
 			insertArrayItems(topScopeDeclarations, namespace.declarations)
 		end
