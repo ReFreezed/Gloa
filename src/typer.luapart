@@ -4084,6 +4084,25 @@ end
 	if defer.body.queued.pipe <= !(PIPE_INFER) then
 		!DEPEND_AND_RETURN(`defer`, DEPEND_NODE_INFERRED, `defer.body`)
 	end
+
+	astVisitAllNodesInUnit(defer.body, false, function(node)
+		if node.nodeType == !(AST_RETURN) then
+			typeError2(state,
+				node,  F("Cannot return from within a defer."),
+				defer, F("...here is the defer.")
+			)
+		elseif node.nodeType == !(AST_BREAK) or node.nodeType == !(AST_CONTINUE) then
+			local loop = node.loop or astFindParent(node, !!(CONST_SET{ AST_FOR, AST_WHILE }))
+
+			if astHasParent(defer, loop) then
+				typeError2(state,
+					node,  F("Cannot %s from within a defer to the outside.", (node.nodeType == !(AST_BREAK) and "break" or "continue")),
+					defer, F("...here is the defer.")
+				)
+			end
+		end
+	end)
+
 	moveToNextRelevantPipe(state, defer)
 end
 

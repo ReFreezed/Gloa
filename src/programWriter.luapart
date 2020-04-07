@@ -1055,6 +1055,10 @@ local function allocateArgumentName(state, writer, localsStack, name, n)
 end
 
 local function writeDefers(state, writer, indent, nextLocalN, localsStack, indentStr, defers)
+	if not defers[1] then  return  end
+
+	!ifDEBUG `writer.file:write(indentStr, "-- defers") ; writeEol(state, writer)`
+
 	for i = #defers, 1, -1 do
 		local block = defers[i].body
 		if
@@ -1070,6 +1074,8 @@ local function writeDefers(state, writer, indent, nextLocalN, localsStack, inden
 			writeBlock(state, writer, indent, nextLocalN, localsStack, block, false, nil)
 		end
 	end
+
+	!ifDEBUG `writer.file:write(indentStr, "-- /defers") ; writeEol(state, writer)`
 end
 
 local function handleContinueAfterBlock(state, writer, parentContinueDepth, prevContinueDepth, nextStatement, indent, indentStr)
@@ -1081,7 +1087,7 @@ local function handleContinueAfterBlock(state, writer, parentContinueDepth, prev
 	end
 
 	if not nextStatement then
-		writer.skipOneJumpCheck = true -- @Cleanup: Kind of ugly...
+		writer.skipOneJumpCheck = true -- @Cleanup: Kind of ugly flag...
 		return indent, indentStr
 	end
 
@@ -1636,8 +1642,8 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 	local doWriteDefers = (
 		writer.deferStack[deferStartIndex]
 		and not (
-			block.statementsDynamic[1]
-			and getLast(block.statementsDynamic).nodeType == !(AST_RETURN)
+			block.statementsDynamic[1] -- Defers will already have been written before these:
+			and !!(CONST_SET{ AST_RETURN, AST_BREAK, AST_CONTINUE })[getLast(block.statementsDynamic).nodeType]
 		)
 	)
 
