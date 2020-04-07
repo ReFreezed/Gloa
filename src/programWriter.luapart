@@ -240,7 +240,9 @@ _G.!struct"WriterState"{
 	{`foreignOnlyAvailableDuringCompilation`, {}},
 
 	{`loopDepth`,         0},
-	{`loopStack`,         {}},  -- [](AstFor|AstWhile)  (Only used for loops with named breaks inside.)
+	{`loopStack`,         {}},  -- [](AstFor|AstWhile)  Only used for loops with named jumps inside.
+	{`continueDepth`,     0},
+	{`skipOneJumpCheck`,  false},
 	{`deferStack`,        {}},  -- []AstDefer
 	{`loopDeferIndices`,  {}},
 
@@ -1061,16 +1063,39 @@ local function writeDefers(state, writer, indent, nextLocalN, localsStack, inden
 		then
 			writer.file:write(indentStr, "do")
 			writeEol(state, writer)
-			writeBlock(state, writer, indent+1, nextLocalN, localsStack, block)
+			writeBlock(state, writer, indent+1, nextLocalN, localsStack, block, false, nil)
 			writer.file:write(indentStr, "end")
 			writeEol(state, writer)
 		else
-			writeBlock(state, writer, indent, nextLocalN, localsStack, block)
+			writeBlock(state, writer, indent, nextLocalN, localsStack, block, false, nil)
 		end
 	end
 end
 
-local function writeLoopBodyAndFooter(state, writer, loop, indent, nextLocalN, localsStack, deferStartIndex)
+local function handleContinueAfterBlock(state, writer, parentContinueDepth, prevContinueDepth, nextStatement, indent, indentStr)
+	-- if writer.continueDepth <= parentContinueDepth then  return indent, indentStr  end
+	if writer.continueDepth == 0 then  return indent, indentStr  end
+
+	if writer.continueDepth == prevContinueDepth then
+		writer.continueDepth = writer.continueDepth+1
+	end
+
+	if not nextStatement then
+		writer.skipOneJumpCheck = true -- @Cleanup: Kind of ugly...
+		return indent, indentStr
+	end
+
+	-- @Cleanup @Speed: Remove excessive if_JUMP==0 checks in blocks without any continues.
+	-- @Cleanup @Speed: Make 'if _JUMP>0 then...end if _JUMP==0' into 'if _JUMP>0 then...else'.
+	writer.file:write(indentStr, "if _JUMP == 0 then") ; writeEol(state, writer)
+
+	indent    = indent+1
+	indentStr = indentStr.."\t"
+
+	return indent, indentStr
+end
+
+local function writeLoopBodyAndFooter(state, writer, loop, indent, nextLocalN, localsStack, deferStartIndex, nextStatement, parentContinueDepth)
 	local file      = writer.file
 	local loopStack = writer.loopStack
 	local indentStr = ("\t"):rep(indent)
@@ -1078,46 +1103,53 @@ local function writeLoopBodyAndFooter(state, writer, loop, indent, nextLocalN, l
 	writer.loopDepth                          = writer.loopDepth+1
 	writer.loopDeferIndices[writer.loopDepth] = #writer.deferStack+1
 
-	if not (loop.hasNamedBreaks or loopStack[1]) then
-		writeBlock(state, writer, indent+1, nextLocalN, localsStack, loop.body)
+	if not (loop.hasNamedJumps or loopStack[1]) then
+		writeBlock(state, writer, indent+1, nextLocalN, localsStack, loop.body, false, nextStatement)
 		file:write(indentStr, "end") ; writeEol(state, writer)
 
 		writer.loopDeferIndices[writer.loopDepth] = nil
 		writer.loopDepth                          = writer.loopDepth-1
-		return
+		return indent, indentStr
 	end
 
-	if not loopStack[1] then
-		file:write(indentStr, "\tlocal _BREAK = 0") ; writeEol(state, writer)
+	if loopStack[1] then
+		file:write(indentStr, "\t_JUMP = 0") ; writeEol(state, writer)
+	else
+		file:write(indentStr, "\tlocal _JUMP, _BREAK = 0, false") ; writeEol(state, writer)
 	end
 
 	table.insert(loopStack, loop)
-	writeBlock(state, writer, indent+1, nextLocalN, localsStack, loop.body)
+
+	local prevContinueDepth = writer.continueDepth
+	writeBlock(state, writer, indent+1, nextLocalN, localsStack, loop.body, false, nextStatement)
+
 	file:write(indentStr, "end") ; writeEol(state, writer)
+
 	table.remove(loopStack)
 
 	if loopStack[1] then
-		file:write(indentStr, "if _BREAK > 0 then") ; writeEol(state, writer)
+		local deferStartIndexJump = writer.loopDeferIndices[writer.loopDepth-1] or deferStartIndex
+		local defers              = writer.deferStack[deferStartIndexJump] and {unpack(writer.deferStack, deferStartIndexJump)} or EMPTY_TABLE
 
-		local deferStartIndexBreak = writer.loopDeferIndices[writer.loopDepth-1] or deferStartIndex
-		local defers               = writer.deferStack[deferStartIndexBreak] and {unpack(writer.deferStack, deferStartIndexBreak)} or EMPTY_TABLE
-		writeDefers(state, writer, indent+1, nextLocalN, localsStack, indentStr.."\t", defers)
+		file:write(indentStr, "if _JUMP > 0 then") ; writeEol(state, writer)
+			writeDefers(state, writer, indent+1, nextLocalN, localsStack, indentStr.."\t", defers)
 
-		file:write(indentStr, "\t")
-		if loopStack[2] then
-			file:write("_BREAK = _BREAK-1 ; ")
-		end
-		file:write("break") ; writeEol(state, writer)
-
+			if loopStack[2] then
+				file:write(indentStr, "\tif _BREAK or _JUMP > 1 then  _JUMP = _JUMP-1 ; break  end") ; writeEol(state, writer)
+			else
+				file:write(indentStr, "\tif _BREAK or _JUMP > 1 then  break  end") ; writeEol(state, writer)
+			end
 		file:write(indentStr, "end") ; writeEol(state, writer)
 	end
 
 	writer.loopDeferIndices[writer.loopDepth] = nil
 	writer.loopDepth                          = writer.loopDepth-1
+
+	indent, indentStr = handleContinueAfterBlock(state, writer, parentContinueDepth, prevContinueDepth, nextStatement, indent, indentStr)
+	return indent, indentStr
 end
 
--- writeBlock( state, writer, indent, nextLocalN, localsStack, block [, isElseif=false ] )
-function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, isElseif)
+function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, isElseif, nextStatementInParent)
 	!ASSERT `not block[1]`
 
 	local file      = writer.file
@@ -1131,13 +1163,16 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 		return
 	end
 
-	local deferStartIndex = #writer.deferStack+1
+	local deferStartIndex     = #writer.deferStack+1
+	local parentContinueDepth = writer.continueDepth
+	local gotContinue         = false
 
 	localsStack  = {{}, unpack(localsStack)} -- @Speed: We can probably handle locals like defers.
 	local inDecl = false
 
-	for _, statement in ipairs(block.statementsDynamic) do
-		local nodeType = statement.nodeType
+	for statementIndex, statement in ipairs(block.statementsDynamic) do
+		local nodeType      = statement.nodeType
+		local nextStatement = block.statementsDynamic[statementIndex+1]
 
 		if nodeType == !(AST_DECLARATION) then
 			local decl = statement
@@ -1325,10 +1360,11 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 			file:write(indentStr, "do")
 			writeEol(state, writer)
 
-			writeBlock(state, writer, indent+1, nextLocalN, localsStack, block)
+			local prevContinueDepth = writer.continueDepth
+			writeBlock(state, writer, indent+1, nextLocalN, localsStack, block, false, nextStatement)
 
-			file:write(indentStr, "end")
-			writeEol(state, writer)
+			file:write(indentStr, "end") ; writeEol(state, writer)
+			indent, indentStr = handleContinueAfterBlock(state, writer, parentContinueDepth, prevContinueDepth, nextStatement, indent, indentStr)
 
 		elseif nodeType == !(AST_IF) then
 			-- @Optimize: Don't output empty branches.
@@ -1341,24 +1377,31 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 			file:write(" then")
 			writeEol(state, writer)
 
-			writeBlock(state, writer, indent+1, nextLocalN, localsStack, ifBranch.branchTrue)
+			local prevContinueDepth = writer.continueDepth
+			writeBlock(state, writer, indent+1, nextLocalN, localsStack, ifBranch.branchTrue, false, nextStatement)
+
+			local maxContinue1   = writer.continueDepth
+			writer.continueDepth = prevContinueDepth
 
 			if not (ifBranch.branchFalse and ifBranch.branchFalse.statementsDynamic[1]) then
 				-- void
 
-			elseif not ifBranch.branchFalse.statementsDynamic[2] and ifBranch.branchFalse.statementsDynamic[1].nodeType == !(AST_IF) then
-				file:write(indentStr, "else") -- This will be followed by "if"
-				writeBlock(state, writer, indent, nextLocalN, localsStack, ifBranch.branchFalse, true)
+			-- @Polish: Re-enable 'elseif' without 'continue' messing up.
+			-- elseif not ifBranch.branchFalse.statementsDynamic[2] and ifBranch.branchFalse.statementsDynamic[1].nodeType == !(AST_IF) then
+			-- 	file:write(indentStr, "else") -- This will be followed by "if"
+			-- 	writeBlock(state, writer, indent, nextLocalN, localsStack, ifBranch.branchFalse, true, nextStatement)
 
 			else
 				file:write(indentStr, "else")
 				writeEol(state, writer)
-				writeBlock(state, writer, indent+1, nextLocalN, localsStack, ifBranch.branchFalse)
+				writeBlock(state, writer, indent+1, nextLocalN, localsStack, ifBranch.branchFalse, false, nextStatement)
 			end
 
+			writer.continueDepth = math.max(maxContinue1, writer.continueDepth)
+
 			if not isElseif then
-				file:write(indentStr, "end")
-				writeEol(state, writer)
+				file:write(indentStr, "end") ; writeEol(state, writer)
+				indent, indentStr = handleContinueAfterBlock(state, writer, parentContinueDepth, prevContinueDepth, nextStatement, indent, indentStr)
 			end
 
 		elseif nodeType == !(AST_WHILE) then
@@ -1370,7 +1413,7 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 			file:write(" do")
 			writeEol(state, writer)
 
-			writeLoopBodyAndFooter(state, writer, whileLoop, indent, nextLocalN, localsStack, deferStartIndex)
+			indent, indentStr = writeLoopBodyAndFooter(state, writer, whileLoop, indent, nextLocalN, localsStack, deferStartIndex, nextStatement, parentContinueDepth)
 
 		elseif nodeType == !(AST_FOR) then
 			-- @Optimize: Don't output an empty body.
@@ -1398,7 +1441,7 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 				file:write(" do")
 				writeEol(state, writer)
 
-				writeLoopBodyAndFooter(state, writer, forLoop, indent, nextLocalN, localsStack, deferStartIndex)
+				indent, indentStr = writeLoopBodyAndFooter(state, writer, forLoop, indent, nextLocalN, localsStack, deferStartIndex, nextStatement, parentContinueDepth)
 
 			elseif forLoop.forType == !(FOR_SHORT) then
 				local objExpr = forLoop.expressions[1]
@@ -1468,7 +1511,7 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 					writeEol(state, writer)
 				end
 
-				writeLoopBodyAndFooter(state, writer, forLoop, indent, nextLocalN, localsStack, deferStartIndex)
+				indent, indentStr = writeLoopBodyAndFooter(state, writer, forLoop, indent, nextLocalN, localsStack, deferStartIndex, nextStatement, parentContinueDepth)
 
 			else--if forLoop.forType == !(FOR_ITERATOR) then
 				file:write(indentStr, "for ")
@@ -1485,25 +1528,43 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 				file:write(" do")
 				writeEol(state, writer)
 
-				writeLoopBodyAndFooter(state, writer, forLoop, indent, nextLocalN, localsStack, deferStartIndex)
+				indent, indentStr = writeLoopBodyAndFooter(state, writer, forLoop, indent, nextLocalN, localsStack, deferStartIndex, nextStatement, parentContinueDepth)
 			end
 
 		elseif nodeType == !(AST_BREAK) then
 			local breakNode = statement
 
-			local deferStartIndexBreak = writer.loopDeferIndices[writer.loopDepth] or errorInternal()
-			local defers               = writer.deferStack[deferStartIndexBreak] and {unpack(writer.deferStack, deferStartIndexBreak)} or EMPTY_TABLE
+			local deferStartIndexJump = writer.loopDeferIndices[writer.loopDepth] or errorInternal()
+			local defers              = writer.deferStack[deferStartIndexJump] and {unpack(writer.deferStack, deferStartIndexJump)} or EMPTY_TABLE
 			writeDefers(state, writer, indent, nextLocalN, localsStack, indentStr, defers)
 
 			if breakNode.loop then
-				local i                 = indexOf(writer.loopStack, breakNode.loop) or errorInternal(state, breakNode)
-				local outerLoopsToBreak = #writer.loopStack-i
-				file:write(indentStr, "_BREAK = ",outerLoopsToBreak," ; break")
+				local i                = indexOf(writer.loopStack, breakNode.loop) or errorInternal(state, breakNode)
+				local outerLoopsToJump = #writer.loopStack-i
+				file:write(indentStr, "_JUMP, _BREAK = ",outerLoopsToJump,", true ; break")
 			else
 				file:write(indentStr, "break")
 			end
-
 			writeEol(state, writer)
+
+		elseif nodeType == !(AST_CONTINUE) then
+			local continue = statement
+
+			local deferStartIndexJump = writer.loopDeferIndices[writer.loopDepth] or errorInternal()
+			local defers              = writer.deferStack[deferStartIndexJump] and {unpack(writer.deferStack, deferStartIndexJump)} or EMPTY_TABLE
+			writeDefers(state, writer, indent, nextLocalN, localsStack, indentStr, defers)
+
+			local i                = indexOf(writer.loopStack, continue.loop) or errorInternal(state, continue)
+			local outerLoopsToJump = #writer.loopStack-i
+
+			if outerLoopsToJump > 0 then
+				file:write(indentStr, "_JUMP = ",outerLoopsToJump," ; break") -- Leave _BREAK false.
+			else
+				file:write(indentStr, "_JUMP = ",outerLoopsToJump+1) -- Leave _BREAK false.
+			end
+			writeEol(state, writer)
+
+			gotContinue = true
 
 		elseif nodeType == !(AST_DEFER) then
 			local defer = statement
@@ -1517,7 +1578,9 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 			writeEol(state, writer)
 
 			if switch.cases[1] then
-				local fallingThrough = false
+				local fallingThrough    = false
+				local prevContinueDepth = writer.continueDepth
+				local maxContinueDepth  = prevContinueDepth
 
 				for i, case in ipairs(switch.cases) do
 					if fallingThrough then
@@ -1546,13 +1609,19 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 							file:write(indentStr, "else")
 						end
 						writeEol(state, writer)
-						writeBlock(state, writer, indent+1, nextLocalN, localsStack, case.body)
+						writeBlock(state, writer, indent+1, nextLocalN, localsStack, case.body, false, nextStatement)
+
+						maxContinueDepth     = math.max(maxContinueDepth, writer.continueDepth)
+						writer.continueDepth = prevContinueDepth
 					end
 
 					fallingThrough = case.fallThrough
 				end
 
+				writer.continueDepth = maxContinueDepth
+
 				file:write(indentStr, "end") ; writeEol(state, writer)
+				indent, indentStr = handleContinueAfterBlock(state, writer, parentContinueDepth, prevContinueDepth, nextStatement, indent, indentStr)
 			end
 
 		else
@@ -1578,6 +1647,43 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 		writer.deferStack[i] = nil
 	end
 	writeDefers(state, writer, indent, nextLocalN, localsStack, indentStr, defers)
+
+	if writer.continueDepth > parentContinueDepth then
+		--[[
+			-- Implicit 'if not continue' blocks example:
+			for {
+				do continue -- DEPTH=1
+				>>>>
+					if {
+						do continue -- DEPTH=2
+						>>>>
+							do continue -- DEPTH=3
+							>>>>
+							<<<<
+						<<<<
+					}
+					-- DEPTH=1 (reset)
+					>>>>
+						do continue -- DEPTH=2
+						>>>>
+						<<<<
+					<<<<
+				<<<<
+			}
+		]]
+		for i = writer.continueDepth, parentContinueDepth+1+(writer.skipOneJumpCheck and 1 or 0), -1 do
+			indentStr = indentStr:sub(2)
+			file:write(indentStr, "end")
+			!ifDEBUG `file:write("--continue")`
+			writeEol(state, writer)
+		end
+		writer.continueDepth    = parentContinueDepth
+		writer.skipOneJumpCheck = false
+	end
+
+	if gotContinue then
+		writer.continueDepth = writer.continueDepth+1 -- This signals to the parent block that we got a continue.
+	end
 end
 
 function _G.writeForeignReference(state, writer, foreignSourceId, nodeForError)
@@ -1625,7 +1731,7 @@ function _G.writeFunction(state, writer, indent, nextLocalN, localsStack, lambda
 	writeEol(state, writer)
 
 	if lambda.body.statementsDynamic[1] then
-		writeBlock(state, writer, indent+1, nextLocalN, localsStack, lambda.body)
+		writeBlock(state, writer, indent+1, nextLocalN, localsStack, lambda.body, false, nil)
 	elseif outputDebugInfo then
 		file:write(indentStr, "\t-- Empty function.")
 		writeEol(state, writer)

@@ -36,8 +36,9 @@ local function errorOrReturn(errCode, returnValueCode)
 	__LUA("if state.soft then return ",returnValueCode," end ")
 	__LUA(errCode)
 end
-local function ERROR_OR_RETURN      (errCode, returnCode)  errorOrReturn(errCode, (returnCode or "nil"))  end
-local function ERROR_OR_RETURN_FALSE(errCode            )  errorOrReturn(errCode, ("false"            ))  end
+local function ERROR_OR_RETURN      (errCode)              errorOrReturn(errCode, "nil")       end
+local function ERROR_OR_RETURN_FALSE(errCode)              errorOrReturn(errCode, "false")     end
+local function ERROR_OR_RETURN_VALUE(errCode, returnCode)  errorOrReturn(errCode, returnCode)  end
 
 local function setOrReturn(assignmentCode, returnValueCode)
 	local preCode, sufCode = assignmentCode:match"^([^=]+)=(.*)$"
@@ -341,12 +342,12 @@ _G.!structAst"AstReturn:_AstJump"{
 }
 _G.!structAst"AstBreak:_AstJump"{
 	_overrides = {{`nodeType`,AST_BREAK}},
-	{`loopName`, nil, ast=nil      }, -- AstIdentifier  (Never inferred.)
+	{`loopName`, nil, ast=nil      }, -- AstIdentifier  Never inferred. Just for debugging.
 	{`loop`,     nil, astRef="node"}, -- AstFor|AstWhile
 }
 _G.!structAst"AstContinue:_AstJump"{
 	_overrides = {{`nodeType`,AST_CONTINUE}},
-	{`loopName`, nil, ast=nil      }, -- AstIdentifier  (Never inferred.)
+	{`loopName`, nil, ast=nil      }, -- AstIdentifier  Never inferred. Just for debugging.
 	{`loop`,     nil, astRef="node"}, -- AstFor|AstWhile
 }
 
@@ -385,12 +386,12 @@ _G.!structAst"AstGlobalScope:_AstScope"{
 _G.!structAst"AstFor:_AstScope"{
 	_overrides = {{`nodeType`,AST_FOR}},
 	_scopeType = "imperative",
-	{`expressions`,    {},  ast="array"},   -- []AstExpression  @Cleanup: Move these into AstFor.statementsDynamic?
-	{`names`,          {},  ast=nil    },   -- []AstIdentifier  These are never inferred, but instead copied to declarations. @Cleanup: Can we get rid of this in favor of the copy we currently make?
-	{`forType`,        FOR_NUMERIC},        -- @Cleanup: Rename to "kind"?
-	{`body`,           nil, astRef="node"}, -- AstBlock
-	{`reverse`,        false},
-	{`hasNamedBreaks`, false},
+	{`expressions`,   {},  ast="array"},   -- []AstExpression  @Cleanup: Move these into AstFor.statementsDynamic?
+	{`names`,         {},  ast=nil    },   -- []AstIdentifier  These are never inferred, but instead copied to declarations. @Cleanup: Can we get rid of this in favor of the copy we currently make?
+	{`forType`,       FOR_NUMERIC},        -- @Cleanup: Rename to "kind"?
+	{`body`,          nil, astRef="node"}, -- AstBlock
+	{`reverse`,       false},
+	{`hasNamedJumps`, false},
 }
 !structAst"_AstScopeExpression:_AstScope"{
 	-- Type phase:
@@ -468,9 +469,9 @@ _G.!structAst"AstStaticIf:AstIf"{
 }
 _G.!structAst"AstWhile:_AstNode"{
 	_overrides = {{`nodeType`,AST_WHILE}},
-	{`condition`,      nil, ast="node"}, -- AstExpression
-	{`body`,           nil, ast="node"}, -- AstBlock
-	{`hasNamedBreaks`, false},
+	{`condition`,     nil, ast="node"}, -- AstExpression
+	{`body`,          nil, ast="node"}, -- AstBlock
+	{`hasNamedJumps`, false},
 }
 _G.!struct"SwitchCase"{
 	{`value`,       nil}, -- AstExpression
@@ -1002,7 +1003,7 @@ function _G.parseStruct(state, parent)
 		astVisitAllNodes(args, function(node)
 			if node.nodeType == !(AST_VARARG) then
 				gotError = true
-				!ERROR_OR_RETURN(`errorParsing(state, node.token, "Struct arguments cannot be variable.")`, toLua(VISIT_BREAK))
+				!ERROR_OR_RETURN_VALUE(`errorParsing(state, node.token, "Struct arguments cannot be variable.")`, toLua(VISIT_BREAK))
 
 			elseif node.nodeType == !(AST_ARGUMENT) then
 				if node.autobake ~= !(AUTOBAKE_DISABLED) and not state.soft then
@@ -1010,7 +1011,7 @@ function _G.parseStruct(state, parent)
 				end
 
 			elseif node.nodeType == !(AST_BAKE) then
-				!ERROR_OR_RETURN(`errorParsing(state, node.token, "Placeholder types are not supported in struct arguments.")`, toLua(VISIT_BREAK))
+				!ERROR_OR_RETURN_VALUE(`errorParsing(state, node.token, "Placeholder types are not supported in struct arguments.")`, toLua(VISIT_BREAK))
 			end
 		end)
 
@@ -1747,7 +1748,8 @@ function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 
 	elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"break","continue") then
 		local keyword         = tokValue
-		local breakOrContinue = astNewNode((keyword == "break" and AstBreak or AstContinue), state.nextToken, block)
+		local isContinue      = keyword == "continue"
+		local breakOrContinue = astNewNode((isContinue and AstContinue or AstBreak), state.nextToken, block)
 
 		eatNextToken(state)
 
@@ -1780,12 +1782,12 @@ function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 					loopOrLambda.nodeType == !(AST_FOR)   and itemWith1(loopOrLambda.names, "name", loopName) or
 					loopOrLambda.nodeType == !(AST_WHILE) and getBreakableNameFromSimpleExpression(loopOrLambda.condition) == loopName
 				then
-					if loopOrLambda == loopClosest then
-						-- void  We don't need a named break if we're breaking from the closest loop. (Should we save this info anyway for the metaprogram?)
+					if loopOrLambda == loopClosest and not isContinue then
+						-- void  We don't need a named break if we're breaking from the closest loop. (Should we save this info anyway for the metaprogram? Probably!)
 					else
-						breakOrContinue.loopName    = loopNameIdent
-						breakOrContinue.loop        = loopOrLambda
-						loopOrLambda.hasNamedBreaks = true
+						breakOrContinue.loopName   = loopNameIdent
+						breakOrContinue.loop       = loopOrLambda
+						loopOrLambda.hasNamedJumps = true
 					end
 					break
 
@@ -1806,6 +1808,10 @@ function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 			if not isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),")") then
 				!ERROR_OR_RETURN_FALSE `errorParsingAfterPrevious(state, "Expected ')'.")`
 			end
+
+		elseif isContinue then
+			breakOrContinue.loop       = loopOrLambda
+			loopOrLambda.hasNamedJumps = true
 		end
 
 		statement = breakOrContinue
@@ -2014,6 +2020,9 @@ function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 
 		elseif exprTest.nodeType == !(AST_CALL) then
 			local call = exprTest
+			if call.surroundedByParentheses then
+				!ERROR_OR_RETURN_FALSE `errorParsing(state, astGetExpressionVisuallyFurthestToTheLeft(call).token-1, "Invalid parenthesis around call.")`
+			end
 			--[[ @Incomplete :ParenthesesAmbiguityError
 			if
 				isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"(")
@@ -2041,7 +2050,7 @@ function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 			AST_CALL,
 			AST_DEFER,
 			AST_FOR,
-			AST_IF, AST_STATIC_IF, -- AstStaticIf may have a mixture of static and dynamic statements.
+			AST_IF, AST_STATIC_IF, -- AST_STATIC_IF may have a mixture of static and dynamic statements.
 			AST_RETURN,
 			AST_SWITCH,
 			AST_WHILE,
@@ -2268,7 +2277,7 @@ function _G.parseFileScopeOrNamespaceStatements(state, scope, isTopLevel, single
 			eatNextToken(state)
 
 			if astIsOrIsInModule(scope) then
-				errorParsingNext(state, "Cannot export namespaces from modules into global space.")
+				!ERROR_OR_RETURN_FALSE `errorParsingNext(state, "Cannot export namespaces from modules into global space.")`
 			end
 
 			!SET_OR_RETURN_FALSE `local import = parseExpression(state, scope, math.huge)`
@@ -2284,14 +2293,14 @@ function _G.parseFileScopeOrNamespaceStatements(state, scope, isTopLevel, single
 		elseif isToken(tokType,tokValue, !(TOKEN_KEYWORD),"export_value") then
 			eatNextToken(state)
 			if not isTopLevel then
-				errorParsingNext(state, "Values must be exported directly from file scope.")
+				!ERROR_OR_RETURN_FALSE `errorParsingNext(state, "Values must be exported directly from file scope.")`
 			end
 
 			local fileScope = scope
 			!ASSERT("fileScope.nodeType == "..AST_FILE_SCOPE)
 
 			if fileScope.isModule then
-				errorParsingNext(state, "Cannot export values from modules.")
+				!ERROR_OR_RETURN_FALSE `errorParsingNext(state, "Cannot export values from modules.")`
 			end
 
 			if fileScope.valueToExport then
@@ -2883,7 +2892,7 @@ function _G.parseExpression(state, parent, prevOpPrecedence, expectLvalue)
 		expr         = astNewNode(AstVararg, exprStartToken, parent)
 		local lambda = getLambda(expr)
 		if not (lambda and lambda.takingVararg) then
-			errorParsing(state, exprStartToken, "This is not inside a vararg function.")
+			!ERROR_OR_RETURN `errorParsing(state, exprStartToken, "This is not inside a vararg function.")`
 		end
 
 	-- Table constructor.
