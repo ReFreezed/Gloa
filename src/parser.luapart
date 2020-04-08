@@ -281,15 +281,16 @@ _G.!structAst"AstDebug:_AstNode"{
 
 _G.!structAst"AstArgument:_AstNode"{
 	_overrides = {{`nodeType`,AST_ARGUMENT}},
-	{`declaration`, nil, ast="node"}, -- AstDeclaration
-	{`assignment`,  nil, ast="node"}, -- AstAssignment
-	{`group`,       1}, -- Arguments in the same group have the same type. This is a small optimization for the typer.
-	{`autobake`,    AUTOBAKE_DISABLED},
-	{`isUsing`,     false}, -- Is it better to store this on declarations?
+	{`declaration`,     nil, ast="node"}, -- AstDeclaration
+	{`assignment`,      nil, ast="node"}, -- AstAssignment
+	{`group`,           1}, -- Arguments in the same group have the same type. This is a small optimization for the typer.
+	{`autobake`,        AUTOBAKE_DISABLED},
+	{`hasPlaceholders`, false},
+	{`isUsing`,         false}, -- Is it better to store this on declarations?
 
 	-- For an input argument, this indicates optionality.
 	-- For an output argument, if there's a !must then it must not be adjusted away by the caller.
-	{`isRequired`,  false},
+	{`isRequired`,      false},
 }
 _G.!structAst"AstArguments:_AstNode"{
 	_overrides = {{`nodeType`,AST_ARGUMENTS}},
@@ -825,13 +826,23 @@ function _G.parseArguments(state, parent, isInput)
 		if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),":") then
 			eatNextToken(state)
 
-			token = state.nextToken
+			local hasPlaceholders = false
+			token                 = state.nextToken
+
 			for i, arg in ipairs(argsInGroup) do
 				state.nextToken           = token
 				local decl                = arg.declaration
 				!SET_OR_RETURN `decl.type = parseExpression(state, decl)` -- @Speed: Parse once then just copy the first one.
 
-				if i > 1 then
+				if i == 1 then
+					astVisitAllNodes(decl.type, function(node, container, key)
+						if node.nodeType == !(AST_BAKE) then
+							hasPlaceholders = true
+							return !(VISIT_BREAK)
+						end
+					end)
+
+				elseif hasPlaceholders then
 					-- Make sure (a,b:$T) works.
 					astVisitAllNodes(decl.type, function(node, container, key)
 						if node.nodeType ~= !(AST_BAKE) then  return  end
@@ -850,6 +861,8 @@ function _G.parseArguments(state, parent, isInput)
 						return !(VISIT_IGNORE_CHILDREN)
 					end)
 				end
+
+				arg.hasPlaceholders = hasPlaceholders
 			end
 		end
 

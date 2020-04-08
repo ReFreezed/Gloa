@@ -255,7 +255,7 @@ function _G.getTypeInfoForLambda(state, lambda)
 	funcSig.isPolymorphic = lambda.isPolymorphic
 
 	local placeholderType       = lambda.isPolymorphic and getTypeInfoForBuiltinType(state, "placeholder"  ) or nil
-	local placeholderTypeVararg = lambda.isPolymorphic and getTypeInfoForVararg     (state, placeholderType) or nil
+	local placeholderTypeVararg = placeholderType      and getTypeInfoForVararg     (state, placeholderType) or nil
 
 	if argsIn then
 		for i, arg in ipairs(argsIn.arguments) do
@@ -263,6 +263,7 @@ function _G.getTypeInfoForLambda(state, lambda)
 				=   placeholderType
 				and (arg.declaration.name.nodeType == !(AST_VARARG) and placeholderTypeVararg or placeholderType)
 				or  arg.declaration.name.inferredType
+				or  errorInternal(state, arg)
 		end
 	end
 	if argsOut then
@@ -271,6 +272,7 @@ function _G.getTypeInfoForLambda(state, lambda)
 				=   placeholderType
 				and (arg.declaration.name.nodeType == !(AST_VARARG) and placeholderTypeVararg or placeholderType)
 				or  arg.declaration.name.inferredType
+				or  errorInternal(state, arg)
 		end
 	end
 
@@ -2405,7 +2407,7 @@ end
 
 		calleeTypeInfo = declBase.name.inferredType
 		if not calleeTypeInfo then
-			!DEPEND_AND_RETURN(`call`, DEPEND_NODE_INFERRED, `declBase.name`)
+			!DEPEND_AND_RETURN(`call`, DEPEND_NODE_INFERRED, `declBase`)
 		end
 	end
 
@@ -4212,15 +4214,12 @@ end
 		local decl  = ident.declaration
 
 		if typeInfo.tag == !(TYPE_STRUCT) then
-			local structInfo = typeInfo
-			usingScope       = structInfo.astNode
-			if not isDeclarationConstant(decl) then
-				using.variableDeclaration = decl
-			end
+			local structInfo    = typeInfo
+			usingScope          = structInfo.astNode
+			if not isDeclarationConstant(decl) then  using.variableDeclaration = decl  end
 		elseif typeInfo.tag == !(TYPE_ENUM) then
-			-- Using an enum value is the same as using the enum type. Is this good? :UsingEnumValueOrType
-			local enumInfo = typeInfo
-			usingScope     = enumInfo.astNode
+			local enumInfo      = typeInfo
+			usingScope          = enumInfo.astNode -- Using an enum value is the same as using the enum type. :UsingEnumValueOrType
 		elseif typeInfo.tag == !(TYPE_NAMESPACE) then
 			local namespaceInfo = typeInfo
 			usingScope          = namespaceInfo.scope
@@ -4236,8 +4235,8 @@ end
 			local structInfo = typeInfo
 			usingScope       = structInfo.astNode
 		elseif typeInfo.tag == !(TYPE_ENUM) then
-			local enumInfo = typeInfo
-			usingScope     = enumInfo.astNode
+			local enumInfo   = typeInfo
+			usingScope       = enumInfo.astNode -- :UsingEnumValueOrType
 		else
 			typeError(state, typeNode, "Invalid or unsupported type group (%s) in 'using' expression.", TYPE_NAMES[typeInfo.tag])
 		end
@@ -4245,9 +4244,8 @@ end
 	elseif expr.nodeType == !(AST_ACCESS) then
 		local access = expr
 		if typeInfo.tag == !(TYPE_ENUM) then
-			-- :UsingEnumValueOrType
 			local enumInfo = typeInfo
-			usingScope     = enumInfo.astNode
+			usingScope     = enumInfo.astNode -- :UsingEnumValueOrType
 		else
 			-- @Incomplete: Support using struct instance members which themselves are structs: using myObj.otherObj
 			typeError(state, access, "Invalid or unsupported type group (%s) in 'using' expression.", TYPE_NAMES[typeInfo.tag])
@@ -6982,9 +6980,19 @@ function _G.getExpectedTypeInfo(state, node, strict, expectantTerm, nodeForError
 		end
 
 		if not call.inferredType and call.callee.nodeType == !(AST_IDENTIFIER) and call.callee.declaration.overloadOf then
-			-- We have a circular dependency here. Overloaded calls must have all args inferred
-			-- before being valid and constructors etc. must know the correct overload.
+			-- Circular dependency:
+			-- Overloaded and polymorphic calls must have all args inferred before being valid,
+			-- and table constructors etc. must know the exact function being called.
 			return (getExpectedTypeInfoUsingContents(state, node, strict, expectantTerm, nodeForError))
+			--[[
+			typeError(
+				state, node, !(
+					"Circular dependency: Call to overloaded function '%s' is waiting for this argument, but the argument is also waiting for the call to finish."
+					.." Use a cast to specify what type this value is to solve the situation."
+				),
+				call.callee.name
+			)
+			--]]
 		end
 
 		local argTypesIn  = calleeTypeInfo.argumentTypesIn
@@ -7005,7 +7013,17 @@ function _G.getExpectedTypeInfo(state, node, strict, expectantTerm, nodeForError
 		end
 
 		if argTypeInfo.tag == !(TYPE_PLACEHOLDER) then
+			-- (See above circular dependency note.)
 			return (getExpectedTypeInfoUsingContents(state, node, strict, expectantTerm, nodeForError))
+			--[[
+			typeError(
+				state, node, !(
+					"Circular dependency: Call to polymorphic function%s is waiting for this argument, but the argument is also waiting for the call to finish."
+					.." Use a cast to specify what type this value is to solve the situation."
+				),
+				(call.callee.nodeType == !(AST_IDENTIFIER) and F(" '%s'", call.callee.name) or "")
+			)
+			--]]
 		end
 
 		return argTypeInfo
