@@ -178,6 +178,8 @@ _G.!struct"TableField"{
 	{`key`,            nil}, -- AstExpression
 	{`value`,          nil}, -- AstExpression
 	{`keyIsGenerated`, false},
+	-- Type phase:
+	{`argumentIndex`,  0},   -- Used for AstCall.argumentsNamed.
 }
 _G.!structAst"AstTable:_AstExpression"{
 	_overrides = {{`nodeType`,AST_TABLE}},
@@ -187,8 +189,9 @@ _G.!structAst"AstTable:_AstExpression"{
 }
 _G.!structAst"AstCall:_AstExpression"{
 	_overrides = {{`nodeType`,AST_CALL}},
-	{`callee`,                  nil, ast="node"},  -- AstExpression
-	{`arguments`,               {},  ast="array"}, -- []AstExpression
+	{`callee`,                  nil, ast="node"},   -- AstExpression
+	{`arguments`,               {},  ast="array"},  -- []AstExpression
+	{`argumentsNamed`,          {},  ast="fields"}, -- []TableField  @Cleanup: Rename TableField struct to something more fitting.
 	{`isMethod`,                false},
 	{`surroundedByParentheses`, false},
 	-- Type phase:
@@ -198,7 +201,7 @@ _G.!structAst"AstCall:_AstExpression"{
 }
 _G.!structAst"AstTypeOf:_AstExpression"{
 	_overrides = {{`nodeType`,AST_TYPE_OF}},
-	{`expression`, nil, ast="node"}, -- AstExpression
+	{`expression`,      nil, ast="node"}, -- AstExpression
 	-- Type phase:
 	{`representedType`, nil}, -- TypeInfo
 }
@@ -678,20 +681,44 @@ function _G.parseTable(state, parent)
 	return tableNode
 end
 
--- Parse comma-separated expressions. Used for function calls and struct parameters.
--- success = parseExpressionList( compilationState, parent, expressions [, expectLvalues=false ] )
-function _G.parseExpressionList(state, parent, expressions, expectLvalues)
+-- Parse comma-separated expressions. Used for function calls, struct parameters, assignments etc.
+-- success = parseExpressionList( compilationState, parent, expressions, expressionsNamed=nil, expectLvalues )
+function _G.parseExpressionList(state, parent, expressions, expressionsNamed, expectLvalues)
+	local takenNames = expressionsNamed and {}
+
 	while true do
-		local tokType, tokValue = peekNextToken(state)
-		local expr
+		local tokType,  tokValue  = peekNextToken(state, 1)
+		local tokType2, tokValue2 = peekNextToken(state, 2)
 
 		if expectLvalues and isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"_") then
-			expr = astNewNode(AstBlank, state.nextToken, parent)
-			eatNextToken(state)
+			local expr = astNewNode(AstBlank, state.nextToken, parent)
+			eatNextToken(state) -- '_'
+			table.insert(expressions, expr)
+
+		elseif expressionsNamed and tokType == !(TOKEN_IDENTIFIER) and isToken(tokType2,tokValue2, !(TOKEN_PUNCTUATION),"=") then
+			local exprNamed                     = TableField()
+			!SET_OR_RETURN_FALSE `exprNamed.key = parseIdentifier(state, parent)`
+
+			local name = exprNamed.key.name
+			if takenNames[name] then
+				!ERROR_OR_RETURN `
+					printerr()
+					parserMessage(io.stderr, state, state.nextToken-1,      "Error", "Duplicate name '%s'.", name)
+					parserMessage(io.stderr, state, takenNames[name].token, "Info",  "...name was previously used here.")
+					exitFailure()
+				`
+			end
+			takenNames[name] = exprNamed.key
+
+			eatNextToken(state) -- '='
+
+			!SET_OR_RETURN_FALSE `exprNamed.value = parseExpression(state, parent, nil, expectLvalues)`
+			table.insert(expressionsNamed, exprNamed)
+
 		else
-			!SET_OR_RETURN_FALSE `expr = parseExpression(state, parent, nil, expectLvalues)`
+			!SET_OR_RETURN_FALSE `local expr = parseExpression(state, parent, nil, expectLvalues)`
+			table.insert(expressions, expr)
 		end
-		table.insert(expressions, expr)
 
 		tokType, tokValue = peekNextToken(state)
 
@@ -1333,7 +1360,7 @@ function _G.parseDeclarationStatement(state, scope, imperative, declType)
 			end
 
 			if declType == !(DECLARATION_NORMAL) then
-				!DO_OR_RETURN `parseExpressionList(state, assignment, assignment.values)`
+				!DO_OR_RETURN `parseExpressionList(state, assignment, assignment.values, nil, false)`
 			else
 				!SET_OR_RETURN `local expr = parseExpression(state, assignment)`
 				table.insert(assignment.values, expr)
@@ -1482,7 +1509,7 @@ function _G.parseAssignment(state, parent)
 	local assignment          = astNewNode(AstAssignment, 1, parent)
 	local statementStartToken = state.nextToken
 
-	!DO_OR_RETURN `parseExpressionList(state, assignment, assignment.targets, true)`
+	!DO_OR_RETURN `parseExpressionList(state, assignment, assignment.targets, nil, true)`
 
 	for i, expr in ipairs(assignment.targets) do
 		if not !!(CONST_SET{ AST_IDENTIFIER, AST_ACCESS, AST_BLANK })[expr.nodeType] then
@@ -1505,7 +1532,7 @@ function _G.parseAssignment(state, parent)
 	assignment.token           = state.nextToken-1
 	assignment.binaryOperation = tokValue:sub(1, -2) -- All assignments with extra operations end with '=' (e.g. '+='). Here we just strip away the '='.
 
-	!DO_OR_RETURN `parseExpressionList(state, assignment, assignment.values)`
+	!DO_OR_RETURN `parseExpressionList(state, assignment, assignment.values, nil, false)`
 
 	-- Quickly check if there are obviously too many values.
 	if #assignment.values > #assignment.targets then
@@ -1754,7 +1781,7 @@ function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 		if isToken(tokType,tokValue, !(TOKEN_KEYWORD),"void") then -- We allow 'return void' both for vararg functions and functions with no return values.
 			eatNextToken(state)
 		elseif lambda.argumentsOut then
-			!DO_OR_RETURN_FALSE `parseExpressionList(state, returnNode, returnNode.values)`
+			!DO_OR_RETURN_FALSE `parseExpressionList(state, returnNode, returnNode.values, nil, false)`
 		end
 
 		statement = returnNode
@@ -1901,7 +1928,7 @@ function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 		local forStartIndex = state.nextToken
 
 		local exprListWeMayOrMayNotUse = {}
-		!DO_OR_RETURN_FALSE `parseExpressionList(state, forLoop, exprListWeMayOrMayNotUse)`
+		!DO_OR_RETURN_FALSE `parseExpressionList(state, forLoop, exprListWeMayOrMayNotUse, nil, false)`
 
 		tokType, tokValue = peekNextToken(state)
 		local twoParter
@@ -1946,7 +1973,7 @@ function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 				tokType, tokValue = eatNextToken(state)
 				assert(isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"="))
 
-				!DO_OR_RETURN_FALSE `parseExpressionList(state, forLoop, forLoop.expressions)`
+				!DO_OR_RETURN_FALSE `parseExpressionList(state, forLoop, forLoop.expressions, nil, false)`
 
 			-- for start, end [, step ]
 			else
@@ -1969,7 +1996,7 @@ function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 				tokType, tokValue = eatNextToken(state)
 				assert(isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),":"))
 
-				!DO_OR_RETURN_FALSE `parseExpressionList(state, forLoop, forLoop.expressions)`
+				!DO_OR_RETURN_FALSE `parseExpressionList(state, forLoop, forLoop.expressions, nil, false)`
 
 				if forLoop.expressions[2] then
 					!ERROR_OR_RETURN_FALSE `errorParsing(state, forLoop.expressions[2].token-1, "Expected a single parameter for the short-form 'for' loop.")`
@@ -1989,7 +2016,7 @@ function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 			tokType, tokValue = eatNextToken(state)
 			assert(isToken(tokType,tokValue, !(TOKEN_KEYWORD),"in"))
 
-			!DO_OR_RETURN_FALSE `parseExpressionList(state, forLoop, forLoop.expressions)`
+			!DO_OR_RETURN_FALSE `parseExpressionList(state, forLoop, forLoop.expressions, nil, false)`
 		end
 
 		!SET_OR_RETURN_FALSE `forLoop.body = parseBlockOrScopedStatement(state, forLoop)`
@@ -2523,7 +2550,7 @@ function _G.parseCallChain(state, parent, callee, isMethod)
 				eatNextToken(state)
 
 			else
-				!DO_OR_RETURN `parseExpressionList(state, call, call.arguments)`
+				!DO_OR_RETURN `parseExpressionList(state, call, call.arguments, call.argumentsNamed, false)`
 
 				tokType, tokValue = eatNextToken(state)
 				if not isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),")") then
@@ -3742,6 +3769,10 @@ do
 				!!(CHILD_PRINT_START)
 				if call.callee then  printNode(call.callee, indent+1, printed, printChildren)  end
 				printNodeList(call.arguments, indent+1, printed, printChildren, "ARG")
+				for i, argNamed in ipairs(call.argumentsNamed) do
+					if argNamed.key   then  printNode(argNamed.key,   indent+1, printed, printChildren, i.."K")  end
+					if argNamed.value then  printNode(argNamed.value, indent+1, printed, printChildren, i.."V")  end
+				end
 				!!(CHILD_PRINT_END)
 
 			elseif node.nodeType == !(AST_ARGUMENTS) then
@@ -4271,10 +4302,12 @@ do
 			local fieldsCopy = copy.$field
 
 			for i, tableField in ipairs(node.$field) do
-				local tableFieldCopy = TableField()
-				tableFieldCopy.key   = tableField.key   and copyTree(tableField.key,   token, copy, copies)
-				tableFieldCopy.value = tableField.value and copyTree(tableField.value, token, copy, copies)
-				fieldsCopy[i]        = tableFieldCopy
+				local tableFieldCopy          = TableField()
+				tableFieldCopy.key            = tableField.key   and copyTree(tableField.key,   token, copy, copies)
+				tableFieldCopy.value          = tableField.value and copyTree(tableField.value, token, copy, copies)
+				tableFieldCopy.keyIsGenerated = tableField.keyIsGenerated
+				tableFieldCopy.argumentIndex  = tableField.argumentIndex
+				fieldsCopy[i]                 = tableFieldCopy
 			end
 		`
 		local TEMPLATE_COPY_CASES = `

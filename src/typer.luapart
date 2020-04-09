@@ -27,7 +27,7 @@
 	newTypeInfo, markTypeAsReady, isTypeBuiltin, getTypeInfo*
 	prepareToRun
 	simplifyExpressionIfConstant, simplifyTypeExpression
-	typeError, typeErrorAfter, typeError2, typeMessage
+	typeError*, typeErrorAfter, typeMessage
 	wrapInImplicitCast
 
 --============================================================]]
@@ -659,13 +659,24 @@ function _G.typeErrorAfter(state, node, s, ...)
 	nodeErrorAfter(state, node, "Typer", s, ...)
 end
 
-function _G.typeError2(state, node1, s1, node2, s2)
+function _G.typeError2(state, node1,s1, node2,s2)
 	!TRACE(2)
 	printerr()
 	!ifDEBUG `astPrint(node1)`
 	typeMessage(io.stderr, state, node1, "Error", "%s", s1)
 	!ifDEBUG `astPrint(node2)`
 	typeMessage(io.stderr, state, node2, "Info",  "%s", s2)
+	exitFailure()
+end
+function _G.typeError3(state, node1,s1, node2,s2, node3,s3)
+	!TRACE(2)
+	printerr()
+	!ifDEBUG `astPrint(node1)`
+	typeMessage(io.stderr, state, node1, "Error", "%s", s1)
+	!ifDEBUG `astPrint(node2)`
+	typeMessage(io.stderr, state, node2, "Info",  "%s", s2)
+	!ifDEBUG `astPrint(node3)`
+	typeMessage(io.stderr, state, node3, "Info",  "%s", s3)
 	exitFailure()
 end
 
@@ -960,10 +971,17 @@ local function isPolymorphicStruct(node)
 end
 
 local function inferIdentifierOrVararg(state, identOrVararg)
-	local vararg = identOrVararg.nodeType == !(AST_VARARG) and identOrVararg or nil
-	local ident  = not vararg                                       and identOrVararg or nil
-	local parent = identOrVararg.parent
-	local decl   = identOrVararg.declaration
+	local vararg    = identOrVararg.nodeType == !(AST_VARARG) and identOrVararg or nil
+	local ident     = not vararg                              and identOrVararg or nil
+	local parent    = identOrVararg.parent
+	local decl      = identOrVararg.declaration
+	local container = identOrVararg.queued.container
+
+	-- 0. Things to ignore.  @Cleanup
+	if ident and parent.nodeType == !(AST_CALL) and container ~= parent and container ~= parent.arguments and indexOf(parent.argumentsNamed, container) then
+		moveToNextRelevantPipe(state, ident)
+		return
+	end
 
 	-- 1. Loose identifier.
 	if not isPartOfAnyDeclaration(identOrVararg) then
@@ -1547,8 +1565,8 @@ local function getArgumentNodeForError(callOrReturnNode, valueIndex, valueExpr)
 		or  astGetExpressionVisuallyFurthestToTheLeft(valueExpr)
 end
 
--- doesMatch, compatibilityScore = checkIfValuesMatchArgumentTypes( state, callOrReturnNode, values, valueTypes, typeInfos [, softCheck=false, calleeDeclarationForCurrentOverload ] )
-local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, valueTypes, typeInfos, softCheck, calleeDecl)
+-- doesMatch, compatibilityScore = checkIfValuesMatchArgumentTypes( state, callOrReturnNode, values, valueTypes, typeInfos, softCheck, calleeDeclarationForCurrentOverload=nil, argumentsNamed=nil )
+local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, valueTypes, typeInfos, softCheck, calleeDecl, argsNamed)
 	--[[
 		Situations:
 
@@ -1567,6 +1585,46 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 		return  x, var()    --- request 1+list(1+vararg)
 		func(   x, var()    )-- request 1+list(1+vararg)
 	]]
+
+	local isCallingName         = callOrReturnNode.nodeType == !(AST_CALL) and callOrReturnNode.callee.nodeType == !(AST_IDENTIFIER)
+	local isCallingConstantName = false
+	local constLambda           = nil
+
+	if isCallingName then
+		calleeDecl            = calleeDecl or callOrReturnNode.callee.declaration
+		isCallingConstantName = isDeclarationConstant(calleeDecl)
+
+		if isCallingConstantName then
+			constLambda = followIdentifiersToConstantValue(calleeDecl.value)
+			!ASSERT("constLambda.nodeType == "..AST_LAMBDA)
+			!ASSERT("constLambda.inferredType")
+		end
+	end
+
+	-- Get accepted count.
+	local typeInfoCount   = #typeInfos
+	local acceptingVararg = typeInfoCount > 0 and typeInfos[typeInfoCount].tag == !(TYPE_VARARG)
+	local acceptedMin     = acceptingVararg and typeInfoCount-1 or typeInfoCount
+	local acceptedMax     = acceptingVararg and math.huge       or typeInfoCount
+
+	-- Consider optional arguments for calls.
+	-- @Robustness: Disallow this: local take2 :: (req:int, opt:int=0) {} ; local get1 :: () -> int {} ; take2(get1())  -- :DisallowListAsLastValueToFunctionWithOptionalArguments
+	if constLambda then
+		if not areArraysEqual(typeInfos, constLambda.inferredType.argumentTypesIn) then
+			-- We should only get here if checking overloads.
+			if softCheck then  return false, 0  end
+			assert(false)
+		end
+
+		for i = acceptedMin, 1, -1 do
+			local arg = constLambda.argumentsIn.arguments[i]
+			if arg.isRequired then
+				break
+			else
+				acceptedMin = acceptedMin-1
+			end
+		end
+	end
 
 	-- Get requested count.
 	local valueExprLast = getLast(values)
@@ -1618,42 +1676,24 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 		end
 	end
 
-	-- Get accepted count.
-	local typeInfoCount   = #typeInfos
-	local acceptingVararg = typeInfoCount > 0 and typeInfos[typeInfoCount].tag == !(TYPE_VARARG)
-	local acceptedMin     = acceptingVararg and typeInfoCount-1 or typeInfoCount
-	local acceptedMax     = acceptingVararg and math.huge       or typeInfoCount
+	-- Increase requestedMin according to named arguments.
+	if argsNamed and argsNamed[1] then
+		!ASSERT("constLambda") -- We should only get here when calling a constant name to a function.
 
-	-- Consider optional arguments for calls.
-	-- @Robustness @Cleanup: We probably must have argument optionality be part of function types - not just the arguments types.
-	-- @Robustness: Disallow this: local take2 :: (req:int, opt:int=0) {} ; local get1 :: () -> int {} ; take2(get1())  -- :DisallowListAsLastValueToFunctionWithOptionalArguments
-	if callOrReturnNode.nodeType == !(AST_CALL) and callOrReturnNode.callee.nodeType == !(AST_IDENTIFIER) then
-		calleeDecl = (calleeDecl or callOrReturnNode.callee.declaration)
+		for argIndex = valueCount+1, acceptedMin do -- Is acceptedMin good?
+			local arg = constLambda.argumentsIn.arguments[argIndex]
+			if not arg.isRequired then  break  end
 
-		if isDeclarationConstant(calleeDecl) then
-			local lambda = getDeclarationValue(calleeDecl) or errorInternal()
-			lambda       = followIdentifiersToConstantValue(lambda)
-
-			if lambda.nodeType ~= !(AST_LAMBDA) then
-				errorInternal(state, lambda)
+			-- @Cleanup: Duplicate named argument check.
+			local argNamed = itemWith1(argsNamed, "argumentIndex", argIndex)
+			if not argNamed then
+				typeError2(state,
+					call, F("Missing value for required argument #%d (%s).", argIndex, arg.declaration.name.name),
+					arg,  F("...here is the argument in the called function.")
+				)
 			end
 
-			!ASSERT `lambda.inferredType`
-
-			if not areArraysEqual(typeInfos, lambda.inferredType.argumentTypesIn) then
-				-- We should only get here if checking overloads.
-				if softCheck then  return false, 0  end
-				assert(false)
-			end
-
-			for i = acceptedMin, 1, -1 do
-				local arg = lambda.argumentsIn.arguments[i]
-				if arg.isRequired then
-					break
-				else
-					acceptedMin = acceptedMin-1
-				end
-			end
+			requestedMin = requestedMin+1
 		end
 	end
 
@@ -1716,9 +1756,10 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 				typeError(state, valueExpr, "Function call returns nothing. (Expected at least one value.)") -- Note: "Nothing" is not the same as vararg of zero length.
 			end
 
-			local adjustVarargToIncludeNil   = not (valueTypeInfo.tag == !(TYPE_VARARG) and typeInfoToMatch.tag == !(TYPE_VARARG))
-			local valueTypeInfoAdjusted      = adjustTypeToOne(state, valueExpr,        valueTypeInfo, adjustVarargToIncludeNil) -- We have a value with a type.
-			local typeInfoToMatchAdjusted    = adjustTypeToOne(state, callOrReturnNode, typeInfoToMatch)                         -- We want a specific type.
+			local adjustVarargToIncludeNil = not (valueTypeInfo.tag == !(TYPE_VARARG) and typeInfoToMatch.tag == !(TYPE_VARARG))
+			local valueTypeInfoAdjusted    = adjustTypeToOne(state, valueExpr,        valueTypeInfo, adjustVarargToIncludeNil) -- We have a value with a type.
+			local typeInfoToMatchAdjusted  = adjustTypeToOne(state, callOrReturnNode, typeInfoToMatch)                         -- We want a specific type.
+
 			isCompatible, compatibilityScore = isTypeCompatibleWith(valueTypeInfoAdjusted, typeInfoToMatchAdjusted)
 
 			if not isCompatible then
@@ -1738,9 +1779,10 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 
 		-- Vararg (0..inf values) OR other (1 value).
 		else
-			local adjustVarargToIncludeNil   = not (valueTypeInfo.tag == !(TYPE_VARARG) and typeInfoToMatch.tag == !(TYPE_VARARG))
-			local valueTypeInfoAdjusted      = adjustTypeToOne(state, valueExpr,        valueTypeInfo, adjustVarargToIncludeNil) -- We have a value with a type.
-			local typeInfoToMatchAdjusted    = adjustTypeToOne(state, callOrReturnNode, typeInfoToMatch)                         -- We want a specific type.
+			local adjustVarargToIncludeNil = not (valueTypeInfo.tag == !(TYPE_VARARG) and typeInfoToMatch.tag == !(TYPE_VARARG))
+			local valueTypeInfoAdjusted    = adjustTypeToOne(state, valueExpr,        valueTypeInfo, adjustVarargToIncludeNil) -- We have a value with a type.
+			local typeInfoToMatchAdjusted  = adjustTypeToOne(state, callOrReturnNode, typeInfoToMatch)                         -- We want a specific type.
+
 			isCompatible, compatibilityScore = isTypeCompatibleWith(valueTypeInfoAdjusted, typeInfoToMatchAdjusted)
 
 			if not isCompatible then
@@ -1760,6 +1802,37 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 		compatibilityScoreSum = compatibilityScoreSum + compatibilityScore
 	end
 
+	for _, argNamed in ipairs(argsNamed or EMPTY_TABLE) do
+		local argIndex        = argNamed.argumentIndex
+		local arg             = constLambda.argumentsIn.arguments[argIndex]
+
+		local valueExpr       = argNamed.value
+		local valueTypeInfo   = valueExpr.inferredType
+
+		local typeInfoToMatch = typeInfos[argIndex]
+
+		-- @Incomplete: Vararg is not yet supported for named arguments. 2020-04-09
+		local valueTypeInfoAdjusted   = adjustTypeToOne(state, valueExpr,        valueTypeInfo,   true)
+		local typeInfoToMatchAdjusted = adjustTypeToOne(state, callOrReturnNode, typeInfoToMatch, true)
+
+		local isCompatible, compatibilityScore = isTypeCompatibleWith(valueTypeInfoAdjusted, typeInfoToMatchAdjusted)
+
+		if not isCompatible then
+			if softCheck then  return false, 0  end
+			!ifDEBUG `astPrintTree(callOrReturnNode)`
+			typeError(
+				state, valueExpr,
+				"Type mismatch for argument #%d (%s). (Wanted %s, got %s)",
+				argIndex,
+				argNamed.key.name,
+				getFriendlyTypeInfoName(typeInfoToMatchAdjusted),
+				getFriendlyTypeInfoName(valueTypeInfoAdjusted)
+			)
+		end
+
+		compatibilityScoreSum = compatibilityScoreSum + compatibilityScore
+	end
+
 	-- @Incomplete: Decrease compatibilityScoreSum as optional arguments are left out?
 
 	return true, compatibilityScoreSum
@@ -1774,7 +1847,7 @@ local function getMatchingFunctions(state, call, realArguments, realArgumentType
 		!ASSERT("funcSig.tag == "..TYPE_FUNCTION)
 
 		local doesMatch, compatibilityScore = checkIfValuesMatchArgumentTypes(
-			state, call, realArguments, realArgumentTypes, funcSig.argumentTypesIn, true, decl
+			state, call, realArguments, realArgumentTypes, funcSig.argumentTypesIn, true, decl, call.argumentsNamed
 		)
 		if doesMatch then
 			matches = matches or {}
@@ -1856,7 +1929,7 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 		end
 	end
 
-	checkIfValuesMatchArgumentTypes(state, call, realArguments, realArgumentTypes, calleeTypeInfo.argumentTypesIn) -- Basically checks everything but placeholders.
+	checkIfValuesMatchArgumentTypes(state, call, realArguments, realArgumentTypes, calleeTypeInfo.argumentTypesIn, false, nil, call.argumentsNamed) -- Basically checks everything but placeholders.
 
 	-- Prepare for auto-bake stuff.
 	local autobaking               = false
@@ -2396,24 +2469,34 @@ end
 	local callee         = call.callee
 	local calleeTypeInfo = callee.inferredType
 
+	-- Wait for callee.
 	if not calleeTypeInfo then
 		!DEPEND_AND_RETURN(`call`, DEPEND_NODE_INFERRED, `callee`)
 	end
 
-	if callee.nodeType == !(AST_IDENTIFIER) and callee.declaration.overloadOf then
-		-- Wait for all overloads to get inferred.
+	local isCallingConstantName = (callee.nodeType == !(AST_IDENTIFIER) and isDeclarationConstant(callee.declaration))
+
+	-- Wait for overloads.
+	if isCallingConstantName and callee.declaration.overloadOf then
 		local ident    = callee
 		local declBase = getOverloadBase(ident.declaration)
 
 		calleeTypeInfo = declBase.name.inferredType
 		if not calleeTypeInfo then
-			!DEPEND_AND_RETURN(`call`, DEPEND_NODE_INFERRED, `declBase`)
+			!DEPEND_AND_RETURN(`call`, DEPEND_NODE_INFERRED, `declBase`) -- If the base is overloaded then all others should be too.
 		end
 	end
 
+	-- Wait for arguments.
 	for _, argExpr in ipairs(call.arguments) do
 		if not argExpr.inferredType then
 			!DEPEND_AND_RETURN(`call`, DEPEND_NODE_INFERRED, `argExpr`)
+		end
+	end
+	for _, argNamed in ipairs(call.argumentsNamed) do
+		-- Only wait for the values.
+		if not argNamed.value.inferredType then
+			!DEPEND_AND_RETURN(`call`, DEPEND_NODE_INFERRED, `argNamed.value`)
 		end
 	end
 
@@ -2433,6 +2516,15 @@ end
 		`,
 		{nodeTypeIdent=AST_IDENTIFIER}
 	)
+
+	if call.argumentsNamed[1] then
+		if not isCallingConstantName then
+			typeError(state, call.argumentsNamed[1].key, "The called object must be a constant identifier for named arguments to work.")
+		end
+		if calleeTypeInfo.tag ~= !(TYPE_FUNCTION) then
+			errorInternal(state, call.argumentsNamed[1].key, "@Incomplete: Handle named arguments for non-function calls.")
+		end
+	end
 
 	if calleeTypeInfo.tag == !(TYPE_FUNCTION) then
 		-- void
@@ -2471,7 +2563,8 @@ end
 		!!(NOT_CALLABLE)
 	end
 
-	!ASSERT("calleeTypeInfo.tag == "..TYPE_FUNCTION)
+	local funcSig = calleeTypeInfo
+	!ASSERT("funcSig.tag == "..TYPE_FUNCTION)
 
 	!if DEBUG then
 		if call.isMethod and callee.nodeType ~= !(AST_ACCESS) then
@@ -2496,31 +2589,83 @@ end
 	end
 
 	-- Overloaded call.
-	if callee.nodeType == !(AST_IDENTIFIER) and callee.declaration.overloadOf then
-		calleeTypeInfo = handleOverloadedCall(state, call, realArguments, realArgumentTypes) or errorInternal(state, call)
+	if isCallingConstantName and callee.declaration.overloadOf then
+		if call.argumentsNamed[1] then
+			errorInternal(state, call.argumentsNamed[1].key, "@Incomplete: Named arguments for overloaded calls.")
+		end
+		funcSig = handleOverloadedCall(state, call, realArguments, realArgumentTypes) or errorInternal(state, call)
+	end
 
-		if calleeTypeInfo.isPolymorphic then
-			handlePolymorphicCall(state, call, calleeTypeInfo, realArguments, realArgumentTypes)
-			return -- Wait for the polymorphed function to infer.
+	local constLambda = nil
+	if isCallingConstantName then
+		constLambda = followIdentifiersToConstantValue(callee.declaration.value)
+		!ASSERT("constLambda.nodeType == "..AST_LAMBDA)
+	end
+
+	-- @Incomplete: Handle call.argumentsNamed everywhere!
+	-- @Incomplete: Handle call.argumentsNamed everywhere!
+	-- @Incomplete: Handle call.argumentsNamed everywhere!
+	if call.argumentsNamed[1] and call.argumentsNamed[1].argumentIndex == 0 then
+		!ASSERT("constLambda")
+
+		-- Assign correct argument indicies to argumentsNamed.
+		for _, argNamed in ipairs(call.argumentsNamed) do
+			local name     = argNamed.key.name
+			local argIndex = nil
+
+			for _argIndex, arg in ipairs(constLambda.argumentsIn and constLambda.argumentsIn.arguments or EMPTY_TABLE) do
+				if arg.declaration.name.name == name then
+					argIndex = _argIndex
+					break
+				end
+			end
+
+			if not argIndex then
+				typeError2(state,
+					argNamed.key, F("No argument '%s'.", name),
+					constLambda,  F("...here is the called function.")
+				)
+
+			elseif realArguments[argIndex] then
+				local early, late = getEarlyAndLateExpression(argNamed.key, realArguments[argIndex])
+				typeError3(state,
+					late,        F("Overlapping values for argument #%d (%s).", argIndex, name),
+					early,       F("...here is the previous value."),
+					constLambda, F("...here is the called function.")
+				)
+			end
+
+			argNamed.argumentIndex = argIndex
 		end
 
+		-- Check for missing required arguments.  @Cleanup: Move this to checkIfValuesMatchArgumentTypes().
+		for argIndex = #realArguments+1, #funcSig.argumentTypesIn do
+			local arg = constLambda.argumentsIn.arguments[argIndex]
+			if not arg.isRequired then  break  end
+
+			local argNamed = itemWith1(call.argumentsNamed, "argumentIndex", argIndex)
+			if not argNamed then
+				typeError2(state,
+					call, F("Missing value for required argument #%d (%s).", argIndex, arg.declaration.name.name),
+					arg,  F("...here is the argument in the called function.")
+				)
+			end
+		end
+	end
+
 	-- Polymorphic call.
-	elseif calleeTypeInfo.isPolymorphic then
-		handlePolymorphicCall(state, call, calleeTypeInfo, realArguments, realArgumentTypes)
+	if funcSig.isPolymorphic then
+		handlePolymorphicCall(state, call, funcSig, realArguments, realArgumentTypes)
 		return -- Wait for the polymorphed function to infer.
+	end
 
 	-- Plain call.
-	else
-		checkIfValuesMatchArgumentTypes(state, call, realArguments, realArgumentTypes, calleeTypeInfo.argumentTypesIn)
-	end
+	checkIfValuesMatchArgumentTypes(state, call, realArguments, realArgumentTypes, funcSig.argumentTypesIn, false, nil, call.argumentsNamed)
 
-	if callee.nodeType == !(AST_IDENTIFIER) and isDeclarationConstant(callee.declaration) then
-		local lambda = followIdentifiersToConstantValue(callee.declaration.value)
-		!ASSERT("lambda.nodeType == "..AST_LAMBDA)
-		call.wantLocation = lambda.wantCallerLocation
+	if constLambda then
+		call.wantLocation = constLambda.wantCallerLocation
 	end
-
-	call.inferredType = getTypeInfoForList(state, calleeTypeInfo.argumentTypesOut)
+	call.inferredType = getTypeInfoForList(state, funcSig.argumentTypesOut)
 	moveToNextRelevantPipe(state, call)
 end
 
@@ -2553,7 +2698,7 @@ end
 		typeInfos[i] = valueExpr.inferredType
 	end
 
-	checkIfValuesMatchArgumentTypes(state, returnNode, returnNode.values, typeInfos, lambda.inferredType.argumentTypesOut)
+	checkIfValuesMatchArgumentTypes(state, returnNode, returnNode.values, typeInfos, lambda.inferredType.argumentTypesOut, false, nil, nil)
 	moveToNextRelevantPipe(state, returnNode)
 end
 
@@ -4982,7 +5127,7 @@ local function checkForRecursiveStruct(state, declThatWeAreChecking, memberPath,
 	memberPath[memberPathIndex] = nil
 end
 
-local function getEarlyAndLateExpression(expr1, expr2)
+function _G.getEarlyAndLateExpression(expr1, expr2)
 	if expr1.token < expr2.token then  return expr1, expr2  end
 	return expr2, expr1
 end
@@ -5119,16 +5264,16 @@ end
 
 			if structInfoToInherit.keyType then
 				if structInfo.keyType then
-					local ealy, late = getEarlyAndLateExpression(typeExpr, typeSourceNodeK)
-					typeError2(state, late, "Key type is already defined.", ealy, "...key type was defined here.")
+					local early, late = getEarlyAndLateExpression(typeExpr, typeSourceNodeK)
+					typeError2(state, late, "Key type is already defined.", early, "...key type was defined here.")
 				end
 				typeSourceNodeK    = typeExpr
 				structInfo.keyType = structInfoToInherit.keyType
 			end
 			if structInfoToInherit.valueType then
 				if structInfo.valueType then
-					local ealy, late = getEarlyAndLateExpression(typeExpr, typeSourceNodeV)
-					typeError2(state, late, "Value type is already defined.", ealy, "...value type was defined here.")
+					local early, late = getEarlyAndLateExpression(typeExpr, typeSourceNodeV)
+					typeError2(state, late, "Value type is already defined.", early, "...value type was defined here.")
 				end
 				typeSourceNodeV      = typeExpr
 				structInfo.valueType = structInfoToInherit.valueType
@@ -5364,7 +5509,8 @@ function _G.crawl(state, unit, crawled, forMeta)
 
 		elseif node.nodeType == !(AST_IDENTIFIER) then
 			local ident = node
-			local decl  = ident.declaration or errorInternal(state, ident)
+			local decl  = ident.declaration-- or errorInternal(state, ident)
+			if not decl then  return  end -- @Robustness @Cleanup: This currently only happens for names in calls with named arguments. 2020-04-09
 
 			if crawled[decl] then  return  end
 

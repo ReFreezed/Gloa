@@ -571,6 +571,24 @@ local function doesTypeContainBoolOrNone(typeInfo)
 	return false
 end
 
+-- lambda = getDataForHandlingMissingArguments( callee )
+local function getDataForHandlingMissingArguments(callee)
+	if callee.nodeType ~= !(AST_IDENTIFIER) then  return nil  end
+
+	local ident = callee
+	local const = ident.declaration.valueConstant
+	if not const then  return nil  end
+
+	local funcSig    = const.valueType
+	local argTypesIn = funcSig.argumentTypesIn
+	if not argTypesIn[1] or argTypesIn[1].tag == !(TYPE_VARARG) then  return nil  end
+
+	local lambda = const.value
+	!ASSERT("lambda.nodeType == "..AST_LAMBDA, nil, `lambda`)
+
+	return lambda
+end
+
 function _G.writeExpression(state, writer, indent, nextLocalN, localsStack, expr)
 	!ASSERT(`expr.inferredType`, nil, `expr`)
 	local file = writer.file
@@ -585,6 +603,7 @@ function _G.writeExpression(state, writer, indent, nextLocalN, localsStack, expr
 
 		if call.surroundedByParentheses then  file:write("(")  end
 
+		-- Write callee and handle method calls.
 		if callee.nodeType == !(AST_IDENTIFIER) and isDeclarationConstant(callee.declaration) then
 			local ident = callee
 			local decl  = ident.declaration
@@ -636,65 +655,69 @@ function _G.writeExpression(state, writer, indent, nextLocalN, localsStack, expr
 		local first = true
 
 		-- Write given arguments.
-		for i = (callingForeignMethod and 2 or 1), #call.arguments do
+		!local MAYBE_WRITE_COMMA = trimTemplate`
 			if not first then  file:write(", ")  end
 			first = false
+		`
+
+		for i = (callingForeignMethod and 2 or 1), #call.arguments do
+			!!(MAYBE_WRITE_COMMA)
 			writeExpression(state, writer, indent, nextLocalN, localsStack, call.arguments[i])
 		end
 
-		-- Write default values for arguments (if the function isn't foreign).
-		if callee.nodeType == !(AST_IDENTIFIER) then
-			local calleeDecl = callee.declaration
+		-- Handle missing arguments.
+		local lambda = getDataForHandlingMissingArguments(callee)
 
-			if isDeclarationConstant(calleeDecl) then
-				local lambda = calleeDecl.value or errorInternal(state, calleeDecl)
-				lambda       = followIdentifiersToConstantValue(lambda)
+		if lambda then
+			local argsIn           = lambda.argumentsIn.arguments
+			local argTypesIn       = lambda.inferredType.argumentTypesIn
+			local isVararg         = getLast(argTypesIn).tag == !(TYPE_VARARG)
+			local lastNonVarargArg = getLast(argTypesIn, (isVararg and 2 or 1))
 
-				!ASSERT("lambda.nodeType == "..AST_LAMBDA, nil, `lambda`)
+			if lastNonVarargArg.isRequired then
+				local argExprLast = getLast(call.arguments)
+				if argExprLast and (
+					(
+						argExprLast.inferredType.tag == !(TYPE_VARARG)
+						and not argExprLast.surroundedByParentheses
+					)
+					or (
+						argExprLast.inferredType.tag == !(TYPE_LIST)
+						and not argExprLast.surroundedByParentheses
+						and argExprLast.inferredType[2]
+					)
+				) then
+					-- :DisallowListAsLastValueToFunctionWithOptionalArguments
+					nodeError(state, call, "ProgramWriter", "@Incomplete: Handle optional arguments if the last value in a call is a list of values.")
+				end
+			end
 
-				if not lambda.bodyIsForeign then
-					-- Only write a value if the last non-vararg argument is optional.
-					local argLast = lambda.argumentsIn and getLast(lambda.argumentsIn.arguments)
-					if argLast and argLast.declaration.name.nodeType == !(AST_VARARG) then
-						argLast = getLast(lambda.argumentsIn.arguments, 2)
-					end
+			for argIndex = #call.arguments+1, #argsIn do
+				local argNamed  = itemWith1(call.argumentsNamed, "argumentIndex", argIndex)
+				local valueExpr = argNamed and argNamed.value or argsIn[argIndex].declaration.value
 
-					if argLast and not argLast.isRequired then
-						local argExprLast = getLast(call.arguments)
+				if not valueExpr then
+					-- Varargs are optional but have no default value (or zero default values since it's technically a list).
+					!ASSERT `not argsIn[argIndex+1]`
+					break
 
-						if argExprLast and (
-							(
-								argExprLast.inferredType.tag == !(TYPE_VARARG)
-								and not argExprLast.surroundedByParentheses
-							)
-							or (
-								argExprLast.inferredType.tag == !(TYPE_LIST)
-								and not argExprLast.surroundedByParentheses
-								and argExprLast.inferredType[2]
-							)
-						) then
-							-- :DisallowListAsLastValueToFunctionWithOptionalArguments
-							nodeError(state, callee, "ProgramWriter", "@Incomplete: Handle optional arguments if the last value in a call is a list of things.")
-						end
+				elseif argNamed then
+					!!(MAYBE_WRITE_COMMA)
+					writeExpression(state, writer, indent, nextLocalN, localsStack, valueExpr)
 
-						local argsInList = lambda.argumentsIn.arguments
+				elseif lambda.bodyIsForeign then
+					-- Don't write default values for foreign functions. This gives the foreign site control over
+					-- what the actual default values should be no matter what the local !foreign declaration says.
+					break
 
-						for i = #call.arguments+1, #argsInList do
-							if not first then  file:write(", ")  end
-							first = false
+				elseif valueExpr.nodeType == !(AST_LOCATION) and valueExpr.ofCaller then
+					local const = call.locationConstant or errorInternal(state, call, "Missing caller location data.")
+					!!(MAYBE_WRITE_COMMA)
+					writeConstantValueOrReference(state, writer, const, valueExpr)
 
-							local valueExpr = argsInList[i].declaration.value
-
-							if not valueExpr then
-								-- void  Varargs are optional but have no default value (or zero default values, since it's a list).
-							elseif valueExpr.nodeType == !(AST_LOCATION) and valueExpr.ofCaller then
-								local const = call.locationConstant or errorInternal(state, call, "Missing caller location data.")
-								writeConstantValueOrReference(state, writer, const, valueExpr)
-							else
-								writeExpression(state, writer, indent, nextLocalN, localsStack, valueExpr)
-							end
-						end
-					end
+				else
+					!!(MAYBE_WRITE_COMMA)
+					writeExpression(state, writer, indent, nextLocalN, localsStack, valueExpr)
 				end
 			end
 		end
