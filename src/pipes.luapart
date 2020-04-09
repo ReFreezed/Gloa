@@ -17,19 +17,20 @@
 
 --============================================================]]
 
-
-
-!local OUTPUT_DEPENDENCY_GRAPH = false
-local MAX_ERRORS_MESSAGES      = !(DEBUG and 20 or 4) -- @Incomplete: Make this a compiler option.
+!local INFINITE_LOOP_PRINT_CONTEXT = false
+!local OUTPUT_DEPENDENCY_GRAPH     = false
+!local CHECK_DUPLICATE_DEPENDENCY  = false -- WARNING: Currently takes a lot of time!
+local MAX_ERRORS_MESSAGES          = !(DEBUG and 20 or 4) -- @Incomplete: Make this a compiler option.
 
 
 
 local !struct"Dependency"{ -- @Cleanup: Rename to something with "wait"?
 	{`dependent`,  nil}, -- Queued
-	{`dependType`, 0},   -- DEPEND_DECLARATION|DEPEND_MEMBER_DECLARATION|DEPEND_NODE_INFERRED|DEPEND_NODE_INFERRED_FULLY|DEPEND_NODE_EMITTED|DEPEND_STRUCT_MEMBERS_READY|DEPEND_CONSTANT_READY
-	{`dependOn`,   nil}, -- string|Queued  (The value depends on what dependType is.)
+	{`dependType`, 0},   -- See addDependency().
+	{`dependOn`,   nil}, -- string|Queued  The value depends on what dependType is.
 	{`extraData`,  nil}, -- AstScope|nil
-	{`next`,       nil}, -- Dependency  (This is for chaining multiple dependencies.)
+	{`next`,       nil}, -- Dependency  This is for chaining multiple dependencies.
+	{`traceback`,  nil}, -- For debugging.
 }
 
 -- addDependency( state, dependent, DEPEND_DECLARATION,          name [, scope ] )
@@ -54,21 +55,27 @@ function _G.addDependency(state, dependent, dependType, dependOn, extraData)
 		end
 	!end
 
-	--[[ WARNING: getExistingDependency() takes a lot of time to call here! @Robustness: @Optimize this into O(1) and uncomment.
-	if getExistingDependency(state, dependent, dependType, dependOn) then
-		!TRACE()
+	!if CHECK_DUPLICATE_DEPENDENCY then
+		-- WARNING: getExistingDependency() takes a lot of time to call here! @Robustness: @Optimize this into O(1) and uncomment.
+		local dependency = getExistingDependency(state, dependent, dependType, dependOn)
 
-		!ifDEBUG `astPrint(dependent)`
-		nodeMessage(io.stderr, state, dependent, "Error", "Pipes", "Internal compiler error: Trying to add dependency twice. (%s)", (DEPEND_TITLES[dependType] or "?"))
+		if dependency then
+			!TRACE()
 
-		if !!(CONST_SET{ DEPEND_NODE_INFERRED, DEPEND_NODE_INFERRED_FULLY, DEPEND_NODE_EMITTED })[dependType] then
-			!ifDEBUG `astPrint(dependOn)`
-			nodeMessage(io.stderr, state, dependOn, "Info", "Pipes", "...depending on this.")
+			!ifDEBUG `astPrint(dependent)`
+			nodeMessage(io.stderr, state, dependent, "Error", "Pipes", "Internal compiler error: Trying to add dependency twice. (%s)", (DEPEND_TITLES[dependType] or "?"))
+
+			if !!(CONST_SET{ DEPEND_NODE_INFERRED, DEPEND_NODE_INFERRED_FULLY, DEPEND_NODE_EMITTED })[dependType] then
+				!ifDEBUG `astPrint(dependOn)`
+				nodeMessage(io.stderr, state, dependOn, "Info", "Pipes", "...depending on this.")
+			end
+
+			io.write("Previous ")
+			print(dependency.traceback)
+
+			exitFailure()
 		end
-
-		exitFailure()
-	end
-	--]]
+	!end
 
 	dependent        = dependent.queued
 	local dependency = Dependency()
@@ -87,6 +94,10 @@ function _G.addDependency(state, dependent, dependType, dependOn, extraData)
 	dependency.dependType = dependType
 	dependency.dependOn   = dependOn
 	dependency.extraData  = extraData
+
+	!if CHECK_DUPLICATE_DEPENDENCY then
+		dependency.traceback = debug.traceback("", 2)
+	!end
 
 	local waitingOn = dependent.waitingOn
 	if waitingOn then
@@ -767,29 +778,40 @@ function _G.errorPipesAreInfiniteLooping(state, finalPipe)
 		if not queued.unqueued and queued.pipe <= finalPipe then
 			printCount = printCount+1
 
-			if printCount > 10 then
+			if printCount > !(INFINITE_LOOP_PRINT_CONTEXT and 100 or 10) then
 				printerr("(...)")
 				break
 			end
 
 			local dependency = queued.waitingOn
 
-			astPrint(queued.node)
-			nodeMessage(
-				io.stderr, state, queued.node, "Debug", nil,
-				"pipe=%s%s",
-				PIPE_TITLES[queued.pipe],
-				dependency and ", waiting" or ""
-			)
+			!if INFINITE_LOOP_PRINT_CONTEXT then
+				astPrint(queued.node)
+				nodeMessage(
+					io.stderr, state, queued.node, "Debug", nil,
+					"pipe=%s%s",
+					PIPE_TITLES[queued.pipe],
+					dependency and ", waiting" or ""
+				)
+			!else
+				printerr(printCount..".")
+				printLocation(io.stderr, state, queued.node)
+				astPrint(queued.node)
+			!end
 
 			if dependency and !!(CONST_SET{ DEPEND_NODE_INFERRED, DEPEND_NODE_INFERRED_FULLY, DEPEND_NODE_EMITTED })[dependency.dependType] then
-				astPrint(dependency.dependOn.node)
-				nodeMessage(io.stderr, state, dependency.dependOn.node, "Debug", nil, "...waiting on this.")
+				!if INFINITE_LOOP_PRINT_CONTEXT then
+					astPrint(dependency.dependOn.node)
+					nodeMessage(io.stderr, state, dependency.dependOn.node, "Debug", nil, "...waiting on this.")
+				!else
+					printLocation(io.stderr, state, dependency.dependOn.node)
+					astPrint(dependency.dependOn.node)
+				!end
 			end
 		end
 	end
 
-	!if OUTPUT_DEPENDENCY_GRAPH then
+	!if DEBUG and OUTPUT_DEPENDENCY_GRAPH then
 		outputDependencyGraph(state)
 	!end
 	errorInternal("[DEBUG] Pipes ran for too long. (waiting:%d)", #state.queueWaiting)

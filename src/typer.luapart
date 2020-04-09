@@ -978,7 +978,7 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 	local container = identOrVararg.queued.container
 
 	-- 0. Things to ignore.  @Cleanup
-	if ident and parent.nodeType == !(AST_CALL) and container ~= parent and container ~= parent.arguments and indexOf(parent.argumentsNamed, container) then
+	if ident and parent.nodeType == !(AST_CALL) and container ~= parent and container ~= parent.arguments and identOrVararg.queued.key == "key" and indexOf(parent.argumentsNamed, container) then
 		moveToNextRelevantPipe(state, ident)
 		return
 	end
@@ -1613,7 +1613,7 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 		if not areArraysEqual(typeInfos, constLambda.inferredType.argumentTypesIn) then
 			-- We should only get here if checking overloads.
 			if softCheck then  return false, 0  end
-			assert(false)
+			errorInternal()
 		end
 
 		for i = acceptedMin, 1, -1 do
@@ -1676,28 +1676,62 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 		end
 	end
 
-	-- Increase requestedMin according to named arguments.
+	-- Increase requestedMin according to named arguments. (Also do some validation of the named arguments.)
 	if argsNamed and argsNamed[1] then
 		!ASSERT("constLambda") -- We should only get here when calling a constant name to a function.
 
-		for argIndex = valueCount+1, acceptedMin do -- Is acceptedMin good?
-			local arg = constLambda.argumentsIn.arguments[argIndex]
-			if not arg.isRequired then  break  end
+		local argsIn = constLambda.argumentsIn.arguments
 
-			-- @Cleanup: Duplicate named argument check.
-			local argNamed = itemWith1(argsNamed, "argumentIndex", argIndex)
-			if not argNamed then
-				typeError2(state,
-					call, F("Missing value for required argument #%d (%s).", argIndex, arg.declaration.name.name),
-					arg,  F("...here is the argument in the called function.")
-				)
+		if argsNamed[1].argumentIndex > 0 then
+			for argIndex = valueCount+1, acceptedMin do -- Is acceptedMin good?
+				local arg = argsIn[argIndex]
+				if not arg.isRequired then  break  end
+
+				local argNamed = itemWith1(argsNamed, "argumentIndex", argIndex)
+
+				-- @Cleanup: Duplicate named argument check. (Maybe keep these and remove the one in the other function?)
+				if not argNamed then
+					!local NAMED_ARG_ERROR = trimTemplate`
+						if softCheck then  return false, 0  end
+						local call = callOrReturnNode
+						typeError2(state,
+							call, F("Missing value for required argument #%d (%s).", argIndex, arg.declaration.name.name),
+							arg,  F("...here is the argument in the called function.")
+						)
+					`
+					!!(NAMED_ARG_ERROR)
+				end
+
+				requestedMin = requestedMin+1
 			end
+		else
+			for argIndex = 1, acceptedMin do -- Is acceptedMin good?
+				local arg = argsIn[argIndex]
+				if not arg.isRequired then  break  end
 
-			requestedMin = requestedMin+1
+				local name     = arg.declaration.name.name
+				local argNamed = nil
+
+				for _, _argNamed in ipairs(argsNamed) do
+					if _argNamed.key.name == name then
+						argNamed = _argNamed
+						break
+					end
+				end
+
+				-- @Cleanup: Duplicate named argument check. (Maybe keep these and remove the one in the other function?)
+				if not (argNamed or values[argIndex]) then
+					!!(NAMED_ARG_ERROR)
+				end
+
+				if argIndex > valueCount then
+					requestedMin = requestedMin+1
+				end
+			end
 		end
 	end
 
-	-- io.stdout:write(F("requested %.0f-%.0f, accepted %.0f-%.0f  ", requestedMin, requestedMax, acceptedMin, acceptedMax)) ; astPrint(callOrReturnNode)
+	-- ifDEBUG `io.write(F("requested %.0f-%.0f, accepted %.0f-%.0f  ", requestedMin, requestedMax, acceptedMin, acceptedMax)) ; astPrint(callOrReturnNode)`
 
 	-- Too few values.
 	-- @UX: Better error message if the last value is a call (without parentheses).
@@ -1803,8 +1837,24 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 	end
 
 	for _, argNamed in ipairs(argsNamed or EMPTY_TABLE) do
-		local argIndex        = argNamed.argumentIndex
-		local arg             = constLambda.argumentsIn.arguments[argIndex]
+		local argIndex = argNamed.argumentIndex
+
+		if argIndex == 0 then
+			local name = argNamed.key.name
+
+			for _argIndex, arg in ipairs(constLambda.argumentsIn and constLambda.argumentsIn.arguments or EMPTY_TABLE) do
+				if arg.declaration.name.name == name then
+					argIndex = _argIndex
+					break
+				end
+			end
+
+			if argIndex == 0 then
+				-- We should only get here if checking overloads.
+				if softCheck then  return false, 0  end
+				errorInternal()
+			end
+		end
 
 		local valueExpr       = argNamed.value
 		local valueTypeInfo   = valueExpr.inferredType
@@ -2097,10 +2147,18 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 				end
 
 				-- @Incomplete: Handle optional arguments.
-				local valueExpr     = realArguments[argIndex] or errorInternal(state, call)
+				local valueExpr     = realArguments[argIndex]
 				local bakeValueExpr = nil
-				local bakeValueType = realArgumentTypes[argIndex] or errorInternal(state, valueExpr)
-				bakeValueType       = adjustTypeToOne(state, valueExpr, bakeValueType)
+				local bakeValueType = nil
+
+				if valueExpr then
+					bakeValueType  = realArgumentTypes[argIndex] or errorInternal(state, valueExpr)
+				else
+					local argNamed = itemWith1(call.argumentsNamed, "argumentIndex", argIndex) or errorInternal(state, call)
+					valueExpr      = argNamed.value
+					bakeValueType  = valueExpr.inferredType or errorInternal(state, valueExpr)
+				end
+				bakeValueType = adjustTypeToOne(state, valueExpr, bakeValueType)
 
 				!(
 				local function BAKE_ERROR(messageAndParamsCode)
@@ -2466,11 +2524,11 @@ local function doesExpressionRepresentStructType(expr)
 end
 
 !NODE_INFERRER `function nodeInferrers.AstCall(state, call)`
-	local callee         = call.callee
-	local calleeTypeInfo = callee.inferredType
+	local callee     = call.callee
+	local calleeType = callee.inferredType
 
 	-- Wait for callee.
-	if not calleeTypeInfo then
+	if not calleeType then
 		!DEPEND_AND_RETURN(`call`, DEPEND_NODE_INFERRED, `callee`)
 	end
 
@@ -2481,8 +2539,8 @@ end
 		local ident    = callee
 		local declBase = getOverloadBase(ident.declaration)
 
-		calleeTypeInfo = declBase.name.inferredType
-		if not calleeTypeInfo then
+		calleeType = declBase.name.inferredType
+		if not calleeType then
 			!DEPEND_AND_RETURN(`call`, DEPEND_NODE_INFERRED, `declBase`) -- If the base is overloaded then all others should be too.
 		end
 	end
@@ -2500,10 +2558,7 @@ end
 		end
 	end
 
-	if calleeTypeInfo.tag == !(TYPE_LIST) then
-		local listSig  = calleeTypeInfo -- @Incomplete: Should we use adjustTypeToOne() here? I think so...
-		calleeTypeInfo = listSig[1] or typeError(state, call, "Trying to call void.")
-	end
+	calleeType = adjustTypeToOne(state, callee, calleeType, true)
 
 	!local NOT_CALLABLE = templateToLua(
 		trimTemplate`
@@ -2511,7 +2566,7 @@ end
 				local ident = callee
 				typeError(state, ident, "'%s' is not a function. (It is %s)", ident.name, getFriendlyTypeInfoName(ident.inferredType))
 			else
-				typeError(state, call, "The object being called is not a function. (It is %s)", getFriendlyTypeInfoName(calleeTypeInfo))
+				typeError(state, call, "The object being called is not a function. (It is %s)", getFriendlyTypeInfoName(calleeType))
 			end
 		`,
 		{nodeTypeIdent=AST_IDENTIFIER}
@@ -2521,12 +2576,12 @@ end
 		if not isCallingConstantName then
 			typeError(state, call.argumentsNamed[1].key, "The called object must be a constant identifier for named arguments to work.")
 		end
-		if calleeTypeInfo.tag ~= !(TYPE_FUNCTION) then
+		if calleeType.tag ~= !(TYPE_FUNCTION) then
 			errorInternal(state, call.argumentsNamed[1].key, "@Incomplete: Handle named arguments for non-function calls.")
 		end
 	end
 
-	if calleeTypeInfo.tag == !(TYPE_FUNCTION) then
+	if calleeType.tag == !(TYPE_FUNCTION) then
 		-- void
 
 	elseif doesExpressionRepresentPolymorphicStructType(callee) then -- @Cleanup: We can/should probably just check callee.declaration.valueTypeInfo here.
@@ -2563,7 +2618,7 @@ end
 		!!(NOT_CALLABLE)
 	end
 
-	local funcSig = calleeTypeInfo
+	local funcSig = calleeType
 	!ASSERT("funcSig.tag == "..TYPE_FUNCTION)
 
 	!if DEBUG then
@@ -2590,9 +2645,6 @@ end
 
 	-- Overloaded call.
 	if isCallingConstantName and callee.declaration.overloadOf then
-		if call.argumentsNamed[1] then
-			errorInternal(state, call.argumentsNamed[1].key, "@Incomplete: Named arguments for overloaded calls.")
-		end
 		funcSig = handleOverloadedCall(state, call, realArguments, realArgumentTypes) or errorInternal(state, call)
 	end
 
