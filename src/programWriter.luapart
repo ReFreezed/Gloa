@@ -668,28 +668,45 @@ function _G.writeExpression(state, writer, indent, nextLocalN, localsStack, expr
 		local lambda = getDataForHandlingMissingArguments(callee)
 
 		if lambda then
-			local argsIn           = lambda.argumentsIn.arguments
-			local argTypesIn       = lambda.inferredType.argumentTypesIn
-			local isVararg         = getLast(argTypesIn).tag == !(TYPE_VARARG)
-			local lastNonVarargArg = getLast(argTypesIn, (isVararg and 2 or 1))
+			local lastValue = getLast(call.arguments)
 
-			if lastNonVarargArg.isRequired then
-				local argExprLast = getLast(call.arguments)
-				if argExprLast and (
-					(
-						argExprLast.inferredType.tag == !(TYPE_VARARG)
-						and not argExprLast.surroundedByParentheses
-					)
-					or (
-						argExprLast.inferredType.tag == !(TYPE_LIST)
-						and not argExprLast.surroundedByParentheses
-						and argExprLast.inferredType[2]
-					)
-				) then
+			local lastValueIsList = (lastValue ~= nil and (
+				(
+					lastValue.inferredType.tag == !(TYPE_VARARG)
+					and not lastValue.surroundedByParentheses
+				)
+				or (
+					lastValue.inferredType.tag == !(TYPE_LIST)
+					and not lastValue.surroundedByParentheses
+					and lastValue.inferredType[2] ~= nil
+				)
+			))
+
+			if lastValueIsList then
+				local argTypesIn         = lambda.inferredType.argumentTypesIn
+				local isVararg           = getLast(argTypesIn).tag == !(TYPE_VARARG)
+				local lastNonVarargIndex = #argTypesIn - (isVararg and 1 or 0)
+				local lastNonVarargType  = argTypesIn[lastNonVarargIndex]
+
+				--[[
+				local lastValueListSize = 0
+				if not lastValueIsList then
+					-- void
+				elseif lastValue.inferredType.tag == !(TYPE_VARARG) then
+					lastValueListSize    = math.huge
+				else
+					local lastArgOutType = getLast(lastValue.inferredType) or errorInternal(state, lastValue)
+					lastValueListSize    = lastArgOutType.tag == !(TYPE_VARARG) and math.huge or #lastValue.inferredType
+				end
+				--]]
+
+				if not isVararg and not lastNonVarargType.isRequired --[[and lastNonVarargIndex > #call.arguments-1+lastValueListSize]] then
 					-- :DisallowListAsLastValueToFunctionWithOptionalArguments
-					nodeError(state, call, "ProgramWriter", "@Incomplete: Handle optional arguments if the last value in a call is a list of values.")
+					nodeError(state, call, "ProgramWriter", "@Incomplete: Handle optional arguments if the last argument in a call is a list of values.")
 				end
 			end
+
+			local argsIn = lambda.argumentsIn.arguments
 
 			for argIndex = #call.arguments+1, #argsIn do
 				local argNamed  = itemWith1(call.argumentsNamed, "argumentIndex", argIndex)

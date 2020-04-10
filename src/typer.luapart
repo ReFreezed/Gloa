@@ -9,6 +9,7 @@
 --=
 --==============================================================
 
+	areMultipleValuesEnabledAtPosition
 	areTreesEqual
 	checkBinaryOperation
 	crawl
@@ -1039,8 +1040,9 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 		if not typeInfo then
 			!DEPEND_AND_RETURN(`identOrVararg`, DEPEND_NODE_INFERRED, `decl`)
 		end
-		if vararg and vararg.surroundedByParentheses then
-			typeInfo = adjustTypeToOne(state, vararg, typeInfo, true)
+		if vararg and (vararg.surroundedByParentheses or not areMultipleValuesEnabledAtPosition(vararg)) then
+			vararg.surroundedByParentheses = true
+			typeInfo                       = adjustTypeToOne(state, vararg, typeInfo, true)
 		end
 
 		identOrVararg.inferredType = typeInfo
@@ -1318,6 +1320,11 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 
 	if vararg then
 		typeInfo = getTypeInfoForVararg(state, typeInfo)
+
+		if vararg.surroundedByParentheses or not areMultipleValuesEnabledAtPosition(vararg) then
+			vararg.surroundedByParentheses = true
+			typeInfo                       = adjustTypeToOne(state, vararg, typeInfo, true)
+		end
 	end
 
 	identOrVararg.inferredType = typeInfo
@@ -1607,7 +1614,7 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 	local acceptedMax     = acceptingVararg and math.huge       or typeInfoCount
 
 	-- Consider optional arguments for calls.
-	-- @Robustness: Disallow this: local take2 :: (req:int, opt:int=0) {} ; local get1 :: () -> int {} ; take2(get1())  -- :DisallowListAsLastValueToFunctionWithOptionalArguments
+	-- @Robustness: Disallow this in PIPE_INFER:  local take2::(req:int,opt=0){} ; local get2::()->int,int{} ; take2(get2())  -- :DisallowListAsLastValueToFunctionWithOptionalArguments
 	if constLambda then
 		if not areArraysEqual(typeInfos, constLambda.inferredType.argumentTypesIn) then
 			-- We should only get here if checking overloads.
@@ -2808,7 +2815,16 @@ end
 	if constLambda then
 		call.wantLocation = constLambda.wantCallerLocation
 	end
-	call.inferredType = getTypeInfoForList(state, funcSig.argumentTypesOut)
+
+	local listSig  = getTypeInfoForList(state, funcSig.argumentTypesOut)
+	local typeInfo = listSig
+
+	if listSig[1] and (call.surroundedByParentheses or not areMultipleValuesEnabledAtPosition(call)) then
+		call.surroundedByParentheses = true
+		typeInfo                     = adjustTypeToOne(state, call, listSig, true)
+	end
+
+	call.inferredType = typeInfo
 	moveToNextRelevantPipe(state, call)
 end
 
@@ -3872,7 +3888,8 @@ end
 	if lastTableField and lastTableField.keyIsGenerated then
 		local valueExpr = lastTableField.value
 
-		-- Note: We don't need to check for vararg as the parser should have handled that.
+		-- Note: We don't need to check for vararg as the parser should have
+		-- handled that (by setting trailingExpression right away).
 		if valueExpr.nodeType == !(AST_CALL) and not valueExpr.surroundedByParentheses then
 			if not valueExpr.inferredType then
 				!DEPEND_AND_RETURN(`tableNode`, DEPEND_NODE_INFERRED, `valueExpr`)
@@ -6163,9 +6180,9 @@ function _G.isExpressionConstant(state, expr, foreignIsConst)
 	end
 end
 
-function _G.isExpressionExactlyOneValue(expr)
-	return not (expr.nodeType == !(AST_VARARG) or expr.nodeType == !(AST_CALL)) or expr.surroundedByParentheses
-end
+-- function _G.isExpressionExactlyOneValue(expr)
+-- 	return not (expr.nodeType == !(AST_VARARG) or expr.nodeType == !(AST_CALL)) or expr.surroundedByParentheses
+-- end
 
 
 
@@ -7460,6 +7477,49 @@ function _G.getOverloadBase(decl)
 	end
 
 	return decl
+end
+
+
+
+-- Determine whether calls and varargs should adjust to one.
+function _G.areMultipleValuesEnabledAtPosition(node)
+	if node.parent.nodeType == !(AST_DECLARATION) then
+		local decl = node.parent
+		return node == decl.name
+
+	elseif node.parent.nodeType == !(AST_ASSIGNMENT) then
+		local assignment = node.parent
+		return node.queued.container == assignment.values and not assignment.values[node.queued.key+1]
+
+	elseif node.parent.nodeType == !(AST_CALL) then
+		local call = node.parent
+		return node.queued.container == call.arguments and not call.arguments[node.queued.key+1]
+
+	elseif node.parent.nodeType == !(AST_RETURN) then
+		local returnNode = node.parent
+		return node.queued.container == returnNode.values and not returnNode.values[node.queued.key+1]
+
+	elseif node.parent.nodeType == !(AST_TABLE) then
+		local tableNode = node.parent
+		if tableNode.trailingExpression then  return node == tableNode.trailingExpression  end
+
+		-- Predict what tableNode.trailingExpression may be when the table infers (if anything).
+		local lastTableField = getLast(tableNode.fields)
+		return lastTableField ~= nil and lastTableField.keyIsGenerated and node == lastTableField.value
+
+	elseif node.parent.nodeType == !(AST_FOR) then
+		local forLoop = node.parent
+		return node.queued.container == forLoop.expressions
+
+	elseif node.parent.nodeType == !(AST_TYPE) then
+		return true
+
+	elseif isScope(node.parent) then
+		return true -- We don't really care about statement-level nodes.
+
+	else
+		return false
+	end
 end
 
 
