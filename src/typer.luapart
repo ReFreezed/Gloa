@@ -1887,6 +1887,79 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 	return true, compatibilityScoreSum
 end
 
+local function ensureNamedArgumentsHaveAssignedIndicies(state, call, lambdaOrStruct, sequentialArguments)
+	if not call.argumentsNamed[1]               then  return  end
+	if call.argumentsNamed[1].argumentIndex > 0 then  return  end
+
+	!ASSERT("lambdaOrStruct")
+	local isLambda = (lambdaOrStruct.nodeType == !(AST_LAMBDA))
+
+	-- Assign indicies.
+	for _, argNamed in ipairs(call.argumentsNamed) do
+		local name     = argNamed.key.name
+		local argIndex = nil
+
+		if isLambda then
+			for _argIndex, arg in ipairs(lambdaOrStruct.argumentsIn and lambdaOrStruct.argumentsIn.arguments or EMPTY_TABLE) do
+				if arg.declaration.name.name == name then
+					argIndex = _argIndex
+					break
+				end
+			end
+		else
+			for _argIndex, declBaked in ipairs(lambdaOrStruct.bakeDeclarations) do
+				if declBaked.name.name == name then
+					argIndex = _argIndex
+					break
+				end
+			end
+		end
+
+		if not argIndex then
+			typeError2(state,
+				argNamed.key,   F("No argument '%s'.", name),
+				lambdaOrStruct, F("...here is the %s.", (isLambda and "called function" or "struct"))
+			)
+
+		elseif sequentialArguments[argIndex] then
+			local early, late = getEarlyAndLateExpression(argNamed.key, sequentialArguments[argIndex])
+			typeError3(state,
+				late,           F("Overlapping values for argument #%d (%s).", argIndex, name),
+				early,          F("...here is the previous value."),
+				lambdaOrStruct, F("...here is the %s.", (isLambda and "called function" or "struct"))
+			)
+		end
+
+		argNamed.argumentIndex = argIndex
+	end
+
+	local argCount
+		=   isLambda
+		and (lambdaOrStruct.argumentsIn and #lambdaOrStruct.argumentsIn.arguments or 0)
+		or  #lambdaOrStruct.bakeDeclarations
+
+	-- Check for missing required arguments.  @Cleanup: Move this to checkIfValuesMatchArgumentTypes(). (Need to handle structs!)
+	for argIndex = #sequentialArguments+1, argCount do
+		local decl
+
+		if isLambda then
+			local arg = lambdaOrStruct.argumentsIn.arguments[argIndex]
+			if not arg.isRequired then  break  end
+			decl = arg.declaration
+		else
+			decl = lambdaOrStruct.bakeDeclarations[argIndex]
+		end
+
+		local argNamed = itemWith1(call.argumentsNamed, "argumentIndex", argIndex)
+		if not argNamed then
+			typeError2(state,
+				call, F("Missing value for required argument #%d (%s).", argIndex, decl.name.name),
+				decl, F("...here is the argument in the %s.", (isLambda and "called function" or "struct"))
+			)
+		end
+	end
+end
+
 local function getMatchingFunctions(state, call, realArguments, realArgumentTypes, declarations)
 	local matches = nil
 
@@ -2380,19 +2453,25 @@ local function handlePolymorphicStruct(state, call)
 
 	for _, morphDecl in ipairs(struct.polymorphs) do
 		if not morphDecl.name.inferredType then
-			!DEPEND_AND_RETURN(`call`, DEPEND_NODE_INFERRED, `morphDecl.name`)
+			!DEPEND_AND_RETURN(`call`, DEPEND_NODE_INFERRED, `morphDecl`)
 		end
 	end
 
-	-- Check arguments.
+	ensureNamedArgumentsHaveAssignedIndicies(state, call, struct, call.arguments)
+
+	-- Check arguments.  @UX: Better error message for foreign values.
 	for argIndex, argExpr in ipairs(call.arguments) do
 		if not isExpressionConstant(state, argExpr, false) then
-			-- @UX: Better message for foreign values.
 			typeError(state, astGetExpressionVisuallyFurthestToTheLeft(argExpr), "Struct argument #%d is not constant.", argIndex)
 		end
 	end
+	for _, argNamed in ipairs(call.argumentsNamed) do
+		if not isExpressionConstant(state, argNamed.value, false) then
+			typeError(state, astGetExpressionVisuallyFurthestToTheLeft(argNamed.value), "Struct argument #%d is not constant.", argNamed.argumentIndex)
+		end
+	end
 
-	local requested   = #call.arguments
+	local requested   = #call.arguments + #call.argumentsNamed
 	local acceptedMax = #struct.bakeDeclarations
 	local acceptedMin = acceptedMax
 
@@ -2403,9 +2482,11 @@ local function handlePolymorphicStruct(state, call)
 
 	if requested < acceptedMin then
 		typeError(state, call, "Too few struct arguments. (Expected %d, got %d)", acceptedMin, requested)
+
 	elseif requested > acceptedMax then
+		local valueExpr = call.arguments[acceptedMax+1]
 		typeError(
-			state, astGetExpressionVisuallyFurthestToTheLeft(call.arguments[acceptedMax+1]),
+			state, (valueExpr and astGetExpressionVisuallyFurthestToTheLeft(valueExpr) or call),
 			"Too many struct arguments. (Expected %d, got %d)",
 			acceptedMax, requested
 		)
@@ -2418,7 +2499,12 @@ local function handlePolymorphicStruct(state, call)
 
 		for argIndex, declBaked in ipairs(morphStruct.bakeDeclarations) do
 			local valueBaked = declBaked.value
-			local valueExpr  = call.arguments[argIndex] or struct.bakeDeclarations[argIndex].value
+			local valueExpr  = call.arguments[argIndex]
+
+			if not valueExpr then
+				local argNamed = itemWith1(call.argumentsNamed, "argumentIndex", argIndex)
+				valueExpr      = argNamed and argNamed.value or struct.bakeDeclarations[argIndex].value
+			end
 
 			if valueExpr.nodeType ~= valueBaked.nodeType then
 				isMatch = false ; break
@@ -2482,8 +2568,14 @@ local function handlePolymorphicStruct(state, call)
 
 	-- Bake values into morphed struct.
 	for argIndex, declBaked in ipairs(morphStruct.bakeDeclarations) do
-		local valueExpr = call.arguments[argIndex] -- Is nil for optional arguments.
-		if valueExpr then
+		local valueExpr = call.arguments[argIndex]
+
+		if not valueExpr then
+			local argNamed = itemWith1(call.argumentsNamed, "argumentIndex", argIndex)
+			valueExpr      = argNamed and argNamed.value
+		end
+
+		if valueExpr then -- valueExpr is nil for optional arguments.
 			declBaked.value = astCopy(valueExpr, nil, declBaked) -- Overwrite any old value expression.
 		end
 		declBaked.checkedRedeclaration = true -- @Hack to prevent redeclaration errors between polymorphed struct and base struct.
@@ -2660,56 +2752,7 @@ end
 		!ASSERT("constLambda.nodeType == "..AST_LAMBDA)
 	end
 
-	-- @Incomplete: Handle call.argumentsNamed everywhere!
-	-- @Incomplete: Handle call.argumentsNamed everywhere!
-	-- @Incomplete: Handle call.argumentsNamed everywhere!
-	if call.argumentsNamed[1] and call.argumentsNamed[1].argumentIndex == 0 then
-		!ASSERT("constLambda")
-
-		-- Assign correct argument indicies to argumentsNamed.
-		for _, argNamed in ipairs(call.argumentsNamed) do
-			local name     = argNamed.key.name
-			local argIndex = nil
-
-			for _argIndex, arg in ipairs(constLambda.argumentsIn and constLambda.argumentsIn.arguments or EMPTY_TABLE) do
-				if arg.declaration.name.name == name then
-					argIndex = _argIndex
-					break
-				end
-			end
-
-			if not argIndex then
-				typeError2(state,
-					argNamed.key, F("No argument '%s'.", name),
-					constLambda,  F("...here is the called function.")
-				)
-
-			elseif realArguments[argIndex] then
-				local early, late = getEarlyAndLateExpression(argNamed.key, realArguments[argIndex])
-				typeError3(state,
-					late,        F("Overlapping values for argument #%d (%s).", argIndex, name),
-					early,       F("...here is the previous value."),
-					constLambda, F("...here is the called function.")
-				)
-			end
-
-			argNamed.argumentIndex = argIndex
-		end
-
-		-- Check for missing required arguments.  @Cleanup: Move this to checkIfValuesMatchArgumentTypes().
-		for argIndex = #realArguments+1, #funcSig.argumentTypesIn do
-			local arg = constLambda.argumentsIn.arguments[argIndex]
-			if not arg.isRequired then  break  end
-
-			local argNamed = itemWith1(call.argumentsNamed, "argumentIndex", argIndex)
-			if not argNamed then
-				typeError2(state,
-					call, F("Missing value for required argument #%d (%s).", argIndex, arg.declaration.name.name),
-					arg,  F("...here is the argument in the called function.")
-				)
-			end
-		end
-	end
+	ensureNamedArgumentsHaveAssignedIndicies(state, call, constLambda, realArguments)
 
 	-- Polymorphic call.
 	if funcSig.isPolymorphic then
