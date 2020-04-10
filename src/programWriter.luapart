@@ -140,7 +140,7 @@ local COMPILER_SYMBOL_PAIRS = {
 	`_FLOOR`,  `math.floor`, -- Used for integer division.
 	`_IPAIRS`, `ipairs`,     -- Used for short-form array loops.
 	`_PAIRS`,  `pairs`,      -- Used for short-form table loops.
-	`_SELECT`, `select`,     -- Used for short-form vararg loops.
+	`_SELECT`, `select`,     -- Used for short-form vararg loops and vararg lookups.
 	`_REP`,    `string.rep`, -- Used for string repetition (duh).
 	`_REP2`,   `function(n,s)return(s:rep(n))end`,
 	`_SUB`,    `function(s,n)return(s:sub(n,n))end`, -- Used for string subscripting.
@@ -396,7 +396,10 @@ local function isExpressionLiteralStringAndValidLuaIdentifier(expr)
 end
 
 function _G.writeAccess(state, writer, indent, nextLocalN, localsStack, access)
-	local typeInfo = adjustTypeToOne(state, access.object, access.object.inferredType, true)
+	local typeInfo = access.object.inferredType
+	if typeInfo.tag == !(TYPE_LIST) then
+		typeInfo = adjustTypeToOne(state, access.object, typeInfo, true)
+	end
 
 	if isTypeTableLike(typeInfo) then
 		-- @Incomplete: Compiler setting for runtime checks of array bounds.
@@ -430,6 +433,11 @@ function _G.writeAccess(state, writer, indent, nextLocalN, localsStack, access)
 		writer.file:write(", ")
 		writeExpression(state, writer, indent, nextLocalN, localsStack, access.member)
 		writer.file:write(")")
+
+	elseif typeInfo.tag == !(TYPE_VARARG) then
+		writer.file:write("(_SELECT(")
+		writeExpression(state, writer, indent, nextLocalN, localsStack, access.member)
+		writer.file:write(", ...))")
 
 	elseif typeInfo.tag == !(TYPE_ENUM) then
 		errorInternal(state, access) -- Enum accesses should have been simplified away.

@@ -3391,8 +3391,10 @@ end
 		!DEPEND_AND_RETURN(`access`, DEPEND_NODE_INFERRED, `access.member`)
 	end
 
-	typeObject            = adjustTypeToOne(state, access.object, typeObject, true)
-	typeMember            = adjustTypeToOne(state, access.member, typeMember, true)
+	if typeObject.tag == !(TYPE_LIST) then
+		typeObject = adjustTypeToOne(state, access.object, typeObject, true)
+	end
+	typeMember = adjustTypeToOne(state, access.member, typeMember, true)
 
 	local isDirectObject  = access.object.inferredType == typeObject
 	local isDirectMember  = access.member.inferredType == typeMember
@@ -3655,6 +3657,19 @@ end
 		local literal = newLiteral(access.parent, access.token, !(LITERAL_STRING), s:sub(i, i), typeObject) -- The value may be "".
 		replaceQueuedNodeAndUnqueueOldTree(state, access, literal)
 		moveToNextRelevantPipe(state, literal, !(PIPE_INFER))
+
+	elseif typeObject.tag == !(TYPE_VARARG) then
+		local indexExpr = access.member
+
+		if typeMember.tag ~= !(TYPE_INT) then
+			typeError(state, indexExpr, "Expected an index of type int. (Got %s)", getFriendlyTypeInfoName(typeMember))
+		elseif indexExpr.nodeType == !(AST_LITERAL) and indexExpr.value <= 0 then
+			typeError(state, indexExpr, "Index is not positive. (It is %d)", indexExpr.value)
+		end
+
+		local varargSig     = typeObject
+		access.inferredType = varargSig.itemType -- Treat varargs like arrays (i.e. we don't use adjustTypeToOne() when accessing them).
+		moveToNextRelevantPipe(state, access)
 
 	else
 		typeError(state, access, "Values of type '%s' do not have members.", getFriendlyTypeInfoName(typeObject))
@@ -7513,6 +7528,10 @@ function _G.areMultipleValuesEnabledAtPosition(node)
 
 	elseif node.parent.nodeType == !(AST_TYPE) then
 		return true
+
+	elseif node.parent.nodeType == !(AST_ACCESS) then
+		local access = node.parent
+		return node == access.object
 
 	elseif isScope(node.parent) then
 		return true -- We don't really care about statement-level nodes.
