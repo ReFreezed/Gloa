@@ -2763,6 +2763,48 @@ end
 	-- Plain call.
 	checkIfValuesMatchArgumentTypes(state, call, realArguments, realArgumentTypes, funcSig.argumentTypesIn, false, nil, call.argumentsNamed)
 
+	-- Make sure foreign function calls don't have gaps among the arguments as
+	-- that may have unexpected consequences (since we don't "put" the default
+	-- value in empty slots for foreign functions).
+	if call.argumentsNamed[1] and constLambda.bodyIsForeign then
+		local argsIn        = constLambda.argumentsIn.arguments
+		local argInCount    = #argsIn
+		local isVararg      = funcSig.argumentTypesIn[argInCount].tag == !(TYPE_VARARG)
+		local maxNamedCount = isVararg and argInCount-1 or argInCount
+		local requiredCount = maxNamedCount
+
+		for argIndex = requiredCount, 1, -1 do
+			local arg = argsIn[argIndex]
+			if arg.isRequired then  break  end
+			requiredCount = requiredCount-1
+		end
+
+		local firstGapAtIndex = nil
+
+		for argIndex = requiredCount+1, maxNamedCount do
+			local valueExpr = realArguments[argIndex]
+			local nodeForError
+
+			if not valueExpr then
+				local argNamed = itemWith1(call.argumentsNamed, "argumentIndex", argIndex)
+				valueExpr      = argNamed and argNamed.value
+				nodeForError   = argNamed and argNamed.key
+			end
+
+			if not valueExpr then
+				firstGapAtIndex = firstGapAtIndex or argIndex
+
+			elseif firstGapAtIndex then
+				local arg = argsIn[firstGapAtIndex]
+				typeError(
+					state, nodeForError,
+					"Foreign function calls must not have gaps before the last specified optional argument. Missing value for argument #%d (%s).",
+					firstGapAtIndex, arg.declaration.name.name
+				)
+			end
+		end
+	end
+
 	if constLambda then
 		call.wantLocation = constLambda.wantCallerLocation
 	end
