@@ -1090,7 +1090,6 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 	local scope = astFindParentScope(decl)
 
 	if not scope then
-		astPrint(identOrVararg)
 		typeError(state, identOrVararg, "Internal compiler error: Could not find what scope '%s' is in.", identOrVararg.name)
 	end
 
@@ -2532,11 +2531,18 @@ end
 		!DEPEND_AND_RETURN(`call`, DEPEND_NODE_INFERRED, `callee`)
 	end
 
-	local isCallingConstantName = (callee.nodeType == !(AST_IDENTIFIER) and isDeclarationConstant(callee.declaration))
+	local isCallingConstantNameOrDeclaredType = (
+		(
+			callee.nodeType == !(AST_IDENTIFIER)
+			or (callee.nodeType == !(AST_TYPE) and callee.declaration ~= nil)
+		)
+		and isDeclarationConstant(callee.declaration)
+	)
 
 	-- Wait for overloads.
-	if isCallingConstantName and callee.declaration.overloadOf then
-		local ident    = callee
+	if isCallingConstantNameOrDeclaredType and callee.declaration.overloadOf then
+		local ident = callee
+		!ASSERT("callee.nodeType == "..AST_IDENTIFIER) -- Only functions can be overloaded in which case 'callee' should not be a type here.
 		local declBase = getOverloadBase(ident.declaration)
 
 		calleeType = declBase.name.inferredType
@@ -2573,10 +2579,10 @@ end
 	)
 
 	if call.argumentsNamed[1] then
-		if not isCallingConstantName then
+		if not isCallingConstantNameOrDeclaredType then
 			typeError(state, call.argumentsNamed[1].key, "The called object must be a constant identifier for named arguments to work.")
 		end
-		if calleeType.tag ~= !(TYPE_FUNCTION) then
+		if not (calleeType.tag == !(TYPE_FUNCTION) or calleeType.tag == !(TYPE_TYPE)) then
 			errorInternal(state, call.argumentsNamed[1].key, "@Incomplete: Handle named arguments for non-function calls.")
 		end
 	end
@@ -2644,12 +2650,12 @@ end
 	end
 
 	-- Overloaded call.
-	if isCallingConstantName and callee.declaration.overloadOf then
+	if isCallingConstantNameOrDeclaredType and callee.declaration.overloadOf then
 		funcSig = handleOverloadedCall(state, call, realArguments, realArgumentTypes) or errorInternal(state, call)
 	end
 
 	local constLambda = nil
-	if isCallingConstantName then
+	if isCallingConstantNameOrDeclaredType then
 		constLambda = followIdentifiersToConstantValue(callee.declaration.value)
 		!ASSERT("constLambda.nodeType == "..AST_LAMBDA)
 	end
