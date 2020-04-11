@@ -187,13 +187,16 @@ local onLoad :: (args:[]string, argsRaw:[]string) {
 
 local onKeyPressed :: (key:LoveKey, scancode:LoveScancode, isRepeat:bool) {
 	local player = currentLevel.player
+
 	if key == {
 		case "escape": loveQuit(0)
-		case "f10": if loveIsKeyDown("lctrl","rctrl") loveRestart() else startNewGame()
+		case "r":      startNewGame()
+		case "f10":    if loveIsKeyDown("lctrl","rctrl")  loveRestart()  else  startNewGame()
 	}
 	if scancode == {
 		case "x": player.wantsToShoot = true
 	}
+
 	!if DEV {
 		if key == {
 		case "kp1": player.bulletMods.level    = 1
@@ -207,8 +210,13 @@ local onKeyPressed :: (key:LoveKey, scancode:LoveScancode, isRepeat:bool) {
 		case "kp9": --
 		case "kp+":
 			player.health = player.healthMax
+
 			if player.isDestroyed {
-				player.isDestroyed = false
+				player.speedX       = 0
+				player.speedY       = 0
+				player.wantsToShoot = false
+
+				player.isDestroyed  = false
 				insert(currentLevel.entities, player)
 			}
 		}
@@ -255,7 +263,7 @@ local onUpdate :: (dt:float) {
 
 	currentLevel.cameraShake = max(currentLevel.cameraShake-dt/.60, 0)
 
-	while true {
+	if not currentLevel.player.isDestroyed  while true {
 		local ent = currentLevel.currentWave.spawns[currentLevel.nextIndexToSpawn]
 
 		if ent == NULL {
@@ -405,6 +413,22 @@ local onDraw :: () {
 
 		loveSetColor(r, g, b)
 		loveDrawText(text, x, y, 0, 1+.5*highlight)
+	}
+
+	-- Restart prompt.
+	if player.isDestroyed {
+		local TEXT           :: "press <R> to restart"
+		local TEXT_DELAY     :: 1.00
+		local TEXT_FADE_TIME :: 1.50
+
+		local timeSinceDeath = currentLevel.time - player.timeDamaged
+
+		local x = ( viewWidth  - loveGetWidth(font, TEXT) ) // 2
+		local y = ( viewHeight - loveGetHeight(font)      ) // 2
+		local a = clamp01((timeSinceDeath-TEXT_DELAY) / TEXT_FADE_TIME)
+
+		loveSetColor(1, 1, 1, a)
+		loveDrawText(TEXT, x, y)
 	}
 
 	!if DEV {

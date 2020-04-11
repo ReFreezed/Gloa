@@ -66,6 +66,7 @@ export Bullet :: struct {
 
 local Enemy :: struct {
 	using Entity,
+	isBoss = false,
 }
 export Carrier :: struct {
 	using Enemy,
@@ -304,11 +305,12 @@ export updateEntity :: (level:Level, ent:Entity, dt:float) {
 	case Player:
 		local player = cast(Player) ent
 
+		-- Move.
 		local dirX, dirY = 0, 0
-		if loveIsScancodeDown("left")   dirX -= 1
-		if loveIsScancodeDown("right")  dirX += 1
-		if loveIsScancodeDown("up")     dirY -= 1
-		if loveIsScancodeDown("down")   dirY += 1
+		if loveIsKeyDown"left"   dirX -= 1
+		if loveIsKeyDown"right"  dirX += 1
+		if loveIsKeyDown"up"     dirY -= 1
+		if loveIsKeyDown"down"   dirY += 1
 
 		local MAX_SPEED_X    :: 50.0
 		local MAX_SPEED_Y    :: 40.0
@@ -343,11 +345,34 @@ export updateEntity :: (level:Level, ent:Entity, dt:float) {
 			player.speedY = 0
 		}
 
-		-- @Incomplete: Collide with other entities.
+		-- Collide with enemies.
+		for level.entities {
+			if isEnemy(it) and areEntitiesOverlapping(it, player) {
+				local HEALTH_TO_DAMAGE_RATIO :: .5
+				local MAX_DAMAGE             :: 99999
 
+				local enemy = cast (Enemy) it
+
+				local damageOnPlayer
+					= enemy.isBoss
+					? MAX_DAMAGE
+					: max(cast(int) (enemy.health*HEALTH_TO_DAMAGE_RATIO), 1)
+
+				damageEntity(level, player, damageOnPlayer, enemy.x,enemy.y)
+
+				if not enemy.isBoss {
+					local damageOnEnemy = (player.isDestroyed ? damageOnPlayer : MAX_DAMAGE)
+					damageEntity(level, enemy, damageOnEnemy, player.x,player.y)
+				}
+
+				if player.isDestroyed  return
+			}
+		}
+
+		-- Handle shooting.
 		player.weaponCooldown -= dt
 
-		if (player.wantsToShoot or loveIsScancodeDown("x")) and player.weaponCooldown <= 0 {
+		if (player.wantsToShoot or loveIsScancodeDown"x") and player.weaponCooldown <= 0 {
 			player.weaponCooldown  = 1/15
 			player.shootCount     += 1
 
@@ -392,14 +417,8 @@ export updateEntity :: (level:Level, ent:Entity, dt:float) {
 		bullet.y += deltaDist * sin(angle)
 
 		for level.entities {
-			local areEntitiesOverlapping :: (ent1,ent2:Entity) -> bool {
-				return
-					abs(ent1.x-ent2.x) < (ent1.width  + ent2.width ) / 2 and
-					abs(ent1.y-ent2.y) < (ent1.height + ent2.height) / 2
-			}
-
-			if ((not bullet.shotByPlayer and it.entityType == Player) or (bullet.shotByPlayer and isEnemy(it))) and areEntitiesOverlapping(bullet, it) {
-				damage(level, it, 1, bullet.x, bullet.y)
+			if (bullet.shotByPlayer ? isEnemy(it) : it.entityType == Player) and areEntitiesOverlapping(bullet, it) {
+				damageEntity(level, it, 1, bullet.x, bullet.y)
 				destroy(bullet)
 				return
 			}
@@ -535,7 +554,7 @@ export updateEntity :: (level:Level, ent:Entity, dt:float) {
 
 		local DISTANCE_BEFORE_SHOOTING :: 1.5
 
-		if follower.shootCount == 0 and abs(follower.x-level.player.x) < DISTANCE_BEFORE_SHOOTING {
+		if not level.player.isDestroyed and follower.shootCount == 0 and abs(follower.x-level.player.x) < DISTANCE_BEFORE_SHOOTING {
 			follower.shootCount += 1
 			spawnBullet(level, follower.x,follower.y, TAU/4, nil)
 		}
@@ -678,11 +697,11 @@ export destroy :: (ent:Entity) {
 
 
 
-export damage :: (level:Level, ent:Entity, amount:int, damagePointX,damagePointY:float) {
+export damageEntity :: (level:Level, ent:Entity, damage:int, damagePointX,damagePointY:float) {
 	if ent.isDestroyed  return
 
 	ent.timeDamaged  = level.time
-	ent.health      -= amount
+	ent.health      -= damage
 
 	local getRandomizedDamageEffectPosition :: (ent:Entity, damagePointX,damagePointY:float) -> (x,y:float) {
 		return
@@ -748,6 +767,14 @@ export spawnBullet :: (level:Level, x,y:float, angle:float, modsToCopy:BulletMod
 	}
 
 	insert(level.entities, bullet)
+}
+
+
+
+local areEntitiesOverlapping :: (ent1,ent2:Entity) -> bool {
+	return
+		abs(ent1.x-ent2.x) < (ent1.width  + ent2.width ) / 2 and
+		abs(ent1.y-ent2.y) < (ent1.height + ent2.height) / 2
 }
 
 
