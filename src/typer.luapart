@@ -2812,16 +2812,48 @@ end
 		end
 	end
 
-	if constLambda then
-		call.wantLocation = constLambda.wantCallerLocation
-	end
-
 	local listSig  = getTypeInfoForList(state, funcSig.argumentTypesOut)
 	local typeInfo = listSig
 
 	if listSig[1] and (call.surroundedByParentheses or not areMultipleValuesEnabledAtPosition(call)) then
 		call.surroundedByParentheses = true
 		typeInfo                     = adjustTypeToOne(state, call, listSig, true)
+	end
+
+	-- Handle !must.
+	if
+		constLambda
+		and constLambda.argumentsOut
+		and constLambda.argumentsOut.arguments[1].isRequired
+		and not !!(CONST_SET{ AST_VARIANT_OF, AST_TYPE_OF, AST_TYPE_INFO, AST_DEBUG })[call.parent.nodeType]
+	then
+		local lastRequiredIndex = lastIndexWith1(constLambda.argumentsOut.arguments, "isRequired", true)
+		local assignment        = call.parent
+
+		if assignment.nodeType ~= !(AST_ASSIGNMENT) then
+			local name = constLambda.argumentsOut.arguments[lastRequiredIndex].declaration.name.name
+			typeError(
+				state, call,
+				"Function requires return value #%d%s to be explicitly received in an assigment.",
+				lastRequiredIndex, (name ~= "" and F(" (%s)", name) or "")
+			)
+		end
+
+		local valueIndex  = indexOf(assignment.values, call) or errorInternal(state, call) -- The call shouldn't be one of the targets. That would've been a parsing error!
+		local targetIndex = valueIndex+lastRequiredIndex-1
+
+		if not assignment.targets[targetIndex] or (call.surroundedByParentheses and lastRequiredIndex > 1) then
+			local name = constLambda.argumentsOut.arguments[lastRequiredIndex].declaration.name.name
+			typeError(
+				state, call,
+				"Missing assignment target for return value #%d%s which is required to be explicitly received.",
+				lastRequiredIndex, (name ~= "" and F(" (%s)", name) or "")
+			)
+		end
+	end
+
+	if constLambda then
+		call.wantLocation = constLambda.wantCallerLocation
 	end
 
 	call.inferredType = typeInfo
@@ -4127,7 +4159,8 @@ end
 		!DEPEND_AND_RETURN(`typeOf`, DEPEND_NODE_INFERRED, `typeOf.expression`)
 	elseif exprTypeInfo.tag == !(TYPE_NAMESPACE) then
 		typeError(state, typeOf.expression, "Namespaces don't have a type.")
-	elseif exprTypeInfo.tag == !(TYPE_LIST) then
+	end
+	if typeOf.expression.nodeType == !(AST_CALL) then
 		typeError(state, astGetExpressionVisuallyFurthestToTheLeft(typeOf.expression), "Cannot get the type of function calls.")
 	end
 
@@ -7496,25 +7529,27 @@ end
 
 
 
--- Determine whether calls and varargs should adjust to one.
+-- Determine whether calls or varargs should adjust to one.
 function _G.areMultipleValuesEnabledAtPosition(node)
-	if node.parent.nodeType == !(AST_DECLARATION) then
+	local parentNodeType = node.parent.nodeType
+
+	if parentNodeType == !(AST_DECLARATION) then
 		local decl = node.parent
 		return node == decl.name
 
-	elseif node.parent.nodeType == !(AST_ASSIGNMENT) then
+	elseif parentNodeType == !(AST_ASSIGNMENT) then
 		local assignment = node.parent
 		return node.queued.container == assignment.values and not assignment.values[node.queued.key+1]
 
-	elseif node.parent.nodeType == !(AST_CALL) then
+	elseif parentNodeType == !(AST_CALL) then
 		local call = node.parent
 		return node.queued.container == call.arguments and not call.arguments[node.queued.key+1]
 
-	elseif node.parent.nodeType == !(AST_RETURN) then
+	elseif parentNodeType == !(AST_RETURN) then
 		local returnNode = node.parent
 		return node.queued.container == returnNode.values and not returnNode.values[node.queued.key+1]
 
-	elseif node.parent.nodeType == !(AST_TABLE) then
+	elseif parentNodeType == !(AST_TABLE) then
 		local tableNode = node.parent
 		if tableNode.trailingExpression then  return node == tableNode.trailingExpression  end
 
@@ -7522,16 +7557,16 @@ function _G.areMultipleValuesEnabledAtPosition(node)
 		local lastTableField = getLast(tableNode.fields)
 		return lastTableField ~= nil and lastTableField.keyIsGenerated and node == lastTableField.value
 
-	elseif node.parent.nodeType == !(AST_FOR) then
+	elseif parentNodeType == !(AST_FOR) then
 		local forLoop = node.parent
 		return node.queued.container == forLoop.expressions
 
-	elseif node.parent.nodeType == !(AST_TYPE) then
-		return true
-
-	elseif node.parent.nodeType == !(AST_ACCESS) then
+	elseif parentNodeType == !(AST_ACCESS) then
 		local access = node.parent
 		return node == access.object
+
+	elseif !!(CONST_SET{ AST_TYPE, AST_VARIANT_OF, AST_TYPE_OF, AST_TYPE_INFO, AST_DEBUG })[parentNodeType] then
+		return true -- These are static expressions. They don't care about resulting values of any subexpressions - only about the subexpressions themselves.
 
 	elseif isScope(node.parent) then
 		return true -- We don't really care about statement-level nodes.

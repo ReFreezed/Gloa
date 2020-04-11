@@ -948,13 +948,33 @@ function _G.parseArguments(state, parent, isInput)
 			)`
 		end
 
-		-- Set if shadowing is allowed.
-		tokType, tokValue = peekNextToken(state)
+		-- Set additional flags.
+		while true do
+			tokType, tokValue = peekNextToken(state)
 
-		if isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"shadow") then
-			eatNextToken(state)
-			for _, arg in ipairs(argsInGroup) do
-				arg.declaration.canShadow = true
+			if isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"shadow") then
+				eatNextToken(state)
+				if argsInGroup[1].declaration.canShadow then
+					!ERROR_OR_RETURN `errorParsingLast(state, "Duplicate !shadow.")`
+				elseif not isInput then
+					!ERROR_OR_RETURN `errorParsingLast(state, "!shadow does nothing for return arguments.")`
+				end
+				for _, arg in ipairs(argsInGroup) do
+					arg.declaration.canShadow = true
+				end
+
+			elseif isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"must") then
+				eatNextToken(state)
+				local lastArg = argsInGroup[#argsInGroup]
+				if lastArg.isRequired then
+					!ERROR_OR_RETURN `errorParsingLast(state, "Duplicate !must.")`
+				elseif isInput then
+					!ERROR_OR_RETURN `errorParsingLast(state, "!must can only be used for return arguments.")`
+				end
+				lastArg.isRequired = true -- We update isRequired for all arguments below.
+
+			else
+				break
 			end
 		end
 
@@ -977,13 +997,18 @@ function _G.parseArguments(state, parent, isInput)
 			arg.isRequired = (arg.declaration.value == nil and arg.declaration.name.nodeType ~= !(AST_VARARG))
 		end
 	else
-		-- @Incomplete: If a !must was specified, set arg.isRequired from first argument to the last !must.
+		local argIndex = lastIndexWith1(args.arguments, "isRequired", true)
+		if argIndex then
+			for argIndex = 1, argIndex-1 do
+				args.arguments[argIndex].isRequired = true
+			end
+		end
 	end
 
 	return args
 end
 
-function _G.parseNamelessArguments(state, parent)
+function _G.parseNamelessOutputArguments(state, parent)
 	local args = astNewNode(AstArguments, state.nextToken, parent)
 
 	for groupN = 1, math.huge do
@@ -1009,9 +1034,15 @@ function _G.parseNamelessArguments(state, parent)
 			!SET_OR_RETURN `decl.type = parseExpression(state, decl)`
 
 			local ident       = astNewNode(AstIdentifier, decl.token, decl)
-			ident.name        = "_"..groupN
 			ident.declaration = decl
 			decl.name         = ident
+		end
+
+		tokType, tokValue = peekNextToken(state)
+
+		if isToken(tokType,tokValue, !(TOKEN_DIRECTIVE),"must") then
+			eatNextToken(state)
+			arg.isRequired = true -- We update isRequired for all arguments below.
 		end
 
 		tokType, tokValue = peekNextToken(state)
@@ -1024,6 +1055,13 @@ function _G.parseNamelessArguments(state, parent)
 
 		if decl.name.nodeType == !(AST_VARARG) then
 			!ERROR_OR_RETURN `errorParsingLast(state, "Vararg must be the last argument.")`
+		end
+	end
+
+	local argIndex = lastIndexWith1(args.arguments, "isRequired", true)
+	if argIndex then
+		for argIndex = 1, argIndex-1 do
+			args.arguments[argIndex].isRequired = true
 		end
 	end
 
@@ -2246,7 +2284,6 @@ function _G.parseRun(state, parent, mustBeExpression)
 			arg.declaration   = decl
 
 			local ident       = astNewNode(AstIdentifier, token, decl)
-			ident.name        = "_1"
 			ident.declaration = decl
 			decl.name         = ident
 
@@ -2752,12 +2789,12 @@ function _G.parseLambda(state, parent)
 			tokType, tokValue = peekNextToken(state)
 			if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"->") then
 				state.nextToken = argsOutStartToken
-				!SET_OR_RETURN `args = parseNamelessArguments(state, lambda)` -- Replace any output arguments we just parsed.
+				!SET_OR_RETURN `args = parseNamelessOutputArguments(state, lambda)` -- Replace any output arguments we just parsed.
 			end
 
 		-- (...) -> type, ...
 		else
-			!SET_OR_RETURN `args = parseNamelessArguments(state, lambda)`
+			!SET_OR_RETURN `args = parseNamelessOutputArguments(state, lambda)`
 		end
 
 		if args then
@@ -2837,7 +2874,7 @@ function _G.parseLambda(state, parent)
 			local decl           = astNewNode(AstDeclaration, token, arg)
 			arg.declaration      = decl
 
-			decl.name            = newIdentifier(decl, token, "_1", decl)
+			decl.name            = newIdentifier(decl, token, "", decl)
 
 			local typeNode       = astNewNode(AstType, token, decl)
 			typeNode.kind        = !(TYPE_KIND_SIMPLE_BUILTIN)

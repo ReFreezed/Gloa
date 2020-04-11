@@ -4,15 +4,20 @@
 --=
 --==============================================================
 
-	APP_PATH, APP_DIRECTORY
-	stdin, stderr, stdout
+	-- Constants:
+	APP_PATH, APP_DIRECTORY, COMPILER_PATH, COMPILER_DIRECTORY
+	STDIN, STDERR, STDOUT
 
-	disableBuffering, enableBuffering, enableLineBuffering
-	openFileForReading, openFileForWriting, closeFile
-	readEntireFile
+	-- Functions:
+	close
+	disableBuffering, enableBuffering, enableLineBuffering, flush
+	openForReading, openForReadingText, openForWriting, openForWritingText
+	readEntireFile, writeEntireFile
 	readNumber, readRemaining, readLine, readBytes
-	removeFile, renameFile, copyFile
-	writeFile
+	remove, rename, copy
+
+	-- Structs:
+	File
 
 --============================================================]]
 
@@ -29,99 +34,96 @@ export STDIN  : File : !foreign lua "io.stdin"
 export STDERR : File : !foreign lua "io.stderr"
 export STDOUT : File : !foreign lua "io.stdout"
 
-local File :: !foreign struct {
-	-- @Incomplete: Hide these methods.
-	read    = (file:File, what:string|int) -> string|float|none !foreign lua "nil",
-	write   = (file:File, ...:string) !foreign lua "nil",
-	close   = (file:File) !foreign lua "nil",
-	setvbuf = (file:File, mode:string, size:int|none) !foreign lua "nil",
-	flush   = (file:File) !foreign lua "nil",
-}
-
-local _openFile :: (path:string, mode:string) -> File|none, none|string !foreign lua "io.open"
+export File :: !foreign struct {}
 
 local openFile :: (path:string, mode:string) -> bool, File, string {
-	local file, err = _openFile(path, mode)
+	local helper :: (path:string, mode:string) -> File|none, none|string !foreign lua "io.open"
+
+	local file, err = helper(path, mode)
 	if file == nil  return false, NULL, cast(string) err
+
 	return true, cast(File) file, ""
 }
-export openFileForReading :: (path:string) -> (success:bool, file:File, error:string) { return openFile(path, "rb") }
-export openFileForWriting :: (path:string) -> (success:bool, file:File, error:string) { return openFile(path, "wb") }
+export openForReading     :: (path:string) -> (success:bool, file:File!must, error:string) { return openFile(path, "rb") }
+export openForReadingText :: (path:string) -> (success:bool, file:File!must, error:string) { return openFile(path, "r")  }
+export openForWriting     :: (path:string) -> (success:bool, file:File!must, error:string) { return openFile(path, "wb") }
+export openForWritingText :: (path:string) -> (success:bool, file:File!must, error:string) { return openFile(path, "w")  }
 
-export closeFile :: (file:File) !foreign lua "io.close"
+export close :: (file:File) !foreign lua "io.close"
 
+local readHelper :: (file:File, what:string|int) -> string|float|none !foreign method "read"
 export readNumber :: (file:File) -> (success:bool, number:float) {
-	local data = file.read!("*n")
+	local data = readHelper(file, "*n")
 	if data == nil  return false, 0
 	return true, cast(float) data
 }
 export readRemaining :: (file:File) -> (success:bool, data:string) {
-	local data = file.read!("*a") -- (I think this always returns a string?)
+	local data = readHelper(file, "*a") -- @Cleanup: I think this always returns a string?
 	if data == nil  return false, ""
 	return true, cast(string) data
 }
 export readLine :: (file:File) -> (success:bool, line:string) {
-	local data = file.read!("*l")
+	local data = readHelper(file, "*l")
 	if data == nil  return false, ""
 	return true, cast(string) data
 }
 export readBytes :: (file:File, maxBytes:int) -> (success:bool, data:string) {
-	local data = file.read!(maxBytes)
+	local data = readHelper(file, maxBytes)
 	if data == nil  return false, ""
 	return true, cast(string) data
 }
 
-export write :: (file:File, ...:string) {
-	file.write!(...)
-}
+export write :: (file:File, ...:string) !foreign method "write"
 export writeLine :: (file:File, ...:string) {
-	file.write!(...)
-	file.write!("\n")
+	write(file, ...)
+	write(file, "\n")
 }
 
 export readEntireFile :: (path:string) -> (success:bool, data:string, error:string) {
-	local ok, file, err = openFileForReading(path)
+	local ok, file, err = openForReading(path)
 	if not ok  return false, "", err
 
 	local data:string
 	ok, data = readRemaining(file)
-	closeFile(file)
+	close(file)
 	if not ok  return false, "", "Could not read from the file."
 
 	return true, data, ""
 }
-
-export writeFile :: (path:string, data:string) -> (success:bool, error:string) {
-	local ok, file, err = openFileForWriting(path)
+export writeEntireFile :: (path:string, data:string) -> (success:bool, error:string) {
+	local ok, file, err = openForWriting(path)
 	if not ok  return false, err
 
-	file.write!(data)
-	closeFile(file)
+	write(file, data)
+	close(file)
 	return true, ""
 }
 
-export removeFile :: (path:string) -> (success:bool, error:string) {
-	local _removeFile :: (path:string) -> bool|none, none|string !foreign lua "os.remove"
-	local ok, err = _removeFile(path)
+export remove :: (path:string) -> (success:bool, error:string) {
+	local helper :: (path:string) -> bool|none, none|string !foreign lua "os.remove"
+	local ok, err = helper(path)
 	if ok == nil  return false, cast(string) err
 	return true, ""
 }
-export renameFile :: (oldPath:string, newPath:string) -> (success:bool, error:string) {
-	local _renameFile :: (oldPath:string, newPath:string) -> bool|none, none|string !foreign lua "os.rename"
-	local ok, err = _renameFile(oldPath, newPath)
+export rename :: (oldPath:string, newPath:string) -> (success:bool, error:string) {
+	local helper :: (oldPath:string, newPath:string) -> bool|none, none|string !foreign lua "os.rename"
+	local ok, err = helper(oldPath, newPath)
 	if ok == nil  return false, cast(string) err
 	return true, ""
 }
-export copyFile :: (sourcePath:string, targetPath:string) -> (success:bool, error:string) {
+export copy :: (sourcePath:string, targetPath:string) -> (success:bool, error:string) {
 	local ok, data, err = readEntireFile(sourcePath)
 	if not ok  return false, err
-	return writeFile(targetPath, data)
+	return writeEntireFile(targetPath, data)
 }
 
-export disableBuffering    :: (file:File)           { file.setvbuf!("no",   nil) }
-export enableBuffering     :: (file:File)           { file.setvbuf!("full", nil) }
-export enableBuffering     :: (file:File, size:int) { file.setvbuf!("full", size) }
-export enableLineBuffering :: (file:File)           { file.setvbuf!("line", nil) }
-export enableLineBuffering :: (file:File, size:int) { file.setvbuf!("line", size) }
+local setvbuf :: (file:File, mode:string, size:int|none) !foreign method "setvbuf"
+export disableBuffering    :: (file:File)           { setvbuf(file, "no",   nil) }
+export enableBuffering     :: (file:File)           { setvbuf(file, "full", nil) }
+export enableBuffering     :: (file:File, size:int) { setvbuf(file, "full", size) }
+export enableLineBuffering :: (file:File)           { setvbuf(file, "line", nil) }
+export enableLineBuffering :: (file:File, size:int) { setvbuf(file, "line", size) }
+
+export flush :: (file:File) !foreign method "flush"
 
 -- @Incomplete: os.tmpname
