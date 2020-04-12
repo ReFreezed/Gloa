@@ -104,9 +104,15 @@ export Follower :: struct {
 
 	shootCount: int,
 }
+export Turret :: struct {
+	using Enemy,
+
+	weaponCooldown: float,
+	shootCount: int,
+}
 export isEnemy :: (ent:Entity) -> bool {
 	local entityType = ent.entityType
-	return entityType == Carrier or entityType == Fly or entityType == Heavy or entityType == Follower
+	return entityType == Carrier or entityType == Fly or entityType == Heavy or entityType == Follower or entityType == Turret
 }
 
 export Pickup :: struct {
@@ -238,6 +244,11 @@ export newEntity :: (level:Level, $T:type, initX,initY:float) -> T {
 		ent.height    = 2
 		ent.healthMax = 2
 
+	} elseif T == Turret {
+		ent.width     = 4
+		ent.height    = 4
+		ent.healthMax = 15
+
 	-- Effects.
 
 	} elseif T == Spark {
@@ -272,6 +283,7 @@ export spawnNextEntity :: (level:Level) {
 		case Fly:      ent = newEntity(level, Fly,      instr.x, instr.y)
 		case Heavy:    ent = newEntity(level, Heavy,    instr.x, instr.y)
 		case Follower: ent = newEntity(level, Follower, instr.x, instr.y)
+		case Turret:   ent = newEntity(level, Turret,   instr.x, instr.y)
 		case:          printf("Error: Unhandled entity type %s.", toString(instr.entity))
 	}
 
@@ -496,7 +508,7 @@ export updateEntity :: (level:Level, ent:Entity, dt:float) {
 
 		for level.entities {
 			local isBulletOverlappingEntity :: (bullet:Bullet, ent:Entity, scale:float) -> bool {
-				!load "math"
+				!import "math/intersect2"
 				return isRectangleIntersectingAabb(
 					bullet.x,bullet.y, bullet.width*scale,bullet.height*scale, bullet.angle+TAU/4,
 					ent.x,ent.y, ent.width,ent.height
@@ -656,6 +668,29 @@ export updateEntity :: (level:Level, ent:Entity, dt:float) {
 			spawnBullet(level, follower.x,follower.y, TAU/4, nil)
 		}
 
+	case Turret:
+		local turret  = cast(Turret) ent
+		turret.y     += 10*dt
+
+		turret.weaponCooldown -= dt
+
+		if turret.weaponCooldown <= 0 {
+			if (turret.y > .20*CAMERA_HEIGHT and turret.shootCount < 1*6) or (turret.y > .45*CAMERA_HEIGHT and turret.shootCount < 2*6) {
+				turret.weaponCooldown  = .15
+				turret.shootCount     += 1
+
+				for 1, 8 {
+					local MODS: BulletMods : {pulsing=true}
+					local angle = it*TAU/8
+					local x, y  = V2.translateTowards(turret.x, turret.y, angle, 2)
+					spawnBullet(level, x, y, angle, MODS)
+				}
+				playSound("shot2")
+			}
+		}
+
+		if turret.y > CAMERA_HEIGHT+20  destroy(turret)
+
 	--
 	-- Effects
 	--
@@ -811,6 +846,11 @@ export drawEntity :: (level:Level, ent:Entity) {
 			loveDrawLine(follower.path)
 			loveSetLineWidth(1)
 		}
+
+	case Turret:
+		local turret = cast(Turret) ent
+		setColorWithEffects(damageEffect, 1, .7, .7)
+		loveDrawRectangleFill(turret.x-turret.width/2, turret.y-turret.height/2, turret.width, turret.height)
 
 	--
 	-- Effects
