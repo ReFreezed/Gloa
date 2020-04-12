@@ -40,7 +40,7 @@ export BulletMovement :: enum {
 export BulletMods :: struct {
 	level    = 1,
 	movement = BulletMovement.LINEAR,
-	pulsing  = false, -- @Incomplete
+	pulsing  = false,
 }
 
 export Player :: struct {
@@ -54,7 +54,8 @@ export Player :: struct {
 	shootCount: int,
 
 	bulletMods: BulletMods,
-	rearWeapon = false,
+	rearWeapon  = false,
+	sideWeapons = false,
 }
 
 export Bullet :: struct {
@@ -118,7 +119,9 @@ export Pickup :: struct {
 		WEAPON_DOWN,
 		BULLET_LINEAR,
 		BULLET_WAVE,
+		BULLET_PULSE,
 		REAR_WEAPON,
+		SIDE_WEAPONS,
 	},
 
 	kind = Kind.HEALTH,
@@ -338,6 +341,11 @@ export spawnNextEntity :: (level:Level) {
 
 
 
+local getBulletPulseScale :: (level:Level, bullet:Bullet) -> float {
+	local lifetimeModified = (level.time - 2.5*bullet.timeSpawned)
+	return bullet.mods.pulsing ? lerp(.8, 1.8, sin01(lifetimeModified*TAU)) : 1.0
+}
+
 export updateEntity :: (level:Level, ent:Entity, dt:float) {
 	-- @Incomplete: Use EntityType and 'if !complete' here.
 	if ent.entityType == {
@@ -415,13 +423,15 @@ export updateEntity :: (level:Level, ent:Entity, dt:float) {
 
 				using pickup.kind
 				if !complete pickup.kind == {
-					case HEALTH:        player.health              = min(player.health+1, player.healthMax)
-					case HEALTH_FULL:   player.health              = player.healthMax
+					case HEALTH:        player.health              = min(player.health+1, player.healthMax) ; spawnTextFx(level, pickup.x,pickup.y, 0,1,0,1, "+1")
+					case HEALTH_FULL:   player.health              = player.healthMax                       ; spawnTextFx(level, pickup.x,pickup.y, 0,1,0,1, "FULL")
 					case WEAPON_UP:     player.bulletMods.level    = min(player.bulletMods.level+1, 3)
 					case WEAPON_DOWN:   player.bulletMods.level    = max(player.bulletMods.level-1, 1)
 					case BULLET_LINEAR: player.bulletMods.movement = BulletMovement.LINEAR
 					case BULLET_WAVE:   player.bulletMods.movement = BulletMovement.WAVE
+					case BULLET_PULSE:  player.bulletMods.pulsing  = true
 					case REAR_WEAPON:   player.rearWeapon          = true
+					case SIDE_WEAPONS:  player.sideWeapons         = true
 				}
 
 				addScore(level, SCORE_PER_PICKUP)
@@ -441,23 +451,25 @@ export updateEntity :: (level:Level, ent:Entity, dt:float) {
 
 			if player.bulletMods.level == {
 			case 1:
-				spawnBullet(level, player.x, player.y, -TAU/4, player.bulletMods, true)
+				spawnBullet(level, player.x, player.y, -TAU/4, player.bulletMods, shotByPlayer=true)
 
 			case 2:
 				if player.shootCount%2 == 0
-					spawnBullet(level, player.x, player.y, -TAU/4, player.bulletMods, true)
+					spawnBullet(level, player.x, player.y, -TAU/4, player.bulletMods, shotByPlayer=true)
 				else
-					for spread = -1, 1  spawnBullet(level, player.x, player.y, -TAU/4+spread*(.04*TAU), player.bulletMods, true)
+					for spread = -1, 1  spawnBullet(level, player.x, player.y, -TAU/4+spread*(.04*TAU), player.bulletMods, shotByPlayer=true)
 
-			case 3:
-				if player.shootCount%2 == 0
-					for spread = -1, 1  spawnBullet(level, player.x, player.y, -TAU/4+spread*(.06*TAU), player.bulletMods, true)
-				else
-					for spread = -1, 1  spawnBullet(level, player.x, player.y, -TAU/4+spread*(.03*TAU), player.bulletMods, true)
+			case:
+				local spreadAngle = (player.shootCount%2 == 0 ? .06 : .03) * TAU
+				for spread = -1, 1  spawnBullet(level, player.x, player.y, -TAU/4+spread*spreadAngle, player.bulletMods, shotByPlayer=true)
 			}
 
 			if player.rearWeapon {
-				if player.shootCount%2 == 0  spawnBullet(level, player.x, player.y, TAU/4, player.bulletMods, true)
+				if player.shootCount%2 == 0  spawnBullet(level, player.x, player.y, TAU/4, player.bulletMods, shotByPlayer=true)
+			}
+			if player.sideWeapons and player.shootCount%2 == 1 {
+				local angle = (player.shootCount%4 == 1 ? .0 : TAU/2)
+				spawnBullet(level, player.x, player.y, angle, player.bulletMods, shotByPlayer=true)
 			}
 
 			playSound("shot1")
@@ -466,7 +478,10 @@ export updateEntity :: (level:Level, ent:Entity, dt:float) {
 		player.wantsToShoot = false
 
 	case Bullet:
+		local MAX_DISTANCE_OUTSIDE_CAMERA :: 20
+
 		local bullet    = cast(Bullet) ent
+		local scale     = getBulletPulseScale(level, bullet)
 		local deltaDist = (bullet.shotByPlayer ? 120 : 50) * dt
 		local angle     = bullet.angleBase
 
@@ -480,19 +495,29 @@ export updateEntity :: (level:Level, ent:Entity, dt:float) {
 		bullet.y += deltaDist * sin(angle)
 
 		for level.entities {
-			if (bullet.shotByPlayer ? isEnemy(it) : it.entityType == Player) and areEntitiesOverlapping(bullet, it) {
+			local isBulletOverlappingEntity :: (bullet:Bullet, ent:Entity, scale:float) -> bool {
+				!load "math"
+				return isRectangleIntersectingAabb(
+					bullet.x,bullet.y, bullet.width*scale,bullet.height*scale, bullet.angle+TAU/4,
+					ent.x,ent.y, ent.width,ent.height
+				)
+			}
+
+			local isTarget = (bullet.shotByPlayer ? isEnemy(it) : it.entityType == Player)
+
+			if isTarget and isBulletOverlappingEntity(bullet, it, scale) {
 				damageEntity(level, it, 1, bullet.x,bullet.y, bullet.shotByPlayer)
 				destroy(bullet)
 				return
 			}
 		}
 
-		if bullet.x < -50 or bullet.x > LEVEL_WIDTH+50 {
+		if bullet.x < -MAX_DISTANCE_OUTSIDE_CAMERA or bullet.x > LEVEL_WIDTH+MAX_DISTANCE_OUTSIDE_CAMERA {
 			destroy(bullet)
 		} elseif bullet.angleBase > 0 {
-			if bullet.y > CAMERA_HEIGHT+20  destroy(bullet)
+			if bullet.y > CAMERA_HEIGHT+MAX_DISTANCE_OUTSIDE_CAMERA  destroy(bullet)
 		} else {
-			if bullet.y < -20  destroy(bullet)
+			if bullet.y < -MAX_DISTANCE_OUTSIDE_CAMERA  destroy(bullet)
 		}
 
 	case Pickup:
@@ -686,7 +711,11 @@ export drawEntity :: (level:Level, ent:Entity) {
 		loveDrawText(text, x-anchorX*w, y-anchorY*h, 0, size)
 	}
 
-	local DAMAGE_EFFECT_TIME :: 0.10
+	local DAMAGE_EFFECT_TIME  :: 0.10
+	local COLLISION_BOX_COLOR :: {.0, 1.0, .0, .4}
+
+	!if DEV  local drawCollisionBox = loveIsKeyDown"tab"
+
 	local damageEffect = clamp01(1 - (level.time-ent.timeDamaged) / DAMAGE_EFFECT_TIME)
 
 	if ent.entityType == {
@@ -701,6 +730,7 @@ export drawEntity :: (level:Level, ent:Entity) {
 
 	case Bullet:
 		local bullet = cast(Bullet) ent
+		local scale  = getBulletPulseScale(level, bullet)
 		local r,g,b: float
 
 		if bullet.shotByPlayer
@@ -711,7 +741,11 @@ export drawEntity :: (level:Level, ent:Entity) {
 		loveGraphicsPushTransform()
 		loveCoordinateSystemTranslate(bullet.x, bullet.y)
 		loveCoordinateSystemRotate(bullet.angle+TAU/4)
-		loveDrawEllipseFill(0,0, .3,1.8, 24)
+		loveDrawEllipseFill(0,0, .3*scale,1.8*scale, 24)
+		!if DEV  if drawCollisionBox {
+			loveSetColor(COLLISION_BOX_COLOR)
+			loveDrawRectangleFill(-bullet.width/2*scale, -bullet.height/2*scale, bullet.width*scale, bullet.height*scale)
+		}
 		loveGraphicsPop()
 
 		drawLight(level, bullet.x,bullet.y, 4,6, r,g,b,.2)
@@ -733,7 +767,9 @@ export drawEntity :: (level:Level, ent:Entity) {
 			case WEAPON_DOWN:   r, g, b, text = .0, .0, .0, "-"
 			case BULLET_LINEAR: r, g, b, text = .4, .4, 1,  "I"
 			case BULLET_WAVE:   r, g, b, text = 1,  .2, 1,  "W"
+			case BULLET_PULSE:  r, g, b, text = 1,  .5, 0,  "P"
 			case REAR_WEAPON:   r, g, b, text = .8, .8, .0, "R"
+			case SIDE_WEAPONS:  r, g, b, text = .8, .8, .0, "S"
 		}
 
 		loveSetColor(r, g, b, .8)
@@ -769,7 +805,7 @@ export drawEntity :: (level:Level, ent:Entity) {
 		setColorWithEffects(damageEffect, 1, .4, .1)
 		loveDrawRectangleFill(follower.x-follower.width/2, follower.y-follower.height/2, follower.width, follower.height)
 
-		!if DEV  if loveIsKeyDown("tab") {
+		!if DEV  if loveIsKeyDown"tab" {
 			loveSetColor(1, .5, 0)
 			loveSetLineWidth(.2)
 			loveDrawLine(follower.path)
@@ -810,8 +846,8 @@ export drawEntity :: (level:Level, ent:Entity) {
 	}
 
 	-- Collision box.
-	!if DEV  if loveIsKeyDown("tab") {
-		loveSetColor(0, 1, 0, .4)
+	!if DEV  if drawCollisionBox and ent.entityType ~= Bullet {
+		loveSetColor(COLLISION_BOX_COLOR)
 		loveDrawRectangleFill(ent.x-ent.width/2, ent.y-ent.height/2, ent.width, ent.height)
 	}
 }
@@ -890,13 +926,7 @@ export damageEntity :: (level:Level, ent:Entity, damage:int, damagePointX,damage
 	if allowRewards and isEnemy(ent) {
 		local score = SCORE_PER_HEALTH_ON_KILL * ent.healthMax
 		addScore(level, score)
-
-		local scoreText = newEntity(level, TextFx, ent.x, ent.y)
-		scoreText.r     = 0
-		scoreText.g     = 1
-		scoreText.b     = 0
-		scoreText.text  = format("%d", score)
-		insert(level.entities, scoreText)
+		spawnTextFx(level, ent.x,ent.y, .9,.9,.9,1, "%d", score)
 	}
 
 	level.cameraShake = max(level.cameraShake, effectScale)
@@ -924,32 +954,45 @@ export spawnBullet :: (level:Level, x,y:float, angle:float, modsToCopy:BulletMod
 	insert(level.entities, bullet)
 }
 
-
-
-local spawnRandomPickup :: (level:Level, x,y:float) {
+export spawnPickup :: (level:Level, x,y:float, kind:Pickup.Kind) {
+	local pickup = newEntity(level, Pickup, x, y)
+	pickup.kind  = kind
+	insert(level.entities, pickup)
+}
+export spawnRandomPickup :: (level:Level, x,y:float) {
 	local COUNT :: !run #type_info(Pickup.Kind).members -- @Compiler @Incomplete: Provide a way of getting the highest enum member value.
 	local kind = cast(Pickup.Kind) cast(any) getRandom(COUNT)
 	-- local kind = cast(Pickup.Kind) getRandom(COUNT) -- @Compiler @Incomplete: Make this possible.
 	spawnPickup(level, x, y, kind)
 }
 
-local spawnPickup :: (level:Level, x,y:float, kind:Pickup.Kind) {
-	local pickup = newEntity(level, Pickup, x, y)
-	pickup.kind  = kind
-	insert(level.entities, pickup)
+export spawnTextFx :: (level:Level, x,y:float, r,g,b,a:float, text:string) {
+	local scoreText = newEntity(level, TextFx, x, y)
+
+	scoreText.r = r
+	scoreText.g = g
+	scoreText.b = b
+	scoreText.a = a
+
+	scoreText.text = text
+
+	insert(level.entities, scoreText)
+}
+export spawnTextFx :: (level:Level, x,y:float, r,g,b,a:float, textFormat:string, v,...:int|float|string) {
+	spawnTextFx(level, x,y, .9,.9,.9,1, format(textFormat, v, ...))
 }
 
 
 
-local areEntitiesOverlapping :: (ent1,ent2:Entity) -> bool {
+export areEntitiesOverlapping :: (ent1,ent2:Entity, ent1Scale=1.0, ent2Scale=1.0) -> bool {
 	return
-		abs(ent1.x-ent2.x) < (ent1.width  + ent2.width ) / 2 and
-		abs(ent1.y-ent2.y) < (ent1.height + ent2.height) / 2
+		abs(ent1.x-ent2.x) < (ent1Scale*ent1.width  + ent2Scale*ent2.width ) / 2 and
+		abs(ent1.y-ent2.y) < (ent1Scale*ent1.height + ent2Scale*ent2.height) / 2
 }
 
 
 
-local addScore :: (level:Level, score:int) {
+export addScore :: (level:Level, score:int) {
 	level.score     += score
 	level.scoreTime  = level.time
 }
