@@ -9,6 +9,9 @@
 --=
 --============================================================]]
 
+local SCORE_PER_HEALTH_ON_KILL :: 10
+local SCORE_PER_PICKUP         :: 10
+
 
 
 export Entity :: struct {
@@ -108,7 +111,16 @@ export isEnemy :: (ent:Entity) -> bool {
 export Pickup :: struct {
 	using Entity,
 
-	Kind :: enum { HEALTH, HEALTH_FULL, WEAPON_UP, WEAPON_DOWN, BULLET_LINEAR, BULLET_WAVE, REAR_WEAPON },
+	Kind :: enum {
+		HEALTH,
+		HEALTH_FULL,
+		WEAPON_UP,
+		WEAPON_DOWN,
+		BULLET_LINEAR,
+		BULLET_WAVE,
+		REAR_WEAPON,
+	},
+
 	kind = Kind.HEALTH,
 }
 
@@ -126,6 +138,18 @@ export Spark :: struct {
 export Explosion :: struct {
 	using Fx,
 	radius = 1.0,
+}
+
+local UiFx :: struct {
+	using Fx,
+	r = 0.0,
+	g = 0.0,
+	b = 0.0,
+	a = 1.0,
+}
+export TextFx :: struct {
+	using UiFx,
+	text = "",
 }
 
 -- @Incomplete: Generate this enum through metaprogramming.
@@ -223,6 +247,10 @@ export newEntity :: (level:Level, $T:type, initX,initY:float) -> T {
 
 	} elseif T == Explosion {
 		ent.timeTotal     = 0.70
+		ent.timeRemaining = ent.timeTotal
+
+	} elseif T == TextFx {
+		ent.timeTotal     = 1.20
 		ent.timeRemaining = ent.timeTotal
 	}
 
@@ -325,8 +353,8 @@ export updateEntity :: (level:Level, ent:Entity, dt:float) {
 
 		local MAX_SPEED_X    :: 50.0
 		local MAX_SPEED_Y    :: 40.0
-		local ACCELERATION_X :: 1000
-		local ACCELERATION_Y :: 1000
+		local ACCELERATION_X :: 800
+		local ACCELERATION_Y :: 800
 
 		player.speedX
 			= dirX == 0
@@ -369,11 +397,11 @@ export updateEntity :: (level:Level, ent:Entity, dt:float) {
 					? MAX_DAMAGE
 					: max(cast(int) (enemy.health*HEALTH_TO_DAMAGE_RATIO), 1)
 
-				damageEntity(level, player, damageOnPlayer, enemy.x,enemy.y)
+				damageEntity(level, player, damageOnPlayer, enemy.x,enemy.y, false)
 
 				if not enemy.isBoss {
 					local damageOnEnemy = (player.isDestroyed ? damageOnPlayer : MAX_DAMAGE)
-					damageEntity(level, enemy, damageOnEnemy, player.x,player.y)
+					damageEntity(level, enemy, damageOnEnemy, player.x,player.y, false)
 				}
 
 				if player.isDestroyed  return
@@ -395,6 +423,8 @@ export updateEntity :: (level:Level, ent:Entity, dt:float) {
 					case BULLET_WAVE:   player.bulletMods.movement = BulletMovement.WAVE
 					case REAR_WEAPON:   player.rearWeapon          = true
 				}
+
+				addScore(level, SCORE_PER_PICKUP)
 
 				-- @Incomplete: Spawn some pickup effect.
 				-- @Incomplete: Play pickup sound.
@@ -451,7 +481,7 @@ export updateEntity :: (level:Level, ent:Entity, dt:float) {
 
 		for level.entities {
 			if (bullet.shotByPlayer ? isEnemy(it) : it.entityType == Player) and areEntitiesOverlapping(bullet, it) {
-				damageEntity(level, it, 1, bullet.x, bullet.y)
+				damageEntity(level, it, 1, bullet.x,bullet.y, bullet.shotByPlayer)
 				destroy(bullet)
 				return
 			}
@@ -618,6 +648,11 @@ export updateEntity :: (level:Level, ent:Entity, dt:float) {
 		local explosion          = cast(Explosion) ent
 		explosion.timeRemaining -= dt
 		if explosion.timeRemaining <= 0  destroy(explosion)
+
+	case TextFx:
+		local textFx          = cast(TextFx) ent
+		textFx.timeRemaining -= dt
+		if textFx.timeRemaining <= 0  destroy(textFx)
 	}
 }
 
@@ -632,8 +667,27 @@ export drawEntity :: (level:Level, ent:Entity) {
 		return r, g, b
 	}
 
+	local drawLight :: (level:Level, x,y:float, radius:float, r,g,b,a:float) {
+		drawLight(level, x,y, radius,radius, r,g,b,a)
+	}
+	local drawLight :: (level:Level, x,y:float, radiusX,radiusY:float, r,g,b,a:float) {
+		local light:Light = {x=x, y=y, radiusX=radiusX, radiusY=radiusY, r=r,g=g,b=b,a=a} -- @Speed: Reuse tables.
+		insert(level.lightsToDraw, light)
+	}
+
+	local drawTextInWorld :: (text:string, x,y:float, anchorX,anchorY=0.0, size=1.0) {
+		local fontH = loveGetHeight(fontWorld)
+
+		size /= fontH
+
+		local w = size * loveGetWidth(fontWorld, text)
+		local h = size * fontH
+
+		loveDrawText(text, x-anchorX*w, y-anchorY*h, 0, size)
+	}
+
 	local DAMAGE_EFFECT_TIME :: 0.10
-	local damageEffect = clamp01(1-(level.time-ent.timeDamaged)/DAMAGE_EFFECT_TIME)
+	local damageEffect = clamp01(1 - (level.time-ent.timeDamaged) / DAMAGE_EFFECT_TIME)
 
 	if ent.entityType == {
 	case Player:
@@ -662,7 +716,34 @@ export drawEntity :: (level:Level, ent:Entity) {
 
 		drawLight(level, bullet.x,bullet.y, 4,6, r,g,b,.2)
 
-	-- Enemies.
+	case Pickup:
+		local pickup = cast(Pickup) ent
+		local time   = level.time - ent.timeSpawned
+		local pulse  = sin(time*TAU/1.20)
+		local radius = 1.4+.1*pulse
+
+		local r, g, b: float
+		local text: string
+
+		using pickup.kind
+		if !complete pickup.kind == {
+			case HEALTH:        r, g, b, text = .9, .0, .0, "h"
+			case HEALTH_FULL:   r, g, b, text = 1,  .2, .2, "H"
+			case WEAPON_UP:     r, g, b, text = .0, .8, .2, "+"
+			case WEAPON_DOWN:   r, g, b, text = .0, .0, .0, "-"
+			case BULLET_LINEAR: r, g, b, text = .4, .4, 1,  "I"
+			case BULLET_WAVE:   r, g, b, text = 1,  .2, 1,  "W"
+			case REAR_WEAPON:   r, g, b, text = .8, .8, .0, "R"
+		}
+
+		loveSetColor(r, g, b, .8)
+		loveDrawCircleFill(pickup.x, pickup.y, radius, 32)
+		loveSetColor(1)
+		drawTextInWorld(text, pickup.x,pickup.y, .5,.5, 2.0+.1*pulse)
+
+	--
+	-- Enemies
+	--
 
 	case Carrier:
 		local carrier = cast(Carrier) ent
@@ -695,7 +776,9 @@ export drawEntity :: (level:Level, ent:Entity) {
 			loveSetLineWidth(1)
 		}
 
-	-- Effects.
+	--
+	-- Effects
+	--
 
 	case Spark:
 		local spark    = cast(Spark) ent
@@ -717,36 +800,13 @@ export drawEntity :: (level:Level, ent:Entity) {
 		loveResetBlendMode()
 		drawLight(level, explosion.x,explosion.y, 4*radius, 1,1,1,.8*a)
 
-	case Pickup:
-		local pickup = cast(Pickup) ent
-		local time   = level.time - ent.timeSpawned
-		local pulse  = sin(time*TAU/1.20)
-		local radius = 1.4+.1*pulse
-
-		local r, g, b: float
-		local text: string
-
-		using pickup.kind
-		if !complete pickup.kind == {
-			case HEALTH:        r, g, b, text = .9, .0, .0, "h"
-			case HEALTH_FULL:   r, g, b, text = 1,  .2, .2, "H"
-			case WEAPON_UP:     r, g, b, text = .0, .8, .2, "+"
-			case WEAPON_DOWN:   r, g, b, text = .0, .0, .0, "-"
-			case BULLET_LINEAR: r, g, b, text = .4, .4, 1,  "I"
-			case BULLET_WAVE:   r, g, b, text = 1,  .2, 1,  "W"
-			case REAR_WEAPON:   r, g, b, text = .8, .8, .0, "R"
-		}
-
-		local font      = loveGetFont()
-		local fontH     = loveGetHeight(font)
-		local textScale = (2.0 + 0.1*pulse) / fontH
-		local textW     = textScale * loveGetWidth(font, text)
-		local textH     = textScale * fontH
-
-		loveSetColor(r, g, b, .8)
-		loveDrawCircleFill(pickup.x, pickup.y, radius, 32)
-		loveSetColor(1)
-		loveDrawText(text, pickup.x-textW/2, pickup.y-textH/2, 0, textScale)
+	case TextFx:
+		local textFx   = cast(TextFx) ent
+		local progress = 1 - textFx.timeRemaining/textFx.timeTotal
+		local y        = textFx.y - 6*progress^1.5
+		local a        = textFx.a * (1-progress)^.5
+		loveSetColor(textFx.r, textFx.g, textFx.b, a)
+		drawTextInWorld(textFx.text, textFx.x,y, .5,.5, 2.5)
 	}
 
 	-- Collision box.
@@ -754,14 +814,6 @@ export drawEntity :: (level:Level, ent:Entity) {
 		loveSetColor(0, 1, 0, .4)
 		loveDrawRectangleFill(ent.x-ent.width/2, ent.y-ent.height/2, ent.width, ent.height)
 	}
-}
-
-local drawLight :: (level:Level, x,y:float, radius:float, r,g,b,a:float) {
-	drawLight(level, x,y, radius,radius, r,g,b,a)
-}
-local drawLight :: (level:Level, x,y:float, radiusX,radiusY:float, r,g,b,a:float) {
-	local light:Light = {x=x, y=y, radiusX=radiusX, radiusY=radiusY, r=r,g=g,b=b,a=a} -- @Speed: Reuse tables.
-	insert(level.lightsToDraw, light)
 }
 
 
@@ -772,7 +824,7 @@ export destroy :: (ent:Entity) {
 
 
 
-export damageEntity :: (level:Level, ent:Entity, damage:int, damagePointX,damagePointY:float) {
+export damageEntity :: (level:Level, ent:Entity, damage:int, damagePointX,damagePointY:float, allowRewards:bool) {
 	if ent.isDestroyed  return
 
 	ent.timeDamaged  = level.time
@@ -835,6 +887,18 @@ export damageEntity :: (level:Level, ent:Entity, damage:int, damagePointX,damage
 		insert(level.entities, explosion)
 	}
 
+	if allowRewards and isEnemy(ent) {
+		local score = SCORE_PER_HEALTH_ON_KILL * ent.healthMax
+		addScore(level, score)
+
+		local scoreText = newEntity(level, TextFx, ent.x, ent.y)
+		scoreText.r     = 0
+		scoreText.g     = 1
+		scoreText.b     = 0
+		scoreText.text  = format("%d", score)
+		insert(level.entities, scoreText)
+	}
+
 	level.cameraShake = max(level.cameraShake, effectScale)
 	destroy(ent)
 }
@@ -881,6 +945,13 @@ local areEntitiesOverlapping :: (ent1,ent2:Entity) -> bool {
 	return
 		abs(ent1.x-ent2.x) < (ent1.width  + ent2.width ) / 2 and
 		abs(ent1.y-ent2.y) < (ent1.height + ent2.height) / 2
+}
+
+
+
+local addScore :: (level:Level, score:int) {
+	level.score     += score
+	level.scoreTime  = level.time
 }
 
 

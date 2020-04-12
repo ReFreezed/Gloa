@@ -34,49 +34,23 @@ export !load "enemyWaves"
 
 
 
-export LEVEL_WIDTH   :: 100 -- 1 unit ~ 1 meter
-export CAMERA_HEIGHT :: 75
+export LEVEL_WIDTH    :: 100 -- 1 unit ~ 1 meter
+export CAMERA_HEIGHT  :: 75
 
-export MIN_DISTANCE_TO_CAMERA_EDGE :: 3
+export MIN_DISTANCE_TO_CAMERA_EDGE  :: 3
 
 export STAR_DISTANCE_OUTSIDE_SCREEN :: .05 * CAMERA_HEIGHT
 
-export SpawnInstruction :: struct {
-	timeRelative = 0.00,
-	entity       = none,
-	x            = 0.0,
-	y            = 0.0,
-	data:table,
-}
 
 
+export fontHud:   LoveFont = NULL
+export fontWorld: LoveFont = NULL
 
-export EnemyWave :: struct {
-	difficulty: int,
-	outroTime: float,
-	spawns: []SpawnInstruction,
-}
+export lightImage: LoveImage = NULL
 
-local Star :: struct {
-	x: float,
-	y: float,
+local currentLevel: Level = NULL
 
-	size:     float, -- 0..1
-	distance: float, -- >1
-}
 
-export Light :: struct {
-	x: float,
-	y: float,
-
-	radiusX: float,
-	radiusY: float,
-
-	r: float,
-	g: float,
-	b: float,
-	a: float,
-}
 
 export Level :: struct {
 	time        = 0.00,
@@ -95,28 +69,59 @@ export Level :: struct {
 	difficulty     = 0,
 	difficultyTime = -9999.00,
 
+	score     = 0,
+	scoreTime = -9999.00,
+
 	stars: []Star,
 	lightsToDraw: []Light,
 
 	cameraShake = 0.0,
 }
 
+export SpawnInstruction :: struct {
+	timeRelative = 0.00,
+	entity       = none,
+	x            = 0.0,
+	y            = 0.0,
+	data:table,
+}
+
+export EnemyWave :: struct {
+	difficulty: int,
+	outroTime: float,
+	spawns: []SpawnInstruction,
+}
+
+export Light :: struct {
+	x: float,
+	y: float,
+
+	radiusX: float,
+	radiusY: float,
+
+	r: float,
+	g: float,
+	b: float,
+	a: float,
+}
 
 
-local currentLevel: Level = NULL
 
-local fontHud:   LoveFont = NULL
-local fontWorld: LoveFont = NULL
+local Star :: struct {
+	x: float,
+	y: float,
 
-local lightImage: LoveImage = NULL
-
-
+	size:     float, -- 0..1
+	distance: float, -- >0
+}
 
 local Sound :: struct {
 	source: LoveSource = NULL,
 	volumeVariation: float,
 	pitchVariation:  float,
 }
+
+
 
 local sounds: struct { !key:string, !value:Sound }
 
@@ -167,7 +172,7 @@ local startNewGame :: () {
 			x        = LEVEL_WIDTH*getRandom(),
 			y        = getRandom(-STAR_DISTANCE_OUTSIDE_SCREEN, CAMERA_HEIGHT+STAR_DISTANCE_OUTSIDE_SCREEN),
 			size     = getRandom()^1.4,
-			distance = getRandom(.3, 1.5),
+			distance = getRandom(.6, 1.5),
 		}
 		insert(currentLevel.stars, star)
 	}
@@ -381,6 +386,14 @@ local onDraw :: () {
 	-- HUD
 	--
 
+	local EDGE_SPACING :: 5
+
+	local getTextHighlight :: (timeReference:float, duration:float) -> float {
+		local timePassed = currentLevel.time - timeReference
+		local highlight  = max(1-timePassed/duration, 0) ^ 1.5
+		return highlight
+	}
+
 	local font  = fontHud
 	local fontH = loveGetHeight(font)
 
@@ -401,28 +414,44 @@ local onDraw :: () {
 		loveDrawCircleFill(SPACING+RADIUS + (i-1)*(SPACING+2*RADIUS), SPACING+RADIUS, RADIUS, 32)
 	}
 
-	-- Difficulty.
+	-- Score.
 	do {
-		local EDGE_SPACING       :: 5
-		local HIGHLIGHT_TIME     :: .70
-		local HIGHLIGHT_MOVEMENT :: 10
+		local highlight = getTextHighlight(currentLevel.scoreTime, .20)
 
-		local timeSinceDifficultyIncreased = currentLevel.time - currentLevel.difficultyTime
-		local highlight                    = max(1-timeSinceDifficultyIncreased/HIGHLIGHT_TIME, 0) ^ 1.5
-
-		local text      = format("DIFFICULTY %d", currentLevel.difficulty)
-		local textScale = 1+.5*highlight
+		local text      = format("SCORE %d", currentLevel.score)
+		local textScale = 1 + .1*highlight
 		local textWidth = loveGetWidth(font, text) * textScale
 
 		local r = lerp(1.0, 1.0, highlight)
 		local g = lerp(0.8, 1.0, highlight)
 		local b = lerp(0.5, 1.0, highlight)
 
+		local HIGHLIGHT_MOVEMENT :: 3
+		local x = (viewWidth - textWidth) // 2
+		local y = EDGE_SPACING + HIGHLIGHT_MOVEMENT * highlight
+
+		loveSetColor(r, g, b)
+		loveDrawText(text, x, y, 0, textScale)
+	}
+
+	-- Difficulty.
+	do {
+		local highlight = getTextHighlight(currentLevel.difficultyTime, .70)
+
+		local text      = format("DIFFICULTY %d", currentLevel.difficulty)
+		local textScale = 1 + .5*highlight
+		local textWidth = loveGetWidth(font, text) * textScale
+
+		local r = lerp(1.0, 1.0, highlight)
+		local g = lerp(0.8, 1.0, highlight)
+		local b = lerp(0.5, 1.0, highlight)
+
+		local HIGHLIGHT_MOVEMENT :: 10
 		local x = round(viewWidth) - EDGE_SPACING - textWidth - HIGHLIGHT_MOVEMENT*highlight
 		local y = EDGE_SPACING + HIGHLIGHT_MOVEMENT * highlight
 
 		loveSetColor(r, g, b)
-		loveDrawText(text, x, y, 0, 1+.5*highlight)
+		loveDrawText(text, x, y, 0, textScale)
 	}
 
 	-- Restart prompt.
