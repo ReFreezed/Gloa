@@ -105,6 +105,13 @@ export isEnemy :: (ent:Entity) -> bool {
 	return entityType == Carrier or entityType == Fly or entityType == Heavy or entityType == Follower
 }
 
+export Pickup :: struct {
+	using Entity,
+
+	Kind :: enum { HEALTH, HEALTH_FULL, WEAPON_UP, WEAPON_DOWN, BULLET_LINEAR, BULLET_WAVE, REAR_WEAPON },
+	kind = Kind.HEALTH,
+}
+
 export Fx :: struct {
 	using Entity,
 	timeTotal     = 1.00,
@@ -155,6 +162,10 @@ export newEntity :: (level:Level, $T:type, initX,initY:float) -> T {
 	} elseif T == Bullet {
 		ent.width  = 1.4
 		ent.height = 3
+
+	} elseif T == Pickup {
+		ent.width  = 3.4
+		ent.height = 3.4
 
 	-- Enemies.
 
@@ -369,6 +380,28 @@ export updateEntity :: (level:Level, ent:Entity, dt:float) {
 			}
 		}
 
+		-- Collide with pickups.
+		for level.entities {
+			if it.entityType == Pickup and areEntitiesOverlapping(it, player) {
+				local pickup = cast(Pickup) it
+
+				using pickup.kind
+				if !complete pickup.kind == {
+					case HEALTH:        player.health              = min(player.health+1, player.healthMax)
+					case HEALTH_FULL:   player.health              = player.healthMax
+					case WEAPON_UP:     player.bulletMods.level    = min(player.bulletMods.level+1, 3)
+					case WEAPON_DOWN:   player.bulletMods.level    = max(player.bulletMods.level-1, 1)
+					case BULLET_LINEAR: player.bulletMods.movement = BulletMovement.LINEAR
+					case BULLET_WAVE:   player.bulletMods.movement = BulletMovement.WAVE
+					case REAR_WEAPON:   player.rearWeapon          = true
+				}
+
+				-- @Incomplete: Spawn some pickup effect.
+				-- @Incomplete: Play pickup sound.
+				destroy(pickup)
+			}
+		}
+
 		-- Handle shooting.
 		player.weaponCooldown -= dt
 
@@ -432,11 +465,20 @@ export updateEntity :: (level:Level, ent:Entity, dt:float) {
 			if bullet.y < -20  destroy(bullet)
 		}
 
-	-- Enemies.
+	case Pickup:
+		local pickup    = cast(Pickup) ent
+		local lifetime  = level.time - pickup.timeSpawned
+		pickup.y       += 10 * clamp01(lifetime/4.00) * dt -- Be stationary for a while, then pick up speed.
+
+		if pickup.y > CAMERA_HEIGHT+20  destroy(pickup)
+
+	--
+	-- Enemies
+	--
 
 	case Carrier:
 		local carrier  = cast(Carrier) ent
-		carrier.y     += 10*dt
+		carrier.y     += 10 * dt
 
 		if carrier.y > CAMERA_HEIGHT+20  destroy(carrier)
 
@@ -444,7 +486,7 @@ export updateEntity :: (level:Level, ent:Entity, dt:float) {
 		local MOVE_SPEED :: 40.0
 
 		local fly = cast(Fly) ent
-		using fly.Phase
+		using fly.phase
 
 		if !complete fly.phase == {
 		case ENTER:
@@ -481,7 +523,7 @@ export updateEntity :: (level:Level, ent:Entity, dt:float) {
 		local MOVE_SPEED :: 15.0
 
 		local heavy = cast(Heavy) ent
-		using heavy.Phase
+		using heavy.phase
 
 		if !complete heavy.phase == {
 		case ENTER:
@@ -559,7 +601,9 @@ export updateEntity :: (level:Level, ent:Entity, dt:float) {
 			spawnBullet(level, follower.x,follower.y, TAU/4, nil)
 		}
 
-	-- Effects.
+	--
+	-- Effects
+	--
 
 	case Spark:
 		local spark = cast(Spark) ent
@@ -672,6 +716,37 @@ export drawEntity :: (level:Level, ent:Entity) {
 		loveDrawCircleFill(explosion.x, explosion.y, radius, 32)
 		loveResetBlendMode()
 		drawLight(level, explosion.x,explosion.y, 4*radius, 1,1,1,.8*a)
+
+	case Pickup:
+		local pickup = cast(Pickup) ent
+		local time   = level.time - ent.timeSpawned
+		local pulse  = sin(time*TAU/1.20)
+		local radius = 1.4+.1*pulse
+
+		local r, g, b: float
+		local text: string
+
+		using pickup.kind
+		if !complete pickup.kind == {
+			case HEALTH:        r, g, b, text = .9, .0, .0, "h"
+			case HEALTH_FULL:   r, g, b, text = 1,  .2, .2, "H"
+			case WEAPON_UP:     r, g, b, text = .0, .8, .2, "+"
+			case WEAPON_DOWN:   r, g, b, text = .0, .0, .0, "-"
+			case BULLET_LINEAR: r, g, b, text = .4, .4, 1,  "I"
+			case BULLET_WAVE:   r, g, b, text = 1,  .2, 1,  "W"
+			case REAR_WEAPON:   r, g, b, text = .8, .8, .0, "R"
+		}
+
+		local font      = loveGetFont()
+		local fontH     = loveGetHeight(font)
+		local textScale = (2.0 + 0.1*pulse) / fontH
+		local textW     = textScale * loveGetWidth(font, text)
+		local textH     = textScale * fontH
+
+		loveSetColor(r, g, b, .8)
+		loveDrawCircleFill(pickup.x, pickup.y, radius, 32)
+		loveSetColor(1)
+		loveDrawText(text, pickup.x-textW/2, pickup.y-textH/2, 0, textScale)
 	}
 
 	-- Collision box.
@@ -722,7 +797,23 @@ export damageEntity :: (level:Level, ent:Entity, damage:int, damagePointX,damage
 		return
 	}
 
+	--
 	-- We're dead!
+	--
+
+	-- Spawn pickup.
+	if isEnemy(ent) {
+		local enemy = cast(Enemy) ent
+		if enemy.isBoss {
+			-- @Incomplete: Boss drops.
+		} else {
+			local dropChance = (enemy.entityType == Carrier ? .7 : .3)
+			if getRandom() < dropChance
+				spawnRandomPickup(level, enemy.x, enemy.y)
+		}
+	}
+
+	-- Spawn effects.
 	local explosionScale = max(ent.width, ent.height) / 5
 	local effectScale    = min(explosionScale, 1) -- Limit all effects except the explosion visuals (because explosions look cool!)
 
@@ -767,6 +858,21 @@ export spawnBullet :: (level:Level, x,y:float, angle:float, modsToCopy:BulletMod
 	}
 
 	insert(level.entities, bullet)
+}
+
+
+
+local spawnRandomPickup :: (level:Level, x,y:float) {
+	local COUNT :: !run #type_info(Pickup.Kind).members -- @Compiler @Incomplete: Provide a way of getting the highest enum member value.
+	local kind = cast(Pickup.Kind) cast(any) getRandom(COUNT)
+	-- local kind = cast(Pickup.Kind) getRandom(COUNT) -- @Compiler @Incomplete: Make this possible.
+	spawnPickup(level, x, y, kind)
+}
+
+local spawnPickup :: (level:Level, x,y:float, kind:Pickup.Kind) {
+	local pickup = newEntity(level, Pickup, x, y)
+	pickup.kind  = kind
+	insert(level.entities, pickup)
 }
 
 
