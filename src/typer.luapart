@@ -4462,90 +4462,101 @@ end
 end
 
 !NODE_INFERRER `function nodeInferrers.AstImport(state, import)`
-	if not import.fileScope then
-		local path
+	if import.fileScope then
+		import.inferredType = getTypeInfoForNamespace(state, import.fileScope)
+		moveToNextRelevantPipe(state, import)
+		return
+	end
 
-		if import.isLoad then
-			local importName = import.importName
+	local importName = import.importName
+	local path
 
-			if isPathAbsolute(importName) then
-				path = importName
-
-			else
-				path = state.projectDirectory.."/"..importName..".gloa"
+	!(
+	local function SET_PATH(pathCode, pathFallbackCode, fileDescription)
+		__LUA(templateToLua(
+			`
+				path = $pathCode
 
 				if not isReadableFile(path) then
-					local pathFallback = state.projectDirectory.."/"..importName.."/main.gloa"
+					local pathFallback = $pathFallbackCode
 
 					if not isReadableFile(pathFallback) then
-						typeError(state, import, "Could not read file '%s' or '%s'.", path, pathFallback)
+						typeError(state, import, "Could not read $fileDescription '%s' or '%s'.", path, pathFallback)
 					end
 
 					path = pathFallback
 				end
-			end
+			`,
+			{pathCode=pathCode, pathFallbackCode=pathFallbackCode, fileDescription=fileDescription}
+		))
+	end
+	)
 
-		else
-			path = COMPILER_DIRECTORY.."/modules/"..import.importName..".gloa"
+	if not import.isLoad then
+		!SET_PATH(
+			`F("%s/modules/%s.gloa",    COMPILER_DIRECTORY, importName)`,
+			`F("%s/modules/%s/%s.gloa", COMPILER_DIRECTORY, importName, (importName:gsub("^.*/", "")))`,
+			"module file"
+		)
+	elseif isPathAbsolute(importName) then
+		path = importName
+	else
+		!SET_PATH(
+			`F("%s/%s.gloa",    state.projectDirectory, importName)`,
+			`F("%s/%s/%s.gloa", state.projectDirectory, importName, (importName:gsub("^.*/", "")))`,
+			"file"
+		)
+	end
 
-			if not isReadableFile(path) then
-				local pathFallback = COMPILER_DIRECTORY.."/modules/"..import.importName.."/main.gloa"
+	local globalScope = state.globalScope
 
-				if not isReadableFile(pathFallback) then
-					typeError(state, import, "Could not read module file '%s' or '%s'.", path, pathFallback)
-				end
-
-				path = pathFallback
-			end
-		end
-
-		local globalScope = state.globalScope
-
-		if not state.fileBuffers[path] then
-			!ifDEBUG `profilerPause()`
-
-			local isPreload = not import.isLoad and import.importName == "preload"
-			local tokens    = state.tokens
-
-			if not isPreload then
-				insertToken(tokens, !(TOKEN_DIRECTIVE),"import", "",path)
-				insertToken(tokens, !(TOKEN_STRING),"preload",   "",path)
-			end
-
-			local startToken = tokens.count+1
-
-			local timeStart          = os.clock()
-			readAndTokenizeFile(state, path, (not isPreload))
-			!ASSERT(`state.fileBuffers[path]`, `path`)
-			local fileScope          = parseFileScope(state, globalScope, path, (not import.isLoad), import.importName)
-			local timeParsing        = os.clock()  - timeStart
-			state.timeParsing        = timeParsing + state.timeParsing
-			state.timeParsingInPipes = timeParsing + state.timeParsingInPipes
-
-			if peekNextToken(state) then
-				errorParsingNext(state, "Expected the end of the file.")
-			end
-
-			if isPreload then
-				for token = startToken, tokens.count do
-					tokens.inserted[token] = true
-				end
-			end
-
-			!ifDEBUG `profilerUnpause()`
-
-			table.insert(globalScope.statementsStatic, fileScope)
-			table.insert(globalScope.fileScopes,       fileScope)
-
-			if import.isLoad then
-				astMoveRelevantThingsFromFileScopeToGlobalScope(state, fileScope)
-			end
-
-			local i = indexOf(globalScope.fileScopes, fileScope) or errorInternal()
-			addToQueueRecursively(state, fileScope, globalScope.fileScopes, i)
-		end
-
+	if state.fileBuffers[path] then
 		import.fileScope = itemWith1(globalScope.fileScopes, "path", path) or errorInternal(path)
+
+	else
+		!ifDEBUG `profilerPause()`
+
+		local isPreload = not import.isLoad and importName == "preload"
+		local tokens    = state.tokens
+
+		if not isPreload then
+			insertToken(tokens, !(TOKEN_DIRECTIVE),"import", "",path)
+			insertToken(tokens, !(TOKEN_STRING),"preload",   "",path)
+		end
+
+		local startToken = tokens.count+1
+
+		local timeStart          = os.clock()
+		readAndTokenizeFile(state, path, (not isPreload))
+		!ASSERT(`state.fileBuffers[path]`, `path`)
+		local fileScope          = parseFileScope(state, globalScope, path, (not import.isLoad), importName)
+		local timeParsing        = os.clock()  - timeStart
+		state.timeParsing        = timeParsing + state.timeParsing
+		state.timeParsingInPipes = timeParsing + state.timeParsingInPipes
+
+		if peekNextToken(state) then
+			errorParsingNext(state, "Expected the end of the file.")
+		end
+
+		if isPreload then
+			for token = startToken, tokens.count do
+				tokens.inserted[token] = true
+			end
+		end
+
+		!ifDEBUG `profilerUnpause()`
+
+		table.insert(globalScope.statementsStatic, fileScope)
+		table.insert(globalScope.fileScopes,       fileScope)
+
+		if import.isLoad then
+			astMoveRelevantThingsFromFileScopeToGlobalScope(state, fileScope)
+		end
+
+		local i = indexOf(globalScope.fileScopes, fileScope) or errorInternal()
+		addToQueueRecursively(state, fileScope, globalScope.fileScopes, i)
+
+		import.fileScope = fileScope
 	end
 
 	import.inferredType = getTypeInfoForNamespace(state, import.fileScope)
