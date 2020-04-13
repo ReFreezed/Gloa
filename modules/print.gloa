@@ -41,6 +41,7 @@ local _printNice :: (v:any, T:type, indent:int) {
 
 		case ENUM:
 			local enumInfo = cast(TypeInfoEnum) typeInfo
+			-- if enumInfo.name  write(indentStr, enumInfo.name, ": ") -- @Incomplete: Print "enumName.enumMemberName" before the literal value.
 			_printNice(v, enumInfo.memberType, indent)
 
 		case STRING:
@@ -61,15 +62,29 @@ local _printNice :: (v:any, T:type, indent:int) {
 			write(indentStr, "}\n")
 
 		case STRUCT:
-			-- @Incomplete: Handle structInfo.kind. (@Compiler: Implement structInfo.kind)
 			local structInfo = cast(TypeInfoStruct) typeInfo
 			local obj        = cast(table) v
 
-			write(indentStr, toString(v), " {\n")
+			if structInfo.kind == structInfo.Kind.TABLE {
+				_printNice(obj, table, indent)
+				return
+			}
+
+			local objStr = toString(obj)
+			objStr       = replacePattern(objStr, "^table: ",    "")
+			objStr       = replacePattern(objStr, "^userdata: ", "")
+
+			write(indentStr, structInfo.name?:"(struct)", ": ", objStr, " {\n")
+
 			for member: structInfo.members {
 				local name = member.name
 				write(indentStr, "\t", name, " = ", toString(obj[name]), "\n")
 			}
+
+			if structInfo.kind == structInfo.Kind.ARRAY {
+				for cast([]any) v  write(indentStr, "\t", toString(itIndex), " = ", toString(it), "\n")
+			}
+
 			write(indentStr, "}\n")
 
 		case TYPE:

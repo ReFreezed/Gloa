@@ -1535,7 +1535,7 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 
 					file:write(" in ")
 
-					if objType.tag == !(TYPE_ARRAY) then
+					if objType.tag == !(TYPE_ARRAY) or (objType.tag == !(TYPE_STRUCT) and objType.kind == !(STRUCT_KIND_ARRAY)) then
 						addLineMapping(state, writer, objExpr.token)
 						if forLoop.reverse then
 							file:write("_IPAIRSR")
@@ -2001,8 +2001,19 @@ local function writeTypeInfo(state, writer, typeInfo)
 		!!(END_OF_TYPE_INFO"TypeInfoFunction")
 
 	elseif tag == !(TYPE_STRUCT) then
-		-- @Incomplete: Output struct kind and key/value types. (Remember to update preload and messenger.)
 		local structInfo = typeInfo
+		local voidType   = getTypeInfoForBuiltinType(state, "void")
+
+		file:write(",name=")
+		writeStringLiteral(writer, structInfo.name)
+
+		file:write(",kind=", structInfo.kind)
+
+		file:write(",valueType=")
+		writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), (structInfo.valueType or voidType), false)
+
+		file:write(",keyType=")
+		writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), (structInfo.keyType or voidType), false)
 
 		file:write(",members={")
 		for i, member in ipairs(structInfo.members) do
@@ -2019,6 +2030,9 @@ local function writeTypeInfo(state, writer, typeInfo)
 
 	elseif tag == !(TYPE_ENUM) then
 		local enumInfo = typeInfo
+
+		file:write(",name=")
+		writeStringLiteral(writer, enumInfo.name)
 
 		file:write(",memberType=")
 		writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), enumInfo.memberTypeInfo, false)
@@ -2167,11 +2181,11 @@ end
 
 
 
-function _G.writeLuaPreloads(state, writer, fromIndex)
+function _G.writeLuaPreloads(state, writer, luaPreloads, fromIndex)
 	local file = writer.file
 
-	for i = fromIndex, #state.luaPreloads do
-		local luaPreload = state.luaPreloads[i]
+	for i = fromIndex, #luaPreloads do
+		local luaPreload = luaPreloads[i]
 
 		file:write("do\n", luaPreload.lua, "\nend\n")
 
@@ -2223,31 +2237,38 @@ function _G.writeCompilerSymbols(state, writer)
 		local first       = true
 		local sequenceGap = 0
 
-		-- @Incomplete: Option for excluding this. @Polish: Also maybe don't write this if no type info is accessed in the written program?
-		file:write("local _ = nil") ; writeEol(state, writer)
-		file:write("local _TYPE_INFO = {")
-		for typeId, typeInfo in ipairs(state.allTypeInfos) do
-			if isTypePublic(typeInfo) then
-				if not first then  file:write(",")  end
-				first = false
+		-- @Incomplete: Option for excluding this.  @Polish: Also maybe don't write this if no type info is accessed in the written program?
+		do
+			local _outputDebugInfo = outputDebugInfo
+			_G.outputDebugInfo     = false -- The type table is big enough already! Let's try making it a bit smaller. (This saves ~50% of the space.)
 
-				-- Note: Type index and type ID are the same.
-				if sequenceGap == 0 then
-					-- void
-				elseif sequenceGap < 30 then
-					file:write(("nil,"):rep(sequenceGap))
-					sequenceGap = 0
+			file:write("local _ = nil") ; writeEol(state, writer)
+			file:write("local _TYPE_INFO = {")
+			for typeId, typeInfo in ipairs(state.allTypeInfos) do
+				if isTypePublic(typeInfo) then
+					if not first then  file:write(",")  end
+					first = false
+
+					-- Note: Type index and type ID are the same.
+					if sequenceGap == 0 then
+						-- void
+					elseif sequenceGap < 30 then
+						file:write(("_,"):rep(sequenceGap))
+						sequenceGap = 0
+					else
+						file:write("[", typeId, "]=")
+					end
+
+					writeTypeInfo(state, writer, typeInfo)
+
 				else
-					file:write("[", typeId, "]=")
+					sequenceGap = sequenceGap+1
 				end
-
-				writeTypeInfo(state, writer, typeInfo)
-
-			else
-				sequenceGap = sequenceGap+1
 			end
+			file:write("}") ; writeEol(state, writer)
+
+			_G.outputDebugInfo = _outputDebugInfo
 		end
-		file:write("}") ; writeEol(state, writer)
 
 	else
 		-- Note: lineMappings is not used in metaprograms because gloaErrorHandler() is different.
@@ -2466,7 +2487,8 @@ function _G.writeProgram(state, writer)
 		writer.currentOutputLine = 5
 	end
 
-	writeLuaPreloads(state, writer, 1)
+	writeLuaPreloads(state, writer, state.luaPreloads,        1)
+	writeLuaPreloads(state, writer, state.luaPreloadsRuntime, 1)
 	writeCompilerSymbols(state, writer)
 
 	-- Start of user code.

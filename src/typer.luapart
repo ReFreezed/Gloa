@@ -1299,23 +1299,6 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 				getFriendlyTypeInfoName(typeInfo), getFriendlyTypeInfoName(typeInfoForDecl)
 			)
 		end
-
-		-- @Robustness: Here we set the name of structs and enums. Is this a good place to do that?
-		if not typeInfoForDecl then
-			-- void
-
-		elseif typeInfoForDecl.tag == !(TYPE_STRUCT) then
-			local structInfo = typeInfoForDecl
-			if structInfo.name == "" then -- Is this detection ok? Need testing or another solution.
-				structInfo.name = ident.name
-			end
-
-		elseif typeInfoForDecl.tag == !(TYPE_ENUM) then
-			local enumInfo = typeInfoForDecl
-			if enumInfo.name == "" then -- Is this detection ok? Need testing or another solution.
-				enumInfo.name = ident.name
-			end
-		end
 	end
 
 	if vararg then
@@ -1328,7 +1311,7 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 	end
 
 	identOrVararg.inferredType = typeInfo
-	decl.valueTypeInfo         = typeInfoForDecl -- May be nil.  @Cleanup: Move this and relevant code to AstDeclaration?
+	decl.valueTypeInfo         = typeInfoForDecl -- May be nil.  @Cleanup: Move this and relevant code to nodeInferrers.AstDeclaration().
 
 	!if DEBUG then
 		if debug_onlyInferTypes then
@@ -2895,12 +2878,19 @@ end
 
 !NODE_INFERRER `function nodeInferrers.AstDeclaration(state, decl)`
 	local valueExpr = getDeclarationValue(decl, true)
+	local isConst   = isDeclarationConstant(decl)
 
-	if valueExpr and not valueExpr.inferredType then
-		if valueExpr.nodeType == !(AST_TABLE) then
-			!DEPEND_AND_RETURN(`decl`, DEPEND_NODE_INFERRED_FULLY, `valueExpr`)
-		else
-			!DEPEND_AND_RETURN(`decl`, DEPEND_NODE_INFERRED, `valueExpr`)
+	if valueExpr then
+		if not valueExpr.inferredType then
+			if valueExpr.nodeType == !(AST_TABLE) then
+				!DEPEND_AND_RETURN(`decl`, DEPEND_NODE_INFERRED_FULLY, `valueExpr`)
+			else
+				!DEPEND_AND_RETURN(`decl`, DEPEND_NODE_INFERRED, `valueExpr`)
+			end
+		end
+
+		if isConst and valueExpr.nodeType == !(AST_STRUCT) or valueExpr.nodeType == !(AST_ENUM) then
+			valueExpr.representedType.name = decl.name.name
 		end
 	end
 
@@ -2918,7 +2908,6 @@ end
 	end
 
 	local scope    = astFindParentScope(decl)
-	local isConst  = isDeclarationConstant(decl)
 	local typeExpr = decl.type
 
 	local isForeignVariableMember = (not isConst and decl.parent == scope and scope.nodeType == !(AST_STRUCT) and scope.isForeign)
@@ -3108,7 +3097,10 @@ end
 		end
 
 	elseif unary.operation == "#" then
-		if not !!(CONST_SET{ TYPE_ARRAY, TYPE_TABLE, TYPE_STRING })[typeInfo.tag] then
+		if not (
+			(typeInfo.tag == !(TYPE_STRUCT) and typeInfo.valueType and not typeInfo.keyType) -- Should we allow keyType to be int?
+			or !!(CONST_SET{ TYPE_ARRAY, TYPE_TABLE, TYPE_STRING })[typeInfo.tag]
+		) then
 			typeError(
 				state, unary.expression,
 				"Unary length operation (#): Expected an array, a table or a string. (Got %s)",
@@ -4991,6 +4983,7 @@ end
 			end
 		end
 
+		----------------------------------------------------------------
 		-- for [ i = ] start, end [, step ]
 		if forLoop.forType == !(FOR_NUMERIC) then
 			!ASSERT `#names <= 1`
@@ -5030,6 +5023,7 @@ end
 
 			addDeclarationInForLoop(state, forLoop, (names[1] and names[1].name or "it"), values[1].inferredType)
 
+		----------------------------------------------------------------
 		-- for [ v1, ... : ] obj
 		elseif forLoop.forType == !(FOR_SHORT) then
 			!ASSERT `#values == 1`
@@ -5044,22 +5038,24 @@ end
 			end
 
 			if objType.tag == !(TYPE_ARRAY) then
+				local arraySig = objType
 				if names[3] then
 					typeError(state, names[3], "For loop: Too many names for short-form array loop. (Expected at most a value name and an index name.)")
 				end
 				local name1 = (names[1] and names[1].name) or "it"
 				local name2 = (names[2] and names[2].name) or "itIndex"
 				addDeclarationInForLoop(state, forLoop, name2, getTypeInfoForBuiltinType(state, "int"))
-				addDeclarationInForLoop(state, forLoop, name1, objType.itemType)
+				addDeclarationInForLoop(state, forLoop, name1, arraySig.itemType)
 
 			elseif objType.tag == !(TYPE_VARARG) then
+				local varargSig = objType
 				if names[3] then
 					typeError(state, names[3], "For loop: Too many names for short-form vararg loop. (Expected at most a value name and an index name.)")
 				end
 				local name1 = (names[1] and names[1].name) or "it"
 				local name2 = (names[2] and names[2].name) or "itIndex"
 				addDeclarationInForLoop(state, forLoop, name2, getTypeInfoForBuiltinType(state, "int"))
-				addDeclarationInForLoop(state, forLoop, name1, objType.itemType)
+				addDeclarationInForLoop(state, forLoop, name1, varargSig.itemType)
 
 			elseif objType.tag == !(TYPE_TABLE) then
 				if names[3] then
@@ -5080,77 +5076,88 @@ end
 				end
 
 				local decl = findMemberDeclaration(state, structInfo.astNode, "!iterator")
-				if not decl then
-					-- @Incomplete: Fall back to array-like behavior if structInfo.kind==STRUCT_KIND_ARRAY and there's no default iterator.
-					typeError(state, objExpr, "For loop: %s has no default iterator.", getFriendlyTypeInfoName(structInfo))
-				elseif decl.overloadOf then
-					typeError(state, decl, "This declaration is overloaded which is currently not supported for default iterators.")
+
+				if decl then
+					if decl.overloadOf then
+						typeError(state, decl, "This declaration is overloaded which is currently not supported for default iterators.")
+					end
+
+					local iterLambda   = followIdentifiersToConstantValue(decl.value)
+					local iterTypeInfo = iterLambda.inferredType
+
+					if iterTypeInfo.tag ~= !(TYPE_FUNCTION) then
+						typeError(state, decl.value, "The !iterator value must be a function. (This is %s)", getFriendlyTypeInfoName(iterTypeInfo))
+					end
+
+					local intType = getTypeInfoForBuiltinType(state, "int")
+
+					if #iterTypeInfo.argumentTypesIn ~= 2 then
+						typeError(
+							state, iterLambda.argumentsIn.arguments[1],
+							"Default iterators for structs must take exactly two values - the struct instance and a control value. (This returns %d)",
+							#iterTypeInfo.argumentTypesOut
+						)
+					elseif not isTypeCompatibleWith(structInfo, iterTypeInfo.argumentTypesIn[1]) then
+						typeError(
+							state, iterLambda.argumentsIn.arguments[1],
+							"The default iterator must take %s as the first argument. (This is %s)",
+							getFriendlyTypeInfoName(structInfo),
+							getFriendlyTypeInfoName(iterTypeInfo.argumentTypesIn[1])
+						)
+					elseif iterTypeInfo.argumentTypesIn[2] ~= intType then
+						typeError(
+							state, iterLambda.argumentsIn.arguments[2],
+							"The default iterator must take an int as the second argument. (This is %s)",
+							getFriendlyTypeInfoName(iterTypeInfo.argumentTypesIn[2])
+						)
+					end
+
+					local intOrNoneType = getTypeInfoForCompoundType(state, {intType, getTypeInfoForBuiltinType(state, "none")}, true)
+
+					if #iterTypeInfo.argumentTypesOut ~= 2 then
+						typeError(
+							state, iterLambda.argumentsOut.arguments[1],
+							"Default iterators for structs must return exactly two values - a control value and the current value. (This returns %d)",
+							#iterTypeInfo.argumentTypesOut
+						)
+					elseif iterTypeInfo.argumentTypesOut[1] ~= intOrNoneType then
+						typeError(
+							state, iterLambda.argumentsOut.arguments[1],
+							"The default iterator must return int|none as the first argument. (This is %s)",
+							getFriendlyTypeInfoName(iterTypeInfo.argumentTypesOut[1])
+						)
+					end
+					-- Note: We don't care what type the second returned value is.
+
+					if names[3] then
+						typeError(state, names[3], "For loop: Too many names for short-form struct loop. (Expected at most a value name and a control value name.)")
+					end
+					names[1] = names[1] or newIdentifier(forLoop, forLoop.token, "itIndex")
+					names[2] = names[2] or newIdentifier(forLoop, forLoop.token, "it")
+
+					-- Convert FOR_SHORT into FOR_ITERATOR.
+					values[1] = astCopy(decl.name, nil, forLoop)
+					values[2] = objExpr
+					values[3] = newLiteral(forLoop, forLoop.token, !(LITERAL_INTEGER), 0, intType)
+					objExpr.queued.key = 2
+					addToQueue(state, values[1], values,1, !(PIPE_INFER))
+					addToQueue(state, values[3], values,3, !(PIPE_INFER))
+
+					forLoop.forType = !(FOR_ITERATOR)
+					-- Continue to after the reverse check below.
+
+				elseif structInfo.kind == !(STRUCT_KIND_ARRAY) then
+					if names[3] then
+						typeError(state, names[3], "For loop: Too many names for short-form array loop. (Expected at most a value name and an index name.)")
+					end
+					local name1 = (names[1] and names[1].name) or "it"
+					local name2 = (names[2] and names[2].name) or "itIndex"
+					addDeclarationInForLoop(state, forLoop, name2, getTypeInfoForBuiltinType(state, "int"))
+					addDeclarationInForLoop(state, forLoop, name1, structInfo.valueType)
+
+				else
+					typeError(state, objExpr, "For loop: %s has no default iterator and is not array-like.", getFriendlyTypeInfoName(structInfo))
 				end
-
-				local iterLambda   = followIdentifiersToConstantValue(decl.value)
-				local iterTypeInfo = iterLambda.inferredType
-
-				if iterTypeInfo.tag ~= !(TYPE_FUNCTION) then
-					typeError(state, decl.value, "The !iterator value must be a function. (This is %s)", getFriendlyTypeInfoName(iterTypeInfo))
-				end
-
-				local intType = getTypeInfoForBuiltinType(state, "int")
-
-				if #iterTypeInfo.argumentTypesIn ~= 2 then
-					typeError(
-						state, iterLambda.argumentsIn.arguments[1],
-						"Default iterators for structs must take exactly two values - the struct instance and a control value. (This returns %d)",
-						#iterTypeInfo.argumentTypesOut
-					)
-				elseif not isTypeCompatibleWith(structInfo, iterTypeInfo.argumentTypesIn[1]) then
-					typeError(
-						state, iterLambda.argumentsIn.arguments[1],
-						"The default iterator must take %s as the first argument. (This is %s)",
-						getFriendlyTypeInfoName(structInfo),
-						getFriendlyTypeInfoName(iterTypeInfo.argumentTypesIn[1])
-					)
-				elseif iterTypeInfo.argumentTypesIn[2] ~= intType then
-					typeError(
-						state, iterLambda.argumentsIn.arguments[2],
-						"The default iterator must take an int as the second argument. (This is %s)",
-						getFriendlyTypeInfoName(iterTypeInfo.argumentTypesIn[2])
-					)
-				end
-
-				local intOrNoneType = getTypeInfoForCompoundType(state, {intType, getTypeInfoForBuiltinType(state, "none")}, true)
-
-				if #iterTypeInfo.argumentTypesOut ~= 2 then
-					typeError(
-						state, iterLambda.argumentsOut.arguments[1],
-						"Default iterators for structs must return exactly two values - a control value and the current value. (This returns %d)",
-						#iterTypeInfo.argumentTypesOut
-					)
-				elseif iterTypeInfo.argumentTypesOut[1] ~= intOrNoneType then
-					typeError(
-						state, iterLambda.argumentsOut.arguments[1],
-						"The default iterator must return int|none as the first argument. (This is %s)",
-						getFriendlyTypeInfoName(iterTypeInfo.argumentTypesOut[1])
-					)
-				end
-				-- Note: We don't care what type the second returned value is.
-
-				if names[3] then
-					typeError(state, names[3], "For loop: Too many names for short-form struct loop. (Expected at most a value name and a control value name.)")
-				end
-				names[1] = names[1] or newIdentifier(forLoop, forLoop.token, "itIndex")
-				names[2] = names[2] or newIdentifier(forLoop, forLoop.token, "it")
-
-				-- Convert FOR_SHORT into FOR_ITERATOR.
-				values[1] = astCopy(decl.name, nil, forLoop)
-				values[2] = objExpr
-				values[3] = newLiteral(forLoop, forLoop.token, !(LITERAL_INTEGER), 0, intType)
-				objExpr.queued.key = 2
-				addToQueue(state, values[1], values,1, !(PIPE_INFER))
-				addToQueue(state, values[3], values,3, !(PIPE_INFER))
-
-				forLoop.forType = !(FOR_ITERATOR)
-				-- Continue to after the reverse check below.
-
 			else
 				typeError(
 					state, objExpr,
@@ -5160,7 +5167,11 @@ end
 				)
 			end
 
-			if forLoop.reverse and not (objType.tag == !(TYPE_ARRAY) or objType.tag == !(TYPE_VARARG)) then
+			if forLoop.reverse and not (
+				objType.tag == !(TYPE_ARRAY)
+				or objType.tag == !(TYPE_VARARG)
+				or (objType.tag == !(TYPE_STRUCT) and objType.kind == !(STRUCT_KIND_ARRAY) and forLoop.forType == !(FOR_SHORT))
+			) then
 				typeError(
 					state, objExpr,
 					"For loop: Only arrays can be iterated in reverse. (This is %s)",
@@ -5170,8 +5181,9 @@ end
 
 			if forLoop.forType == !(FOR_ITERATOR) then  return  end
 
+		----------------------------------------------------------------
 		-- for v1, ... in iter [, state [, init ] ]
-		else--if forType == FOR_ITERATOR
+		elseif forLoop.forType == !(FOR_ITERATOR) then
 			!ASSERT `#names >= 1`
 			!ASSERT `values[1]`
 
@@ -5266,6 +5278,10 @@ end
 
 				addDeclarationInForLoop(state, forLoop, ident.name, typeInfo)
 			end
+
+		----------------------------------------------------------------
+		else
+			errorInternal(state, forLoop, "%d", forLoop.forType)
 		end
 	end
 
@@ -6059,7 +6075,7 @@ function _G.prepareToRun(state, dependent, lambda)
 
 	local writer = state.runnerWriter
 
-	writeLuaPreloads(state, writer, state.runnerWrittenPreloads+1)
+	writeLuaPreloads(state, writer, state.luaPreloads, state.runnerWrittenPreloads+1)
 	state.runnerWrittenPreloads = #state.luaPreloads
 
 	writeForeignImports                (state, writer, newConstants, true)

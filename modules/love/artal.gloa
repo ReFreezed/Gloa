@@ -1,0 +1,93 @@
+--[[============================================================
+--=
+--=  Artal bindings
+--=  Load .psd (Photoshop) files in LÖVE.
+--=  https://github.com/unXedDani/Artal
+--=
+--=  Requires artal.lua
+--=
+--==============================================================
+
+	loadAll, loadInfo, loadLayer, loadComposed
+
+	Structs:
+	Psd
+
+	Enums:
+	PsdBlendMode
+	PsdLayerType
+
+--============================================================]]
+
+!import "love/basic"
+!import "love/filesystem" -- LoveFileData
+!import "love/graphics"   -- LoveImage
+!import "love/image"      -- LoveImageData
+
+export PsdLayerType :: enum {
+	IMAGE :: "image", -- Image layer with LoveImageData.
+	EMPTY :: "empty", -- Image layer without LoveImageData.
+	OPEN  :: "open",  -- Beginning of group layer.
+	CLOSE :: "close", -- End of group layer.
+}
+
+export PsdBlendMode :: enum {
+	NORMAL        :: "norm",
+	PASS_THROUGH  :: "pass",
+	MULTIPLY      :: "mul",
+	SCREEN        :: "scrn",
+	OVERLAY       :: "over",
+	DISSOLVE      :: "diss",
+	DARKEN        :: "dark",
+	COLOR_BURN    :: "idiv",
+	LINEAR_BURN   :: "lbrn",
+	DARKER_COLOR  :: "dkCl",
+	LIGHTEN       :: "lite",
+	COLOR_DODGE   :: "div",
+	LINEAR_DODGE  :: "lddg",
+	LIGHTER_COLOR :: "lgCl",
+	SOFT_LIGHT    :: "sLit",
+	HARD_LIGHT    :: "hLit",
+	VIVID_LIGHT   :: "vLit",
+	LINEAR_LIGHT  :: "lLit",
+	PIN_LIGHT     :: "pLit",
+	HARD_MIX      :: "hMix",
+	DIFFERENCE    :: "diff",
+	EXCLUSION     :: "smud",
+	SUBTRACT      :: "fsub",
+	DIVIDE        :: "fdiv",
+	HUE           :: "hue",
+	SATURATION    :: "sat",
+	COLOR         :: "colr",
+	LUMINOSITY    :: "lum",
+}
+
+export Psd :: !foreign struct {
+	width:  int,
+	height: int,
+
+	-- Layers...
+	!value: !foreign struct {
+		name:  string,
+		\type: PsdLayerType,
+		blend: PsdBlendMode,
+		clip:  bool,
+		ox:    int,
+		oy:    int,
+		image: LoveImage|none, -- Only set by loadAll().
+	},
+}
+
+local Filename   :: string
+local loadHelper :: (file:Filename|LoveFileData, what:string|int|none=nil) -> Psd|LoveImageData|none !foreign lua "require'artal'.newPSD"
+
+export loadAll      :: (file:Filename|LoveFileData) -> Psd           { return cast(Psd)           loadHelper(file            ) }
+export loadInfo     :: (file:Filename|LoveFileData) -> Psd           { return cast(Psd)           loadHelper(file, "info"    ) }
+export loadComposed :: (file:Filename|LoveFileData) -> LoveImageData { return cast(LoveImageData) loadHelper(file, "composed") }
+
+export loadLayer :: (file:Filename|LoveFileData, layerNumber:int) -> (ok:bool, imageData:LoveImageData) {
+	local imageData = loadHelper(file, layerNumber)
+	if imageData == nil  return false, NULL
+
+	return true, cast(LoveImageData)imageData
+}
