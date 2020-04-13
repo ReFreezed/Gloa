@@ -12,6 +12,7 @@ It draws inspiration from [Jai](https://www.youtube.com/playlist?list=PLmV5I2fxa
 > This repository is mostly for people interested in programming languages related to Lua or the development of a compiler/transpiler written in/for Lua.
 
 - [Language](#language)
+	- [Example Programs](#example-programs)
 - [Usage](#usage)
 	- [Build the Compiler](#build-the-compiler)
 	- [Compile Programs](#compile-programs)
@@ -216,6 +217,9 @@ local getRandomColors :: (count:int) -> []string {
 There are more features but it's too many to list on this one page!
 Proper documentation is yet to be written.
 
+### Example Programs
+Full programs that showcase the language can be found in the [Glóa Example Programs repository](https://github.com/ReFreezed/GloaExamples).
+
 
 
 ## Usage
@@ -246,7 +250,6 @@ lua gloa.lua [compilerOptions] myProgram.gloa [myOtherProgram.gloa ...] [-- meta
 
 ### Folders
 - `/docs/` - Relevant documents.
-- `/examples/` - Example programs that showcase the language.
 - `/lib/` - Libraries used when building the compiler.
 - `/modules/` - Standard/shared Glóa modules/libraries.
 - `/src/` - Compiler source components.
