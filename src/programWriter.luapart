@@ -140,7 +140,7 @@ local COMPILER_SYMBOL_PAIRS = {
 	`_FLOOR`,  `math.floor`, -- Used for integer division.
 	`_IPAIRS`, `ipairs`,     -- Used for short-form array loops.
 	`_PAIRS`,  `pairs`,      -- Used for short-form table loops.
-	`_SELECT`, `select`,     -- Used for short-form vararg loops and vararg lookups.
+	`_SELECT`, `select`,     -- Used for short-form vararg loops, lookups and length expressions.
 	`_REP`,    `string.rep`, -- Used for string repetition (duh).
 	`_REP2`,   `function(n,s)return(s:rep(n))end`,
 	`_SUB`,    `function(s,n)return(s:sub(n,n))end`, -- Used for string subscripting.
@@ -433,6 +433,7 @@ function _G.writeAccess(state, writer, indent, nextLocalN, localsStack, access)
 		end
 
 	elseif typeInfo.tag == !(TYPE_STRING) then
+		-- @Design: Should we change str[n] to result in a byte instead of a substring?
 		writer.file:write("_SUB(")
 		writeExpression(state, writer, indent, nextLocalN, localsStack, access.object)
 		writer.file:write(", ")
@@ -760,6 +761,10 @@ function _G.writeExpression(state, writer, indent, nextLocalN, localsStack, expr
 
 		if unary.operation == "+" then
 			writeExpression(state, writer, indent, nextLocalN, localsStack, unary.expression)
+
+		elseif unary.operation == "#" and unary.expression.nodeType == !(AST_VARARG) then
+			addLineMapping(state, writer, unary.token)
+			file:write('_SELECT("#", ...)')
 
 		else
 			local addParens = shouldOperationHaveSurroundingParentheses(unary)
@@ -2308,9 +2313,10 @@ function _G.writeForeignImports(state, writer, constants, asGlobals, relevantObj
 	end
 end
 
--- writeConstantObjectsExceptFunctions( state, writer, constants, asGlobals [, relevantObjects=all ] )
+-- writtenObjectCount = writeConstantObjectsExceptFunctions( state, writer, constants, asGlobals [, relevantObjects=all ] )
 function _G.writeConstantObjectsExceptFunctions(state, writer, constants, asGlobals, relevantObjects)
-	local file = writer.file
+	local file               = writer.file
+	local writtenObjectCount = 0
 
 	for _, const in ipairs(constants) do
 		if relevantObjects and not relevantObjects[const] then
@@ -2322,8 +2328,12 @@ function _G.writeConstantObjectsExceptFunctions(state, writer, constants, asGlob
 			file:write(const.name, " = ")
 			writeConstantValue(state, writer, const, const.value)
 			writeEol(state, writer)
+
+			writtenObjectCount = writtenObjectCount+1
 		end
 	end
+
+	return writtenObjectCount
 end
 
 -- writeFunctionObjects( state, writer, constants [, relevantObjects=all ] )
@@ -2500,13 +2510,12 @@ function _G.writeProgram(state, writer)
 	file:write("local function runProgram()") ; writeEol(state, writer)
 
 	writeForeignImports(state, writer, state.constants, false, relevantObjects)
-	writeConstantObjectsExceptFunctions(state, writer, state.constants, false, relevantObjects)
+	local declCount = writeConstantObjectsExceptFunctions(state, writer, state.constants, false, relevantObjects)
 
 	if state.constants[1] or state.topScopeNames[1] then
 		-- @Incomplete @Robustness: A nicer/better way of supporting more upvalues than Lua. Right now we just limit forward declarations of Glóa globals.
 		!local MAX_UPVALUES = 60
 		!local MAX_NAMES    = MAX_UPVALUES - COMPILER_SYMBOL_COUNT
-		local declCount     = 0
 
 		-- Forward declarations.
 		local first = true

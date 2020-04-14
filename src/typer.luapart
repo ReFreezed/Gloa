@@ -3077,7 +3077,9 @@ end
 		!DEPEND_AND_RETURN(`unary`, DEPEND_NODE_INFERRED, `unary.expression`)
 	end
 
-	typeInfo = adjustTypeToOne(state, unary.expression, typeInfo, true)
+	if typeInfo.tag == !(TYPE_LIST) then
+		typeInfo = adjustTypeToOne(state, unary.expression, typeInfo, true)
+	end
 
 	if unary.operation == "+" or unary.operation == "-" then
 		-- @Incomplete: Allow int|float compound type here (or disallow declarations of that specific compound type).
@@ -3099,7 +3101,7 @@ end
 	elseif unary.operation == "#" then
 		if not (
 			(typeInfo.tag == !(TYPE_STRUCT) and typeInfo.valueType and not typeInfo.keyType) -- Should we allow keyType to be int?
-			or !!(CONST_SET{ TYPE_ARRAY, TYPE_TABLE, TYPE_STRING })[typeInfo.tag]
+			or !!(CONST_SET{ TYPE_ARRAY, TYPE_TABLE, TYPE_STRING, TYPE_VARARG })[typeInfo.tag]
 		) then
 			typeError(
 				state, unary.expression,
@@ -7592,6 +7594,10 @@ function _G.areMultipleValuesEnabledAtPosition(state, node)
 	elseif parentNodeType == !(AST_ACCESS) then
 		local access = node.parent
 		return node == access.object
+
+	elseif parentNodeType == !(AST_UNARY) then
+		local unary = node.parent
+		return node.nodeType == !(AST_VARARG) and unary.operation == "#"
 
 	elseif !!(CONST_SET{ AST_TYPE, AST_VARIANT_OF, AST_TYPE_OF, AST_TYPE_INFO, AST_DEBUG })[parentNodeType] then
 		return true -- These are static expressions. They don't care about resulting values of any subexpressions - only about the subexpressions themselves.
