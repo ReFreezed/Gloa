@@ -9,7 +9,7 @@
 
 	LuaType
 
-	error, assert
+	error, errorf, errorLine, assert
 	format
 	getLuaType
 	print, printf
@@ -30,17 +30,32 @@ export LUA_ENVIRONMENT    : table  : !foreign lua "_G"
 
 export toString :: (value:any) -> string !foreign lua "tostring"
 
-export format :: (s:string, ...:int|float|string|type) -> string !foreign lua "string.format"
+export StringFormat :: string
+export format :: (s:StringFormat, ...:int|float|string|type) -> string !foreign lua "string.format"
 export print  :: (...:any) !foreign lua "print"
-export printf :: (s:string, ...:int|float|string|type) { print(format(s, ...)) }
+export printf :: (s:StringFormat, ...:int|float|string|type) { print(format(s, ...)) }
 
 -- We change these a bit to be more strict than the Lua equivalent.
 export error  :: (message:string, level:int=1) !foreign lua "error"
 export assert :: (v:bool)                 !foreign lua "assert"
 export assert :: (v:bool, message:string) !foreign lua "assert"
 
-export errorf :: (           s:string, ...:int|float|string|type) { error(format(s, ...), 2) }
-export errorf :: (level:int, s:string, ...:int|float|string|type) { error(format(s, ...), 1+level) }
+export errorf :: (           s:StringFormat, ...:int|float|string|type) { error(format(s, ...), 2) }
+export errorf :: (level:int, s:StringFormat, ...:int|float|string|type) { error(format(s, ...), 1+level) }
+
+export errorLine :: (s:string) {
+	-- We use these foreign declarations instead of importing stuff from the io and os modules. (May want to @Cleanup this at some point.)
+	local File  :: !foreign struct {}
+	local write :: (file:File, ...:string) !foreign method "write"
+	local exit  :: (exitCode:int) !foreign lua "os.exit"
+	local STDERR: File : !foreign lua "io.stderr"
+
+	write(STDERR, s, "\n")
+	exit(1)
+}
+export errorLine :: (s:StringFormat, v1,...:int|float|string|type) {
+	errorLine(format(s, v1, ...))
+}
 
 export LuaType :: enum {
 	BOOLEAN  :: "boolean",
@@ -67,6 +82,8 @@ export stringToInt :: (s:string, base:int=10) -> (success:bool, number:int) {
 	if n == nil  return false, 0
 	return true, cast(int) cast(float) n -- Note: The casts will simply discard any decimals.
 }
+
+export select :: (fromIndex:int, ...:$T) -> ...T !foreign lua "select"
 
 -- Not sure this function is really needed. Lua modules should maybe always be
 -- required directly inside !foreign expressions or possibly using !preload.
@@ -111,7 +128,6 @@ export copyArray :: (array:[]$T) -> []T {
 
 --[[ OLD unrevised:
 export collectGarbage :: (task:string, value:any=nil) !foreign lua "collectgarbage" -- @Incomplete: Split into multiple functions.
-export select :: (what:int|string, ...:$T) -> ...T !foreign lua "select"
 
 export pcall  :: (callback:(), ...:any)                 -> bool, string|none !foreign lua "pcall"
 export xpcall :: (callback:(), errorCallback:(err:any)) -> bool, string|none !foreign lua "xpcall"

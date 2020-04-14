@@ -15,13 +15,15 @@
 !load "suite.fails"
 
 local TEST_FILES :: {
-	"examples/lovelyBlaster/main.gloa",
-	"examples/lovelySnake/main.gloa",
 	"tests/basic.gloa",
 	"tests/compileTimeExecution.gloa",
 	"tests/deepCompilation.gloa",
 	"tests/modules.gloa",
 	"tests/types.gloa",
+}
+local EXAMPLE_FILES :: {
+	"lovelyBlaster/main.gloa",
+	"lovelySnake/main.gloa",
 }
 
 local COMPILER_OPTIONS   :: "--debug --nogc --silent"
@@ -34,6 +36,37 @@ local OUTPUT_REDIRECTION :: ">NUL" -- ">NUL 2>&1"
 
 	disableBuffering(STDOUT)
 	disableBuffering(STDERR)
+
+	print("Running test suite...")
+
+	local testFiles      = {unpack(TEST_FILES)}
+	local examplesFolder = ""
+
+	do {
+		local ok, file = openForReadingText(APP_DIRECTORY.."/suite.ini")
+		if ok {
+			local ln = 0
+			for line in eachLine(file) {
+				ln += 1
+				if not line or line[1] == "#"  continue
+
+				local ok, k, v = matchPattern(line, "^(%w+)=(.*)$") !shadow
+				if not ok
+					errorLine("suite.ini:%d: Bad line format: %s", ln, line)
+				elseif k == "examplesFolder"
+					examplesFolder = cast(string) v
+				else
+					errorLine("suite.ini:%d: Unknown key '%s'.", ln, k)
+			}
+		}
+	}
+
+	if examplesFolder {
+		print("Including examples.")
+		for EXAMPLE_FILES  insert(testFiles, examplesFolder.."/"..it)
+	} else {
+		print("Excluding examples.")
+	}
 
 	local testToRun = getProgramArguments()[1]
 	testToRun       = testToRun ~= NULL ? toLower(testToRun) : ""
@@ -50,7 +83,7 @@ local OUTPUT_REDIRECTION :: ">NUL" -- ">NUL 2>&1"
 		return (find(toLower(basename), testToRun))
 	}
 
-	for path: TEST_FILES {
+	for path: testFiles {
 		if shouldRunTest(path) {
 			testCount += 1
 			local cmd   = format([["lua "%s" %s "%s" %s"]], COMPILER_PATH, COMPILER_OPTIONS, path, OUTPUT_REDIRECTION)

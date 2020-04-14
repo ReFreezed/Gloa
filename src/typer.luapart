@@ -1040,7 +1040,7 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 		if not typeInfo then
 			!DEPEND_AND_RETURN(`identOrVararg`, DEPEND_NODE_INFERRED, `decl`)
 		end
-		if vararg and (vararg.surroundedByParentheses or not areMultipleValuesEnabledAtPosition(vararg)) then
+		if vararg and (vararg.surroundedByParentheses or not areMultipleValuesEnabledAtPosition(state, vararg)) then
 			vararg.surroundedByParentheses = true
 			typeInfo                       = adjustTypeToOne(state, vararg, typeInfo, true)
 		end
@@ -1304,7 +1304,7 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 	if vararg then
 		typeInfo = getTypeInfoForVararg(state, typeInfo)
 
-		if vararg.surroundedByParentheses or not areMultipleValuesEnabledAtPosition(vararg) then
+		if vararg.surroundedByParentheses or not areMultipleValuesEnabledAtPosition(state, vararg) then
 			vararg.surroundedByParentheses = true
 			typeInfo                       = adjustTypeToOne(state, vararg, typeInfo, true)
 		end
@@ -2798,7 +2798,7 @@ end
 	local listSig  = getTypeInfoForList(state, funcSig.argumentTypesOut)
 	local typeInfo = listSig
 
-	if listSig[1] and (call.surroundedByParentheses or not areMultipleValuesEnabledAtPosition(call)) then
+	if listSig[1] and (call.surroundedByParentheses or not areMultipleValuesEnabledAtPosition(state, call)) then
 		call.surroundedByParentheses = true
 		typeInfo                     = adjustTypeToOne(state, call, listSig, true)
 	end
@@ -7121,7 +7121,8 @@ local function getExpectedTypeInfoUsingContents(state, node, strict, expectantTe
 				!DEPEND_AND_RETURN(`node`, DEPEND_NODE_INFERRED, `fieldValue`, nil, `nil`)
 			end
 
-			return getTypeInfoForArray(state, fieldValue.inferredType)
+			local typeInfo = adjustTypeToOne(state, fieldValue, fieldValue.inferredType)
+			return getTypeInfoForArray(state, typeInfo)
 
 		elseif not fieldKey.inferredType then
 			if fieldKey.nodeType ~= !(AST_TABLE) then
@@ -7557,7 +7558,7 @@ end
 
 
 -- Determine whether calls or varargs should adjust to one.
-function _G.areMultipleValuesEnabledAtPosition(node)
+function _G.areMultipleValuesEnabledAtPosition(state, node)
 	local parentNodeType = node.parent.nodeType
 
 	if parentNodeType == !(AST_DECLARATION) then

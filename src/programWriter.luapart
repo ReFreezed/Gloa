@@ -222,7 +222,12 @@ local foreignApiCompilerSymbols = {
 	`),
 }
 
-local foreignApiCompilerSymbolsDuringCompilation = {}
+local foreignApiCompilerSymbolsDuringCompilation = {
+	-- These are different during compilation.
+
+	appPath      = `metaprogramAppPath`,
+	appDirectory = `metaprogramAppDirectory`,
+}
 
 for k in pairs(compilerApi) do
 	foreignApiCompilerSymbols[k]                  = `function() error("Function not available during runtime.") end` -- This should only ever get written if keepDeadCode is set.
@@ -722,7 +727,7 @@ function _G.writeExpression(state, writer, indent, nextLocalN, localsStack, expr
 
 				if not valueExpr then
 					-- Varargs are optional but have no default value (or zero default values since it's technically a list).
-					!ASSERT `not argsIn[argIndex+1]`
+					-- !ASSERT(`not argsIn[argIndex+1]`, nil, `call`) -- This assert is not correct if the last call argument is another call that returns values before the vararg.
 					break
 
 				elseif argNamed then
@@ -1840,10 +1845,9 @@ function _G.writeForeignImportIfNew(state, writer, typeInfo, foreignSource, fore
 
 		if not writer.outputRuntime then
 			lua = foreignApiCompilerSymbolsDuringCompilation[foreignSourceName]
-		elseif foreignApiCompilerSymbolsDuringCompilation[foreignSourceName] then
+		elseif compilerApi[foreignSourceName] then
 			writer.foreignOnlyAvailableDuringCompilation[foreignSourceId] = true
 		end
-
 		if not lua then
 			lua = foreignApiCompilerSymbols[foreignSourceName] or errorInternal("%s", foreignSourceName)
 		end
