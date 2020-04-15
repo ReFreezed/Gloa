@@ -6,127 +6,24 @@
 --=
 --==============================================================
 
-	loveParseArguments
+	parseArguments
 
-	-- Structs:
-	LoveConfig
-	LoveData
-	LoveObject
-	LovePointer
+	-- Types:
+	Config
+	Data
+	Object
+	Pointer
 
 	-- Enums:
-	LoveBlendMode, LoveBlendAlphaMode
-	LoveCompareMode
-	LoveEvent
-	LoveFilterMode
-	LoveFullscreenType
-	LoveKey, LoveScancode
-	LoveLineJoin, LoveLineStyle
-	LoveObjectName
-	LovePixelFormat
-	LoveTextureType
-	LoveWrapMode
+	ObjectName
+	Event
+	FullscreenType
+	HintingMode
 
 --============================================================]]
 
-local ffi :: !import "ffi"
-
-
-
-----------------------------------------------------------------
--- Structs.
-----------------------------------------------------------------
-
-export LovePointer :: !foreign struct {}
-
--- Object.
-export LoveObject :: !foreign struct {}
-
-export loveRelease :: (obj:LoveObject) -> (success:bool) {
-	local M :: (obj:LoveObject) -> (success:bool);
-	return (cast(M)(cast(table)obj).release) (obj)
-}
-
-export loveGetType :: (obj:LoveObject) -> (name:LoveObjectName) {
-	local M :: (obj:LoveObject) -> (name:LoveObjectName);
-	return (cast(M)(cast(table)obj)["type"]) (obj)
-}
-export loveIsType :: (obj:LoveObject, name:LoveObjectName) -> bool {
-	local M :: (obj:LoveObject, name:LoveObjectName) -> bool;
-	return (cast(M)(cast(table)obj).typeOf) (obj, name)
-}
-
--- Data.
-export LoveData :: !foreign struct { using LoveObject }
-
-export loveClone         :: (data:LoveData) -> LoveData    !foreign method "clone"
-export loveGetFfiPointer :: (data:LoveData) -> ffi.Cdata   !foreign method "getFFIPointer"
-export loveGetPointer    :: (data:LoveData) -> LovePointer !foreign method "getPointer" -- Use loveGetFfiPointer() instead!
-export loveGetSize       :: (data:LoveData) -> int         !foreign method "getSize"
-export loveGetString     :: (data:LoveData) -> string      !foreign method "getString"
-
---
--- Other.
---
-
-export LoveConfig :: struct {
-	identity:string|none  = nil,    -- The name of the save directory.
-	appendidentity        = false,  -- Search files in source directory before save directory.
-	version               = "11.3", -- The LÖVE version this game was made for.
-	console               = false,  -- Attach a console. (Windows only.)
-	accelerometerjoystick = true,   -- Enable the accelerometer on iOS and Android by exposing it as a Joystick.
-	externalstorage       = false,  -- True to save files (and read from the save directory) in external storage on Android.
-	gammacorrect          = false,  -- Enable gamma-correct rendering, when supported by the system.
-
-	audio: struct {
-		mic           = false, -- Request and use microphone capabilities in Android.
-		mixwithsystem = true,  -- Keep background music playing when opening LÖVE. (iOS and Android only.)
-	},
-
-	window: struct {
-		title            = "Untitled", -- The window title.
-		icon:string|none = nil,        -- Filepath to an image to use as the window's icon.
-		width            = 800,        -- The window width.
-		height           = 600,        -- The window height.
-		borderless       = false,      -- Remove all border visuals from the window.
-		resizable        = false,      -- Let the window be user-resizable.
-		minwidth         = 1,          -- Minimum window width if the window is resizable.
-		minheight        = 1,          -- Minimum window height if the window is resizable.
-		fullscreen       = false,      -- Enable fullscreen.
-		fullscreentype   = LoveFullscreenType.DESKTOP,
-		usedpiscale      = true,       -- Enable automatic DPI scaling.
-		vsync            = 1,          -- Vertical sync mode.
-		msaa             = 0,          -- The number of samples to use with multi-sampled antialiasing.
-		depth:int|none   = nil,        -- The number of bits per sample in the depth buffer.
-		stencil:int|none = nil,        -- The number of bits per sample in the stencil buffer.
-		display          = 1,          -- Index of the monitor to show the window in.
-		highdpi          = false,      -- Enable high-dpi mode for the window on a Retina display.
-		x:int|none       = nil,        -- The x-coordinate of the window's position in the specified display.
-		y:int|none       = nil,        -- The y-coordinate of the window's position in the specified display.
-	},
-
-	modules: struct {
-		-- Enable/disable modules.
-		audio    = true,
-		data     = true,
-		event    = true,
-		font     = true,
-		graphics = true,
-		image    = true,
-		joystick = true,
-		keyboard = true,
-		math     = true,
-		mouse    = true,
-		physics  = true,
-		sound    = true,
-		system   = true,
-		thread   = true,
-		timer    = true,
-		touch    = true,
-		video    = true,
-		window   = true,
-	},
-}
+local LW  :: !import"love/window" -- FullscreenType
+local ffi :: !import "ffi"        -- Cdata
 
 
 
@@ -134,178 +31,7 @@ export LoveConfig :: struct {
 -- Enums.
 ----------------------------------------------------------------
 
-export LoveFullscreenType :: enum {
-	DESKTOP    :: "desktop",    -- Windowed mode.
-	FULLSCREEN :: "fullscreen", -- Borderless fullscreen.
-	EXCLUSIVE  :: "exclusive",  -- Exclusive fullscreen.
-}
-
-export LoveEvent :: enum {
-	-- General.
-	DISPLAY_ROTATED   :: "displayrotated",
-	DRAW              :: "draw",
-	ERROR_HANDLER     :: "errorhandler",
-	LOAD              :: "load",
-	LOW_MEMORY        :: "lowmemory",
-	QUIT              :: "quit",
-	RUN               :: "run",
-	THREAD_ERROR      :: "threaderror",
-	UPDATE            :: "update",
-	-- Window.
-	DIRECTORY_DROPPED :: "directorydropped",
-	FILE_DROPPED      :: "filedropped",
-	FOCUS             :: "focus",
-	MOUSE_FOCUS       :: "mousefocus",
-	RESIZE            :: "resize",
-	VISIBLE           :: "visible",
-	-- Keyboard.
-	KEY_PRESSED       :: "keypressed",
-	KEY_RELEASED      :: "keyreleased",
-	TEXT_EDITED       :: "textedited",
-	TEXT_INPUT        :: "textinput",
-	-- Mouse.
-	MOUSE_MOVED       :: "mousemoved",
-	MOUSE_PRESSED     :: "mousepressed",
-	MOUSE_RELEASED    :: "mousereleased",
-	WHEEL_MOVED       :: "wheelmoved",
-	-- Joystick.
-	GAMEPAD_AXIS      :: "gamepadaxis",
-	GAMEPAD_PRESSED   :: "gamepadpressed",
-	GAMEPAD_RELEASED  :: "gamepadreleased",
-	JOYSTICK_ADDED    :: "joystickadded",
-	JOYSTICK_AXIS     :: "joystickaxis",
-	JOYSTICK_HAT      :: "joystickhat",
-	JOYSTICK_PRESSED  :: "joystickpressed",
-	JOYSTICK_RELEASED :: "joystickreleased",
-	JOYSTICK_REMOVED  :: "joystickremoved",
-	-- Touch.
-	TOUCH_MOVED       :: "touchmoved",
-	TOUCH_PRESSED     :: "touchpressed",
-	TOUCH_RELEASED    :: "touchreleased",
-	-- Other.
-	CONFIG            :: "conf",
-}
-
-export LoveFilterMode :: enum {
-	LINEAR  :: "linear",
-	NEAREST :: "nearest",
-}
-
-export LoveCompareMode :: enum {
-	EQUAL            :: "equal",
-	NOT_EQUAL        :: "notequal",
-	LESS             :: "less",
-	LESS_OR_EQUAL    :: "lequal",
-	GREATER_OR_EQUAL :: "gequal",
-	GREATER          :: "greater",
-	NEVER            :: "never",
-	ALWAYS           :: "always",
-}
-
-export LoveWrapMode :: enum {
-	CLAMP           :: "clamp",
-	REPEAT          :: "repeat",
-	MIRRORED_REPEAT :: "mirroredrepeat",
-	CLAMP_ZERO      :: "clampzero", -- This mode is not available on most mobile devices and will fall back to CLAMP mode when unsupported.
-}
-
-export LovePixelFormat :: enum {
-	-- Normal color formats.
-	NORMAL           :: "normal",
-	R8               :: "r8",
-	RG8              :: "rg8",
-	RGBA8            :: "rgba8",
-	SRGBA8           :: "srgba8",
-	RGBA16           :: "rgba16",
-	R16F             :: "r16f",
-	RG16F            :: "rg16f",
-	RGBA16F          :: "rgba16f",
-	R32F             :: "r32f",
-	RG32F            :: "rg32f",
-	RGBA32F          :: "rgba32f",
-	RGBA4            :: "rgba4",
-	RGB5A1           :: "rgb5a1",
-	RGB565           :: "rgb565",
-	RGB10A2          :: "rgb10a2",
-	RG11B10F         :: "rg11b10f",
-	-- Depth/stencil formats.
-	STENCIL8         :: "stencil8",
-	DEPTH16          :: "depth16",
-	DEPTH24          :: "depth24",
-	DEPTH32F         :: "depth32f",
-	DEPTH24STENCIL8  :: "depth24stencil8",
-	DEPTH32FSTENCIL8 :: "depth32fstencil8",
-	-- Compressed formats, desktop GPUs.
-	DXT1             :: "DXT1",
-	DXT3             :: "DXT3",
-	DXT5             :: "DXT5",
-	BC4              :: "BC4",
-	BC4S             :: "BC4s",
-	BC5              :: "BC5",
-	BC5S             :: "BC5s",
-	BC6H             :: "BC6h",
-	BC6HS            :: "BC6hs",
-	BC7              :: "BC7",
-	-- Compressed formats, mobile GPUs.
-	ETC1             :: "ETC1",
-	ETC2RGB          :: "ETC2rgb",
-	ETC2RGBA         :: "ETC2rgba",
-	ETC2RGBA1        :: "ETC2rgba1",
-	EACR             :: "EACr",
-	EACRS            :: "EACrs",
-	EACRG            :: "EACrg",
-	EACRGS           :: "EACrgs",
-	PVR1RGB2         :: "PVR1rgb2",
-	PVR1RGB4         :: "PVR1rgb4",
-	PVR1RGBA2        :: "PVR1rgba2",
-	PVR1RGBA4        :: "PVR1rgba4",
-	ASTC4X4          :: "ASTC4x4",
-	ASTC5X4          :: "ASTC5x4",
-	ASTC5X5          :: "ASTC5x5",
-	ASTC6X5          :: "ASTC6x5",
-	ASTC6X6          :: "ASTC6x6",
-	ASTC8X5          :: "ASTC8x5",
-	ASTC8X6          :: "ASTC8x6",
-	ASTC8X8          :: "ASTC8x8",
-	ASTC10X5         :: "ASTC10x5",
-	ASTC10X6         :: "ASTC10x6",
-	ASTC10X8         :: "ASTC10x8",
-	ASTC10X10        :: "ASTC10x10",
-	ASTC12X10        :: "ASTC12x10",
-	ASTC12X12        :: "ASTC12x12",
-}
-
-export LoveBlendMode :: enum {
-	ALPHA    :: "alpha",
-	REPLACE  :: "replace",
-	SCREEN   :: "screen",
-	ADD      :: "add",
-	SUBTRACT :: "subtract",
-	MULTIPLY :: "multiply",
-	LIGHTEN  :: "lighten",
-	DARKEN   :: "darken",
-	PREMULTIPLIED :: "premultiplied",
-}
-export LoveBlendAlphaMode :: enum {
-	ALPHAMULTIPLY :: "alphamultiply",
-	PREMULTIPLIED :: "premultiplied",
-}
-
-export LoveLineJoin  :: enum { MITER::"miter", NONE::"none", BEVEL::"bevel" }
-export LoveLineStyle :: enum { ROUGH::"rough", SMOOTH::"smooth" }
-
-export LoveTextureType :: enum {
-	TWOD   :: "2d", -- @Cleanup: A better name...
-	ARRAY  :: "array",
-	CUBE   :: "cube",
-	VOLUME :: "volume",
-}
-
--- @Robustness: Use enums for keys and scancodes.
-export LoveKey      :: string
-export LoveScancode :: string
-
-export LoveObjectName :: enum {
+export ObjectName :: enum {
 	BEZIER_CURVE          :: "BezierCurve",
 	BODY                  :: "Body",
 	BYTE_DATA             :: "ByteData",
@@ -364,10 +90,95 @@ export LoveObjectName :: enum {
 }
 
 
+
 ----------------------------------------------------------------
--- Misc.
+-- Types.
 ----------------------------------------------------------------
 
-export loveParseArguments :: (argsRaw:[]string) -> (args:[]string) !foreign lua "love.arg.parseGameArguments"
+export Pointer :: !foreign struct {}
+
+export Object :: !foreign struct {
+	release :: (obj:Object) -> (success:bool) !foreign method "release",
+
+	getType :: (obj:Object) -> (name:ObjectName)     !foreign method "type",
+	isType  :: (obj:Object, name:ObjectName) -> bool !foreign method "typeOf",
+}
+
+export Data :: !foreign struct {
+	using Object,
+
+	clone         :: (data:Data) -> Data      !foreign method "clone",
+	getFFIPointer :: (data:Data) -> ffi.Cdata !foreign method "getFFIPointer",
+	getPointer    :: (data:Data) -> Pointer   !foreign method "getPointer", -- Use getFFIPointer() instead!
+	getSize       :: (data:Data) -> int       !foreign method "getSize",
+	getString     :: (data:Data) -> string    !foreign method "getString",
+}
+
+export Config :: struct {
+	identity: string|none = nil,    -- The name of the save directory.
+	appendidentity        = false,  -- Search files in source directory before save directory.
+	version               = "11.3", -- The LÖVE version this game was made for.
+	console               = false,  -- Attach a console. (Windows only.)
+	accelerometerjoystick = true,   -- Enable the accelerometer on iOS and Android by exposing it as a Joystick.
+	externalstorage       = false,  -- True to save files (and read from the save directory) in external storage on Android.
+	gammacorrect          = false,  -- Enable gamma-correct rendering, when supported by the system.
+
+	audio: struct {
+		mic           = false, -- Request and use microphone capabilities in Android.
+		mixwithsystem = true,  -- Keep background music playing when opening LÖVE. (iOS and Android only.)
+	},
+
+	window: struct {
+		title             = "Untitled", -- The window title.
+		icon: string|none = nil,        -- Filepath to an image to use as the window's icon.
+		width             = 800,        -- The window width.
+		height            = 600,        -- The window height.
+		borderless        = false,      -- Remove all border visuals from the window.
+		resizable         = false,      -- Let the window be user-resizable.
+		minwidth          = 1,          -- Minimum window width if the window is resizable.
+		minheight         = 1,          -- Minimum window height if the window is resizable.
+		fullscreen        = false,      -- Enable fullscreen.
+		fullscreentype    = LW.FullscreenType.DESKTOP,
+		usedpiscale       = true,       -- Enable automatic DPI scaling.
+		vsync             = 1,          -- Vertical sync mode.
+		msaa              = 0,          -- The number of samples to use with multi-sampled antialiasing.
+		depth:   int|none = nil,        -- The number of bits per sample in the depth buffer.
+		stencil: int|none = nil,        -- The number of bits per sample in the stencil buffer.
+		display           = 1,          -- Index of the monitor to show the window in.
+		highdpi           = false,      -- Enable high-dpi mode for the window on a Retina display.
+		x: int|none       = nil,        -- The x-coordinate of the window's position in the specified display.
+		y: int|none       = nil,        -- The y-coordinate of the window's position in the specified display.
+	},
+
+	modules: struct {
+		-- Enable/disable modules.
+		audio    = true,
+		data     = true,
+		event    = true,
+		font     = true,
+		graphics = true,
+		image    = true,
+		joystick = true,
+		keyboard = true,
+		math     = true,
+		mouse    = true,
+		physics  = true,
+		sound    = true,
+		system   = true,
+		thread   = true,
+		timer    = true,
+		touch    = true,
+		video    = true,
+		window   = true,
+	},
+}
+
+
+
+----------------------------------------------------------------
+-- Functions.
+----------------------------------------------------------------
+
+export parseArguments :: (argsRaw:[]string) -> (args:[]string) !foreign lua "love.arg.parseGameArguments"
 
 
