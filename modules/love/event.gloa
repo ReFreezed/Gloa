@@ -10,14 +10,24 @@
 	setEventHandler, setConfigHandler, removeEventHandler
 	quit, restart
 
-	Enums:
-	Event
+	-- Types:
+	Config
+
+	-- Enums:
+	Event, EventHandlerTypes
 
 --============================================================]]
 
 !import "love/basic"
+local LF :: !import "love/filesystem" -- @Cleanup: Don't import so much here!
+local LJ :: !import "love/joystick"
+local LK :: !import "love/keyboard"
+local LT :: !import "love/thread"
+local LW :: !import "love/window"
 
-
+--
+-- Enums
+--
 
 export Event :: enum {
 	-- General.
@@ -65,27 +75,172 @@ export Event :: enum {
 	CONFIG            :: "conf",
 }
 
+export EventHandlerTypes :: enum {
+	-- General.
+	DISPLAY_ROTATED   :: (index:int, orientation:LW.DisplayOrientation),
+	DRAW              :: (),
+	ERROR_HANDLER     :: (err:any),
+	LOAD              :: (arguments,unfilteredArguments:[]string),
+	LOW_MEMORY        :: (),
+	QUIT              :: () -> (abortQuitting:bool),
+	RUN               :: () -> (mainLoop:()),
+	THREAD_ERROR      :: (thread:LT.Thread, err:string),
+	UPDATE            :: (dt:float),
+	-- Window.
+	DIRECTORY_DROPPED :: (path:string),
+	FILE_DROPPED      :: (file:LF.DroppedFile),
+	FOCUS             :: (hasFocus:bool),
+	MOUSE_FOCUS       :: (hasFocus:bool),
+	RESIZE            :: (width,height:int),
+	VISIBLE           :: (isVisible:bool),
+	-- Keyboard.
+	KEY_PRESSED       :: (key:LK.Key, scancode:LK.Scancode, isRepeat:bool),
+	KEY_RELEASED      :: (key:LK.Key, scancode:LK.Scancode),
+	TEXT_EDITED       :: (text:string, start,length:int),
+	TEXT_INPUT        :: (text:string),
+	-- Mouse.
+	MOUSE_MOVED       :: (x,y:int, dx,dy:int,  isTouch:bool),
+	MOUSE_PRESSED     :: (x,y:int, button:int, isTouch:bool, presses:int),
+	MOUSE_RELEASED    :: (x,y:int, button:int, isTouch:bool, presses:int),
+	WHEEL_MOVED       :: (dx,dy:int),
+	-- Joystick.
+	GAMEPAD_AXIS      :: (joystick:LJ.Joystick, axis:LJ.GamepadAxis, value:float),
+	GAMEPAD_PRESSED   :: (joystick:LJ.Joystick, button:LJ.GamepadButton),
+	GAMEPAD_RELEASED  :: (joystick:LJ.Joystick, button:LJ.GamepadButton),
+	JOYSTICK_ADDED    :: (joystick:LJ.Joystick),
+	JOYSTICK_AXIS     :: (joystick:LJ.Joystick, axis:int, value:float),
+	JOYSTICK_HAT      :: (joystick:LJ.Joystick, hat:int, direction:LJ.JoystickHat),
+	JOYSTICK_PRESSED  :: (joystick:LJ.Joystick, button:int),
+	JOYSTICK_RELEASED :: (joystick:LJ.Joystick, button:int),
+	JOYSTICK_REMOVED  :: (joystick:LJ.Joystick),
+	-- Touch.
+	TOUCH_MOVED       :: (id:LightUserdata, x,y:int, dx,dy:int, pressure:float),
+	TOUCH_PRESSED     :: (id:LightUserdata, x,y:int, dx,dy:int, pressure:float),
+	TOUCH_RELEASED    :: (id:LightUserdata, x,y:int, dx,dy:int, pressure:float),
+	-- Other.
+	CONFIG            :: (conf:Config),
+}
 
+--
+-- Types
+--
+
+export Config :: struct {
+	identity: string|none = nil,    -- The name of the save directory.
+	appendidentity        = false,  -- Search files in source directory before save directory.
+	version               = "11.3", -- The LÖVE version this game was made for.
+	console               = false,  -- Attach a console. (Windows only.)
+	accelerometerjoystick = true,   -- Enable the accelerometer on iOS and Android by exposing it as a Joystick.
+	externalstorage       = false,  -- True to save files (and read from the save directory) in external storage on Android.
+	gammacorrect          = false,  -- Enable gamma-correct rendering, when supported by the system.
+
+	audio: struct {
+		mic           = false, -- Request and use microphone capabilities in Android.
+		mixwithsystem = true,  -- Keep background music playing when opening LÖVE. (iOS and Android only.)
+	},
+
+	window: struct {
+		title             = "Untitled", -- The window title.
+		icon: string|none = nil,        -- Filepath to an image to use as the window's icon.
+		width             = 800,        -- The window width.
+		height            = 600,        -- The window height.
+		borderless        = false,      -- Remove all border visuals from the window.
+		resizable         = false,      -- Let the window be user-resizable.
+		minwidth          = 1,          -- Minimum window width if the window is resizable.
+		minheight         = 1,          -- Minimum window height if the window is resizable.
+		fullscreen        = false,      -- Enable fullscreen.
+		fullscreentype    = LW.FullscreenType.DESKTOP,
+		usedpiscale       = true,       -- Enable automatic DPI scaling.
+		vsync             = 1,          -- Vertical sync mode.
+		msaa              = 0,          -- The number of samples to use with multi-sampled antialiasing.
+		depth:   int|none = nil,        -- The number of bits per sample in the depth buffer.
+		stencil: int|none = nil,        -- The number of bits per sample in the stencil buffer.
+		display           = 1,          -- Index of the monitor to show the window in.
+		highdpi           = false,      -- Enable high-dpi mode for the window on a Retina display.
+		x: int|none       = nil,        -- The x-coordinate of the window's position in the specified display.
+		y: int|none       = nil,        -- The y-coordinate of the window's position in the specified display.
+	},
+
+	modules: struct {
+		-- Enable/disable modules.
+		audio    = true,
+		data     = true,
+		event    = true,
+		font     = true,
+		graphics = true,
+		image    = true,
+		joystick = true,
+		keyboard = true,
+		math     = true,
+		mouse    = true,
+		physics  = true,
+		sound    = true,
+		system   = true,
+		thread   = true,
+		timer    = true,
+		touch    = true,
+		video    = true,
+		window   = true,
+	},
+}
+
+--
+-- Functions
+--
 
 local loveTable: table : !foreign lua "love"
 
-export setEventHandler :: (event:Event, handler:any, catchErrorsInGloa=true) { -- @Compiler @Cleanup :RestrictAnyToTypeTag
-	!import "basic"
-
-	assert(getLuaType(handler) == LuaType.FUNCTION, "Handler is not a function.") -- @Cleanup: Remove this when :RestrictAnyToTypeTag is solved.
+export setEventHandler :: ($event:Event, handler:$T, catchErrorsInGloa=true) {
+	!if    event == Event.CONFIG            !assert T == cast(type) EventHandlerTypes.CONFIG
+	elseif event == Event.DIRECTORY_DROPPED !assert T == cast(type) EventHandlerTypes.DIRECTORY_DROPPED
+	elseif event == Event.DISPLAY_ROTATED   !assert T == cast(type) EventHandlerTypes.DISPLAY_ROTATED
+	elseif event == Event.DRAW              !assert T == cast(type) EventHandlerTypes.DRAW
+	elseif event == Event.ERROR_HANDLER     !assert T == cast(type) EventHandlerTypes.ERROR_HANDLER
+	elseif event == Event.FILE_DROPPED      !assert T == cast(type) EventHandlerTypes.FILE_DROPPED
+	elseif event == Event.FOCUS             !assert T == cast(type) EventHandlerTypes.FOCUS
+	elseif event == Event.GAMEPAD_AXIS      !assert T == cast(type) EventHandlerTypes.GAMEPAD_AXIS
+	elseif event == Event.GAMEPAD_PRESSED   !assert T == cast(type) EventHandlerTypes.GAMEPAD_PRESSED
+	elseif event == Event.GAMEPAD_RELEASED  !assert T == cast(type) EventHandlerTypes.GAMEPAD_RELEASED
+	elseif event == Event.JOYSTICK_ADDED    !assert T == cast(type) EventHandlerTypes.JOYSTICK_ADDED
+	elseif event == Event.JOYSTICK_AXIS     !assert T == cast(type) EventHandlerTypes.JOYSTICK_AXIS
+	elseif event == Event.JOYSTICK_HAT      !assert T == cast(type) EventHandlerTypes.JOYSTICK_HAT
+	elseif event == Event.JOYSTICK_PRESSED  !assert T == cast(type) EventHandlerTypes.JOYSTICK_PRESSED
+	elseif event == Event.JOYSTICK_RELEASED !assert T == cast(type) EventHandlerTypes.JOYSTICK_RELEASED
+	elseif event == Event.JOYSTICK_REMOVED  !assert T == cast(type) EventHandlerTypes.JOYSTICK_REMOVED
+	elseif event == Event.KEY_PRESSED       !assert T == cast(type) EventHandlerTypes.KEY_PRESSED
+	elseif event == Event.KEY_RELEASED      !assert T == cast(type) EventHandlerTypes.KEY_RELEASED
+	elseif event == Event.LOAD              !assert T == cast(type) EventHandlerTypes.LOAD
+	elseif event == Event.LOW_MEMORY        !assert T == cast(type) EventHandlerTypes.LOW_MEMORY
+	elseif event == Event.MOUSE_FOCUS       !assert T == cast(type) EventHandlerTypes.MOUSE_FOCUS
+	elseif event == Event.MOUSE_MOVED       !assert T == cast(type) EventHandlerTypes.MOUSE_MOVED
+	elseif event == Event.MOUSE_PRESSED     !assert T == cast(type) EventHandlerTypes.MOUSE_PRESSED
+	elseif event == Event.MOUSE_RELEASED    !assert T == cast(type) EventHandlerTypes.MOUSE_RELEASED
+	elseif event == Event.QUIT              !assert T == cast(type) EventHandlerTypes.QUIT
+	elseif event == Event.RESIZE            !assert T == cast(type) EventHandlerTypes.RESIZE
+	elseif event == Event.RUN               !assert T == cast(type) EventHandlerTypes.RUN
+	elseif event == Event.TEXT_EDITED       !assert T == cast(type) EventHandlerTypes.TEXT_EDITED
+	elseif event == Event.TEXT_INPUT        !assert T == cast(type) EventHandlerTypes.TEXT_INPUT
+	elseif event == Event.THREAD_ERROR      !assert T == cast(type) EventHandlerTypes.THREAD_ERROR
+	elseif event == Event.TOUCH_MOVED       !assert T == cast(type) EventHandlerTypes.TOUCH_MOVED
+	elseif event == Event.TOUCH_PRESSED     !assert T == cast(type) EventHandlerTypes.TOUCH_PRESSED
+	elseif event == Event.TOUCH_RELEASED    !assert T == cast(type) EventHandlerTypes.TOUCH_RELEASED
+	elseif event == Event.UPDATE            !assert T == cast(type) EventHandlerTypes.UPDATE
+	elseif event == Event.VISIBLE           !assert T == cast(type) EventHandlerTypes.VISIBLE
+	elseif event == Event.WHEEL_MOVED       !assert T == cast(type) EventHandlerTypes.WHEEL_MOVED
+	else                                    !assert false
 
 	if catchErrorsInGloa {
 		-- Because LÖVE has it's own error handling that the user may not want we have
 		-- to do some trickery to catch errors in Glóa before LÖVE sees them.
-		local wrap :: (func:any) -> any !foreign compiler "wrapFunctionInGloaErrorHandler"
+		local wrap :: (func:T) -> T !foreign compiler "wrapFunctionInGloaErrorHandler"
 		handler = wrap(handler)
 	}
 
 	loveTable[event] = handler
-	if event == Event.ERROR_HANDLER  loveTable.errhand = handler
+	!if event == Event.ERROR_HANDLER  loveTable.errhand = handler
 }
 
-export setConfigHandler :: (handler:(conf:Config)) {
+export setConfigHandler :: (handler:EventHandlerTypes.CONFIG) {
 	setEventHandler(Event.CONFIG, handler, false)
 }
 

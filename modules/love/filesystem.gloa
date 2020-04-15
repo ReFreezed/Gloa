@@ -11,11 +11,84 @@
 	read, write
 
 	-- Types:
+	File, DroppedFile
 	FileData
+
+	-- Enum:
+	BufferMode
+	FileMode
 
 --============================================================]]
 
 !import "love/basic"
+
+--
+-- Enums
+--
+
+export FileMode :: enum {
+	READ   :: "r", -- Open a file for read.
+	WRITE  :: "w", -- Open a file for write.
+	APPEND :: "a", -- Open a file for append.
+	CLOSED :: "c", -- Do not open a file (represents a closed file).
+}
+
+export BufferMode :: enum {
+	NONE :: "none",
+	LINE :: "line",
+	FULL :: "full",
+}
+
+--
+-- Types
+--
+
+local readIntoDataHelper :: (file:File, container:string)            -> (contents:FileData, bytes:int) !foreign method "read"
+local readIntoDataHelper :: (file:File, container:string, bytes:int) -> (contents:FileData, bytes:int) !foreign method "read"
+
+export File :: !foreign struct {
+	using Object,
+
+	open   :: (file:File, mode:FileMode) -> (success:bool, err:string|none) !foreign method "open",
+	close  :: (file:File) -> (success:bool) !foreign method "close",
+	isOpen :: (file:File) -> bool !foreign method "isOpen",
+
+	getFilename :: (file:File) -> string   !foreign method "getFilename",
+	getMode     :: (file:File) -> FileMode !foreign method "getMode",
+	getSize     :: (file:File) -> int      !foreign method "getSize",
+
+	readAll         :: (file:File)            -> (contents:string, bytes:int) !foreign method "read",
+	read_           :: (file:File, bytes:int) -> (contents:string, bytes:int) !foreign method "read", -- @Compiler: Fix overload scope issues!!!
+	readAllIntoData :: (file:File)            -> (data:FileData,   bytes:int) { return readIntoDataHelper(file, "data") },
+	readIntoData    :: (file:File, bytes:int) -> (data:FileData,   bytes:int) { return readIntoDataHelper(file, "data", bytes) },
+
+	write :: (file:File, data:string|Data)                   -> (success:bool, err:string|none) !foreign method "write",
+	write :: (file:File, data:string|Data, bytesToWrite:int) -> (success:bool, err:string|none) !foreign method "write",
+
+	isEOF  :: (file:File) -> bool !foreign method "isEOF",
+
+	eachLine :: (file:File) -> (iter:(_1,_2:none)->(line:string|none), _1,_2:none) !foreign method "lines",
+
+	tell :: (file:File) -> (position:int) !foreign method "tell",
+	seek :: (file:File, position:int) -> (success:bool) !foreign method "seek",
+
+	getBuffer :: (file:File) -> (mode:BufferMode, size:int)                              !foreign method "getBuffer", -- @Cleanup: Be more like io module.
+	setBuffer :: (file:File, mode:BufferMode, size=0) -> (success:bool, err:string|none) !foreign method "setBuffer",
+	flush     :: (file:File) -> (success:bool, err:string|none)                          !foreign method "flush",
+}
+
+export DroppedFile :: !foreign struct { using File }
+
+export FileData :: !foreign struct {
+	using Data,
+
+	getExtension :: (data:FileData) -> string !foreign method "getExtension",
+	getFilename  :: (data:FileData) -> string !foreign method "getFilename",
+}
+
+--
+-- Functions
+--
 
 export setAppDataFolderName :: (name:string) !foreign lua "love.filesystem.setIdentity"
 
@@ -46,11 +119,4 @@ export newFileData :: (filename:string) -> (success:bool, fileData:FileData!must
 	if fileData == nil  return false, NULL, cast(string)err
 
 	return true, cast(FileData)fileData , ""
-}
-
-export FileData :: !foreign struct {
-	using Data,
-
-	getExtension :: (data:FileData) -> string !foreign method "getExtension",
-	getFilename  :: (data:FileData) -> string !foreign method "getFilename",
 }

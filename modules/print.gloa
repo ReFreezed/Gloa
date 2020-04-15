@@ -20,20 +20,27 @@ export printNice :: (v:$T) { _printNice(v, T, 0) }
 local _printNice :: (v:any, T:type, indent:int) {
 	-- @Incomplete: Recursive printing for table-likes.
 	-- @Polish: Better member printing.
+
+	local isLuaValueTableLike :: (v:any) {
+		local luaType = getLuaType(v)
+		return luaType == LuaType.TABLE or luaType == LuaType.USERDATA
+	}
+
 	using basic
+	using TypeTag
 
 	local write :: (...:int|float|string|type) !foreign lua "io.write"
 
 	local typeInfo  = getTypeInfo(T)
 	local indentStr = ""--"\t" * indent
 
-	using TypeTag
-
 	if typeInfo.tag == {
 		case INT:
 			printf("%.0f", cast(int) v)
 
 		case FLOAT:
+			if getLuaType(v) ~= LuaType.NUMBER { print(v) ; return }
+
 			local nStr = toString(v)
 			write(nStr)
 			if not find(nStr, ".")  write(".0")
@@ -45,9 +52,13 @@ local _printNice :: (v:any, T:type, indent:int) {
 			_printNice(v, enumInfo.memberType, indent)
 
 		case STRING:
+			if getLuaType(v) ~= LuaType.STRING { print(v) ; return }
+
 			write(indentStr, '"', cast(string) v, '"\n')
 
 		case TABLE:
+			if getLuaType(v) ~= LuaType.TABLE { print(v) ; return }
+
 			write(indentStr, toString(v), " {\n")
 			for cast(table) v {
 				write(indentStr, "\t", toString(itIndex), " = ", toString(it), "\n")
@@ -55,6 +66,8 @@ local _printNice :: (v:any, T:type, indent:int) {
 			write(indentStr, "}\n")
 
 		case ARRAY:
+			if not isLuaValueTableLike(v) { print(v) ; return }
+
 			write(indentStr, toString(v), " {\n")
 			for cast([]any) v {
 				write(indentStr, "\t", toString(itIndex), " = ", toString(it), "\n")
@@ -62,6 +75,8 @@ local _printNice :: (v:any, T:type, indent:int) {
 			write(indentStr, "}\n")
 
 		case STRUCT:
+			if not isLuaValueTableLike(v) { print(v) ; return }
+
 			local structInfo = cast(TypeInfoStruct) typeInfo
 			local obj        = cast(table) v
 
@@ -88,6 +103,8 @@ local _printNice :: (v:any, T:type, indent:int) {
 			write(indentStr, "}\n")
 
 		case TYPE:
+			if getLuaType(v) ~= LuaType.NUMBER { print(v) ; return }
+
 			-- @Incomplete: Print the type info struct instead of just the ID.
 			printf("type: %.0f", cast(int) v)
 
