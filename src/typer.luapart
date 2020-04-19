@@ -534,6 +534,24 @@ function _G.findDynamicMemberDeclaration(state, scope, name)
 	return nil
 end
 
+function _G.findDeclarationInEnumForValue(state, enum, constValueExpr)
+	for _, decl in ipairs(enum.declarations) do
+		assert(constValueExpr.nodeType == decl.value.nodeType)
+
+		if decl.value.nodeType == !(AST_LITERAL) then
+			if decl.value.value == constValueExpr.value then  return decl  end
+
+		elseif decl.value.nodeType == !(AST_TYPE) then
+			if decl.value.representedType == constValueExpr.representedType then  return decl  end
+
+		else
+			errorUnhandledNodeType(state, constValueExpr)
+		end
+	end
+
+	return nil
+end
+
 function _G.canNodeSeeDeclaration(state, node, decl)
 	-- It doesn't matter if this is true and we're in a declarative scope because we check that in the loop below.
 	local canSeeImperativeVariables = (decl.kind == !(DECL_KIND_LOCAL_VAR) --[[or decl.kind == !(DECL_KIND_READ_ONLY)]])
@@ -4309,21 +4327,23 @@ end
 !NODE_INFERRER `function nodeInferrers.AstCast(state, cast)`
 	-- Note: For convenience, cast.targetType may be nil here for generated casts. cast.inferredType must be set in those cases.
 
+	local expr = cast.expression
+
 	if cast.targetType and not cast.targetType.inferredType then
 		!DEPEND_AND_RETURN(`cast`, DEPEND_NODE_INFERRED, `cast.targetType`)
 	end
-	if not cast.expression.inferredType then
-		!DEPEND_AND_RETURN(`cast`, DEPEND_NODE_INFERRED, `cast.expression`)
+	if not expr.inferredType then
+		!DEPEND_AND_RETURN(`cast`, DEPEND_NODE_INFERRED, `expr`)
 	end
 
 	local castType    = cast.inferredType or requireTypeRepresentedByExpression(state, cast.targetType)
-	local exprType    = adjustTypeToOne(state, cast.expression, cast.expression.inferredType, true)
+	local exprType    = adjustTypeToOne(state, expr, expr.inferredType, true)
 	local castTypeTag = castType.tag
 	local exprTypeTag = exprType.tag
 
 	!local INVALID_CAST = `
 		typeError(
-			state, astGetExpressionVisuallyFurthestToTheLeft(cast.expression),
+			state, astGetExpressionVisuallyFurthestToTheLeft(expr),
 			"Cannot cast from %s to %s.",
 			getFriendlyTypeInfoName(exprType),
 			getFriendlyTypeInfoName(castType)
@@ -4332,6 +4352,7 @@ end
 
 	cast.inferredType = castType
 
+	-- Useless cast.
 	if castType == exprType then
 		if cast.targetType and !!(CONST_SET{ AST_STRUCT, AST_ENUM })[cast.targetType.nodeType] then
 			-- @Robustness: We cannot unqueue struct and enum nodes as that
@@ -4339,44 +4360,60 @@ end
 			-- nodes somewhere safe?
 			moveToNextRelevantPipe(state, cast)
 		else
-			moveToPipe(state, cast, cast.expression.queued.pipe) -- @Cleanup: Maybe cutOutPartOfNodeTree()/replaceQueuedNode() should do this (or maybe we just keep the wrong queued in cutOutPartOfNodeTree()).
-			cutOutPartOfNodeTree(state, cast, cast.expression)
+			moveToPipe(state, cast, expr.queued.pipe) -- @Cleanup: Maybe cutOutPartOfNodeTree()/replaceQueuedNode() should do this (or maybe we just keep the wrong queued in cutOutPartOfNodeTree()).
+			cutOutPartOfNodeTree(state, cast, expr)
 		end
 		return
 
-	elseif isTypeCompatibleWith(exprType, castType) or exprTypeTag == !(TYPE_ANY) then
+	elseif
+		-- Comaptible types.
+		(exprTypeTag == !(TYPE_ANY) or isTypeCompatibleWith(exprType, castType))
+		-- float <-> int
+		or (isTypeNumeric(castType) and isTypeNumeric(exprType))
+		-- Struct to substruct.
+		or (exprTypeTag == !(TYPE_STRUCT) and castTypeTag == !(TYPE_STRUCT) and doesStructInherit(castType, exprType))
+		-- Values to bool.
+		or (castTypeTag == !(TYPE_BOOL) and !!(CONST_SET{
+			TYPE_INT,
+			TYPE_FLOAT,
+			TYPE_STRING,
+			TYPE_ARRAY
+		})[exprTypeTag])
+		-- Array-like struct to bool (passes as an array).
+		or (castTypeTag == !(TYPE_BOOL) and exprTypeTag == !(TYPE_STRUCT) and exprType.kind == !(STRUCT_KIND_ARRAY))
+		-- Enum member to real member type.
+		or (exprTypeTag == !(TYPE_ENUM) and castType == exprType.memberTypeInfo)
+		-- Type to int.
+		or (exprTypeTag == !(TYPE_TYPE) and castTypeTag == !(TYPE_INT))
+	then
 		-- void  Valid cast.
 
-	elseif isTypeNumeric(castType) and isTypeNumeric(exprType) then
-		-- void  Valid cast.
-
-	elseif exprTypeTag == !(TYPE_STRUCT) and castTypeTag == !(TYPE_STRUCT) and doesStructInherit(castType, exprType) then
-		-- void  Valid cast.
-
-	elseif castTypeTag == !(TYPE_BOOL) and !!(CONST_SET{
-		TYPE_INT,
-		TYPE_FLOAT,
-		TYPE_STRING,
-		TYPE_ARRAY
-	})[exprTypeTag] then
-		-- void  Valid cast.
-
-	elseif castTypeTag == !(TYPE_BOOL) and exprTypeTag == !(TYPE_STRUCT) and exprType.kind == !(STRUCT_KIND_ARRAY) then
-		-- void  Array-like structs can pass as arrays.
-
-	elseif exprTypeTag == !(TYPE_ENUM) and isTypeCompatibleWith(castType, exprType.memberTypeInfo) then
-		-- void  Enum members can cast to the real member type.
-
-	elseif exprTypeTag == !(TYPE_ENUM) and isTypeNumeric(castType) and isTypeNumeric(exprType.memberTypeInfo) then
-		-- We need two casts to happen in sequence here so we wrap ourselves in another cast.
-		wrapInImplicitCast(state, cast, exprType.memberTypeInfo, false)
-
+	-- Compound to single.
 	elseif castTypeTag ~= !(TYPE_COMPOUND) and exprTypeTag == !(TYPE_COMPOUND) then
 		-- We get here for situations like these: local xMaybe:int|nil = 0 ; local x = cast(int) xMaybe
 		-- The user better know what they're doing!
 		local compound = exprType
 		if not indexOf(compound, castType) then
 			!!(INVALID_CAST)
+		end
+
+	-- Enum to numeric (not real member type).
+	elseif exprTypeTag == !(TYPE_ENUM) and isTypeNumeric(castType) and isTypeNumeric(exprType.memberTypeInfo) then
+		-- We need two casts to happen in sequence here so we wrap the expression in another cast.
+		wrapInImplicitCast(state, cast.expression, exprType.memberTypeInfo, false)
+		simplifyExpressionIfConstant(state, cast.expression)
+
+	-- Enum member type to enum.
+	elseif castTypeTag == !(TYPE_ENUM) and exprType == castType.memberTypeInfo then
+		if isExpressionConstant(state, expr, false) then
+			assert(expr.nodeType == !(AST_LITERAL) or expr.nodeType == !(AST_TYPE))
+
+			local enumInfo = castType
+			local decl     = findDeclarationInEnumForValue(state, enumInfo.astNode, expr)
+
+			if not decl then
+				typeError(state, expr, "This value is not valid for enum '%s'.", getFriendlyTypeInfoName(castType))
+			end
 		end
 
 	else
@@ -6638,6 +6675,23 @@ local function simplifyCast(state, cast)
 		else
 			errorInternal(state, cast, "Incomplete: Handle casting enum to %s.", getFriendlyTypeInfoName(castTypeInfo))
 		end
+
+	-- enumMemberType -> enum
+	elseif castTypeInfo.tag == !(TYPE_ENUM) and exprTypeInfo == castTypeInfo.memberTypeInfo then
+		local enumInfo = castTypeInfo
+		local decl     = findDeclarationInEnumForValue(state, enumInfo.astNode, cast.expression) or errorInternal(state, cast.expression)
+		local ident    = astCopy(decl.name, cast.token, cast.parent)
+
+		replaceQueuedNodeAndUnqueueOldTree(state, cast, ident)
+		moveToNextRelevantPipe(state, ident, !(PIPE_INFER))
+
+	-- type -> int
+	elseif exprTypeInfo.tag == !(TYPE_TYPE) and castTypeInfo.tag == !(TYPE_INT) then
+		local typeRepresented = getTypeRepresentedByExpression(cast.expression) or errorInternal(state, cast)
+		local literal         = newLiteral(cast.parent, cast.token, !(LITERAL_INTEGER), typeRepresented.id, castTypeInfo)
+
+		replaceQueuedNodeAndUnqueueOldTree(state, cast, literal)
+		moveToNextRelevantPipe(state, literal, !(PIPE_INFER))
 
 	-- (whatever) -> compound
 	elseif castTypeInfo.tag == !(TYPE_COMPOUND) then

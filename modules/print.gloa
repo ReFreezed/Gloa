@@ -13,23 +13,25 @@
 !import "string"
 local basic :: !import "basic"
 
-export print     :: basic.print
-export printf    :: basic.printf
+local stdoutWrite :: (...:int|float|string|type) !foreign lua "io.write"
+
+export print  :: basic.print
+export printf :: basic.printf
+
 export printNice :: (v:$T) { _printNice(v, T, 0) }
+export printNice :: (prefix:string, v:$T) { stdoutWrite(prefix) ; _printNice(v, T, 0) }
 
 local _printNice :: (v:any, T:type, indent:int) {
 	-- @Incomplete: Recursive printing for table-likes.
 	-- @Polish: Better member printing.
 
-	local isLuaValueTableLike :: (v:any) {
+	local isLuaValueTableLike :: (v:any) -> bool {
 		local luaType = getLuaType(v)
 		return luaType == LuaType.TABLE or luaType == LuaType.USERDATA
 	}
 
 	using basic
 	using TypeTag
-
-	local write :: (...:int|float|string|type) !foreign lua "io.write"
 
 	local typeInfo  = getTypeInfo(T)
 	local indentStr = ""--"\t" * indent
@@ -42,37 +44,37 @@ local _printNice :: (v:any, T:type, indent:int) {
 			if getLuaType(v) ~= LuaType.NUMBER { print(v) ; return }
 
 			local nStr = toString(v)
-			write(nStr)
-			if not find(nStr, ".")  write(".0")
-			write("\n")
+			stdoutWrite(nStr)
+			if not find(nStr, ".")  stdoutWrite(".0")
+			stdoutWrite("\n")
 
 		case ENUM:
 			local enumInfo = cast(TypeInfoEnum) typeInfo
-			-- if enumInfo.name  write(indentStr, enumInfo.name, ": ") -- @Incomplete: Print "enumName.enumMemberName" before the literal value.
+			-- if enumInfo.name  stdoutWrite(indentStr, enumInfo.name, ": ") -- @Incomplete: Print "enumName.enumMemberName" before the literal value.
 			_printNice(v, enumInfo.memberType, indent)
 
 		case STRING:
 			if getLuaType(v) ~= LuaType.STRING { print(v) ; return }
 
-			write(indentStr, '"', cast(string) v, '"\n')
+			stdoutWrite(indentStr, '"', cast(string) v, '"\n')
 
 		case TABLE:
 			if getLuaType(v) ~= LuaType.TABLE { print(v) ; return }
 
-			write(indentStr, toString(v), " {\n")
+			stdoutWrite(indentStr, toString(v), " {\n")
 			for cast(table) v {
-				write(indentStr, "\t", toString(itIndex), " = ", toString(it), "\n")
+				stdoutWrite(indentStr, "\t", toString(itIndex), " = ", toString(it), "\n")
 			}
-			write(indentStr, "}\n")
+			stdoutWrite(indentStr, "}\n")
 
 		case ARRAY:
 			if not isLuaValueTableLike(v) { print(v) ; return }
 
-			write(indentStr, toString(v), " {\n")
+			stdoutWrite(indentStr, toString(v), " {\n")
 			for cast([]any) v {
-				write(indentStr, "\t", toString(itIndex), " = ", toString(it), "\n")
+				stdoutWrite(indentStr, "\t", toString(itIndex), " = ", toString(it), "\n")
 			}
-			write(indentStr, "}\n")
+			stdoutWrite(indentStr, "}\n")
 
 		case STRUCT:
 			if not isLuaValueTableLike(v) { print(v) ; return }
@@ -89,18 +91,18 @@ local _printNice :: (v:any, T:type, indent:int) {
 			objStr       = replacePattern(objStr, "^table: ",    "")
 			objStr       = replacePattern(objStr, "^userdata: ", "")
 
-			write(indentStr, structInfo.name?:"(struct)", ": ", objStr, " {\n")
+			stdoutWrite(indentStr, structInfo.name?:"(struct)", ": ", objStr, " {\n")
 
 			for member: structInfo.members {
 				local name = member.name
-				write(indentStr, "\t", name, " = ", toString(obj[name]), "\n")
+				stdoutWrite(indentStr, "\t", name, " = ", toString(obj[name]), "\n")
 			}
 
 			if structInfo.kind == structInfo.Kind.ARRAY {
-				for cast([]any) v  write(indentStr, "\t", toString(itIndex), " = ", toString(it), "\n")
+				for cast([]any) v  stdoutWrite(indentStr, "\t", toString(itIndex), " = ", toString(it), "\n")
 			}
 
-			write(indentStr, "}\n")
+			stdoutWrite(indentStr, "}\n")
 
 		case TYPE:
 			if getLuaType(v) ~= LuaType.NUMBER { print(v) ; return }
