@@ -1212,6 +1212,16 @@ local function writeLoopBodyAndFooter(state, writer, loop, indent, nextLocalN, l
 	return indent, indentStr
 end
 
+local function doesContinueCrossNode(state, node)
+	-- @Polish: Check more exactly for an actual crossing.
+	while true do
+		node = astFindParent(node, !!(CONST_SET{ AST_FOR, AST_WHILE, AST_LAMBDA }))
+		if not node or node.nodeType == !(AST_LAMBDA) then  return false  end
+
+		if node.hasContinues then  return true  end
+	end
+end
+
 function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, isElseif, nextStatementInParent)
 	!ASSERT `not block[1]`
 
@@ -1449,10 +1459,9 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 			if not (ifBranch.branchFalse and ifBranch.branchFalse.statementsDynamic[1]) then
 				-- void
 
-			-- @Polish: Re-enable 'elseif' without 'continue' messing up.
-			-- elseif not ifBranch.branchFalse.statementsDynamic[2] and ifBranch.branchFalse.statementsDynamic[1].nodeType == !(AST_IF) then
-			-- 	file:write(indentStr, "else") -- This will be followed by "if"
-			-- 	writeBlock(state, writer, indent, nextLocalN, localsStack, ifBranch.branchFalse, true, nextStatement)
+			elseif not ifBranch.branchFalse.statementsDynamic[2] and ifBranch.branchFalse.statementsDynamic[1].nodeType == !(AST_IF) and not doesContinueCrossNode(state, ifBranch) then
+				file:write(indentStr, "else") -- This will be followed by "if"
+				writeBlock(state, writer, indent, nextLocalN, localsStack, ifBranch.branchFalse, true, nextStatement)
 
 			else
 				file:write(indentStr, "else")
