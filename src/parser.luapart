@@ -310,6 +310,7 @@ _G.!structAst"AstDeclaration:_AstNode"{
 	{`kind`,                 DECL_KIND_LOCAL_VAR}, -- DECL_KIND_LOCAL_VAR|DECL_KIND_LOCAL_CONST|DECL_KIND_EXPORT_VAR|DECL_KIND_EXPORT_CONST|DECL_KIND_STATIC  @Incomplete: DECL_KIND_READ_ONLY  Note: Globals are exports.
 	{`canShadow`,            false},
 	{`addedByPolymorph`,     false},
+	{`isDocumentation`,      false}, -- Some declared names basically only exist for documentation purposes, i.e. function output arguments.
 
 	{`assignment`,           nil, astRef="node"}, -- AstAssignment
 	{`assignmentIndex`,      1},
@@ -805,8 +806,9 @@ function _G.parseArguments(state, parent, isInput)
 			table.insert(args.arguments, arg)
 			table.insert(argsInGroup,    arg)
 
-			local decl      = astNewNode(AstDeclaration, token, arg)
-			arg.declaration = decl
+			local decl           = astNewNode(AstDeclaration, token, arg)
+			decl.isDocumentation = not isInput
+			arg.declaration      = decl
 
 			if tokType == !(TOKEN_IDENTIFIER) then
 				local ident       = astNewNode(AstIdentifier, token, decl)
@@ -1016,8 +1018,9 @@ function _G.parseNamelessOutputArguments(state, parent)
 		arg.group = groupN
 		table.insert(args.arguments, arg)
 
-		local decl      = astNewNode(AstDeclaration, arg.token, arg)
-		arg.declaration = decl
+		local decl           = astNewNode(AstDeclaration, arg.token, arg)
+		decl.isDocumentation = true
+		arg.declaration      = decl
 
 		local tokType, tokValue = peekNextToken(state)
 
@@ -2912,6 +2915,12 @@ function _G.parseLambda(state, parent)
 		!ERROR_OR_RETURN `errorParsing(state, lambda.token, "Foreign functions cannot have captures.")`
 	end
 
+	if lambda.bodyIsForeign and lambda.argumentsIn then
+		for _, arg in ipairs(lambda.argumentsIn.arguments) do
+			arg.declaration.isDocumentation = true
+		end
+	end
+
 	return lambda
 end
 
@@ -3045,12 +3054,19 @@ function _G.parseExpression(state, parent, prevOpPrecedence, expectLvalue)
 
 		if lambda.body then
 			expr = lambda
+
 		else
 			local typeNode          = astNewNode(AstType, lambda.token, parent)
 			typeNode.kind           = !(TYPE_KIND_FUNCTION)
 			typeNode.functionHeader = lambda
 			lambda.parent           = typeNode
 			expr                    = typeNode
+
+			if lambda.argumentsIn then
+				for _, arg in ipairs(lambda.argumentsIn.arguments) do
+					arg.declaration.isDocumentation = true
+				end
+			end
 		end
 
 	-- Parentheses (must be detected after lambda).
