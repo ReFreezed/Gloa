@@ -3846,9 +3846,9 @@ local function inferTableStruct(state, tableNode, structInfo)
 		!TRACE()
 		printerr()
 		nodeMessage(io.stderr, state, tableNode, "Error", "Typer", "Cannot instantiate foreign struct '%s'.", getFriendlyTypeInfoName(structInfo))
-		if structInfo.astNode.foreignThroughNode then
-			nodeMessage(io.stderr, state, structInfo.astNode.foreignThroughNode, "Info", "Typer", "...the struct got its foreign state through this.")
-		end
+		-- if structInfo.astNode.foreignThroughNode then
+		-- 	nodeMessage(io.stderr, state, structInfo.astNode.foreignThroughNode, "Info", "Typer", "...the struct got its foreign state through this.")
+		-- end
 		exitFailure()
 	end
 
@@ -5520,9 +5520,14 @@ end
 				end
 			end
 
-			if structToInherit.isForeign then
-				struct.isForeign          = true
-				struct.foreignThroughNode = typeExpr
+			if structToInherit.isForeign and not struct.isForeign then
+				typeError(
+					state, typeExpr,
+					"Trying to inherit foreign struct '%s' into non-foreign struct. Both structs must be foreign for inheritance to work.",
+					getFriendlyTypeInfoName(structInfoToInherit)
+				)
+				-- struct.isForeign          = true
+				-- struct.foreignThroughNode = typeExpr
 			end
 
 			if structInfoToInherit.keyType then
@@ -5565,27 +5570,29 @@ end
 			member.typeInfo = memberType
 			table.insert(structInfo.members, member)
 
-			-- Inherit foreign state from foreign-marked members in certain situations:
+			-- Make sure we never attempt to construct foreign values for members natively.
+			-- (There's also a check for this in ProgramWriter.)
 
 			if struct.isForeign then
 				-- void
 
 			elseif decl.value and !!(CONST_SET{ AST_FOREIGN, AST_NULL })[decl.value.nodeType] then
-				-- void
+				-- void  Already foreign values and nil are always fine.
 
 			elseif member.typeInfo.tag == !(TYPE_STRUCT) then
 				if member.typeInfo.astNode.isForeign then
-					struct.isForeign          = true
-					struct.foreignThroughNode = decl
+					typeError(state, (decl.value or decl), "Struct member value is foreign but the struct itself isn't. Mark the struct as !foreign or use NULL as initial value for this member to be valid.")
+					-- struct.isForeign          = true
+					-- struct.foreignThroughNode = decl
 				end
 
 			elseif member.typeInfo.tag == !(TYPE_COMPOUND) then
 				!ASSERT("decl.value.inferredType.tag ~= "..TYPE_COMPOUND)
 
 				if decl.value.inferredType.tag == !(TYPE_STRUCT) and decl.value.inferredType.astNode.isForeign then
-					struct.isForeign          = true
-					struct.foreignThroughNode = decl
-					break
+					typeError(state, decl.value, "Struct member value is foreign but the struct itself isn't. Mark the struct as !foreign or use NULL as initial value for this member to be valid.")
+					-- struct.isForeign          = true
+					-- struct.foreignThroughNode = decl
 				end
 			end
 		end
