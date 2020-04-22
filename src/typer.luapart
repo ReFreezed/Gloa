@@ -5476,95 +5476,108 @@ end
 
 	-- Inherit members from other structs.
 	if struct.inherits[1] then
+		local declarationsWithNew = {} -- Declarations will be sorted as expected.
+		local inheritIndices      = {}
+
 		for i, typeExpr in ipairs(struct.inherits) do
-			local structInfoToInherit  = requireTypeRepresentedByExpression(state, typeExpr)
-			local insertIndexStatement = indexOf(struct.statementsStatic, typeExpr) or errorInternal(state, typeExpr)
-			table.remove(struct.statementsStatic, insertIndexStatement)
+			inheritIndices[typeExpr] = i
+		end
 
-			for j = 1, i-1 do
-				local typeExprPrevious   = struct.inherits[j]
-				local structInfoPrevious = requireTypeRepresentedByExpression(state, typeExprPrevious)
-				if
-					structInfoToInherit == structInfoPrevious
-					-- @Speed?
-					or doesStructInherit(structInfoToInherit, structInfoPrevious)
-					or doesStructInherit(structInfoPrevious, structInfoToInherit)
-				then
-					typeError2(state,
-						typeExpr,         F("Two inherited structs are the same or share a base struct."),
-						typeExprPrevious, F("...here is the other inheritance.")
+		for _, statement in ipairs(struct.statementsStatic) do
+			if statement.nodeType == !(AST_DECLARATION) then
+				local decl = statement
+				table.insert(declarationsWithNew, decl)
+
+			elseif inheritIndices[statement] then
+				local typeExpr            = statement
+				local structInfoToInherit = requireTypeRepresentedByExpression(state, typeExpr)
+
+				for j = 1, inheritIndices[statement]-1 do
+					local typeExprPrevious   = struct.inherits[j]
+					local structInfoPrevious = requireTypeRepresentedByExpression(state, typeExprPrevious)
+					if
+						structInfoToInherit == structInfoPrevious
+						-- @Speed?
+						or doesStructInherit(structInfoToInherit, structInfoPrevious)
+						or doesStructInherit(structInfoPrevious, structInfoToInherit)
+					then
+						typeError2(state,
+							typeExpr,         F("Two inherited structs are the same or share a base struct."),
+							typeExprPrevious, F("...here is the other inheritance.")
+						)
+					end
+				end
+
+				local structToInherit = structInfoToInherit.astNode
+
+				for j, declToInherit in ipairs(structToInherit.declarations) do
+					local decl = findMemberDeclaration(state, struct, declToInherit.name.name)
+					if not decl or decl.parent ~= struct then
+						table.insert(struct.declarations,      declToInherit)
+						table.insert(declarationsWithNew, declToInherit)
+					elseif isDeclarationConstant(decl) and isDeclarationConstant(declToInherit) then
+						-- void  Shadowing/overriding static declarations is permitted. (@Design: Should we limit this to only functions, methods, or even foreign methods?)
+					else
+						typeError3(state,
+							typeExpr,      F("Trying to inherit a member called '%s' but the struct already has a member with that name.", decl.name.name),
+							decl,          F("...one declaration."), -- This may be an inherited member too.
+							declToInherit, F("...the other declaration.")
+						)
+					end
+				end
+
+				if structToInherit.isForeign and not struct.isForeign then
+					typeError(
+						state, typeExpr,
+						"Trying to inherit foreign struct '%s' into non-foreign struct. Both structs must be foreign for inheritance to work.",
+						getFriendlyTypeInfoName(structInfoToInherit)
 					)
+					-- struct.isForeign          = true
+					-- struct.foreignThroughNode = typeExpr
 				end
-			end
 
-			local insertIndexDecl = 1
-
-			for i, decl in ipairs(struct.declarations) do
-				if decl.token > typeExpr.token then  break  end
-				insertIndexDecl = i+1
-			end
-
-			local structToInherit = structInfoToInherit.astNode
-
-			for _, declToInherit in ipairs(structToInherit.declarations) do
-				local decl = findMemberDeclaration(state, struct, declToInherit.name.name)
-				if not decl or decl.parent ~= struct then
-					table.insert(struct.declarations, insertIndexDecl, declToInherit)
-				elseif isDeclarationConstant(decl) and isDeclarationConstant(declToInherit) then
-					-- void  Shadowing/overriding static declarations is permitted. (@Design: Should we limit this to only functions, methods, or even foreign methods?)
-				else
-					typeError2(state,
-						typeExpr, F("Trying to inherit a member called '%s' but the struct already has a member with that name.", decl.name.name),
-						decl,     F("...previous member was added here.") -- This may be an inherited member too.
-					)
+				if structInfoToInherit.keyType then
+					if structInfo.keyType then
+						local early, late = getEarlyAndLateExpression(typeExpr, typeSourceNodeK)
+						typeError2(state, late, "Key type is already defined.", early, "...key type was defined here.")
+					end
+					typeSourceNodeK    = typeExpr
+					structInfo.keyType = structInfoToInherit.keyType
 				end
-			end
-
-			if structToInherit.isForeign and not struct.isForeign then
-				typeError(
-					state, typeExpr,
-					"Trying to inherit foreign struct '%s' into non-foreign struct. Both structs must be foreign for inheritance to work.",
-					getFriendlyTypeInfoName(structInfoToInherit)
-				)
-				-- struct.isForeign          = true
-				-- struct.foreignThroughNode = typeExpr
-			end
-
-			if structInfoToInherit.keyType then
-				if structInfo.keyType then
-					local early, late = getEarlyAndLateExpression(typeExpr, typeSourceNodeK)
-					typeError2(state, late, "Key type is already defined.", early, "...key type was defined here.")
+				if structInfoToInherit.valueType then
+					if structInfo.valueType then
+						local early, late = getEarlyAndLateExpression(typeExpr, typeSourceNodeV)
+						typeError2(state, late, "Value type is already defined.", early, "...value type was defined here.")
+					end
+					typeSourceNodeV      = typeExpr
+					structInfo.valueType = structInfoToInherit.valueType
 				end
-				typeSourceNodeK    = typeExpr
-				structInfo.keyType = structInfoToInherit.keyType
-			end
-			if structInfoToInherit.valueType then
-				if structInfo.valueType then
-					local early, late = getEarlyAndLateExpression(typeExpr, typeSourceNodeV)
-					typeError2(state, late, "Value type is already defined.", early, "...value type was defined here.")
+				-- @Incomplete: Handle structInfo.kind==STRUCT_KIND_ARRAY and structInfoToInherit.kind==STRUCT_KIND_TABLE, and vice versa.
+				if structInfoToInherit.kind ~= !(STRUCT_KIND_NORMAL) then
+					assert(structInfo.kind == !(STRUCT_KIND_NORMAL))
+					structInfo.kind = structInfoToInherit.kind
 				end
-				typeSourceNodeV      = typeExpr
-				structInfo.valueType = structInfoToInherit.valueType
-			end
-			-- @Incomplete: Handle structInfo.kind==STRUCT_KIND_ARRAY and structInfoToInherit.kind==STRUCT_KIND_TABLE, and vice versa.
-			if structInfoToInherit.kind ~= !(STRUCT_KIND_NORMAL) then
-				assert(structInfo.kind == !(STRUCT_KIND_NORMAL))
-				structInfo.kind = structInfoToInherit.kind
 			end
 		end
 
-		for i, expr in ipairs(struct.statementsStatic) do
-			expr.queued.key = i
+		struct.declarations = declarationsWithNew
+	end
+
+	-- Check invalid recursiveness.
+	for _, decl in ipairs(struct.statementsStatic) do
+		if decl.nodeType == !(AST_DECLARATION) then
+			local memberName = decl.name.name
+			local memberType = decl.name.inferredType or errorInternal()
+			checkForRecursiveStruct(state, decl, {memberName},memberName,memberType, structInfo, structInfo)
 		end
 	end
 
 	-- Add members to structInfo.
 	for _, decl in ipairs(struct.declarations) do
-		local memberName = decl.name.name
-		local memberType = decl.name.inferredType or errorInternal()
-		checkForRecursiveStruct(state, decl, {memberName},memberName,memberType, structInfo, structInfo)
-
 		if not isDeclarationConstant(decl) then
+			local memberName = decl.name.name
+			local memberType = decl.name.inferredType or errorInternal()
+
 			local member    = TypeInfoStructMember()
 			member.name     = memberName
 			member.typeInfo = memberType

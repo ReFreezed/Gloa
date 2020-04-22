@@ -602,6 +602,23 @@ local function getDataForHandlingMissingArguments(callee)
 	return lambda
 end
 
+local function isExpressionNil(expr)
+	return
+		expr.nodeType == !(AST_NULL)
+		or expr.nodeType == !(AST_LITERAL) and expr.literalType == !(LITERAL_NIL)
+end
+
+local function isStructMemberDefaultValueNil(state, struct, memberName, nodeForError)
+	local decl      = findDynamicMemberDeclaration(state, struct, memberName) or errorInternal(state, nodeForError, memberName)
+	local valueExpr = decl.value
+
+	if valueExpr then
+		return isExpressionNil(valueExpr)
+	else
+		return decl.name.inferredType.tag == !(TYPE_NONE) -- Will probably never be true. Why would anyone use 'none' as a member type? That's silly!
+	end
+end
+
 function _G.writeExpression(state, writer, indent, nextLocalN, localsStack, expr)
 	!ASSERT(`expr.inferredType`, nil, `expr`)
 	local file = writer.file
@@ -841,23 +858,17 @@ function _G.writeExpression(state, writer, indent, nextLocalN, localsStack, expr
 		local first     = true
 		file:write("{")
 
-		local function writeGenericTableFieldIfValueIsNotNil(tableField)
-			local valueExpr = tableField.value
-			if valueExpr.nodeType == !(AST_NULL) then  return  end
-			if valueExpr.nodeType == !(AST_LITERAL) and valueExpr.literalType == !(LITERAL_NIL) then  return  end
-
-			if not first then  file:write(", ")  end
-			first = false
-
-			-- @Polish: Output sequence values without key in 'table' type tables.
-			writeTableConstructorKey(state, writer, indent, nextLocalN, localsStack, tableField.key)
-			file:write("=")
-			writeExpression(state, writer, indent, nextLocalN, localsStack, valueExpr)
-		end
-
 		if tableNode.inferredType.tag == !(TYPE_TABLE) then
 			for _, tableField in ipairs(tableNode.fields) do
-				writeGenericTableFieldIfValueIsNotNil(tableField)
+				if not (isExpressionNil(tableField.value) and isExpressionConstant(state, tableField.key, true)) then
+					if not first then  file:write(", ")  end
+					first = false
+
+					-- @Polish: Output sequence values without key in generic table constructors.
+					writeTableConstructorKey(state, writer, indent, nextLocalN, localsStack, tableField.key)
+					file:write("=")
+					writeExpression(state, writer, indent, nextLocalN, localsStack, tableField.value)
+				end
 			end
 
 		elseif tableNode.inferredType.tag == !(TYPE_ARRAY) then
@@ -878,41 +889,30 @@ function _G.writeExpression(state, writer, indent, nextLocalN, localsStack, expr
 			end
 
 		elseif tableNode.inferredType.tag == !(TYPE_STRUCT) then
-			local structInfo    = tableNode.inferredType
-			local writtenFields = {}
+			local structInfo = tableNode.inferredType
 			!ASSERT `not structInfo.isPolymorphic`
 
-			for _, member in ipairs(structInfo.members) do
-				local tableField = findTableFieldByNameInStructConstructor(state, tableNode, member.name)
-				if tableField then  writtenFields[tableField] = true  end
-
-				if not (
-					tableField and (
-						tableField.value.nodeType == !(AST_NULL)
-						or (tableField.value.nodeType == !(AST_LITERAL) and tableField.value.literalType == !(LITERAL_NIL))
-					)
-					-- or (default value is NULL/nil) -- @Polish
-				) then
+			for _, tableField in ipairs(tableNode.fields) do
+				if not isExpressionNil(tableField.value) then
 					if not first then  file:write(", ")  end
 					first = false
 
-					if tableField then
-						writeTableConstructorKey(state, writer, indent, nextLocalN, localsStack, tableField.key)
-						file:write("=")
-						writeExpression(state, writer, indent, nextLocalN, localsStack, tableField.value)
-					else
-						writeTableConstructorKeyName(writer, member.name)
-						file:write("=")
-						writeDefaultValueForStructMember(state, writer, indent, nextLocalN, localsStack, structInfo, member, tableNode) -- @UX: Maybe use a better nodeForError.
-					end
+					writeTableConstructorKey(state, writer, indent, nextLocalN, localsStack, tableField.key)
+					file:write("=")
+					writeExpression(state, writer, indent, nextLocalN, localsStack, tableField.value)
 				end
 			end
 
-			if structInfo.kind ~= !(STRUCT_KIND_NORMAL) then
-				for _, tableField in ipairs(tableNode.fields) do
-					if not writtenFields[tableField] then
-						writeGenericTableFieldIfValueIsNotNil(tableField)
-					end
+			for _, member in ipairs(structInfo.members) do
+				local tableField = findTableFieldByNameInStructConstructor(state, tableNode, member.name)
+
+				if not (tableField or isStructMemberDefaultValueNil(state, structInfo.astNode, member.name, tableNode)) then
+					if not first then  file:write(", ")  end
+					first = false
+
+					writeTableConstructorKeyName(writer, member.name)
+					file:write("=")
+					writeDefaultValueForStructMember(state, writer, indent, nextLocalN, localsStack, structInfo, member, tableNode) -- @UX: Maybe use a better nodeForError.
 				end
 			end
 

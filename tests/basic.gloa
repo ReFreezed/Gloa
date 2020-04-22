@@ -59,7 +59,7 @@ local _main :: () -> void {
 			}
 		}
 		local double = getDoubler()(5)
-		!import "basic"
+		!import "basic" -- The module has the same name as this file - don't worry about it!
 		print("double", double)
 		assert(double == 10)
 	}
@@ -672,6 +672,20 @@ local _main :: () -> void {
 		print("MyType id:", intTypeId)
 	}
 
+	do {
+		-- Ensure code gets executed in certain cases involving table contructors.
+		!import "basic"
+		static gotCalled = false
+
+		local getFieldName :: () -> string {
+			gotCalled = true
+			return "b"
+		}
+
+		local t: table = {a=nil, [getFieldName()]=nil}
+		assert(gotCalled, "gotCalled")
+	}
+
 	--]=]
 	do {
 		!import "basic"
@@ -1087,10 +1101,62 @@ local testStructs :: () {
 
 		assert(Thinger(57) == false)
 	}
+
+	do {
+		-- Test member order.
+		!import "basic"
+
+		local StructA :: struct { a1:int, a2:string }
+		local StructB :: struct { b1:bool, b2:table }
+
+		local StructC :: struct {
+			c1: int,
+			using StructA,
+			c2: int,
+			using StructB,
+			c3: int,
+		}
+
+		local EXPECTED :: {
+			"c1",
+			"a1", "a2",
+			"c2",
+			"b1", "b2",
+			"c3",
+		}
+		for type_info(StructC).members {
+			if it.name ~= EXPECTED[itIndex]
+				errorf("%d got:%s expect:%s", itIndex, it.name, EXPECTED[itIndex])
+		}
+	}
+
+	do {
+		-- Test table field value execution order.
+		!import "basic"
+
+		local getInt :: (callNumExpected:int) -> int {
+			static callNum = 0
+			callNum += 1
+
+			if callNum ~= callNumExpected
+				errorf("%d", callNumExpected)
+
+			return 0
+		}
+
+		local Struct :: struct {
+			a: int,
+			b: string|none = nil,
+			c: int,
+			d: bool,
+		}
+
+		local obj: Struct = { c=getInt(1), a=getInt(2) }
+	}
 }
 
 local testBoolCasts :: () {
-	!import "basic" -- The module has the same name as this file - don't worry about it!
+	!import "basic"
 	print("Doing testBoolCasts.")
 
 	do {
