@@ -1,0 +1,64 @@
+-- Trying to optimize output for assignments with binary operations...
+
+local main :: () {
+	local i: int
+	local o: struct { oo:int }
+	local x: struct { y:struct{z:int} }
+	static arr = {0, 0, 0, 0, 0} -- Static or local or whatever doesn't matter.
+
+	local get3 :: () -> int, int, int {
+		return 1, 2, 3
+	}
+
+	-- Targets:
+	--   1: Don't fetch i because no-op.
+	--   2: Don't fetch i because no-op.
+	-- Values:
+	--   1: Don't fetch 1 because const.
+	--   2: Don't fetch 2 because const.
+	i, i += 1, 2
+	-- Preparation:
+	--   (none) -- There are only consts and no-ops here.
+	-- Assignment:
+	--   i,   i
+	-- = i+1, i+2
+
+	-- Targets:
+	--   1: Don't fetch o because no-op.
+	--      Don't fetch oo because const.
+	--   2: Fetch x.y.
+	--      Don't fetch z because const.
+	--   3: Don't fetch arr because no-op.
+	--      Don't fetch i because no-op.
+	-- Values:
+	--   1: Don't fetch 5 because const.
+	--   2: Don't fetch i because no-op.
+	--   3: Don't fetch x.y.z because evaluation order is fine.
+	o.oo, x.y.z, arr[i] //= 5, i, x.y.z
+	-- Preparation:
+	--   local OBJ2 = x.y
+	-- Assignment:
+	--   o.oo,     OBJ2.z,     arr[i]
+	-- = o.oo + 5, OBJ2.z + i, arr[i] + x.y.z
+
+	-- Targets:
+	--   1: Don't fetch o because no-op.
+	--      Don't fetch oo because const.
+	--   2: Fetch x.y.
+	--      Don't fetch z because const.
+	--   3: Don't fetch arr because no-op.
+	--      Fetch i+1.
+	-- Values:
+	--   1: Fetch get3() because return values after first value is needed unpacked.
+	o.oo, x.y.z, arr[i+1] += get3()
+	-- Preparation:
+	--   local OBJ2 = x.y
+	--   local KEY3 = i+1
+	--   local VAL1,VAL2,VAL3 = get3()
+	-- Assignment:
+	--   o.oo,        OBJ2.z,        arr[KEY3]
+	-- = o.oo + VAL1, OBJ2.z + VAL2, arr[KEY3] + VAL3
+
+	o.oo         += 1
+	o.oo, arr[i] += 1, 2
+}

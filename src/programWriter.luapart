@@ -31,7 +31,7 @@
 	- Local variables in Lua are uniquely named and thus never shadow anything (which might help with debugging).
 
 	@Incomplete:
-	- Handle the limited amount of locals Lua allows (200). (Maybe we'll have to use Lua globals to some extent after all.)
+	- Handle the limited amount of locals Lua allows (200).
 
 --============================================================]]
 
@@ -324,18 +324,18 @@ function _G.shouldOperationHaveSurroundingParentheses(node)
 	return not (
 		!!(CONST_SET{
 			AST_CAST, -- Casts should always add their own parentheses.
-			AST_ASSIGNMENT,
 			AST_CALL, -- Both callee and arguments.
 			AST_RETURN,
 			AST_IF,
 			AST_FOR,
 			AST_WHILE
 		})[parentNodeType]
-		or parent.nodeType == !(AST_ACCESS) and node == parent.member -- The member should be inside [].
+		or parentNodeType == !(AST_ASSIGNMENT) and not (parent.binaryOperation ~= "" and node.queued.container == parent.values)
+		or parentNodeType == !(AST_ACCESS) and node == parent.member -- The member should be inside [].
 	)
 end
 
--- writeBinaryOperation( state, writer, indent, nextLocalN, localsStack, left:AstNode|string, right:AstNode|string, binaryOperation, leftType, rightType, resultingType, token, binary=nil )
+-- writeBinaryOperation( state, writer, indent, nextLocalN, localsStack, left:AstNode|string, right:AstNode|string, binaryOperation leftType, rightType, resultingType, token, binary=nil )
 function _G.writeBinaryOperation(state, writer, indent, nextLocalN, localsStack, l, r, binOp, lType, rType, resultingType, token, binary)
 	!(
 	local function WRITE_OPERAND(sideCode)
@@ -400,14 +400,40 @@ local function isExpressionLiteralStringAndValidLuaIdentifier(expr)
 		and not LUA_KEYWORDS[expr.value]
 end
 
+local function writeAccessMemberPart(state, writer, indent, nextLocalN, localsStack, accessMember)
+	if isExpressionLiteralStringAndValidLuaIdentifier(accessMember) then
+		local stringLiteral = accessMember
+		writer.file:write(".", stringLiteral.value)
+	else
+		writer.file:write("[")
+		writeExpression(state, writer, indent, nextLocalN, localsStack, accessMember)
+		writer.file:write("]")
+	end
+end
+
 function _G.writeAccess(state, writer, indent, nextLocalN, localsStack, access)
-	local typeInfo = access.object.inferredType
-	if typeInfo.tag == !(TYPE_LIST) then
-		typeInfo = adjustTypeToOne(state, access.object, typeInfo, true)
+	if access.XXX_AWBO_HACK then -- @Hack
+		-- :AbcCheck
+		if type(access.object) == "string" then
+			writer.file:write(access.object)
+		else
+			writeExpression(state, writer, indent, nextLocalN, localsStack, access.object)
+		end
+		if type(access.member) == "string" then
+			writer.file:write("[", access.member, "]")
+		else
+			writeAccessMemberPart(state, writer, indent, nextLocalN, localsStack, access.member)
+		end
+		return
 	end
 
-	if isTypeTableLike(typeInfo) then
-		-- @Incomplete: Compiler setting for runtime checks of array bounds.
+	local objType = access.object.inferredType
+	if objType.tag == !(TYPE_LIST) then
+		objType = adjustTypeToOne(state, access.object, objType, true)
+	end
+
+	if isTypeTableLike(objType) then
+		-- @Incomplete: Compiler setting for runtime checks of array bounds. :AbcCheck
 		writeExpression(state, writer, indent, nextLocalN, localsStack, access.object)
 
 		if access.parent.nodeType == !(AST_CALL) and access.parent.isMethod then
@@ -422,17 +448,11 @@ function _G.writeAccess(state, writer, indent, nextLocalN, localsStack, access)
 
 			writer.file:write(":", stringLiteral.value)
 
-		elseif isExpressionLiteralStringAndValidLuaIdentifier(access.member) then
-			local stringLiteral = access.member
-			writer.file:write(".", stringLiteral.value)
-
 		else
-			writer.file:write("[")
-			writeExpression(state, writer, indent, nextLocalN, localsStack, access.member)
-			writer.file:write("]")
+			writeAccessMemberPart(state, writer, indent, nextLocalN, localsStack, access.member)
 		end
 
-	elseif typeInfo.tag == !(TYPE_STRING) then
+	elseif objType.tag == !(TYPE_STRING) then
 		-- @Design: Should we change str[n] to result in a byte instead of a substring?
 		writer.file:write("_SUB(")
 		writeExpression(state, writer, indent, nextLocalN, localsStack, access.object)
@@ -440,16 +460,16 @@ function _G.writeAccess(state, writer, indent, nextLocalN, localsStack, access)
 		writeExpression(state, writer, indent, nextLocalN, localsStack, access.member)
 		writer.file:write(")")
 
-	elseif typeInfo.tag == !(TYPE_VARARG) then
+	elseif objType.tag == !(TYPE_VARARG) then
 		writer.file:write("(_SELECT(")
 		writeExpression(state, writer, indent, nextLocalN, localsStack, access.member)
 		writer.file:write(", ...))")
 
-	elseif typeInfo.tag == !(TYPE_ENUM) then
+	elseif objType.tag == !(TYPE_ENUM) then
 		errorInternal(state, access) -- Enum accesses should have been simplified away.
 
 	else
-		errorUnhandledType(state, access.object, typeInfo)
+		errorUnhandledType(state, access.object, objType)
 	end
 end
 
@@ -1083,6 +1103,8 @@ local function isNameAllocated(state, writer, localsStack, localName)
 		if locals[localName] then  return true  end
 	end
 
+	if localName:find"^_AWBO_" then  return true  end -- Assignment with binary operation.
+
 	return false
 end
 
@@ -1247,7 +1269,9 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 		local nodeType      = statement.nodeType
 		local nextStatement = block.statementsDynamic[statementIndex+1]
 
+		----------------------------------------------------------------
 		if nodeType == !(AST_DECLARATION) then
+			-- @Optimize: Output 'local a = nil' as 'local a'.
 			local decl = statement
 			assert(decl.kind == !(DECL_KIND_LOCAL_VAR) --[[or decl.kind == !(DECL_KIND_READ_ONLY)]])
 
@@ -1258,7 +1282,6 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 				inDecl = true
 
 			else
-				local tag = decl.name.inferredType.tag
 				file:write(indentStr, "local ", decl.localName, " = ")
 				if decl.value then
 					writeExpression(state, writer, indent, nextLocalN, localsStack, decl.value)
@@ -1269,6 +1292,7 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 				writeEol(state, writer)
 			end
 
+		----------------------------------------------------------------
 		elseif nodeType == !(AST_ASSIGNMENT) then
 			local assignment = statement
 
@@ -1300,98 +1324,180 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 				end
 				writeEol(state, writer)
 
-			-- Assignment with binary operation.
+			-- Assignment with binary operation (AWBO).
 			else
 				!ASSERT `not inDecl`
 
-				file:write(indentStr, "do")
-				writeEol(state, writer)
+				--
+				-- To make expressions evaluate the expected way (left to
+				-- right with no hidden duplicate evaluations) we prefetch
+				-- some values before we start doing operations (and
+				-- eventually the assignment).
+				--
+				-- Constants and right-hand-side values are never prefetched.
+				-- These rules apply otherwise:
+				--
+				--   x        += 1    -- Don't fetch x.
+				--   t.k      += 1    -- Don't fetch t. Don't fetch k.
+				--   o.t[k]   += 1    -- Fetch o.t.     Don't fetch k.
+				--   o.t[t.k] += 1    -- Fetch o.t.     Fetch t.k.
+				--
+				-- More info:
+				--   x, y += 1, z  -- No fetching or preparations needed as all targets are simple variables/identifiers.
+				--
+				local fetchObj = {}
+				local fetchKey = {}
+				local fetchVal = {}
 
-				-- Get target objects and values.
-				file:write(indentStr, "\tlocal ")
-				local first   = true
-				local accessN = 0
-
-				for _, targetExpr in ipairs(assignment.targets) do
+				-- Figure out what to fetch.
+				for i, targetExpr in ipairs(assignment.targets) do
 					if targetExpr.nodeType == !(AST_ACCESS) then
 						local access = targetExpr
 
-						if not first then  file:write(", ")  end
-						first = false
+						if not (access.object.nodeType == !(AST_IDENTIFIER) or isExpressionConstant(state, access.object, true)) then
+							fetchObj[i] = true
+						end
 
-						-- @Optimize: Don't store the object and/or member like this if it's unnecessary.
-						accessN = accessN+1
-						file:write("_OBJECT", accessN, ", _MEMBER", accessN) -- @Robustness: Ensure unique names.
+						if not (access.member.nodeType == !(AST_IDENTIFIER) or isExpressionConstant(state, access.member, true)) then
+							fetchKey[i] = true
+						end
 					end
 				end
 
+				if not assignment.values[#assignment.targets] then
+					-- The last value ought to be a call! (Note: It shouldn't be vararg as that would've been a type error.)
+					for i = #assignment.values, #assignment.targets do
+						fetchVal[i] = true
+					end
+				end
+
+				local fetchingAnything = (next(fetchObj) or next(fetchKey) or next(fetchVal)) ~= nil
+
+				if fetchingAnything then
+					file:write(indentStr, "do")
+					writeEol(state, writer)
+
+					indent    = indent+1
+					indentStr = indentStr.."\t"
+
+					-- Fetch objects and keys.
+					if next(fetchObj) or next(fetchKey) then
+						file:write(indentStr, "local ")
+
+						local first = true
+						for i, targetExpr in ipairs(assignment.targets) do
+							if fetchObj[i] then
+								if not first then  file:write(", ")  end
+								first = false
+
+								file:write("_AWBO_OBJ", i)
+							end
+
+							if fetchKey[i] then
+								if not first then  file:write(", ")  end
+								first = false
+
+								file:write("_AWBO_KEY", i)
+							end
+						end
+
+						file:write(" = ")
+
+						local first = true
+						for i, targetExpr in ipairs(assignment.targets) do
+							if fetchObj[i] then
+								local access = targetExpr
+
+								if not first then  file:write(", ")  end
+								first = false
+
+								writeExpression(state, writer, indent, nextLocalN, localsStack, access.object)
+							end
+
+							if fetchKey[i] then
+								local access = targetExpr
+
+								if not first then  file:write(", ")  end
+								first = false
+
+								writeExpression(state, writer, indent, nextLocalN, localsStack, access.member)
+							end
+						end
+
+						writeEol(state, writer)
+					end
+
+					-- Fetch values.
+					if next(fetchVal) then
+						file:write(indentStr, "local ")
+
+						local first = true
+						for i, targetExpr in ipairs(assignment.targets) do
+							if fetchVal[i] then
+								if not first then  file:write(", ")  end
+								first = false
+
+								file:write("_AWBO_VAL", i)
+							end
+						end
+
+						file:write(" = ")
+
+						local first = true
+						for i, valueExpr in ipairs(assignment.values) do
+							if fetchVal[i] then
+								if not first then  file:write(", ")  end
+								first = false
+
+								writeExpression(state, writer, indent, nextLocalN, localsStack, valueExpr)
+							end
+						end
+
+						writeEol(state, writer)
+					end
+				end--if fetchingAnything
+
+				-- Assignment targets.
+				file:write(indentStr)
+
+				local first = true
 				for i, targetExpr in ipairs(assignment.targets) do
 					if not first then  file:write(", ")  end
 					first = false
 
-					file:write("_VALUE", i) -- @Robustness: Ensure unique names.
-				end
-
-				file:write(" = ")
-				first = true
-
-				for _, targetExpr in ipairs(assignment.targets) do
-					if targetExpr.nodeType == !(AST_ACCESS) then
+					if fetchObj[i] or fetchKey[i] then
 						local access = targetExpr
-
-						if not first then  file:write(", ")  end
-						first = false
-
-						writeExpression(state, writer, indent, nextLocalN, localsStack, access.object)
-						file:write(", ")
-						writeExpression(state, writer, indent, nextLocalN, localsStack, access.member)
-					end
-				end
-
-				for _, valueExpr in ipairs(assignment.values) do
-					if not first then  file:write(", ")  end
-					first = false
-
-					writeExpression(state, writer, indent, nextLocalN, localsStack, valueExpr)
-				end
-
-				writeEol(state, writer)
-
-				-- Assign to targets.
-				local targetsToWrite = {}
-				file:write(indentStr, "\t")
-				first   = true
-				accessN = 0
-
-				for i, target in ipairs(assignment.targets) do
-					if not first then  file:write(", ")  end
-					first = false
-
-					if target.nodeType == !(AST_ACCESS) then
-						accessN = accessN+1
-						target  = F("_OBJECT%d[_MEMBER%d]", accessN, accessN)
-						file:write(target)
+						if fetchObj[i] then  file:write( "_AWBO_OBJ", i     )  else  writeExpression      (state, writer, indent, nextLocalN, localsStack, access.object)  end
+						if fetchKey[i] then  file:write("[_AWBO_KEY", i, "]")  else  writeAccessMemberPart(state, writer, indent, nextLocalN, localsStack, access.member)  end
 					else
-						writeExpression(state, writer, indent, nextLocalN, localsStack, target)
+						writeExpression(state, writer, indent, nextLocalN, localsStack, targetExpr)
 					end
-
-					targetsToWrite[i] = target
 				end
 
+				-- Assignment values.
 				file:write(" = ")
-				first   = true
-				accessN = 0
 
+				local first = true
 				for i, targetExpr in ipairs(assignment.targets) do
 					if not first then  file:write(", ")  end
 					first = false
+
+					if fetchObj[i] or fetchKey[i] then
+						local access              = targetExpr
+						local accessDummy         = astNewNode(AstAccess, access.token, access.parent)
+						accessDummy.XXX_AWBO_HACK = true
+						accessDummy.object        = fetchObj[i] and "_AWBO_OBJ"..i or access.object -- @Hack!!!
+						accessDummy.member        = fetchKey[i] and "_AWBO_KEY"..i or access.member -- @Hack!!!
+						accessDummy.inferredType  = access.inferredType
+						targetExpr                = accessDummy
+					end
 
 					local _, valueType = getAssignmentValue(state, targetExpr, assignment.values, i, nil, nil, nil)
 					!ASSERT(`valueType`, `tostring(i)`, `assignment.values[i] or assignment`)
 
 					writeBinaryOperation(
 						state, writer, indent, nextLocalN, localsStack,
-						targetsToWrite[i], "_VALUE"..i,
+						targetExpr, (fetchVal[i] and "_AWBO_VAL"..i or assignment.values[i]),
 						assignment.binaryOperation,
 						targetExpr.inferredType, valueType, targetExpr.inferredType,
 						targetExpr.token, nil
@@ -1399,12 +1505,19 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 				end
 
 				writeEol(state, writer)
-				file:write(indentStr, "end")
-				writeEol(state, writer)
+
+				if fetchingAnything then
+					indent    = indent-1
+					indentStr = indentStr:sub(2)
+
+					file:write(indentStr, "end")
+					writeEol(state, writer)
+				end
 			end
 
 			inDecl = false
 
+		----------------------------------------------------------------
 		elseif nodeType == !(AST_RETURN) then
 			local returnNode = statement
 
@@ -1427,6 +1540,7 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 				writeEol(state, writer)
 			end
 
+		----------------------------------------------------------------
 		elseif nodeType == !(AST_BLOCK) then
 			local block = statement
 
@@ -1439,6 +1553,7 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 			file:write(indentStr, "end") ; writeEol(state, writer)
 			indent, indentStr = handleContinueAfterBlock(state, writer, parentContinueDepth, prevContinueDepth, nextStatement, indent, indentStr)
 
+		----------------------------------------------------------------
 		elseif nodeType == !(AST_IF) then
 			-- @Optimize: Don't output empty branches.
 			local ifBranch = statement
@@ -1476,6 +1591,7 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 				indent, indentStr = handleContinueAfterBlock(state, writer, parentContinueDepth, prevContinueDepth, nextStatement, indent, indentStr)
 			end
 
+		----------------------------------------------------------------
 		elseif nodeType == !(AST_WHILE) then
 			-- @Optimize: Don't output an empty body.
 			local whileLoop = statement
@@ -1487,6 +1603,7 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 
 			indent, indentStr = writeLoopBodyAndFooter(state, writer, whileLoop, indent, nextLocalN, localsStack, deferStartIndex, nextStatement, parentContinueDepth)
 
+		----------------------------------------------------------------
 		elseif nodeType == !(AST_FOR) then
 			-- @Optimize: Don't output an empty body.
 			local forLoop     = statement
@@ -1603,6 +1720,7 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 				indent, indentStr = writeLoopBodyAndFooter(state, writer, forLoop, indent, nextLocalN, localsStack, deferStartIndex, nextStatement, parentContinueDepth)
 			end
 
+		----------------------------------------------------------------
 		elseif nodeType == !(AST_BREAK) then
 			local breakNode = statement
 
@@ -1619,6 +1737,7 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 			end
 			writeEol(state, writer)
 
+		----------------------------------------------------------------
 		elseif nodeType == !(AST_CONTINUE) then
 			local continue = statement
 
@@ -1638,10 +1757,12 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 
 			gotContinue = true
 
+		----------------------------------------------------------------
 		elseif nodeType == !(AST_DEFER) then
 			local defer = statement
 			table.insert(writer.deferStack, defer)
 
+		----------------------------------------------------------------
 		elseif nodeType == !(AST_SWITCH) then
 			local switch = statement
 
@@ -1696,6 +1817,7 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 				indent, indentStr = handleContinueAfterBlock(state, writer, parentContinueDepth, prevContinueDepth, nextStatement, indent, indentStr)
 			end
 
+		----------------------------------------------------------------
 		else
 			-- Assume the statement is an expression at this point and let writeExpression() deal with any errors.
 			file:write(indentStr)
@@ -1703,6 +1825,7 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 			file:write(";") -- This removes ambiguity is some cases.
 			writeEol(state, writer)
 		end
+		----------------------------------------------------------------
 	end
 
 	local doWriteDefers = (
