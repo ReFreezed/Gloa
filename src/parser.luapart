@@ -330,11 +330,12 @@ _G.!structAst"AstDeclaration:_AstNode"{
 
 _G.!structAst"AstAssignment:_AstNode"{
 	_overrides = {{`nodeType`,AST_ASSIGNMENT}},
-	{`targets`,         {},  ast="array"},    -- []AstExpression
+	{`targets`,         {},  ast="array"},    -- [](AstIdentifier|AstAccess|AstBlank)
 	{`values`,          {},  ast="array"},    -- []AstExpression
 
+	-- Assignments can have some targets that's part of a declaration and others that were declared before.
 	{`forDeclaration`,  false},
-	{`declarations`,    nil, astRef="array"}, -- []AstDeclaration  (Is set if forDeclaration is set.)
+	{`declarations`,    nil, astRef="array"}, -- []AstDeclaration  Is set if forDeclaration is set. This array does not include declarations marked as "previously declared" and will have gaps in it!
 
 	{`binaryOperation`, ""}, -- Empty means plain assignment.
 }
@@ -1254,9 +1255,10 @@ function _G.parseDeclarationStatement(state, scope, imperative, declType)
 
 	declType = declType or !(DECLARATION_NORMAL)
 
-	local declarations = {}
-	local declNames    = {}
-	local isUsing      = false
+	local declarations        = {} -- []AstDeclaration
+	local declNames           = {} -- []AstIdentifier
+	local declNamesFromBefore = {--[[ name1=true, ... ]]}
+	local isUsing             = false
 	local declKind
 
 	local tokType, tokValue = peekNextToken(state)
@@ -1293,7 +1295,7 @@ function _G.parseDeclarationStatement(state, scope, imperative, declType)
 	local takenNames = {}
 
 	if declType == !(DECLARATION_NORMAL) then
-		!DO_OR_RETURN `parseNameList(state, scope, declNames, true)` -- Note: We update parent here below.
+		!DO_OR_RETURN `parseNameList(state, scope, declNames, declNamesFromBefore, true)` -- Note: We update parent here below.
 
 		for i, ident in ipairs(declNames) do
 			local decl        = astNewNode(AstDeclaration, ident.token, scope)
@@ -1399,7 +1401,11 @@ function _G.parseDeclarationStatement(state, scope, imperative, declType)
 				decl.assignment       = assignment
 				decl.assignmentIndex  = i
 
-				table.insert(assignment.declarations, decl)
+				if declNamesFromBefore[identCopy.name] then
+					identCopy.declaration = nil
+				else
+					assignment.declarations[i] = decl
+				end
 			end
 
 			if declType == !(DECLARATION_NORMAL) then
@@ -1438,6 +1444,27 @@ function _G.parseDeclarationStatement(state, scope, imperative, declType)
 
 	for _, decl in ipairs(declarations) do
 		decl.kind = declKind
+	end
+
+	-- Validate "previously declared" flag.
+	if not next(declNamesFromBefore) then
+		-- void
+
+	elseif not imperative then
+		for _, ident in ipairs(declNames) do
+			if declNamesFromBefore[ident.name] then
+				errorParsing(state, ident.token-1, "Only imperative variable declarations can be flagged as 'previously declared'.")
+			end
+		end
+		errorInternal(state, declarations[1])
+
+	elseif not assignment then
+		for _, ident in ipairs(declNames) do
+			if declNamesFromBefore[ident.name] then
+				errorParsing(state, ident.token-1, "Declarations with names flagged as 'previously declared' can only be used if there's an explicit assignment.")
+			end
+		end
+		errorInternal(state, declarations[1])
 	end
 
 	-- Set if shadowing is allowed.
@@ -1509,14 +1536,29 @@ function _G.parseDeclarationStatement(state, scope, imperative, declType)
 		end
 	end
 
+	-- Remove declarations that are marked as "previously declared".
+	-- @Speed: Don't even create and add them in the first place.
+	if imperative then
+		for i, ident in ipairsr(declNames) do
+			if declNamesFromBefore[ident.name] then
+				table.remove(declarations, i)
+			end
+		end
+
+		if not declarations[1] then
+			errorParsing(state, nameListStartToken-1, "Declaration statement has no new declarations - only previous declarations are used.")
+		end
+	end
+	!ifDEBUG `declNames = nil`
+
 	--
 	-- Everything's done! Now we can modify the scope.
 	--
 
 	local statements = (imperative and scope.statementsDynamic or scope.statementsStatic)
-	for i = 1, #declarations do
-		table.insert(statements,         declarations[i])
-		table.insert(scope.declarations, declarations[i])
+	for _, decl in ipairs(declarations) do
+		table.insert(statements,         decl)
+		table.insert(scope.declarations, decl)
 	end
 
 	if assignment then
@@ -1539,7 +1581,7 @@ function _G.parseDeclarationStatement(state, scope, imperative, declType)
 
 	!if DEBUG then
 		local decl1 = declarations[1]
-		if decl1.kind == !(DECL_KIND_LOCAL_CONST) or decl1.kind == !(DECL_KIND_EXPORT_CONST) then
+		if decl1 and (decl1.kind == !(DECL_KIND_LOCAL_CONST) or decl1.kind == !(DECL_KIND_EXPORT_CONST)) then
 			assert(decl1.value)
 			assert(not assignment)
 		end
@@ -1586,8 +1628,8 @@ function _G.parseAssignment(state, parent)
 end
 
 -- Add the names to the 'names' array.
--- success = parseNameList( compilationState, parent, names, allowBlanks )
-function _G.parseNameList(state, parent, names, allowBlanks)
+-- success = parseNameList( compilationState, parent, names, namesFromBefore=nil, allowBlanks )
+function _G.parseNameList(state, parent, names, namesFromBefore, allowBlanks)
 	local takenNames = {}
 
 	while true do
@@ -1597,12 +1639,24 @@ function _G.parseNameList(state, parent, names, allowBlanks)
 		if allowBlanks and isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"_") then
 			eatNextToken(state)
 			identOrBlank = astNewNode(AstBlank, token, parent)
+
 		else
+			local fromBefore = false
+
+			if namesFromBefore and isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"^") then
+				eatNextToken(state)
+				fromBefore = true
+			end
+
 			!SET_OR_RETURN_FALSE `identOrBlank = parseIdentifier(state, parent)`
 			if takenNames[identOrBlank.name] then
 				!ERROR_OR_RETURN_FALSE `errorParsingLast(state, "Duplicate name '%s'.", identOrBlank.name)`
 			end
 			takenNames[identOrBlank.name] = true
+
+			if fromBefore then
+				namesFromBefore[identOrBlank.name] = true
+			end
 		end
 
 		table.insert(names, identOrBlank)
@@ -2009,7 +2063,7 @@ function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 			-- for i = start, end [, step ]
 			if twoParter then
 				state.nextToken = forStartIndex
-				!DO_OR_RETURN_FALSE `parseNameList(state, forLoop, forLoop.names, false)`
+				!DO_OR_RETURN_FALSE `parseNameList(state, forLoop, forLoop.names, nil, false)`
 
 				if forLoop.names[2] then
 					!ERROR_OR_RETURN_FALSE `errorParsing(state, forLoop.names[2].token, "Expected only one name in numeric 'for' loop.")`
@@ -2036,7 +2090,7 @@ function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 			-- for [ < ] v1, ... : obj
 			if twoParter then
 				state.nextToken = forStartIndex
-				!DO_OR_RETURN_FALSE `parseNameList(state, forLoop, forLoop.names, false)`
+				!DO_OR_RETURN_FALSE `parseNameList(state, forLoop, forLoop.names, nil, false)`
 
 				tokType, tokValue = eatNextToken(state)
 				assert(isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),":"))
@@ -2056,7 +2110,7 @@ function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)
 		-- for v1, ... in iter [, state [, init ] ]
 		else
 			state.nextToken = forStartIndex
-			!DO_OR_RETURN_FALSE `parseNameList(state, forLoop, forLoop.names, false)`
+			!DO_OR_RETURN_FALSE `parseNameList(state, forLoop, forLoop.names, nil, false)`
 
 			tokType, tokValue = eatNextToken(state)
 			assert(isToken(tokType,tokValue, !(TOKEN_KEYWORD),"in"))
@@ -2637,7 +2691,7 @@ function _G.parseLambda(state, parent)
 
 	if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"[") then
 		eatNextToken(state)
-		!DO_OR_RETURN `parseNameList(state, lambda, lambda.captures, false)`
+		!DO_OR_RETURN `parseNameList(state, lambda, lambda.captures, nil, false)`
 
 		tokType, tokValue = eatNextToken(state)
 		if not isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"]") then
@@ -3913,8 +3967,9 @@ do
 				local assignment = node
 				if assignment.forDeclaration then
 					write(" (forDeclaration")
-					for _, decl in ipairs(assignment.declarations) do
-						write(" ", decl.s)
+					for i = 1, #assignment.targets do
+						local decl = assignment.declarations[i]
+						if decl then  write(" ", i, "=", decl.s)  end
 					end
 					write(")")
 				end

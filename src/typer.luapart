@@ -844,7 +844,10 @@ function _G.isPartOfAnyDeclaration(identOrVararg)
 
 	elseif parent.nodeType == !(AST_ASSIGNMENT) then
 		local assignment = parent
-		return assignment.forDeclaration and indexOf(assignment.targets, identOrVararg) ~= nil
+		if not assignment.forDeclaration then  return false  end
+
+		local i = indexOf(assignment.targets, identOrVararg) -- Nil if identOrVararg is a value.
+		return assignment.declarations[i] ~= nil
 
 	else
 		return false
@@ -7208,9 +7211,9 @@ function _G.getExpectedTypeInfo(state, node, strict, expectantTerm, nodeForError
 		local i          = indexOf(assignment.values, node)
 		if not i then  return (getExpectedTypeInfoUsingContents(state, node, strict, expectantTerm, nodeForError))  end
 
-		if assignment.forDeclaration then
-			local decl = assignment.declarations[i] or errorInternal()
+		local decl = (assignment.forDeclaration and assignment.declarations[i] or nil)
 
+		if decl then
 			if decl.name.inferredType then
 				return decl.name.inferredType
 			elseif not decl.type then
@@ -7227,6 +7230,47 @@ function _G.getExpectedTypeInfo(state, node, strict, expectantTerm, nodeForError
 			end
 			return assignment.targets[i].inferredType
 		end
+
+	--[[ Is this older than the above? What's going on? @Cleanup!
+	elseif parentNodeType == !(AST_ASSIGNMENT) then
+		local assignment = node.parent
+		local i          = indexOf(assignment.values, node)
+		if not i then  return (getExpectedTypeInfoUsingContents(state, node, strict, expectantTerm, nodeForError))  end
+
+		local decl = (assignment.forDeclaration and assignment.declarations[i] or nil)
+
+		if decl then
+			if decl.name.inferredType then
+				return decl.name.inferredType
+
+			elseif decl.parent.nodeType == !(AST_ENUM) then
+				local enum     = decl.parent
+				local enumInfo = enum.representedType
+				if enumInfo then
+					return enumInfo
+				elseif enum.memberType or decl ~= enum.declarations[1] then
+					-- @Incomplete: This doesn't work right now as enums wait for their members. Enums need to be more like structs!
+					!DEPEND_AND_RETURN(`node`, DEPEND_NODE_INFERRED, `enum`, nil, `nil`)
+				else
+					return (getExpectedTypeInfoUsingContents(state, node, strict, expectantTerm, nodeForError))
+				end
+
+			elseif decl.type then
+				if not decl.type.inferredType then
+					!DEPEND_AND_RETURN(`node`, DEPEND_NODE_INFERRED, `decl.type`, nil, `nil`)
+				else
+					return getTypeRepresentedByExpression(decl.type) or errorInternal(state, decl.type)
+				end
+
+			else
+				return (getExpectedTypeInfoUsingContents(state, node, strict, expectantTerm, nodeForError))
+			end
+
+		else
+			-- @Incomplete: Get type from assignment target.
+			return (getExpectedTypeInfoUsingContents(state, node, strict, expectantTerm, nodeForError))
+		end
+	]]
 
 	elseif parentNodeType == !(AST_DECLARATION) then
 		local decl = node.parent
@@ -7258,48 +7302,6 @@ function _G.getExpectedTypeInfo(state, node, strict, expectantTerm, nodeForError
 			return (getExpectedTypeInfoUsingContents(state, node, strict, expectantTerm, nodeForError))
 
 		else
-			return (getExpectedTypeInfoUsingContents(state, node, strict, expectantTerm, nodeForError))
-		end
-
-	elseif parentNodeType == !(AST_ASSIGNMENT) then
-		local assignment = node.parent
-		local i          = indexOf(assignment.values, node)
-		if not i then  return (getExpectedTypeInfoUsingContents(state, node, strict, expectantTerm, nodeForError))  end
-
-		if assignment.forDeclaration then
-			local decl = assignment.declarations[i] or errorInternal(state, node)
-
-			if decl.name.inferredType then
-				return decl.name.inferredType
-
-			elseif decl.parent.nodeType == !(AST_ENUM) then
-				local enum     = decl.parent
-				local enumInfo = enum.representedType
-				if enumInfo then
-					return enumInfo
-				elseif enum.memberType or decl ~= enum.declarations[1] then
-					-- @Incomplete: This doesn't work right now as enums wait for their members. Enums need to be more like structs!
-					!DEPEND_AND_RETURN(`node`, DEPEND_NODE_INFERRED, `enum`, nil, `nil`)
-				else
-					return (getExpectedTypeInfoUsingContents(state, node, strict, expectantTerm, nodeForError))
-				end
-
-			elseif decl.type then
-				if not decl.type.inferredType then
-					!DEPEND_AND_RETURN(`node`, DEPEND_NODE_INFERRED, `decl.type`, nil, `nil`)
-				else
-					return getTypeRepresentedByExpression(decl.type) or errorInternal(state, decl.type)
-				end
-
-			elseif node.nodeType == !(AST_TABLE) then
-				return (getExpectedTypeInfoUsingContents(state, node, strict, expectantTerm, nodeForError))
-
-			else
-				return (getExpectedTypeInfoUsingContents(state, node, strict, expectantTerm, nodeForError))
-			end
-
-		else
-			-- @Incomplete: Get type from assignment target.
 			return (getExpectedTypeInfoUsingContents(state, node, strict, expectantTerm, nodeForError))
 		end
 

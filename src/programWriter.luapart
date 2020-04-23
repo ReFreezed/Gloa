@@ -1302,8 +1302,42 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 				-- @Optimize: Output 'x, _ = func()' as 'x = func()'.
 				local hasBlank = false
 
-				file:write(indentStr)
-				if inDecl then  file:write("local ")  end
+				if inDecl then
+					local hasGaps = false
+
+					for i = 1, #assignment.targets do
+						if not assignment.declarations[i] then
+							hasGaps = true
+							break
+						end
+					end
+
+					if hasGaps then
+						file:write(indentStr)
+						file:write("local ")
+
+						local first = true
+						for i, ident in ipairs(assignment.targets) do
+							if ident.nodeType ~= !(AST_BLANK) and assignment.declarations[i] then
+								!ASSERT("ident.nodeType == "..AST_IDENTIFIER)
+
+								if not first then  file:write(",")  end
+								first = false
+
+								writeIdentifierName(state, writer, ident)
+							end
+						end
+
+						file:write("; ")
+
+					else
+						file:write(indentStr)
+						file:write("local ")
+					end
+
+				else
+					file:write(indentStr)
+				end
 
 				for i, targetExpr in ipairs(assignment.targets) do
 					if i > 1 then  file:write(", ")  end
