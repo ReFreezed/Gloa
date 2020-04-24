@@ -23,7 +23,13 @@ Options:
     --silent   Disable output to stdout. (Errors and warnings are still printed to stderr.)
     --         Start of arguments for metaprogram.]]
 
-local EXTRA_STATS = DEBUG and false
+local EXTRA_STATS                  = false -- Pipe cycles.
+local FUNCTION_TO_MEASURE_CALLS_ON = ""--`inferIdentifierOrVararg` -- Also see profiler*() in functions.luapart. (The two features are not compatible.)
+
+if not DEBUG then
+	EXTRA_STATS                  = false
+	FUNCTION_TO_MEASURE_CALLS_ON = ""
+end
 )
 
 local args = {...}
@@ -233,6 +239,13 @@ local function runCompiler()
 		{`entryPointName`,  "main"},
 	}
 
+	!(
+	local constantsTableTemplate = {}
+	for kind = 1, #CONST_KIND_TITLES do
+		constantsTableTemplate[kind] = {}
+	end
+	)
+
 	local !struct"CompilationState"{
 		{`id`,                    0},
 
@@ -286,8 +299,11 @@ local function runCompiler()
 
 		-- Emitter:
 		{`constants`,             {}},
+		{`constantsByKind`,         constantsTableTemplate},
+		{`constantsByKindAndValue`, constantsTableTemplate},
+		{`constantsByTypeAndValue`, constantsTableTemplate},
 		{`constantN`,             0},
-		{`functionN`,             0}, -- Same as constantN, but for function constants.
+		{`functionN`,             0}, -- Same as constantN, but for constant functions.
 		{`topScopeNames`,         RESERVED_TOP_SCOPE_NAMES},
 
 		-- Runner:
@@ -738,17 +754,53 @@ local function runCompiler()
 		timeDoingSubCompilations = timeDoingSubCompilationsStart+timeCompilation
 	end
 
+	!if FUNCTION_TO_MEASURE_CALLS_ON ~= "" then
+		local callCount     = 0
+		local callTime      = 0.00
+		local callTimeStart = 0.00
+		local getinfo       = debug.getinfo
+		local clock         = os.clock
+		local funcToMeasure = !!(FUNCTION_TO_MEASURE_CALLS_ON) or errorInternal!(FUNCTION_TO_MEASURE_CALLS_ON)
+
+		debug.sethook(function(event)
+			if getinfo(2, "f").func == funcToMeasure then
+				-- @Incomplete: Handle recursive calls.
+				if event == "call" then
+					callCount     = callCount+1
+					callTimeStart = clock()
+				else
+					callTime = callTime + (clock()-callTimeStart)
+				end
+			end
+		end, "cr")
+	!end
+
 	for _, path in ipairs(pathsToCompile) do
 		compileProgram(path)
 	end
 
+	!if FUNCTION_TO_MEASURE_CALLS_ON ~= "" then
+		debug.sethook(nil)
+	!end
+
 	!ifNotDEBUG`if not silent then`
+		local printedAnything = false
+
 		if pathsToCompile[2] then
 			printf("Compiled all %d programs in %.3f sec", #pathsToCompile, os.clock()-timeStartInitial)
+			printedAnything = true
 		end
-		if disableGc then
+		!ifNotDEBUG`if disableGc then`
 			printf("Memory usage: %s bytes", formatNumber(collectgarbage"count"*1024))
-		end
+			printedAnything = true
+		!ifNotDEBUG`end`
+
+		!if FUNCTION_TO_MEASURE_CALLS_ON ~= "" then
+			printf(!("Calls ("..FUNCTION_TO_MEASURE_CALLS_ON.."): %d in %.3f seconds"), callCount, callTime)
+			printedAnything = true
+		!end
+
+		if printedAnything then  print()  end
 	!ifNotDEBUG`end`
 
 	!ifDEBUG `profilerPrint()`

@@ -140,12 +140,13 @@ _G.CONST_KIND_NULL      = 4
 _G.CONST_KIND_VIEW      = 5 -- A view into a table constructor.
 _G.CONST_KIND_LOCATION  = 6
 
-local CONST_KIND_TITLES = {
+_G.CONST_KIND_TITLES = {
 	[CONST_KIND_NORMAL]    = "normal",
 	[CONST_KIND_FOREIGN]   = "foreign",
 	[CONST_KIND_TYPE_INFO] = "type info",
 	[CONST_KIND_NULL]      = "null",
 	[CONST_KIND_VIEW]      = "view",
+	[CONST_KIND_LOCATION]  = "location",
 }
 
 _G.STRUCT_KIND_NORMAL = 1
@@ -542,13 +543,27 @@ local constNames          = {}
 local constSets           = {}
 local constSetValueArrays = {}
 
-function _G.CONST(t)
-	local constName = constNames[t]
-	if constName then  return constName  end
+-- constName = CONST( table )
+-- constName = CONST "constName" ( table )
+function _G.CONST(t, constName)
+	if type(t) == "string" then
+		constName = t
+		return function(t)  return CONST(t, constName)  end
+	end
 
-	constCount    = constCount+1
-	constName     = "CONST"..constCount
-	constNames[t] = constName
+	if constName then
+		assert(not constNames[constName], constName)
+
+	else
+		constName = constNames[t]
+		if constName then  return constName  end
+
+		constCount = constCount+1
+		constName  = "CONST"..constCount
+	end
+
+	constNames[t]         = constName
+	constNames[constName] = true
 
 	preprocessorOutputAtTopOfFile("local "..constName.." = "..toLua(t))
 	return constName

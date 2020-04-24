@@ -53,50 +53,60 @@ function _G.allocateConstantIfNew(state, kind, typeInfo, v, nodeForError)
 	end
 	local isObject = not isSimple
 
-	for _, const in ipairs(state.constants) do
-		if kind ~= const.kind then
-			-- void
+	--
+	-- Look for existing contant
+	--
 
-		elseif kindIsNormal then
-			if const.valueType ~= typeInfo then
-				-- void
+	local valueForByValue = nil
 
-			elseif isSimple then
-				if const.value == v then  return const, false  end
+	if kindIsNormal then
+		local byTypeAndValue = state.constantsByTypeAndValue[typeInfo]
 
-			elseif tag == !(TYPE_FUNCTION) then
-				-- All functions are unique for now (except foreign functions, which are identified differently).
-				-- We may detect duplicate non-foreign functions at some point.
-				if
-					const.value == v or (
-						v.bodyIsForeign and const.value.bodyIsForeign
-						and v.foreignSourceId == const.value.foreignSourceId
-					)
-				then
-					return const, false
-				end
+		if not byTypeAndValue then
+			byTypeAndValue                          = {}
+			state.constantsByTypeAndValue[typeInfo] = byTypeAndValue
+		end
 
+		if isSimple then
+			valueForByValue = v
+
+		elseif tag == !(TYPE_FUNCTION) then
+			-- All functions are unique for now (except foreign functions, which are identified by source).
+			-- We may detect duplicate non-foreign functions at some point.
+			valueForByValue = v.bodyIsForeign and v.foreignSourceId or v
+
+		elseif !!(CONST_SET{ TYPE_STRUCT, TYPE_ARRAY, TYPE_TABLE })[tag] then
 			-- All table-likes are always unique.
-			elseif !!(CONST_SET{ TYPE_STRUCT, TYPE_ARRAY, TYPE_TABLE })[tag] then
-				if const.value == v then  return const, false  end
-
-			else
-				errorInternal(state, nodeForError, "Incomplete: Unhandled constant value type '%s'.", (TYPE_NAMES[tag] or "?"))
-			end
-
-		elseif kind == !(CONST_KIND_FOREIGN) then
-			if const.value.sourceId == v.sourceId then  return const, false  end
-
-		elseif kind == !(CONST_KIND_NULL) then
-			return const, false -- NULL is always the same value (nil).
-
-		elseif !!(CONST_SET{ CONST_KIND_TYPE_INFO, CONST_KIND_LOCATION, CONST_KIND_VIEW })[kind] then
-			if const.value == v then  return const, false  end
+			valueForByValue = v
 
 		else
-			errorInternal(state, nodeForError, "Incomplete: Unhandled constant kind '%s'.", (CONST_KIND_TITLES[kind] or "?"))
+			errorInternal(state, nodeForError, "Incomplete: Unhandled constant value type '%s'.", (TYPE_NAMES[tag] or "?"))
 		end
+
+		local const = byTypeAndValue[valueForByValue]
+		if const then  return const, false  end
+
+	elseif kind == !(CONST_KIND_FOREIGN) then
+		valueForByValue = v.sourceId
+		local const     = state.constantsByKindAndValue[!(CONST_KIND_FOREIGN)][valueForByValue]
+		if const then  return const, false  end
+
+	elseif kind == !(CONST_KIND_NULL) then
+		local const = state.constantsByKind[!(CONST_KIND_NULL)][1] -- NULL is always the same value (nil).
+		if const then  return const, false  end
+
+	elseif !!(CONST_SET{ CONST_KIND_TYPE_INFO, CONST_KIND_LOCATION, CONST_KIND_VIEW })[kind] then
+		valueForByValue = v
+		local const     = state.constantsByKindAndValue[kind][valueForByValue]
+		if const then  return const, false  end
+
+	else
+		errorInternal(state, nodeForError, "Incomplete: Unhandled constant kind %d (%s).", kind, (CONST_KIND_TITLES[kind] or "?"))
 	end
+
+	--
+	-- Allocate new constant
+	--
 
 	local const     = Constant()
 	const.kind      = kind
@@ -121,7 +131,19 @@ function _G.allocateConstantIfNew(state, kind, typeInfo, v, nodeForError)
 		state.topScopeNames[const.name] = true -- Note: The name may get tampered with later leaving the original name reserved but unused, but that's fine!
 	end
 
-	table.insert(state.constants, const)
+	table.insert(state.constants,             const)
+	table.insert(state.constantsByKind[kind], const)
+
+	valueForByValue
+		=  valueForByValue == nil             and !!(CONST"NIL_SUBSTITUTE"{})
+		or valueForByValue ~= valueForByValue and !!(CONST"NAN_SUBSTITUTE"{})
+		or valueForByValue
+
+	state.constantsByKindAndValue[kind][valueForByValue] = const
+
+	if kindIsNormal --[[and typeInfo]] then
+		state.constantsByTypeAndValue[typeInfo][valueForByValue] = const
+	end
 
 	return const, true
 end
