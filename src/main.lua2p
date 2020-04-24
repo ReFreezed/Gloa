@@ -23,7 +23,7 @@ Options:
     --silent   Disable output to stdout. (Errors and warnings are still printed to stderr.)
     --         Start of arguments for metaprogram.]]
 
-local EXTRA_STATS                  = false -- Pipe cycles.
+local EXTRA_STATS                  = 1==0 -- Pipe cycles.
 local FUNCTION_TO_MEASURE_CALLS_ON = ""--`inferIdentifierOrVararg` -- Also see profiler*() in functions.luapart. (The two features are not compatible.)
 
 if not DEBUG then
@@ -240,6 +240,10 @@ local function runCompiler()
 	}
 
 	!(
+	local typeInfosTableTemplate = {}
+	for tag = 1, #TYPE_NAMES do
+		typeInfosTableTemplate[tag] = {}
+	end
 	local constantsTableTemplate = {}
 	for kind = 1, #CONST_KIND_TITLES do
 		constantsTableTemplate[kind] = {}
@@ -294,17 +298,20 @@ local function runCompiler()
 		{`prioriyCount`,          0},
 
 		-- Typer:
-		{`lastTypeId`,            0},
-		{`allTypeInfos`,          {}},
+		{`lastTypeId`,                0},
+		{`builtinTypeInfos`,          {}},
+		{`allTypeInfos`,              {}},
+		{`allTypeInfosByTag`,         typeInfosTableTemplate},
+		{`allTypeInfosByTagAndValue`, typeInfosTableTemplate},
 
 		-- Emitter:
-		{`constants`,             {}},
-		{`constantsByKind`,         constantsTableTemplate},
-		{`constantsByKindAndValue`, constantsTableTemplate},
-		{`constantsByTypeAndValue`, constantsTableTemplate},
-		{`constantN`,             0},
-		{`functionN`,             0}, -- Same as constantN, but for constant functions.
-		{`topScopeNames`,         RESERVED_TOP_SCOPE_NAMES},
+		{`constants`,                 {}},
+		{`constantsByKind`,           constantsTableTemplate},
+		{`constantsByKindAndValue`,   constantsTableTemplate},
+		{`constantsByTypeAndValue`,   constantsTableTemplate},
+		{`constantN`,                 0},
+		{`functionN`,                 0}, -- Same as constantN, but for constant functions.
+		{`topScopeNames`,             RESERVED_TOP_SCOPE_NAMES},
 
 		-- Runner:
 		{`runnerPath`,            ""},
@@ -705,12 +712,12 @@ local function runCompiler()
 				end
 
 				printf(
-					!((DEBUG and OK[incN()] or "").."Cycles:%d Updates:%d Prio:%d Queue:%d(a=%d,w=%d) Consts:%d"),
+					!((DEBUG and OK[incN()] or "").."Cycles:%d Updates:%d Prio:%d Queue:%d(a=%d,w=%d) Types:%d Consts:%d"),
 					state.pipeCycles,
 					state.queuedUpdates,
 					state.prioriyCount,
 					#state.allQueueds, state.queueActiveMaxSize, state.queueWaitingMaxSize,
-					#state.constants
+					#state.allTypeInfos, #state.constants
 				)
 				printf(
 					!((DEBUG and OK[incN()] or "").."Deps:%d (%s)"),

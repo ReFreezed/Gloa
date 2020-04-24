@@ -158,8 +158,6 @@ function _G.markTypeAsReady(state, typeInfo)
 end
 
 do
-	local builtinTypeInfos = {}
-
 	local BUILTIN_TYPE_STRUCTS = {
 		["any"]         = TypeInfoAny,
 		["bool"]        = TypeInfoBool,
@@ -172,16 +170,28 @@ do
 		["void"]        = TypeInfoVoid,        -- Used when no useful type is expected or available.
 		["placeholder"] = TypeInfoPlaceholder, -- Used in polymorphic functions.
 	}
+	local BUILTIN_TYPE_TAG_TO_NAME = {
+		[!(TYPE_ANY)]         = "any",
+		[!(TYPE_BOOL)]        = "bool",
+		[!(TYPE_INT)]         = "int",
+		[!(TYPE_NONE)]        = "none",
+		[!(TYPE_FLOAT)]       = "float",
+		[!(TYPE_STRING)]      = "string",
+		[!(TYPE_TABLE)]       = "table",
+		[!(TYPE_TYPE)]        = "type",
+		[!(TYPE_PLACEHOLDER)] = "placeholder",
+	}
 
 	function _G.getTypeInfoForBuiltinType(state, typeName)
-		local typeInfo = builtinTypeInfos[typeName]
+		local typeInfo = state.builtinTypeInfos[typeName]
 
 		if not typeInfo then
-			local TypeInfoCreator      = BUILTIN_TYPE_STRUCTS[typeName] or errorInternal(tostring(typeName))
-			typeInfo                   = newTypeInfo(state, TypeInfoCreator)
-			builtinTypeInfos[typeName] = typeInfo
+			local TypeInfoCreator            = BUILTIN_TYPE_STRUCTS[typeName] or errorInternal(tostring(typeName))
+			typeInfo                         = newTypeInfo(state, TypeInfoCreator)
+			state.builtinTypeInfos[typeName] = typeInfo
 
-			table.insert(state.allTypeInfos, typeInfo)
+			table.insert(state.allTypeInfos,                    typeInfo)
+			table.insert(state.allTypeInfosByTag[typeInfo.tag], typeInfo)
 			markTypeAsReady(state, typeInfo)
 		end
 
@@ -190,17 +200,10 @@ do
 
 	-- bool, typeName = isTypeBuiltin( typeInfo )
 	function _G.isTypeBuiltin(typeInfo)
-		!ASSERT `typeInfo`
-		if typeInfo == builtinTypeInfos["any"]         then  return true, "any"          end
-		if typeInfo == builtinTypeInfos["bool"]        then  return true, "bool"         end
-		if typeInfo == builtinTypeInfos["int"]         then  return true, "int"          end
-		if typeInfo == builtinTypeInfos["none"]        then  return true, "none"         end
-		if typeInfo == builtinTypeInfos["float"]       then  return true, "float"        end
-		if typeInfo == builtinTypeInfos["string"]      then  return true, "string"       end
-		if typeInfo == builtinTypeInfos["table"]       then  return true, "table"        end
-		if typeInfo == builtinTypeInfos["type"]        then  return true, "type"         end
-		if typeInfo == builtinTypeInfos["placeholder"] then  return true, "placeholder"  end
-		return false, ""
+		local typeName = BUILTIN_TYPE_TAG_TO_NAME[typeInfo.tag]
+		if not typeName then  return false, ""  end
+
+		return true, typeName
 	end
 end
 
@@ -224,32 +227,44 @@ local function doesLambdaHaveSignature(lambda, funcSig)
 		end
 	end
 
-	if lambda.isPolymorphic ~= funcSig.isPolymorphic then  return false  end
+	-- if lambda.isPolymorphic ~= funcSig.isPolymorphic then  return false  end  -- Not needed when using dumbHash.
 
 	return true
 end
 
 function _G.getTypeInfoForLambda(state, lambda)
-	local argsIn  = lambda.argumentsIn
-	local argsOut = lambda.argumentsOut
+	local argsIn   = lambda.argumentsIn
+	local argsOut  = lambda.argumentsOut
+	local dumbHash = 0
 
-	if not lambda.isPolymorphic then
+	if lambda.isPolymorphic then
+		dumbHash = -(1 + (argsIn and #argsIn.arguments or 0) + (argsOut and #argsOut.arguments*0x100 or 0))
+
+	else
 		if argsIn then
-			for _, arg in ipairs(argsIn.arguments) do
-				if not arg.declaration.name.inferredType then  return nil  end
+			for argIndex, arg in ipairs(argsIn.arguments) do
+				local argType = arg.declaration.name.inferredType
+				if not argType then  return nil  end
+				dumbHash = dumbHash+argType.id*argIndex*argIndex
 			end
 		end
 		if argsOut then
-			for _, arg in ipairs(argsOut.arguments) do
-				if not arg.declaration.name.inferredType then  return nil  end
+			for argIndex, arg in ipairs(argsOut.arguments) do
+				local argType = arg.declaration.name.inferredType
+				if not argType then  return nil  end
+				dumbHash = dumbHash+argType.id*argIndex*argIndex*0x1000
 			end
 		end
 	end
 
-	for _, typeInfoCached in ipairs(state.allTypeInfos) do
-		if typeInfoCached.tag == !(TYPE_FUNCTION) and doesLambdaHaveSignature(lambda, typeInfoCached) then
-			return typeInfoCached
-		end
+	local byTagAndValue      = state.allTypeInfosByTagAndValue[!(TYPE_FUNCTION)]
+	local typeInfoCached     = byTagAndValue[dumbHash] -- Linked list where the first key is the hash and the rest are type infos.
+	local typeInfoCachedLast = nil
+
+	while typeInfoCached do
+		if doesLambdaHaveSignature(lambda, typeInfoCached) then  return typeInfoCached  end
+		typeInfoCachedLast = typeInfoCached
+		typeInfoCached     = byTagAndValue[typeInfoCached]
 	end
 
 	local funcSig         = newTypeInfo(state, TypeInfoFunction)
@@ -277,23 +292,24 @@ function _G.getTypeInfoForLambda(state, lambda)
 		end
 	end
 
-	table.insert(state.allTypeInfos, funcSig)
+	table.insert(state.allTypeInfos,                        funcSig)
+	table.insert(state.allTypeInfosByTag[!(TYPE_FUNCTION)], funcSig)
+	byTagAndValue[typeInfoCachedLast or dumbHash] = funcSig
 	markTypeAsReady(state, funcSig)
 	return funcSig
 end
 
 do
 	local function getTypeInfoForListOrCompoundType(state, typeInfos, tag, schematicForTypeInfo)
-		for _, typeInfoCached in ipairs(state.allTypeInfos) do
-			if typeInfoCached.tag == tag and areArraysEqual(typeInfos, typeInfoCached) then
-				return typeInfoCached
-			end
+		for _, typeInfoCached in ipairs(state.allTypeInfosByTag[tag]) do
+			if areArraysEqual(typeInfos, typeInfoCached) then  return typeInfoCached  end
 		end
 
 		local typeInfo = newTypeInfo(state, schematicForTypeInfo)
 		copyToArray(typeInfos, typeInfo)
 
-		table.insert(state.allTypeInfos, typeInfo)
+		table.insert(state.allTypeInfos,           typeInfo)
+		table.insert(state.allTypeInfosByTag[tag], typeInfo)
 		markTypeAsReady(state, typeInfo)
 		return typeInfo
 	end
@@ -314,16 +330,15 @@ end
 
 do
 	local function getTypeInfoForArrayOrVararg(state, itemType, tag, schematicForTypeInfo)
-		for _, typeInfoCached in ipairs(state.allTypeInfos) do
-			if typeInfoCached.tag == tag and itemType == typeInfoCached.itemType then
-				return typeInfoCached
-			end
+		for _, typeInfoCached in ipairs(state.allTypeInfosByTag[tag]) do
+			if itemType == typeInfoCached.itemType then  return typeInfoCached  end
 		end
 
 		local typeInfo    = newTypeInfo(state, schematicForTypeInfo)
 		typeInfo.itemType = itemType or errorInternal()
 
-		table.insert(state.allTypeInfos, typeInfo)
+		table.insert(state.allTypeInfos,           typeInfo)
+		table.insert(state.allTypeInfosByTag[tag], typeInfo)
 		markTypeAsReady(state, typeInfo)
 		return typeInfo
 	end
@@ -340,16 +355,16 @@ end
 function _G.getTypeInfoForNamespace(state, scope)
 	!ASSERT `scope`
 
-	for _, typeInfoCached in ipairs(state.allTypeInfos) do
-		if typeInfoCached.tag == !(TYPE_NAMESPACE) and scope == typeInfoCached.scope then
-			return typeInfoCached
-		end
-	end
+	local byTagAndValue  = state.allTypeInfosByTagAndValue[!(TYPE_NAMESPACE)]
+	local typeInfoCached = byTagAndValue[scope]
+	if typeInfoCached then  return typeInfoCached  end
 
 	local namespaceInfo = newTypeInfo(state, TypeInfoNamespace)
 	namespaceInfo.scope = scope
 
-	table.insert(state.allTypeInfos, namespaceInfo)
+	table.insert(state.allTypeInfos,                         namespaceInfo)
+	table.insert(state.allTypeInfosByTag[!(TYPE_NAMESPACE)], namespaceInfo)
+	byTagAndValue[scope] = namespaceInfo
 	markTypeAsReady(state, namespaceInfo)
 	return namespaceInfo
 end
@@ -5406,7 +5421,8 @@ end
 		structInfo.isPolymorphic = true
 		structInfo.hasMembers    = true -- Probably doesn't matter.
 
-		table.insert(state.allTypeInfos, structInfo)
+		table.insert(state.allTypeInfos,                      structInfo)
+		table.insert(state.allTypeInfosByTag[!(TYPE_STRUCT)], structInfo)
 		markTypeAsReady(state, structInfo)
 
 		struct.representedType = structInfo
@@ -5431,7 +5447,8 @@ end
 
 		-- Note: We don't populate structInfo.members just yet. (Is this gonna a problem?)
 
-		table.insert(state.allTypeInfos, structInfo)
+		table.insert(state.allTypeInfos,                      structInfo)
+		table.insert(state.allTypeInfosByTag[!(TYPE_STRUCT)], structInfo)
 
 		struct.representedType = structInfo
 		struct.inferredType    = getTypeInfoForBuiltinType(state, "type")
@@ -5685,7 +5702,8 @@ end
 		enumInfo.members[i] = member
 	end
 
-	table.insert(state.allTypeInfos, enumInfo)
+	table.insert(state.allTypeInfos,                    enumInfo)
+	table.insert(state.allTypeInfosByTag[!(TYPE_ENUM)], enumInfo)
 	markTypeAsReady(state, enumInfo)
 
 	enum.representedType = enumInfo
@@ -6043,7 +6061,7 @@ local function createRunReplacementFromTypeAndLuaValue(state, runNode, parent, t
 		local typeId = v
 		assert(type(typeId) == "number" and typeId == math.floor(typeId))
 
-		local typeRepresented = itemWith1(state.allTypeInfos, "id", typeId)
+		local typeRepresented = state.allTypeInfos[typeId]
 		if not typeRepresented then
 			typeError(state, runNode, "Got the ID of a type that doesn't exist. (Type ID %d)", typeId)
 		end
