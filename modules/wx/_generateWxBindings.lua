@@ -235,11 +235,11 @@ local GLOA_KEYWORDS = {
 	["bool"]         = true,
 	["float"]        = true,
 	["int"]          = true,
+	["none"]         = true,
 	["string"]       = true,
 	["table"]        = true,
-	["type"]         = true,
+	["Type"]         = true,
 	["void"]         = true,
-	["none"]         = true,
 }
 
 local EMPTY_TABLE         = {}

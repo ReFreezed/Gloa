@@ -166,7 +166,7 @@ do
 		["float"]       = TypeInfoFloat,
 		["string"]      = TypeInfoString,
 		["table"]       = TypeInfoTable,
-		["type"]        = TypeInfoType,        -- The result of e.g. type_of(int) or type_of(type_of(expression)).
+		["Type"]        = TypeInfoType,        -- The result of e.g. type_of(int) or type_of(type_of(expression)).
 		["void"]        = TypeInfoVoid,        -- Used when no useful type is expected or available.
 		["placeholder"] = TypeInfoPlaceholder, -- Used in polymorphic functions.
 	}
@@ -178,7 +178,7 @@ do
 		[!(TYPE_FLOAT)]       = "float",
 		[!(TYPE_STRING)]      = "string",
 		[!(TYPE_TABLE)]       = "table",
-		[!(TYPE_TYPE)]        = "type",
+		[!(TYPE_TYPE)]        = "Type",
 		[!(TYPE_PLACEHOLDER)] = "placeholder",
 	}
 
@@ -1397,7 +1397,7 @@ end
 
 	if typeNode.kind == !(TYPE_KIND_SIMPLE_BUILTIN) then
 		typeInfoRepresented = getTypeInfoForBuiltinType(state, typeNode.typeName)
-		typeInfo            = getTypeInfoForBuiltinType(state, "type")
+		typeInfo            = getTypeInfoForBuiltinType(state, "Type")
 
 	elseif typeNode.kind == !(TYPE_KIND_FUNCTION) then
 		local lambda = typeNode.functionHeader or errorInternal()
@@ -1409,7 +1409,7 @@ end
 
 		local funcSig       = getTypeInfoForLambda(state, lambda)
 		typeInfoRepresented = funcSig
-		typeInfo            = getTypeInfoForBuiltinType(state, "type")
+		typeInfo            = getTypeInfoForBuiltinType(state, "Type")
 
 	elseif typeNode.kind == !(TYPE_KIND_ARRAY) then
 		local itemTypeNode = typeNode.arrayItemType or errorInternal(state, typeNode)
@@ -1427,7 +1427,7 @@ end
 
 		local arraySig      = getTypeInfoForArray(state, itemTypeInfo)
 		typeInfoRepresented = arraySig
-		typeInfo            = getTypeInfoForBuiltinType(state, "type")
+		typeInfo            = getTypeInfoForBuiltinType(state, "Type")
 
 	elseif typeNode.kind == !(TYPE_KIND_COMPOUND) then
 		for _, typeExpr in ipairs(typeNode.components) do
@@ -1497,7 +1497,7 @@ end
 		table.sort(typeNode.components, function(a, b)  return typeIds[a] < typeIds[b]  end) -- @Cleanup @Speed: This is probably unnecessary.
 
 		typeInfoRepresented = getTypeInfoForCompoundType(state, typeInfos, true)
-		typeInfo            = getTypeInfoForBuiltinType(state, "type")
+		typeInfo            = getTypeInfoForBuiltinType(state, "Type")
 
 	else
 		decl = typeNode.declaration
@@ -1522,7 +1522,7 @@ end
 			local enumInfo = enum.representedType or errorInternal()
 
 			if enumInfo.memberTypeInfo.tag == !(TYPE_TYPE) then
-				typeInfo = getTypeInfoForBuiltinType(state, "type")
+				typeInfo = getTypeInfoForBuiltinType(state, "Type")
 			end
 		end
 
@@ -4222,7 +4222,7 @@ end
 		typeError(state, astGetExpressionVisuallyFurthestToTheLeft(typeOf.expression), "Cannot get the type of function calls.")
 	end
 
-	typeOf.inferredType    = getTypeInfoForBuiltinType(state, "type")
+	typeOf.inferredType    = getTypeInfoForBuiltinType(state, "Type")
 	typeOf.representedType = exprTypeInfo
 
 	if typeOf.representedType.tag == !(TYPE_VARARG) then
@@ -5500,7 +5500,7 @@ end
 		markTypeAsReady(state, structInfo)
 
 		struct.representedType = structInfo
-		struct.inferredType    = getTypeInfoForBuiltinType(state, "type")
+		struct.inferredType    = getTypeInfoForBuiltinType(state, "Type")
 
 		moveToNextRelevantPipe(state, struct)
 		return
@@ -5525,7 +5525,7 @@ end
 		table.insert(state.allTypeInfosByTag[!(TYPE_STRUCT)], structInfo)
 
 		struct.representedType = structInfo
-		struct.inferredType    = getTypeInfoForBuiltinType(state, "type")
+		struct.inferredType    = getTypeInfoForBuiltinType(state, "Type")
 	end
 
 	-- Wait for explicit contents to infer.
@@ -5743,7 +5743,7 @@ end
 		-- Just use the type of the first member as the wanted type for the enum.
 		enumMemberInfo = enum.declarations[1].value.inferredType
 		if not !!(CONST_SET{ TYPE_INT, TYPE_STRING, TYPE_TYPE, TYPE_BOOL, TYPE_FLOAT })[enumMemberInfo.tag] then
-			typeError(state, enum, "Supported enum member types are: int, string, type, bool, float")
+			typeError(state, enum, "Supported enum member types are: int, string, Type, bool, float")
 		end
 	end
 
@@ -5781,7 +5781,7 @@ end
 	markTypeAsReady(state, enumInfo)
 
 	enum.representedType = enumInfo
-	enum.inferredType    = getTypeInfoForBuiltinType(state, "type")
+	enum.inferredType    = getTypeInfoForBuiltinType(state, "Type")
 
 	moveToNextRelevantPipe(state, enum)
 end
@@ -6558,7 +6558,7 @@ function _G.createTypeNodeFromInfo(state, typeRepresented, token, parent)
 	local typeNode            = astNewNode(AstType, token, parent)
 	local isBuiltin, typeName = isTypeBuiltin(typeRepresented)
 
-	typeNode.inferredType    = getTypeInfoForBuiltinType(state, "type")
+	typeNode.inferredType    = getTypeInfoForBuiltinType(state, "Type")
 	typeNode.representedType = typeRepresented
 
 	if isBuiltin then
@@ -6726,7 +6726,7 @@ local function simplifyCast(state, cast)
 		replaceQueuedNodeAndUnqueueOldTree(state, cast, literal)
 		moveToNextRelevantPipe(state, literal, !(PIPE_INFER))
 
-	-- enum -> enumMemberType (int, float, string, bool or type)
+	-- enum -> enumMemberType (int, float, string, bool or Type)
 	elseif exprTypeInfo.tag == !(TYPE_ENUM) and isTypeCompatibleWith(exprTypeInfo.memberTypeInfo, castTypeInfo) then
 		local castIsDirect = (castTypeInfo == exprTypeInfo.memberTypeInfo)
 
@@ -6788,7 +6788,7 @@ local function simplifyCast(state, cast)
 		replaceQueuedNodeAndUnqueueOldTree(state, cast, ident)
 		moveToNextRelevantPipe(state, ident, !(PIPE_INFER))
 
-	-- type -> int
+	-- Type -> int
 	elseif exprTypeInfo.tag == !(TYPE_TYPE) and castTypeInfo.tag == !(TYPE_INT) then
 		local typeRepresented = getTypeRepresentedByExpression(cast.expression) or errorInternal(state, cast)
 		local literal         = newLiteral(cast.parent, cast.token, !(LITERAL_INTEGER), typeRepresented.id, castTypeInfo)
