@@ -1578,7 +1578,10 @@ local function getArgumentNodeForError(callOrReturnNode, valueIndex, valueExpr)
 		or  astGetExpressionVisuallyFurthestToTheLeft(valueExpr)
 end
 
--- doesMatch, compatibilityScore = checkIfValuesMatchArgumentTypes( state, callOrReturnNode, values, valueTypes, typeInfos, softCheck, calleeDeclarationForCurrentOverload=nil, argumentsNamed=nil )
+-- doesMatch, compatibilityScore = checkIfValuesMatchArgumentTypes(
+--     state, callOrReturnNode, values, valueTypes, typeInfos,
+--     softCheck, calleeDeclarationForCurrentOverload=nil, argumentsNamed=nil
+-- )
 local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, valueTypes, typeInfos, softCheck, calleeDecl, argsNamed)
 	--[[
 		Situations:
@@ -1782,6 +1785,21 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 
 	local compatibilityScoreSum = 0
 
+	!(
+	local function SET_STRICT_TYPE_MATCH_FLAG(argIndexCode)
+		__LUA(templateToLua(
+			trimTemplate`
+				if constLambda and constLambda.polymorphSourceLambda then
+					local argsIn    = constLambda.polymorphSourceLambda.argumentsIn
+					local arg       = argsIn.arguments and (argsIn.arguments[$argIndex] or getLast(argsIn.arguments)) or errorInternal(state, valueExpr)
+					strictTypeMatch = (arg.hasPlaceholders or arg.autobake ~= $AUTOBAKE_DISABLED)
+				end
+			`,
+			{AUTOBAKE_DISABLED=AUTOBAKE_DISABLED, argIndex=argIndexCode}
+		))
+	end
+	)
+
 	for slot = 1, slotsToCheck do
 		local valueIndex      = math.min(slot, valueCount)
 		local valueExpr       = values[valueIndex]
@@ -1807,7 +1825,10 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 			local valueTypeInfoAdjusted    = adjustTypeToOne(state, valueExpr,        valueTypeInfo, adjustVarargToIncludeNil) -- We have a value with a type.
 			local typeInfoToMatchAdjusted  = adjustTypeToOne(state, callOrReturnNode, typeInfoToMatch)                         -- We want a specific type.
 
-			isCompatible, compatibilityScore = isTypeCompatibleWith(valueTypeInfoAdjusted, typeInfoToMatchAdjusted)
+			local strictTypeMatch = false
+			!SET_STRICT_TYPE_MATCH_FLAG(`typeInfoIndex`)
+
+			isCompatible, compatibilityScore = isTypeCompatibleWith(valueTypeInfoAdjusted, typeInfoToMatchAdjusted, strictTypeMatch)
 
 			if not isCompatible then
 				if softCheck then  return false, 0  end
@@ -1830,7 +1851,10 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 			local valueTypeInfoAdjusted    = adjustTypeToOne(state, valueExpr,        valueTypeInfo, adjustVarargToIncludeNil) -- We have a value with a type.
 			local typeInfoToMatchAdjusted  = adjustTypeToOne(state, callOrReturnNode, typeInfoToMatch)                         -- We want a specific type.
 
-			isCompatible, compatibilityScore = isTypeCompatibleWith(valueTypeInfoAdjusted, typeInfoToMatchAdjusted)
+			local strictTypeMatch = false
+			!SET_STRICT_TYPE_MATCH_FLAG(`typeInfoIndex`)
+
+			isCompatible, compatibilityScore = isTypeCompatibleWith(valueTypeInfoAdjusted, typeInfoToMatchAdjusted, strictTypeMatch)
 
 			if not isCompatible then
 				if softCheck then  return false, 0  end
@@ -1878,7 +1902,10 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 		local valueTypeInfoAdjusted   = adjustTypeToOne(state, valueExpr,        valueTypeInfo,   true)
 		local typeInfoToMatchAdjusted = adjustTypeToOne(state, callOrReturnNode, typeInfoToMatch, true)
 
-		local isCompatible, compatibilityScore = isTypeCompatibleWith(valueTypeInfoAdjusted, typeInfoToMatchAdjusted)
+		local strictTypeMatch = false
+		!SET_STRICT_TYPE_MATCH_FLAG(`argIndex`)
+
+		local isCompatible, compatibilityScore = isTypeCompatibleWith(valueTypeInfoAdjusted, typeInfoToMatchAdjusted, strictTypeMatch)
 
 		if not isCompatible then
 			if softCheck then  return false, 0  end
@@ -1979,11 +2006,11 @@ local function getMatchingFunctions(state, call, realArguments, realArgumentType
 
 	for _, decl in ipairs(declarations) do
 		local funcSig = decl.name.inferredType
-
 		!ASSERT("funcSig.tag == "..TYPE_FUNCTION)
 
 		local doesMatch, compatibilityScore = checkIfValuesMatchArgumentTypes(
-			state, call, realArguments, realArgumentTypes, funcSig.argumentTypesIn, true, decl, call.argumentsNamed
+			state, call, realArguments, realArgumentTypes, funcSig.argumentTypesIn,
+			true, decl, call.argumentsNamed
 		)
 		if doesMatch then
 			matches = matches or {}
@@ -2010,7 +2037,7 @@ local function getBestMatchOrTriggerError(state, call, matches, matchTerm, error
 	typeMessage(io.stderr, state, call.callee, "Error", errorTextOnDraw)
 	for i, matchData in ipairs(matches) do
 		if matchData.score < highscore then  break  end
-		typeMessage(io.stderr, state, matchData.declaration.name, "Info", "...%s #%d.", matchTerm, i)
+		typeMessage(io.stderr, state, matchData.declaration.name, "Info", "...%s #%d: %s", matchTerm, i, getFriendlyTypeInfoName(matchData.declaration.name.inferredType))
 	end
 	exitFailure()
 end
@@ -2065,7 +2092,10 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 		end
 	end
 
-	checkIfValuesMatchArgumentTypes(state, call, realArguments, realArgumentTypes, calleeTypeInfo.argumentTypesIn, false, nil, call.argumentsNamed) -- Basically checks everything but placeholders.
+	checkIfValuesMatchArgumentTypes( -- Basically checks everything but placeholders.
+		state, call, realArguments, realArgumentTypes, calleeTypeInfo.argumentTypesIn,
+		false, nil, call.argumentsNamed
+	)
 
 	-- Prepare for auto-bake stuff.
 	local autobaking               = false
@@ -2170,8 +2200,9 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 	morphIdent.declaration = morphDecl
 	morphDecl.name         = morphIdent
 
-	local morphLambda = astCopy(lambda, nil, morphDecl)
-	morphDecl.value   = morphLambda
+	local morphLambda                 = astCopy(lambda, nil, morphDecl)
+	morphLambda.polymorphSourceLambda = lambda
+	morphDecl.value                   = morphLambda
 
 	-- Don't keep copies of previous polymorphs we've made - that would quickly create a mess!
 	-- (@Speed: Don't even copy them in the first place.)
@@ -2776,7 +2807,10 @@ end
 	end
 
 	-- Plain call.
-	checkIfValuesMatchArgumentTypes(state, call, realArguments, realArgumentTypes, funcSig.argumentTypesIn, false, nil, call.argumentsNamed)
+	checkIfValuesMatchArgumentTypes(
+		state, call, realArguments, realArgumentTypes, funcSig.argumentTypesIn,
+		false, nil, call.argumentsNamed
+	)
 
 	-- Make sure foreign function calls don't have gaps among the arguments as
 	-- that may have unexpected consequences (since we don't "put" the default
@@ -2897,7 +2931,10 @@ end
 		typeInfos[i] = valueExpr.inferredType
 	end
 
-	checkIfValuesMatchArgumentTypes(state, returnNode, returnNode.values, typeInfos, lambda.inferredType.argumentTypesOut, false, nil, nil)
+	checkIfValuesMatchArgumentTypes(
+		state, returnNode, returnNode.values, typeInfos, lambda.inferredType.argumentTypesOut,
+		false, nil, nil
+	)
 	moveToNextRelevantPipe(state, returnNode)
 end
 
@@ -3196,9 +3233,11 @@ local function isCompoundCompare(state, binary, typeInfoL, typeInfoR)
 end
 
 local function isValidEqualityCheck(state, binary, typeInfoL, typeInfoR)
-	if typeInfoL     == typeInfoR               then  return true  end
+	if typeInfoL     == typeInfoR   then  return true  end
 	if typeInfoL.tag == !(TYPE_ANY) then  return true  end
 	if typeInfoR.tag == !(TYPE_ANY) then  return true  end
+
+	if typeInfoL.tag == !(TYPE_FUNCTION) and typeInfoL.tag == typeInfoR.tag then  return true  end -- Good rule?
 
 	if isTypeNumeric(typeInfoL) and isTypeNumeric(typeInfoR) then  return true  end
 
@@ -4737,10 +4776,45 @@ end
 
 		if not isExpressionConstant(state, expr, true) then
 			typeError(state, astGetExpressionVisuallyFurthestToTheLeft(expr), "Expression is not constant.")
+
+		elseif not isExpressionConstant(state, expr, false) then
+			while expr.nodeType == !(AST_CAST) do
+				expr = expr.expression
+			end
+			typeError(state, expr, "Cannot statically assert foreign values as they are not known at compile-time.")
+
 		elseif not (expr.nodeType == !(AST_LITERAL) and expr.literalType == !(LITERAL_BOOLEAN)) then
 			errorInternal(state, astGetExpressionVisuallyFurthestToTheLeft(expr), "Constant expression did not result in a boolean literal.")
-		elseif not expr.value then
-			typeError(state, debugNode, "Assertion failed!")
+
+		elseif expr.value then
+			-- void  Assertion passed!
+
+		elseif not expr.replacing then
+			typeError(state, astGetExpressionVisuallyFurthestToTheLeft(expr), "Assertion failed!")
+
+		elseif expr.replacing.nodeType == !(AST_BINARY) then
+			local binary = expr.replacing
+			typeError(
+				state, binary,
+				"Binary assertion failed! (Left is %s, right is %s)",
+				getFriendlyTypeInfoName(binary.left.inferredType), getFriendlyTypeInfoName(binary.right.inferredType)
+			)
+
+		elseif expr.replacing.nodeType == !(AST_CAST) and expr.replacing.expression.inferredType.tag ~= !(TYPE_BOOL) then
+			local cast      = expr.replacing
+			local typeInfo  = cast.expression.inferredType
+			local tag       = typeInfo.tag
+			typeError(
+				state, cast, "Assertion failed! '%s' value is %s.",
+				getFriendlyTypeInfoName(typeInfo),
+				(
+					(tag == !(TYPE_INT) or tag == !(TYPE_FLOAT)) and "zero"
+					or "empty"
+				)
+			)
+
+		else
+			typeError(state, astGetExpressionVisuallyFurthestToTheLeft(expr), "Assertion failed!")
 		end
 
 	elseif debugNode.action == "print" then
@@ -7057,8 +7131,12 @@ function _G.isTypePublic(typeInfo)
 	return true
 end
 
--- isCompatible, compatibilityScore = isTypeCompatibleWith( typeToCheck, otherType )
-function _G.isTypeCompatibleWith(typeToCheck, otherType)
+-- isCompatible, compatibilityScore = isTypeCompatibleWith( typeToCheck, otherType [, strictTypeMatch=false ] )
+--
+-- strictTypeMatch ought to be set for arguments of morphed polymorphic functions that were baked or came from a placeholder argument.
+-- (Not sure if the baked state matter - maybe just the placeholder state.)
+--
+function _G.isTypeCompatibleWith(typeToCheck, otherType, strictTypeMatch)
 	!local SCORE = 0x10000
 	if typeToCheck == otherType then  return true, !(SCORE)  end
 
@@ -7070,55 +7148,58 @@ function _G.isTypeCompatibleWith(typeToCheck, otherType)
 	!local SCORE = .1
 	if typeToCheck.tag == !(TYPE_PLACEHOLDER) or otherType.tag == !(TYPE_PLACEHOLDER) then  return true, !(SCORE)  end
 
-	-- Everything is compatible with the 'any' type. The user better know what they're doing!
-	!local SCORE = 0x1
-	if otherType.tag == !(TYPE_ANY) then  return true, !(SCORE)  end
+	if not strictTypeMatch then
+		-- Everything is compatible with the 'any' type. The user better know what they're doing!
+		!local SCORE = 0x1
+		if otherType.tag == !(TYPE_ANY) then  return true, !(SCORE)  end
 
-	-- Ints are always compatible with floats (but the opposite is false).
-	-- This should be safe as all numbers are 64-bit floats in Lua 5.1 (I think).
-	!local SCORE = 0x1000
-	if typeToCheck.tag == !(TYPE_INT) and otherType.tag == !(TYPE_FLOAT) then  return true, !(SCORE)  end
+		-- Ints are always compatible with floats (but the opposite is false).
+		-- This should be safe as all numbers are 64-bit floats in Lua 5.1 (I think).
+		!local SCORE = 0x1000
+		if typeToCheck.tag == !(TYPE_INT) and otherType.tag == !(TYPE_FLOAT) then  return true, !(SCORE)  end
 
-	-- Substructs are compatible with base structs.
-	!local SCORE = 0x1000
-	if typeToCheck.tag == !(TYPE_STRUCT) and otherType.tag == !(TYPE_STRUCT) then
-		if doesStructInherit(typeToCheck, otherType) then  return true, !(SCORE)  end
-		return false, 0
-	end
-
-	-- Structs and arrays are outputted as tables in Lua, so they are always compatible with tables in Glóa.
-	!local SCORE = 0x10
-	if otherType.tag == !(TYPE_TABLE) and !!(CONST_SET{ TYPE_STRUCT, TYPE_ARRAY })[typeToCheck.tag] then
-		return true, !(SCORE)
-	end
-
-	!local SCORE = 0x100
-	if typeToCheck.tag == !(TYPE_COMPOUND) then
-		-- All compound items has to match the target. (If only one item matches, an explicit cast is needed.)
-		local compoundToCheck = typeToCheck
-		for _, compoundItemToCheck in ipairs(compoundToCheck) do
-			if not isTypeCompatibleWith(compoundItemToCheck, otherType) then  return false, 0  end
+		-- Substructs are compatible with base structs.
+		!local SCORE = 0x1000
+		if typeToCheck.tag == !(TYPE_STRUCT) and otherType.tag == !(TYPE_STRUCT) then
+			if doesStructInherit(typeToCheck, otherType) then  return true, !(SCORE)  end
+			return false, 0
 		end
-		return true, !(SCORE)
-	end
 
-	!local SCORE = 0x100
-	if otherType.tag == !(TYPE_COMPOUND) then
-		-- typeToCheck has to match at least one compound item.
-		local otherCompound = otherType
-		for _, otherCompoundItem in ipairs(otherCompound) do
-			if isTypeCompatibleWith(typeToCheck, otherCompoundItem) then  return true, !(SCORE)  end
+		-- Structs and arrays are outputted as tables in Lua, so they are always compatible with tables in Glóa.
+		!local SCORE = 0x10
+		if otherType.tag == !(TYPE_TABLE) and !!(CONST_SET{ TYPE_STRUCT, TYPE_ARRAY })[typeToCheck.tag] then
+			return true, !(SCORE)
 		end
-		return false, 0
+
+		!local SCORE = 0x100
+		if typeToCheck.tag == !(TYPE_COMPOUND) then
+			-- All compound items has to match the target. (If only one item matches, an explicit cast is needed.)
+			local compoundToCheck = typeToCheck
+			for _, compoundItemToCheck in ipairs(compoundToCheck) do
+				if not isTypeCompatibleWith(compoundItemToCheck, otherType, false) then  return false, 0  end
+			end
+			return true, !(SCORE)
+		end
+
+		!local SCORE = 0x100
+		if otherType.tag == !(TYPE_COMPOUND) then
+			-- typeToCheck has to match at least one compound item.
+			local otherCompound = otherType
+			for _, otherCompoundItem in ipairs(otherCompound) do
+				if isTypeCompatibleWith(typeToCheck, otherCompoundItem, false) then  return true, !(SCORE)  end
+			end
+			return false, 0
+		end
 	end
 
 	-- Array compatability completely depends on the item type.
 	if otherType.tag == !(TYPE_ARRAY) then
 		if typeToCheck.tag == !(TYPE_ARRAY) then
-			return isTypeCompatibleWith(typeToCheck.itemType, otherType.itemType)
-		elseif typeToCheck.tag == !(TYPE_STRUCT) and typeToCheck.kind == !(STRUCT_KIND_ARRAY) then
-			return isTypeCompatibleWith(typeToCheck.valueType, otherType.itemType)
+			return isTypeCompatibleWith(typeToCheck.itemType, otherType.itemType, strictTypeMatch)
+		elseif typeToCheck.tag == !(TYPE_STRUCT) and typeToCheck.kind == !(STRUCT_KIND_ARRAY) then -- We allow array-like structs even if strictTypeMatch is set.
+			return isTypeCompatibleWith(typeToCheck.valueType, otherType.itemType, strictTypeMatch)
 		end
+		return false, 0
 	end
 
 	return false, 0
