@@ -2845,6 +2845,12 @@ function _G.writeProgram(state, writer)
 	end
 
 	file:close()
+
+	-- Validate output.
+	local chunk, err = loadfile(state.settings.outputFilePath)
+	if not chunk then
+		errorInternal("Wrote invalid Lua output. (%s)", err)
+	end
 end
 
 
@@ -2883,7 +2889,11 @@ end
 
 function _G.validateForeignSource(state, foreignSource, foreignSourceName, nodeForError)
 	if foreignSource == "lua" then
-		if not (foreignSourceName:find"^[%w_]+$" or foreignSourceName:find"^[%a_][%w_]*%.[%a_][%w_]*$" or loadstring(F("return(%s)", foreignSourceName))) then
+		if foreignSourceName:find"^[%w_]+$" or foreignSourceName:find"^[%a_][%w_]*%.[%a_][%w_]*$" or loadstring(F("return(%s)", foreignSourceName)) then
+			-- void
+		elseif foreignSourceName:find"%-%-[^\n]*$" then
+			nodeError(state, nodeForError, "ForeignValidator", "This is not a valid Lua symbol. (Note that trailing comments in the Lua code may cause problems.)")
+		else
 			nodeError(state, nodeForError, "ForeignValidator", "This is not a valid Lua symbol.")
 		end
 
