@@ -2414,7 +2414,8 @@ function _G.writeLuaPreloads(state, writer, luaPreloads, fromIndex)
 	end
 end
 
-function _G.writeCompilerSymbols(state, writer)
+-- writeCompilerSymbols( state, writer, relevantObjects=nil )
+function _G.writeCompilerSymbols(state, writer, relevantObjects)
 	local file = writer.file
 
 	if writer.outputRuntime then
@@ -2422,57 +2423,70 @@ function _G.writeCompilerSymbols(state, writer)
 		file:write("local programArguments  = {...}") ; writeEol(state, writer) -- Should we use 'arg' here? It has additional stuff in index 0 and below. metaprogramArguments needs to be updated too.
 		file:write!("local gloaErrorHandler = "..ERROR_HANDLER) ; writeEol(state, writer)
 
-		-- @Incomplete: Option for excluding type information from the program as it takes up a lot of space.
-		-- @Polish: Also maybe don't write this if no type info is accessed in the written program?
+		local writeAllTypes = not relevantObjects or relevantObjects.allTypeInfos
 
-		local first = true
+		if writeAllTypes or next(relevantObjects.typeInfos) then
+			local toWriteTypeIdSet  = {}
+			local toWriteLastTypeId = 0
 
-		file:write("local _TYPES = {")
-		for _, typeInfo in ipairs(state.allTypeInfos) do
-			if isTypePublic(typeInfo) then
-				if not typeInfo.isReady then
-					errorInternal("Type info is not ready for '%s'.", getFriendlyTypeInfoName(typeInfo))
+			for typeId, typeInfo in ipairs(state.allTypeInfos) do
+				if (writeAllTypes or relevantObjects.typeInfos[typeInfo]) and isTypePublic(typeInfo) then
+					if not typeInfo.isReady then
+						errorInternal("Type info is not ready for '%s'.", getFriendlyTypeInfoName(typeInfo))
+					end
+
+					toWriteTypeIdSet[typeId] = true
+					toWriteLastTypeId        = typeId
 				end
-
-				if not first then  file:write(",")  end
-				first = false
-
-				file:write(typeInfo.id)
 			end
-		end
-		file:write("}") ; writeEol(state, writer)
 
-		local first       = true
-		local sequenceGap = 0
+			-- Write list of types.
+			file:write("local _TYPES = {")
 
-		-- @Incomplete: Option for excluding this.  @Polish: Also maybe don't write this if no type info is accessed in the written program?
-		do
-			local _outputDebugInfo = outputDebugInfo
-			_G.outputDebugInfo     = false -- The type table is big enough already! Let's try making it a bit smaller. (This saves ~50% of the space.)
+			local first = true
+			for typeId = 1, toWriteLastTypeId do
+				if toWriteTypeIdSet[typeId] then
+					if not first then  file:write(",")  end
+					first = false
+
+					file:write(typeId)
+				end
+			end
+
+			file:write("}") ; writeEol(state, writer)
+
+			-- Write type table.
+			local sequenceGap       = 0
+			local sequenceGapToFill = writeAllTypes and 30 or 10
+			local _outputDebugInfo  = outputDebugInfo
+			_G.outputDebugInfo      = false -- The type table is big enough already! Let's try making it a bit smaller. (This saves ~50% of the space.)
 
 			file:write("local _ = nil") ; writeEol(state, writer)
 			file:write("local _TYPE_INFO = {")
-			for typeId, typeInfo in ipairs(state.allTypeInfos) do
-				if isTypePublic(typeInfo) then
+
+			local first = true
+			for typeId = 1, toWriteLastTypeId do
+				if toWriteTypeIdSet[typeId] then
 					if not first then  file:write(",")  end
 					first = false
 
 					-- Note: Type index and type ID are the same.
 					if sequenceGap == 0 then
 						-- void
-					elseif sequenceGap < 30 then
+					elseif sequenceGap < sequenceGapToFill then
 						file:write(("_,"):rep(sequenceGap))
 						sequenceGap = 0
 					else
 						file:write("[", typeId, "]=")
 					end
 
-					writeTypeInfo(state, writer, typeInfo)
+					writeTypeInfo(state, writer, state.allTypeInfos[typeId])
 
 				else
 					sequenceGap = sequenceGap+1
 				end
 			end
+
 			file:write("}") ; writeEol(state, writer)
 
 			_G.outputDebugInfo = _outputDebugInfo
@@ -2679,12 +2693,33 @@ function _G.writeProgram(state, writer)
 	local relevantObjects = nil
 
 	if not keepDeadCode then
-		relevantObjects = {}
+		local relevantTypes = {--[[ [typeInfo1]=true, ... ]]}
+		relevantObjects     = {typeInfos=relevantTypes, allTypeInfos=false--[[, [node1]=true, [const1]=true, ... ]]}
+
+		local function cb(obj, crawlObjKind)
+			if crawlObjKind ~= !(CRAWL_CONSTANT) then  return  end
+
+			local const = obj
+
+			if const.kind == !(CONST_KIND_NORMAL) then
+				if const.valueType.tag == !(TYPE_FUNCTION) and const.value.bodyIsForeign and const.value.foreignSource == "compiler" and !!(CONST_SET{
+					-- These are the only functions that can retrieve type information dynamically at runtime.
+					"getAllTypes",
+					"getTypeInfo",
+				})[const.value.foreignSourceName.value] then
+					relevantObjects.allTypeInfos = true
+				end
+
+			elseif const.kind == !(CONST_KIND_TYPE_INFO) then
+				local typeInfo          = const.value
+				relevantTypes[typeInfo] = true
+			end
+		end
 
 		if outputType == !(OUTPUT_TYPE_LUA_APP) then
-			crawl(state, mainLambda, relevantObjects, false)
+			crawl(state, mainLambda, relevantObjects, false, cb)
 		elseif outputType == !(OUTPUT_TYPE_LUA_MODULE) then
-			crawl(state, globalScope.fileScopeWithValueToExport.valueToExport, relevantObjects, false)
+			crawl(state, globalScope.fileScopeWithValueToExport.valueToExport, relevantObjects, false, cb)
 		else
 			errorInternal("outputType==%d", outputType)
 		end
@@ -2706,7 +2741,7 @@ function _G.writeProgram(state, writer)
 
 	writeLuaPreloads(state, writer, state.luaPreloads,        1)
 	writeLuaPreloads(state, writer, state.luaPreloadsRuntime, 1)
-	writeCompilerSymbols(state, writer)
+	writeCompilerSymbols(state, writer, relevantObjects)
 
 	-- Start of user code.
 	addLineMappingDummy(state, writer)

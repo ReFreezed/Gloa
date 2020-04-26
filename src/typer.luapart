@@ -5881,74 +5881,116 @@ local function visitNodesForRunning(state, dependent, unit, visited, deepTopScop
 	end)
 end
 
-function _G.crawl(state, unit, crawled, forMeta)
+function _G.crawl(state, unit, crawled, forMeta, cb)
 	astVisitAllNodes(unit, function(node)
-		crawled[node] = true
+		!(
+		local function MARK_CRAWLED(objCode, crawlObjKind)
+			__LUA(templateToLua(
+				trimTemplate`
+					crawled[$obj] = true
+					if cb then  cb($obj, $crawlObjKind)  end
+				`,
+				{obj=objCode, crawlObjKind=toLua(crawlObjKind)}
+			))
+		end
+		local function MARK_CRAWLED_IF_NEW(objCode, crawlObjKind)
+			__LUA(templateToLua(
+				trimTemplate`
+					if not crawled[$obj] then
+						crawled[$obj] = true
+						if cb then  cb($obj, $crawlObjKind)  end
+					end
+				`,
+				{obj=objCode, crawlObjKind=toLua(crawlObjKind)}
+			))
+		end
+		)
 
 		-- Also see visitNodesForRunning():
 
 		if not node.queued then
+			!MARK_CRAWLED(`node`, CRAWL_NODE)
 			return !(VISIT_IGNORE_CHILDREN)
 
 		elseif node.nodeType == !(AST_IDENTIFIER) then
 			local ident = node
-			local decl  = ident.declaration-- or errorInternal(state, ident)
+			!MARK_CRAWLED(`ident`, CRAWL_NODE)
+
+			local decl = ident.declaration-- or errorInternal(state, ident)
 			if not decl then  return  end -- @Robustness @Cleanup: This currently only happens for names in calls with named arguments. 2020-04-09
 
 			if crawled[decl] then  return  end
 
-			crawl(state, decl, crawled, forMeta)
+			crawl(state, decl, crawled, forMeta, cb)
 
 			if decl.value then  return  end
 
 			local valueExpr = getDeclarationValue(decl)
 			if valueExpr then
-				crawl(state, valueExpr, crawled, forMeta)
+				crawl(state, valueExpr, crawled, forMeta, cb)
 			end
 
 		elseif node.nodeType == !(AST_DECLARATION) then
 			local decl = node
-			if not decl.valueConstant then  return  end
 
-			if decl.name.inferredType.tag == !(TYPE_NAMESPACE) then  return  end -- This check seem a bit out of place maybe. @Cleanup
+			if not decl.valueConstant then
+				!MARK_CRAWLED(`decl`, CRAWL_NODE)
+				return
+			end
+
+			-- This check seem a bit out of place maybe. @Cleanup
+			if decl.name.inferredType.tag == !(TYPE_NAMESPACE) then
+				!MARK_CRAWLED(`decl`, CRAWL_NODE)
+				return
+			end
 
 			if decl ~= unit then -- decl is unit if we followed an identifier.
-				crawled[decl] = nil
+				-- Don't mark as crawled!
 				return !(VISIT_IGNORE_CHILDREN)
 			end
 
-			crawled[decl.valueConstant] = true
+			!MARK_CRAWLED(`decl`, CRAWL_NODE)
+			!MARK_CRAWLED_IF_NEW(`decl.valueConstant`, CRAWL_CONSTANT)
 
 		elseif node.nodeType == !(AST_LOCATION) then
 			local loc = node
+			!MARK_CRAWLED(`loc`, CRAWL_NODE)
+
 			if not loc.ofCaller then
-				crawled[loc.valueConstant] = true
+				!MARK_CRAWLED_IF_NEW(`loc.valueConstant`, CRAWL_CONSTANT)
 			end
+
 			return !(VISIT_IGNORE_CHILDREN)
 
 		elseif !!(CONST_SET{ AST_LITERAL, AST_FOREIGN, AST_TYPE_INFO })[node.nodeType] then
-			crawled[node.valueConstant] = true
+			!MARK_CRAWLED(`node`, CRAWL_NODE)
+			!MARK_CRAWLED_IF_NEW(`node.valueConstant`, CRAWL_CONSTANT)
 			return !(VISIT_IGNORE_CHILDREN)
 
 		--
 
 		elseif node.nodeType == !(AST_LAMBDA) then
 			local lambda = node
+			!MARK_CRAWLED(`lambda`, CRAWL_NODE)
 
 			if lambda.metaOnly and not forMeta then
-				crawled[lambda] = nil
 				return !(VISIT_IGNORE_CHILDREN)
 			end
 
 			if lambda.valueConstant then -- @Robustness: When is this not set? Be more clear!
-				crawled[lambda.valueConstant] = true
+				!MARK_CRAWLED_IF_NEW(`lambda.valueConstant`, CRAWL_CONSTANT)
 			end
 
 		elseif node.nodeType == !(AST_CALL) then
 			local call = node
+			!MARK_CRAWLED(`call`, CRAWL_NODE)
+
 			if call.wantLocation then
-				crawled[call.locationConstant] = true
+				!MARK_CRAWLED_IF_NEW(`call.locationConstant`, CRAWL_CONSTANT)
 			end
+
+		else
+			!MARK_CRAWLED(`node`, CRAWL_NODE)
 		end
 	end)
 end
@@ -6177,7 +6219,7 @@ function _G.prepareToRun(state, dependent, lambda)
 	if dependent.queued.waitingOn then  return nil  end
 
 	local relevantObjects = {}
-	crawl(state, lambda, relevantObjects, true)
+	crawl(state, lambda, relevantObjects, true, nil)
 
 	for _, const in ipairs(state.constants) do
 		if relevantObjects[const] and not const.isReady and (const.kind == !(CONST_KIND_NORMAL) and const.valueType.tag == !(TYPE_FUNCTION)) then
