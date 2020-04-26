@@ -16,10 +16,14 @@
 
 --============================================================]]
 
+!-- To prevent large strings from bloating the output file we treat them as
+!-- referencable objects instead of literals.
+!local STRING_OBJECT_MIN_LENGTH = 1024 -- @Incomplete: Make this an option.
+
 
 
 local !struct"Constant"{
-	{`name`,       ""},  -- Only used for constants that are objects.  @Incomplete: Separate name for metaprogram (which may be limited) and final name.
+	{`name`,       ""},  -- Only used for constants that are objects.  @Incomplete: Separate the name for the metaprogram (which may be limited) and the final name.
 	{`nameLocked`, false},
 
 	{`kind`,       CONST_KIND_NORMAL}, -- See allocateConstantIfNew().
@@ -51,7 +55,6 @@ function _G.allocateConstantIfNew(state, kind, typeInfo, v, nodeForError)
 	if not isSimple and !!(CONST_SET{ TYPE_ANY, TYPE_NAMESPACE, TYPE_COMPOUND, TYPE_LIST, TYPE_PLACEHOLDER })[tag] then
 		errorInternal(state, nodeForError, "Invalid type '%s' for constant.", (TYPE_NAMES[tag] or "?"))
 	end
-	local isObject = not isSimple
 
 	--
 	-- Look for existing contant
@@ -112,11 +115,11 @@ function _G.allocateConstantIfNew(state, kind, typeInfo, v, nodeForError)
 	const.kind      = kind
 	const.valueType = typeInfo
 	const.value     = v
-	const.isObject  = isObject
+	const.isObject  = not isSimple or (kindIsNormal and tag == !(TYPE_STRING) and #v >= !(STRING_OBJECT_MIN_LENGTH))
 	const.isReady   = not (kindIsNormal and tag == !(TYPE_FUNCTION))
 
 	-- Note: Simple constants (like ints) don't need a referencable name as we write those values directly everywhere.
-	if isObject then
+	if const.isObject then
 		if kindIsNormal and tag == !(TYPE_FUNCTION) then
 			assert(not v.isPolymorphic)
 			state.functionN = state.functionN+1

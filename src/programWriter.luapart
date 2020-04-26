@@ -557,7 +557,7 @@ function _G.writeTableConstructorKeyName(writer, name)
 		writer.file:write(name)
 	else
 		writer.file:write("[")
-		writeStringLiteral(writer, name)
+		writeStringLiteral(writer, name) -- @Incomplete: Use writeConstantValueOrReference() in case the string is large.
 		writer.file:write("]")
 	end
 end
@@ -828,7 +828,7 @@ function _G.writeExpression(state, writer, indent, nextLocalN, localsStack, expr
 	elseif expr.nodeType == !(AST_LITERAL) then
 		local literal = expr
 		!ASSERT(`literal.valueConstant`, nil, `literal`)
-		writeConstantValue(state, writer, literal.valueConstant, literal)
+		writeConstantValueOrReference(state, writer, literal.valueConstant, literal)
 
 	elseif expr.nodeType == !(AST_IDENTIFIER) then
 		local ident = expr
@@ -851,7 +851,7 @@ function _G.writeExpression(state, writer, indent, nextLocalN, localsStack, expr
 
 	elseif expr.nodeType == !(AST_TYPE) then
 		local typeNode = expr
-		file:write(F("%d", typeNode.representedType.id)) -- @Cleanup: We probably have a constant for the type ID to use with writeConstantValue() here who cares...
+		file:write(F("%d", typeNode.representedType.id)) -- @Cleanup: We probably have a constant for the type ID to use with writeConstantValue() here, but whatever!
 		if outputDebugInfo then
 			file:write(formatInfoComment(getFriendlyTypeInfoName(typeNode.representedType)))
 		end
@@ -1915,9 +1915,14 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 	end
 end
 
+-- writeForeignReference( state, writer, foreignSourceId, nodeForError=nil )
 function _G.writeForeignReference(state, writer, foreignSourceId, nodeForError)
 	if writer.foreignOnlyAvailableDuringCompilation[foreignSourceId] and writer.outputRuntime and not keepDeadCode then
-		nodeError(state, nodeForError, "ProgramWriter", "Trying to write runtime reference to compile-time-only symbol.")
+		if nodeForError then
+			nodeError(state, nodeForError, "ProgramWriter", "Trying to write runtime reference to compile-time-only symbol.")
+		else
+			errorLine("ProgramWriter", "Trying to write runtime reference to compile-time-only symbol.")
+		end
 	end
 	writer.file:write(writer.foreignReferences[foreignSourceId])
 end
@@ -2255,6 +2260,7 @@ local function writeTypeInfo(state, writer, typeInfo)
 	end
 end
 
+-- writeConstantValue( state, writer, const, nodeForError=nil )
 function _G.writeConstantValue(state, writer, const, nodeForError)
 	local file = writer.file
 	local tag  = const.valueType.tag
@@ -2266,7 +2272,6 @@ function _G.writeConstantValue(state, writer, const, nodeForError)
 	elseif const.kind == !(CONST_KIND_TYPE_INFO) then
 		local typeInfo = const.value
 		file:write("_TYPE_INFO[", typeInfo.id, "]")
-		-- writeTypeInfo(state, writer, const.value)
 
 	elseif const.kind == !(CONST_KIND_LOCATION) then
 		local target = const.value
@@ -2289,7 +2294,11 @@ function _G.writeConstantValue(state, writer, const, nodeForError)
 	--------------------------------
 
 	elseif const.kind ~= !(CONST_KIND_NORMAL) then
-		errorInternal(state, nodeForError, "Incomplete: Handle constant kind '%s'.", (CONST_KIND_TITLES[const.kind] or "?"))
+		if nodeForError then
+			errorInternal(state, nodeForError, "Incomplete: Handle constant kind '%s'.", (CONST_KIND_TITLES[const.kind] or "?"))
+		else
+			errorInternal("Incomplete: Handle constant kind '%s'.", (CONST_KIND_TITLES[const.kind] or "?"))
+		end
 
 	elseif not const.isObject then
 		if tag ~= !(TYPE_ENUM) then
@@ -2302,10 +2311,14 @@ function _G.writeConstantValue(state, writer, const, nodeForError)
 		local decl       = findMemberDeclaration(state, enumInfo.astNode, memberName)
 
 		if not decl then
-			typeError2(state,
-				enumInfo.astNode, F("Internal compiler error: Did not find member '%s' in enum '%s'.", memberName, getFriendlyTypeInfoName(enumInfo)),
-				nodeForError,     F("...current node.")
-			)
+			if nodeForError then
+				typeError2(state,
+					enumInfo.astNode, F("Internal compiler error: Did not find member '%s' in enum '%s'.", memberName, getFriendlyTypeInfoName(enumInfo)),
+					nodeForError,     F("...current node.")
+				)
+			else
+				typeError("Internal compiler error: Did not find member '%s' in enum '%s'.", memberName, getFriendlyTypeInfoName(enumInfo))
+			end
 		end
 
 		local valueExpr  = decl.value
@@ -2332,10 +2345,22 @@ function _G.writeConstantValue(state, writer, const, nodeForError)
 		local tableNode = const.value
 		writeExpression(state, writer, 1, 1, {}, tableNode)
 
+	elseif tag == !(TYPE_STRING) then -- Large string.
+		local s = const.value
+		writeStringLiteral(writer, s)
+
 	elseif !!(CONST_SET{ TYPE_ANY, TYPE_NAMESPACE, TYPE_COMPOUND, TYPE_LIST })[tag] then
-		errorInternal(state, nodeForError, "Cannot write invalid value type '%s'.", TYPE_NAMES[tag])
+		if nodeForError then
+			errorInternal(state, nodeForError, "Cannot write invalid value type '%s'.", TYPE_NAMES[tag])
+		else
+			errorInternal("Cannot write invalid value type '%s'.", TYPE_NAMES[tag])
+		end
 	else
-		errorInternal(state, nodeForError, "Incomplete: Handle constant value of type '%s'.", (TYPE_NAMES[tag] or "?"))
+		if nodeForError then
+			errorInternal(state, nodeForError, "Incomplete: Handle constant value of type '%s'.", (TYPE_NAMES[tag] or "?"))
+		else
+			errorInternal("Incomplete: Handle constant value of type '%s'.", (TYPE_NAMES[tag] or "?"))
+		end
 	end
 end
 
@@ -2497,10 +2522,12 @@ function _G.writeConstantObjectsExceptFunctions(state, writer, constants, asGlob
 			-- void
 
 		elseif const.isObject and not (const.kind == !(CONST_KIND_NORMAL) and const.valueType.tag == !(TYPE_FUNCTION)) then
+			local nodeForError = (type(const.value) == "table" and const.value.nodeType and const.value.s and const.value or nil) -- @Hack @Robustness
+
 			file:write("\t")
 			if not asGlobals then  file:write("local ")  end
 			file:write(const.name, " = ")
-			writeConstantValue(state, writer, const, const.value)
+			writeConstantValue(state, writer, const, nodeForError)
 			writeEol(state, writer)
 
 			writtenObjectCount = writtenObjectCount+1
