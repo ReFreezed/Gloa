@@ -23,7 +23,7 @@
 	indexOf, lastIndexOf
 	indexWith*, lastIndexWith*, itemWith*, lastItemWith*, nextItemWith*, previousItemWith*
 	isAny
-	isPathAbsolute
+	isPathAbsolute, normalizeDirectoryPath
 	isReadableFile, getFileContents
 	iterate
 	newVirtualFile
@@ -1033,7 +1033,70 @@ end
 
 
 function _G.isPathAbsolute(path)
-	return (path:find"^%a:" or path:find"^/") ~= nil
+	-- Note: Network paths or weird paths ("C:foo.png") are not supported.
+	return (path:find"^%a:" or path:find"^[/~]") ~= nil
+end
+
+do
+	function _G.normalizeDirectoryPath(path)
+		-- Note: Network paths or weird paths ("C:foo.png") are not supported.
+		local            drive, root, dir =     path:match"^(%a:)(/)(.*)"
+		if not dir then  drive, root, dir =     path:match"^(~)(/)(.*)"  end
+		if not dir then  drive, root, dir = "", path:match"^(/?)(.*)"    end
+
+		local segments = {}
+		for segment in dir:gmatch"[^/]+" do
+			table.insert(segments, segment)
+		end
+
+		for i = #segments, 1, -1 do
+			if segments[i] == "." then
+				table.remove(segments, i)
+			end
+		end
+
+		local i = 1
+		while segments[i] do
+			if segments[i+1] == ".." and segments[i] ~= ".." then
+				table.remove(segments, i+1)
+				table.remove(segments, i)
+				i = math.max(i-1, 1)
+			else
+				i = i+1
+			end
+		end
+
+		segments[1] = segments[1] or "." -- Prevent an empty string or a trailing slash so it's easy to append stuff to the resulting path.
+		path        = drive..root..table.concat(segments, "/")
+
+		return path
+	end
+
+	--[[ Path normalization tests:
+	local tests = {
+		"C:/foo/bar",             "C:/foo/bar",
+		"/majestic/doggo/.",      "/majestic/doggo",
+		"~/Only trees",           "~/Only trees",
+		"My Game/src/",           "My Game/src",
+		"./cutest/cat/..",        "cutest",
+		"ceiling/cat/../..",      ".",
+		"../almighty/cricket/..", "../almighty",
+		"",                       ".",
+		".",                      ".",
+		"..",                     "..",
+		"foo/../..",              "..",
+		"C:/",                    "C:/.",
+		"C/",                     "C",
+		"/",                      "/.",
+	}
+	for i = 1, #tests, 2 do
+		printf('IN  "%s"', tests[i])
+		printf('OUT "%s"', normalizeDirectoryPath(tests[i]))
+		assert(normalizeDirectoryPath(tests[i]) == tests[i+1])
+		print(("-"):rep(20))
+	end
+	os.exit(2)
+	--]]
 end
 
 

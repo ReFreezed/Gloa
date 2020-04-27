@@ -17,15 +17,16 @@ local TEST_FILES :: {
 	"tests/types.gloa",
 }
 local FILES_TO_COPY_TO_TEMP_FOLDER :: {
+	-- These are used by TEST_FILES.
 	"tests/types.errorGlobal.gloa",
 	"tests/types.errorLocal.gloa",
 	"tests/types.load.gloa",
 }
 
-local EXAMPLE_FILES :: {
+local EXAMPLES: [] struct {folder:string, main:string} : {
 	-- These only run if 'examplesFolder' in suite.ini is set.
-	"lovelyBlaster/main.gloa",
-	"lovelySnake/main.gloa",
+	{folder="lovelyBlaster", main="src/main.gloa"},
+	{folder="lovelySnake",   main="main.gloa"},
 }
 
 local COMPILER_OPTIONS   :: "--debug --nogc --silent"
@@ -52,7 +53,6 @@ local OUTPUT_REDIRECTION :: ">NUL" -- ">NUL 2>&1"
 
 	print("Running test suite...")
 
-	local testFiles      = {unpack(TEST_FILES)}
 	local examplesFolder = ""
 
 	do {
@@ -74,12 +74,7 @@ local OUTPUT_REDIRECTION :: ">NUL" -- ">NUL 2>&1"
 		}
 	}
 
-	if examplesFolder {
-		print("Including examples.")
-		for EXAMPLE_FILES  insert(testFiles, examplesFolder.."/"..it)
-	} else {
-		print("Excluding examples.")
-	}
+	print(examplesFolder ? "Including examples." : "Excluding examples.")
 
 	local testToRun = getProgramArguments()[1]
 	testToRun       = testToRun ~= NULL ? toLower(testToRun) : ""
@@ -88,28 +83,49 @@ local OUTPUT_REDIRECTION :: ">NUL" -- ">NUL 2>&1"
 
 	local testCount = 0
 	local failCount = 0
-	local lines: []string
+	local results: []string
 
-	local shouldRunTest = [testToRun] (path:string) -> bool {
+	local shouldRunTest = [testToRun] (name:string) -> bool {
 		if not testToRun  return true
-		local _, basename = matchPattern(path, "([^/]+)%.gloa$")
-		return (find(toLower(basename), testToRun))
+		name = replacePattern(name, "%.gloa$", "")
+		return (find(toLower(name), testToRun))
 	}
 
-	for path: testFiles {
+	local runTest = [testCount,failCount,results] (name:string, expectSuccess:bool, cmd:string) {
+		print(cmd)
+		testCount += 1
+
+		if (execute(cmd) == 0) == expectSuccess {
+			insert(results, format("ok      %s", name))
+		} else {
+			insert(results, format("NOT_OK  %s", name))
+			failCount = failCount+1
+		}
+	}
+
+	for path: TEST_FILES {
 		if shouldRunTest(path) {
-			testCount += 1
-			local cmd   = format([["lua "%s" %s "%s" %s"]], COMPILER_PATH, COMPILER_OPTIONS, path, OUTPUT_REDIRECTION)
+			runTest(path, true, format(
+				[["lua "%s" %s "%s" %s"]],
+				COMPILER_PATH, COMPILER_OPTIONS,
+				path,
+				OUTPUT_REDIRECTION
+			))
+			if testToRun  break
+		}
+	}
 
-			print(cmd)
-			if execute(cmd) == 0 {
-				insert(lines, format("ok      %s", path))
-			} else {
-				insert(lines, format("NOT_OK  %s", path))
-				failCount = failCount+1
-			}
+	if examplesFolder  for example: EXAMPLES {
+		local path = format("%s/%s/%s", examplesFolder, example.folder, example.main)
 
-			if testToRun ~= ""  break
+		if shouldRunTest(example.folder) {
+			runTest(path, true, format(
+				[["lua "%s" %s --root "%s/%s" "%s" %s"]],
+				COMPILER_PATH, COMPILER_OPTIONS,
+				examplesFolder, example.folder, example.main,
+				OUTPUT_REDIRECTION
+			))
+			if testToRun  break
 		}
 	}
 
@@ -125,30 +141,24 @@ local OUTPUT_REDIRECTION :: ">NUL" -- ">NUL 2>&1"
 		local tempPath = format("temp/shouldFail%d.gloa", i)
 
 		if shouldRunTest(tempPath) {
-			testCount += 1
-
 			if not find(gloa, "main ::")
 				gloa = gloa.."\nlocal main :: () {}\n"
 
 			local ok, err = writeEntireFile(tempPath, gloa)
 			assert(ok, err)
 
-			local cmd = format([["lua "%s" %s "%s" %s"]], COMPILER_PATH, COMPILER_OPTIONS, tempPath, OUTPUT_REDIRECTION)
-			print(cmd)
-
-			if execute(cmd) ~= 0 {
-				insert(lines, format("ok      %s", tempPath))
-			} else {
-				insert(lines, format("NOT_OK  %s", tempPath))
-				failCount = failCount+1
-			}
-
-			if testToRun ~= ""  break
+			runTest(tempPath, false, format(
+				[["lua "%s" %s "%s" %s"]],
+				COMPILER_PATH, COMPILER_OPTIONS,
+				tempPath,
+				OUTPUT_REDIRECTION
+			))
+			if testToRun  break
 		}
 	}
 
 	print("-"*64)
-	for lines  print(it)
+	for results  print(it)
 	print("-"*64)
 
 	if testCount == 0

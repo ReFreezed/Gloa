@@ -236,12 +236,13 @@ lua gloa.lua [compilerOptions] myProgram.gloa [myOtherProgram.gloa ...] [-- meta
 
 #### Options
 ```
---debug    Output debug information into compiled programs.
---help     Display this help.
---nogc     Disable garbage collection during compilation. (May decrease compilation time.)
---nostrip  Disable automatic removal of dead code. (May trigger runtime errors on start-up!)
---silent   Disable output to stdout. (Errors and warnings are still printed to stderr.)
---         Start of arguments for metaprogram.
+--debug       Output debug information into compiled programs.
+--help        Display this help.
+--nogc        Disable garbage collection during compilation. (May decrease compilation time.)
+--nostrip     Disable automatic removal of dead code. (May trigger runtime errors on start-up!)
+--root <dir>  Specify the root directory for the project. (Default is where the target .gloa file is.)
+--silent      Disable output to stdout. (Errors and warnings are still printed to stderr.)
+--            Start of arguments for metaprogram.
 ```
 
 

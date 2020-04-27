@@ -41,8 +41,8 @@ exec lua "$0" "$@"
 --=
 --=  Language points:
 --=  - Strong static type system.
---=  - Compile-time execution.
---=  - The order of declarations doesn't matter in non-imperative scopes. (No forward declarations needed.)
+--=  - Compile-time code execution.
+--=  - No forward declarations.
 --=
 --============================================================]]
 ]====]

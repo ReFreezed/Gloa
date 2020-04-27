@@ -16,12 +16,13 @@ Synopsis:
     lua gloa.lua [compilerOptions] myProgram.gloa [myOtherProgram.gloa ...] [-- metaprogramArgument1 ...]
 
 Options:
-    --debug    Output debug information into compiled programs.
-    --help     Display this help.
-    --nogc     Disable garbage collection during compilation. (May decrease compilation time.)
-    --nostrip  Disable automatic removal of dead code. (May trigger runtime errors on start-up!)
-    --silent   Disable output to stdout. (Errors and warnings are still printed to stderr.)
-    --         Start of arguments for metaprogram.]]
+    --debug       Output debug information into compiled programs.
+    --help        Display this help.
+    --nogc        Disable garbage collection during compilation. (May decrease compilation time.)
+    --nostrip     Disable automatic removal of dead code. (May trigger runtime errors on start-up!)
+    --root <dir>  Specify the root directory for the project. (Default is where the target .gloa file is.)
+    --silent      Disable output to stdout. (Errors and warnings are still printed to stderr.)
+    --            Start of arguments for metaprogram.]]
 
 local EXTRA_STATS                  = 1==0 -- Pipe cycles.
 local FUNCTION_TO_MEASURE_CALLS_ON = ""--`inferIdentifierOrVararg` -- Also see profiler*() in functions.luapart. (The two features are not compatible.)
@@ -99,6 +100,7 @@ local function runCompiler()
 	_G.silent               = false
 	_G.outputDebugInfo      = false
 	_G.keepDeadCode         = false
+	_G.rootDirectory        = ""
 
 	!if DEBUG then
 	_G.debug_onlyParse      = false
@@ -152,6 +154,10 @@ local function runCompiler()
 				_G.keepDeadCode = true
 				table.insert(compilerArguments, arg)
 				i = i+1
+			elseif arg == "--root" then
+				_G.rootDirectory = args[i+1] or errorLine("Compiler", "Expected a path after '--root'.")
+				_G.rootDirectory = rootDirectory == "" and "" or normalizeDirectoryPath((rootDirectory:gsub("\\", "/")))
+				i = i+2
 
 			!if DEBUG then
 			elseif arg == "--debug:onlyparse" then
@@ -333,20 +339,26 @@ local function runCompiler()
 		state.id     = nextStateId
 		nextStateId  = nextStateId+1
 
-		-- Project directory result examples:
-		--   C:/app/main.gloa > C:/app
-		--   ../main.gloa     > ..
-		--   main.gloa        > .
-		state.pathToFirstFile  = pathToFirstFile
-		state.projectDirectory = pathToFirstFile:gsub("/?[^/]+$", ""):gsub("^$", ".")
-		state.mainFileBasename = pathToFirstFile:match"([^/]+)%.gloa$"
+		if rootDirectory == "" then
+			-- Project directory result examples:
+			--   C:/app/main.gloa > C:/app
+			--   ../main.gloa     > ..
+			--   main.gloa        > .
+			state.pathToFirstFile  = pathToFirstFile
+			state.projectDirectory = normalizeDirectoryPath((pathToFirstFile:gsub("/?[^/]+$", ""):gsub("^$", ".")))
+		else
+			pathToFirstFile        = isPathAbsolute(pathToFirstFile) and pathToFirstFile or rootDirectory.."/"..pathToFirstFile
+			state.pathToFirstFile  = pathToFirstFile
+			state.projectDirectory = rootDirectory
+		end
 
+		state.mainFileBasename = pathToFirstFile:match"([^/]+)%.gloa$"
 		if not state.mainFileBasename then
 			errorLine("Compiler", "Expected the file to compile to end with '.gloa': %s", pathToFirstFile)
 		end
 
 		local settings          = CompilationSettings()
-		settings.outputFilePath = pathToFirstFile:gsub("%.gloa$", "")..".lua"
+		settings.outputFilePath = state.projectDirectory.."/"..state.mainFileBasename..".lua"
 		state.settings          = settings
 
 		!if DEBUG then
