@@ -577,6 +577,8 @@ function _G.canNodeSeeDeclaration(state, node, decl)
 
 	if nodeStatement.nodeType == !(AST_DECLARATION) then
 		nodeStatement = nodeStatement.assignment or nodeStatement -- Not sure if needed. See :DeclarationAssignment
+	elseif nodeStatement.nodeType == !(AST_ARGUMENTS) then
+		nodeStatement = astFindParent1(node, !(AST_ARGUMENT)) or errorInternal()
 	end
 
 	while true do
@@ -598,9 +600,31 @@ function _G.canNodeSeeDeclaration(state, node, decl)
 		elseif not canSeeImperativeVariables then
 			return false
 
-		elseif !!(CONST_SET{ AST_FOR, AST_LAMBDA })[nodeScope.nodeType] then
-			-- These are really a combination of declarative and imperative scopes. (Not sure if this is good. 2020-03-19)
+		-- Imperative scopes
+		----------------------------------------------------------------
+
+		elseif nodeScope.nodeType == !(AST_FOR) then
+			-- This is really a combination of a declarative scope and an imperative scope. (Not sure if this is good. 2020-03-19)
+			-- @Robustness: Give a makeover similar to AST_LAMBDA here below? 2020-04-27
 			return true
+
+		elseif nodeScope.nodeType == !(AST_LAMBDA) then
+			-- Lambdas act as imperative scopes for arguments, but declarative scopes otherwise. (Could maybe use some @Cleanup.)
+			local lambda = nodeScope
+			if lambda ~= nodeScope0 then  return true  end
+
+			-- We should only get here if both node and decl is inside arguments.
+			local arg = decl.parent
+			!ASSERT("arg.nodeType           == "..AST_ARGUMENT)
+			!ASSERT("nodeStatement.nodeType == "..AST_ARGUMENT)
+
+			!if DEBUG then
+				if state.tokens.file[arg.token] ~= state.tokens.file[node.token] then
+					typeError2(state, node, "Internal compiler error: node", arg, "arg")
+				end
+			!end
+
+			return (arg.token < nodeStatement.token)
 
 		elseif nodeScope.nodeType == !(AST_BLOCK) then
 			local block = nodeScope
@@ -609,15 +633,11 @@ function _G.canNodeSeeDeclaration(state, node, decl)
 			-- and the assignment as if they were the same statement. Otherwise the assignment will be
 			-- able to see it's own declarations, which is illegal! :DeclarationAssignment
 			local declScope, declStatement = astFindParentScope(decl.assignment or decl)
+			assert(declScope == block)
 
-			if declScope == block then
-				return (declStatement.token < nodeStatement.token)
-			end
+			return (declStatement.token < nodeStatement.token)
 
-			-- The declaration is probably from a using. The only things you can use right
-			-- now are structs and enums, both being declarative scopes. 2020-01-03
-			!ASSERT `isScopeDeclarative(declScope)`
-			return true
+		----------------------------------------------------------------
 
 		else
 			errorUnhandledNodeType(state, nodeScope)

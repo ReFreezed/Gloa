@@ -534,90 +534,76 @@ function _G.errorPipesAreStuck(state)
 	end
 
 	-- [[ Report undeclared identifier.
-	local function getDeclaredIdentifierWaitingToBeDeclaredWithName(name, queuedToIgnore) -- @Cleanup: What is this even?!?!
-		for _, queued in ipairs(state.allQueueds) do
-			if queued ~= queuedToIgnore and not queued.unqueued and queued.waitingOn and queued.node.nodeType == !(AST_IDENTIFIER) then
-				local ident = queued.node
-				if ident.parent == ident.declaration and ident.name == name then  return queued  end
-			end
-		end
-		return nil
-	end
-
 	local generatedIdents = {}
 	local namesReported   = {}
 
-	for _, queued in ipairs(state.allQueueds) do
-		local dependency = not queued.unqueued and queued.waitingOn
+	local queueds = findQueueds(function(queued, node, dependency, dependOn)
+		return dependency.dependType == !(DEPEND_DECLARATION) or dependency.dependType == !(DEPEND_MEMBER_DECLARATION)
+	end)
+	for _, queued in ipairs(queueds) do
+		local name = queued.waitingOn.dependOn
+		local node = queued.node
 
-		if dependency and (dependency.dependType == !(DEPEND_DECLARATION) or dependency.dependType == !(DEPEND_MEMBER_DECLARATION)) then
-			local name = dependency.dependOn
+		if namesReported[name] then
+			-- void
 
-			if not getDeclaredIdentifierWaitingToBeDeclaredWithName(name, queued) then
-				local node = queued.node
+		elseif name == "..." then
+			errorParsing(state, node.token, "This is not inside a vararg function.") -- Probably an internal compiler error at this point.
 
-				if namesReported[name] then
-					-- void
+		elseif node.nodeType == !(AST_ACCESS) then
+			local access = node
 
-				elseif name == "..." then
-					errorParsing(state, node.token, "This is not inside a vararg function.") -- Probably an internal compiler error at this point.
+			if access.object.inferredType.tag == !(TYPE_NAMESPACE) and access.object.inferredType.scope.nodeType == !(AST_FILE_SCOPE) then
+				local fileScope = access.object.inferredType.scope
+				!!(REPORT_START)
+				typeError(
+					state, node.member,
+					"Undeclared identifier '%s' in %s '%s'.",
+					name,
+					fileScope.isModule and "module"             or "file",
+					fileScope.isModule and fileScope.moduleName or fileScope.path
+				)
+				!!(REPORT_END)
 
-				elseif node.nodeType == !(AST_ACCESS) then
-					local access = node
+			else
+				local scope  = nil
+				local tag    = access.object.inferredType.tag
+				local ignore = false
 
-					if access.object.inferredType.tag == !(TYPE_NAMESPACE) and access.object.inferredType.scope.nodeType == !(AST_FILE_SCOPE) then
-						local fileScope = access.object.inferredType.scope
-						!!(REPORT_START)
-						typeError(
-							state, node.member,
-							"Undeclared identifier '%s' in %s '%s'.",
-							name,
-							fileScope.isModule and "module"             or "file",
-							fileScope.isModule and fileScope.moduleName or fileScope.path
-						)
-						!!(REPORT_END)
-
-					else
-						local scope  = nil
-						local tag    = access.object.inferredType.tag
-						local ignore = false
-
-						if tag == !(TYPE_NAMESPACE) then
-							scope = access.object.inferredType.scope
-						elseif tag == !(TYPE_ENUM) then
-							scope = access.object.inferredType.astNode
-						elseif tag == !(TYPE_STRUCT) then
-							scope = access.object.inferredType.astNode
-							if not access.object.inferredType.hasMembers then  ignore = true  end -- Better to report the next issue, probably.
-						else
-							-- What could this be?
-						end
-
-						if not ignore then
-							!!(REPORT_START)
-							printerr()
-							typeMessage(io.stderr, state, access.member, "Error", "Undeclared identifier '%s'.", name)
-							if scope then
-								typeMessage(io.stderr, state, scope, "Info", "...here is the accessed scope.")
-							end
-							exitFailure()
-							!!(REPORT_END)
-						end
-					end
-
-				elseif name == "it" or name == "itIndex" then
-					table.insert(generatedIdents, node)
-					-- Continue, as we prefer to report on user-defined identifiers first...
-
+				if tag == !(TYPE_NAMESPACE) then
+					scope = access.object.inferredType.scope
+				elseif tag == !(TYPE_ENUM) then
+					scope = access.object.inferredType.astNode
+				elseif tag == !(TYPE_STRUCT) then
+					scope = access.object.inferredType.astNode
+					if not access.object.inferredType.hasMembers then  ignore = true  end -- Better to report the next issue, probably.
 				else
-					!!(REPORT_START)
-					typeError(state, node, "Undeclared identifier '%s'.", name)
-					!!(REPORT_END)
+					-- What could this be?
 				end
 
-				namesReported[name] = true
+				if not ignore then
+					!!(REPORT_START)
+					printerr()
+					typeMessage(io.stderr, state, access.member, "Error", "Undeclared identifier '%s'.", name)
+					if scope then
+						typeMessage(io.stderr, state, scope, "Info", "...here is the accessed scope.")
+					end
+					exitFailure()
+					!!(REPORT_END)
+				end
 			end
+
+		elseif name == "it" or name == "itIndex" then
+			table.insert(generatedIdents, node)
+			-- Continue, as we prefer to report on user-defined identifiers first...
+
+		else
+			!!(REPORT_START)
+			typeError(state, node, "Undeclared identifier '%s'.", name)
+			!!(REPORT_END)
 		end
+
+		namesReported[name] = true
 	end
 
 	!!(REPORT_FINAL) -- Only report generatedIdents if they are the only ones.
