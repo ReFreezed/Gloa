@@ -151,6 +151,8 @@ local numberTypeByScope     = {}
 local numberTypeByModule    = {}
 local numberTypeByName      = {}
 
+local argumentsToJoin       = {}
+
 
 
 --==============================================================
@@ -212,6 +214,46 @@ function _G.getNameOfMostSpecificType(unsortedLineageTypeNames)
 	errorInternal()
 end
 
+local function eachArgument(t)
+	local i = 0
+	return function()
+		i = i+1
+		if t[i] then  return i, t[i]  end
+	end
+end
+
+local function writeOneOrMoreArgumentNames(state, argIndex, argInfo, arguments, iter)
+	local argName1 = state:writeName(argInfo.name, true)
+
+	-- Write (x:float,y:float) as (x,y:float) etc.
+	for _, argNames in ipairs(argumentsToJoin) do
+		local argIndexLast = argIndex + #argNames - 1
+
+		if arguments[argIndexLast] then
+			local matching = true
+
+			for i, argName in ipairs(argNames) do
+				local argInfoOther = arguments[argIndex+i-1]
+
+				if not (argInfoOther.name == argName and (argInfoOther.typeOverride or argInfoOther.type) == (argInfo.typeOverride or argInfo.type) and argInfoOther.default == argInfo.default) then
+					matching = false
+					break
+				end
+			end
+
+			if matching then
+				for argIndex = argIndex+1, argIndexLast do
+					state:write(",")
+					state:writeName(select(2, iter()).name, false)
+				end
+				return argName1
+			end
+		end
+	end
+
+	return argName1
+end
+
 local function processFunction(state, funcInfo, funcName, alignment)
 	for _, variantInfo in ipairs(funcInfo.variants) do
 		countFunctionVariants = countFunctionVariants+1
@@ -222,10 +264,12 @@ local function processFunction(state, funcInfo, funcName, alignment)
 		state:writeFirstFunctionArgument(variantInfo)
 
 		if variantInfo.arguments and variantInfo.arguments[1] then
-			for argIndex, argInfo in ipairs(variantInfo.arguments) do
+			local iter = eachArgument(variantInfo.arguments)
+
+			for argIndex, argInfo in iter do
 				if argIndex > 1 then  state:write(", ")  end
 
-				local argName1 = state:writeName(argInfo.name, true)
+				local argName1 = writeOneOrMoreArgumentNames(state, argIndex, argInfo, variantInfo.arguments, iter)
 				state:write(":")
 
 				local typeName = argInfo.typeOverride or state:getFinalType(argInfo.type, funcInfo.name, argName1)
@@ -241,12 +285,14 @@ local function processFunction(state, funcInfo, funcName, alignment)
 		state:write(")")
 
 		if variantInfo.returns and variantInfo.returns[1] then
+			local iter = eachArgument(variantInfo.returns)
+
 			state:write(" -> (")
 
-			for argIndex, argInfo in ipairs(variantInfo.returns) do
+			for argIndex, argInfo in iter do
 				if argIndex > 1 then  state:write(", ")  end
 
-				local argName1 = state:writeName(argInfo.name, true)
+				local argName1 = writeOneOrMoreArgumentNames(state, argIndex, argInfo, variantInfo.returns, iter)
 				state:write(":")
 
 				local typeName = argInfo.typeOverride or state:getFinalType(argInfo.type, funcInfo.name, argName1)
@@ -549,11 +595,26 @@ for line in nextLine do
 				errorLine(EDITS_PATH, ln, "Bad numbertype match kind '%s'.", matchKind)
 			end
 
+		elseif action == "joinargs" then
+			local argName1 = objectPathString
+			local argNames = {argName1}
+			for argName in line:sub(ptr):gmatch"%S+" do
+				table.insert(argNames, argName)
+			end
+			if not argNames[2] then
+				errorLine(EDITS_PATH, ln, "At least 2 argument names are required.", line)
+			end
+			table.insert(argumentsToJoin, argNames)
+
 		else
 			errorLine(EDITS_PATH, ln, "Unknown action '%s'.", action)
 		end
 	end
 end
+
+table.sort(argumentsToJoin, function(a, b)
+	return #a > #b
+end)
 
 -- Move/remove objects before doing anything else. (Note: We don't touch loveApiExtra.)
 do
