@@ -3204,28 +3204,6 @@ end
 	simplifyExpressionIfConstant(state, unary)
 end
 
-local function isArrayItemOrTableFieldCheck(state, binary, typeInfoL, typeInfoR)
-	-- Detect situations like these: myArray[i]==nil or myTable[k]==nil
-
-	local maybeAccess = binary.left
-	local nilExpr     = binary.right
-
-	if nilExpr.inferredType.tag == !(TYPE_NONE) then
-		-- void
-	elseif maybeAccess.inferredType.tag == !(TYPE_NONE) then
-		nilExpr, maybeAccess = maybeAccess, nilExpr
-	else
-		return false
-	end
-
-	if maybeAccess.nodeType ~= !(AST_ACCESS) then  return false  end
-
-	local tag = maybeAccess.object.inferredType.tag
-	if not !!(CONST_SET{ TYPE_ARRAY, TYPE_TABLE })[tag] then  return false  end
-
-	return true
-end
-
 local function isCompoundCompare(state, binary, typeInfoL, typeInfoR)
 	-- Detect situations like these: local v:int|string = 0 ; if v == ""
 
@@ -3253,19 +3231,14 @@ local function isCompoundCompare(state, binary, typeInfoL, typeInfoR)
 end
 
 local function isValidEqualityCheck(state, binary, typeInfoL, typeInfoR)
-	if typeInfoL     == typeInfoR   then  return true  end
-	if typeInfoL.tag == !(TYPE_ANY) then  return true  end
-	if typeInfoR.tag == !(TYPE_ANY) then  return true  end
-
-	if typeInfoL.tag == !(TYPE_FUNCTION) and typeInfoL.tag == typeInfoR.tag then  return true  end -- Good rule?
-
-	if isTypeNumeric(typeInfoL) and isTypeNumeric(typeInfoR) then  return true  end
-
-	if isArrayItemOrTableFieldCheck(state, binary, typeInfoL, typeInfoR) then  return true  end
-	if isCompoundCompare           (state, binary, typeInfoL, typeInfoR) then  return true  end
+	if typeInfoL == typeInfoR or typeInfoL.tag == !(TYPE_ANY) or typeInfoR.tag == !(TYPE_ANY) then  return true  end
 
 	-- We allow comparing namespaces even though technically each namespace has it's own unique type.
-	if typeInfoL.tag == typeInfoR.tag and typeInfoL.tag == !(TYPE_NAMESPACE) then  return true  end
+	-- Functions can also be compared freely despite having different signatures.
+	if typeInfoL.tag == typeInfoR.tag and (typeInfoL.tag == !(TYPE_NAMESPACE) or typeInfoL.tag == !(TYPE_FUNCTION)) then  return true  end
+
+	if isTypeNumeric(typeInfoL) and isTypeNumeric(typeInfoR)  then  return true  end
+	if isCompoundCompare(state, binary, typeInfoL, typeInfoR) then  return true  end
 
 	return false
 end
@@ -3747,7 +3720,7 @@ end
 			typeError(state, indexExpr, "Byte position is not positive. (It is %d)", indexExpr.value)
 		end
 
-		access.inferredType = typeObject
+		access.inferredType = typeMember
 
 		if not (isExpressionConstant(state, strExpr, false) and isExpressionConstant(state, indexExpr, false)) then
 			moveToNextRelevantPipe(state, access)
@@ -3764,7 +3737,7 @@ end
 			typeError(state, indexExpr, "Byte position is greater than the length of the string. (Index is %d, length is %d)", i, #s)
 		end
 
-		local literal = newLiteral(access.parent, access.token, !(LITERAL_STRING), s:sub(i, i), typeObject) -- The value may be "".
+		local literal = newLiteral(access.parent, access.token, !(LITERAL_INTEGER), s:byte(i), typeMember)
 		replaceQueuedNodeAndUnqueueOldTree(state, access, literal)
 		moveToNextRelevantPipe(state, literal, !(PIPE_INFER))
 

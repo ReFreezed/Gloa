@@ -143,7 +143,7 @@ local COMPILER_SYMBOL_PAIRS = {
 	`_SELECT`, `select`,     -- Used for short-form vararg loops, lookups and length expressions.
 	`_REP`,    `string.rep`, -- Used for string repetition (duh).
 	`_REP2`,   `function(n,s)return(s:rep(n))end`,
-	`_SUB`,    `function(s,n)return(s:sub(n,n))end`, -- Used for string subscripting.
+	`_BYTE`,   `string.byte`,-- Used for string subscripting.
 
 	-- Used for short-form array loops in reverse.
 	`_IPAIRSR`, trimTemplate`
@@ -453,8 +453,7 @@ function _G.writeAccess(state, writer, indent, nextLocalN, localsStack, access)
 		end
 
 	elseif objType.tag == !(TYPE_STRING) then
-		-- @Design: Should we change str[n] to result in a byte instead of a substring?
-		writer.file:write("_SUB(")
+		writer.file:write("_BYTE(")
 		writeExpression(state, writer, indent, nextLocalN, localsStack, access.object)
 		writer.file:write(", ")
 		writeExpression(state, writer, indent, nextLocalN, localsStack, access.member)
@@ -795,18 +794,36 @@ function _G.writeExpression(state, writer, indent, nextLocalN, localsStack, expr
 
 	elseif expr.nodeType == !(AST_UNARY) then
 		local unary = expr
+		addLineMapping(state, writer, unary.token)
 
+		-- Lua doesn't have unary '+'.
 		if unary.operation == "+" then
 			writeExpression(state, writer, indent, nextLocalN, localsStack, unary.expression)
 
+		-- Length of vararg.
 		elseif unary.operation == "#" and unary.expression.nodeType == !(AST_VARARG) then
-			addLineMapping(state, writer, unary.token)
 			file:write('_SELECT("#", ...)')
 
+		-- For 'if not n', output 'if n==0' instead of 'if not(n~=0)'.
+		elseif unary.operation == "not" and unary.expression.nodeType == !(AST_CAST) and !!(CONST_SET{ TYPE_STRING, TYPE_INT, TYPE_FLOAT })[unary.expression.expression.inferredType.tag] then
+			local cast = unary.expression
+
+			addLineMapping(state, writer, cast.token)
+			addLineMapping(state, writer, cast.expression.token)
+
+			file:write("(")
+			writeExpression(state, writer, indent, nextLocalN, localsStack, cast.expression)
+			file:write(" == ")
+			if cast.expression.inferredType.tag == !(TYPE_STRING) then
+				file:write('""')
+			else
+				file:write("0")
+			end
+			file:write(")")
+
+		-- Other operations.
 		else
 			local addParens = shouldOperationHaveSurroundingParentheses(unary)
-
-			addLineMapping(state, writer, unary.token)
 
 			if addParens then  file:write("(")  end
 			file:write(unary.operation)
