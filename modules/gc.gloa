@@ -1,0 +1,51 @@
+--[[============================================================
+--=
+--=  Glóa garbage collector module
+--=
+--==============================================================
+
+	collect, stop, restart
+	getMemoryUsage, getMemoryUsageInBytes
+	getPause, setPause
+	getStepMultiplier, setStepMultiplier
+	step
+
+--============================================================]]
+
+local collectgarbage :: (opt:string, arg:int|none=nil) -> any !foreign lua "collectgarbage"
+
+export collect :: () !foreign lua "collectgarbage"
+export stop    :: () { collectgarbage("stop") }
+export restart :: () { collectgarbage("restart") }
+
+export step :: (size:int) -> (finishedCollectionCycle:bool) {
+	return cast(bool) collectgarbage("step", size)
+}
+
+export getMemoryUsage :: () -> (kiloBytes:float) {
+	return cast(float) collectgarbage("count")
+}
+export getMemoryUsageInBytes :: () -> (bytes:int) {
+	local floor :: (x:float) -> int !foreign lua "math.floor"
+	return floor(getMemoryUsage()*1024+.5) -- Not sure if rounding is absolutely necessary to ensure an int here.
+}
+
+local Percent :: int
+
+export getPause :: () -> Percent {
+	local value = cast(Percent) collectgarbage("setpause", 1000) -- Hacky, but there's no other way to do this.
+	collectgarbage("setpause", value)
+	return value
+}
+export setPause :: (value:Percent) -> (previousValue:Percent) {
+	return cast(Percent) collectgarbage("setpause", value)
+}
+
+export getStepMultiplier :: () -> Percent {
+	local multiplier = cast(Percent) collectgarbage("setstepmul", 0) -- Hacky, but there's no other way to do this.
+	collectgarbage("setstepmul", multiplier)
+	return multiplier
+}
+export setStepMultiplier :: (multiplier:Percent) -> (previousMultiplier:Percent) {
+	return cast(Percent) collectgarbage("setstepmul", multiplier)
+}
