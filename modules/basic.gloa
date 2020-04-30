@@ -8,7 +8,6 @@
 
 	error, errorf, errorLine, assert
 	format
-	getLuaType
 	print, printf
 	stringToFloat, stringToInt
 	toString
@@ -21,12 +20,7 @@
 	pairs, ipairs
 	unpack
 
-	-- Enums:
-	LuaType
-
 --============================================================]]
-
-export LUA_VERSION_STRING : string : !foreign lua "_VERSION"
 
 export toString :: (value:any) -> string !foreign lua "tostring"
 
@@ -35,10 +29,10 @@ export format :: (s:StringFormat, ...:int|float|string|Type) -> string !foreign 
 export print  :: (...:any) !foreign lua "print"
 export printf :: (s:StringFormat, ...:int|float|string|Type) { print(format(s, ...)) }
 
--- We change these a bit to be more strict than the Lua equivalent.
-export error  :: (message:string, level:int=1) !foreign lua "error"
-export assert :: (v:bool)                 !foreign lua "assert"
-export assert :: (v:bool, message:string) !foreign lua "assert"
+-- We change these a bit to be more strict than the Lua equivalents.
+export error  :: (message:string)            !foreign compiler "error"
+export error  :: (message:string, level:int) !foreign compiler "error"
+export assert :: (b:bool, message="Assertion failed!") { if not b  error(message, 2) }
 
 export errorf :: (           s:StringFormat, ...:int|float|string|Type) { error(format(s, ...), 2) }
 export errorf :: (level:int, s:StringFormat, ...:int|float|string|Type) { error(format(s, ...), 1+level) }
@@ -57,18 +51,6 @@ export errorLine :: (s:StringFormat, v1,...:int|float|string|Type) {
 	errorLine(format(s, v1, ...))
 }
 
-export LuaType :: enum {
-	BOOLEAN  :: "boolean",
-	FUNCTION :: "function",
-	NIL      :: "nil",
-	NUMBER   :: "number",
-	STRING   :: "string",
-	TABLE    :: "table",
-	THREAD   :: "thread",   -- Coroutine.
-	USERDATA :: "userdata", -- C data.
-}
-export getLuaType :: (v:any) -> LuaType !foreign lua "type"
-
 local tonumber :: (s:string, base:int) -> float|none !foreign lua "tonumber"
 
 export stringToFloat :: (s:string) -> (success:bool, number:float) {
@@ -84,10 +66,6 @@ export stringToInt :: (s:string, base:int=10) -> (success:bool, number:int) {
 }
 
 export select :: (fromIndex:int, ...:$T) -> ...T !foreign lua "select"
-
--- Not sure this function is really needed. Lua modules should maybe always be
--- required directly inside !foreign expressions or possibly using !preload.
--- export requireLuaModule :: (moduleName:string) -> any !foreign lua "require"
 
 --
 -- Arrays/tables (@Cleanup: Move some/all of these to their own module?)
@@ -129,11 +107,6 @@ export copyArray :: (array:[]$T) -> []T {
 --[[ OLD unrevised:
 export pcall  :: (callback:(), ...:any)                 -> bool, string|none !foreign lua "pcall"
 export xpcall :: (callback:(), errorCallback:(err:any)) -> bool, string|none !foreign lua "xpcall"
-
--- dofile
--- load
--- loadfile
--- loadstring
 
 -- getfenv
 -- setfenv

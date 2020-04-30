@@ -26,7 +26,7 @@ local MODULE_HEADER = [=[
 --============================================================]]
 ]=]
 
-local ENUMS_AS_INTS = {KeyConstant=true, Scancode=true} -- These types will just be 'int' instead of actual enums.
+local ENUMS_AS_STRINGS = {KeyConstant=true, Scancode=true} -- These types will just be 'string' instead of actual enums.
 
 local VALUES_TO_OUTPUT_AS_IS = {
 	-- ["luaCodeValue"] = { objectName1, ... }
@@ -334,9 +334,9 @@ function _G.processModule(state, moduleInfo)
 		for _, enumInfo in ipairs(moduleInfo.enums) do
 			countEnums = countEnums+1
 
-			if ENUMS_AS_INTS[enumInfo.name] then
+			if ENUMS_AS_STRINGS[enumInfo.name] then
 				state:declarationConstantStart(state:getFinalName(enumInfo.name), 0)
-				state:write("int")
+				state:write("string")
 				state:statementEnd()
 			else
 				state:enumStart(enumInfo.name)

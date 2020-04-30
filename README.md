@@ -39,7 +39,7 @@ local E  :       : 2.72 -- Inferred type (float in this case).
 The 12 basic value types in Glóa are:
 **bool**, **int**, **float**, **string**, **table**, **type** (types themselves are first-class values),
 arrays, functions, enums, structs, **none** (the type of *nil*) and **any**.
-(The idea of distinguishing integers from floating-point numbers comes from Lua 5.4.)
+(The idea of distinguishing integers from floating-point numbers comes from Lua 5.3.)
 
 A variable can have multiple types (we call those *compound types*) which may sometimes be necessary to use if the program interacts with existing Lua code.
 The **any** type means the value can be of literally any type, which is not very safe but sometimes necessary.

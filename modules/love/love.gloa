@@ -409,10 +409,10 @@ export filesystem :: namespace {
 		setBuffer   :: (self:File, mode:BufferMode, size:int=0) -> (success:bool, errorstr:string) !foreign method "setBuffer",
 		tell        :: (self:File) -> (pos:int) !foreign method "tell",
 		lines :: (self:File) -> (iterator:(_1,_2:none)->(line:string|none), _1,_2:none) !foreign method "lines",
-		read :: (self:File)            -> (contents:string, size:int) !foreign method "read",
-		read :: (self:File, bytes:int) -> (contents:string, size:int) !foreign method "read",
-		read :: (self:File, container:data.ContainerType)            -> (contents:string|FileData, size:int) !foreign method "read",
-		read :: (self:File, container:data.ContainerType, bytes:int) -> (contents:string|FileData, size:int) !foreign method "read",
+		read :: (self:File)            -> (contents:string|none, sizeOrError:int|string) !foreign method "read",
+		read :: (self:File, bytes:int) -> (contents:string|none, sizeOrError:int|string) !foreign method "read",
+		read :: (self:File, container:data.ContainerType)            -> (contents:string|FileData|none, sizeOrError:int|string) !foreign method "read",
+		read :: (self:File, container:data.ContainerType, bytes:int) -> (contents:string|FileData|none, sizeOrError:int|string) !foreign method "read",
 		write :: (self:File, data:string|Data)           -> (success:bool, err:string) !foreign method "write",
 		write :: (self:File, data:string|Data, size:int) -> (success:bool, err:string) !foreign method "write",
 	}
@@ -438,8 +438,6 @@ export filesystem :: namespace {
 	export mount                  :: (archive:string, mountpoint:string, appendToPath:bool=false) -> (success:bool) !foreign lua "love.filesystem.mount"
 	export mount                  :: (filedata:FileData, mountpoint:string, appendToPath:bool=false) -> (success:bool) !foreign lua "love.filesystem.mount"
 	export mount                  :: (data:Data, archivename:string, mountpoint:string, appendToPath:bool=false) -> (success:bool) !foreign lua "love.filesystem.mount"
-	export newFile                :: (filename:string) -> (file:File) !foreign lua "love.filesystem.newFile"
-	export newFile                :: (filename:string, mode:FileMode) -> (file:File, errorstr:string) !foreign lua "love.filesystem.newFile"
 	export newFileData            :: (contents:string, name:string) -> (data:FileData) !foreign lua "love.filesystem.newFileData"
 	export newFileData            :: (filepath:string) -> (data:FileData, err:string) !foreign lua "love.filesystem.newFileData"
 	export remove                 :: (name:string) -> (success:bool) !foreign lua "love.filesystem.remove"
@@ -466,6 +464,8 @@ export filesystem :: namespace {
 	export read :: (container:data.ContainerType, name:Filename, size:int) -> (contents:string|FileData|none, sizeOrError:int|string) !foreign lua "love.filesystem.read"
 	export write :: (name:Filename, data:string|Data)           -> (success:bool, message:string) !foreign lua "love.filesystem.write"
 	export write :: (name:Filename, data:string|Data, size:int) -> (success:bool, message:string) !foreign lua "love.filesystem.write"
+	export newFile :: (filename:Filename)                -> (file:File)                       !foreign lua "love.filesystem.newFile"
+	export newFile :: (filename:Filename, mode:FileMode) -> (file:File|none, err:none|string) !foreign lua "love.filesystem.newFile"
 	export setIdentity :: (name:Filename, appendToPath=false) !foreign lua "love.filesystem.setIdentity"
 }
 export graphics :: namespace {
@@ -722,8 +722,6 @@ export graphics :: namespace {
 		setOffset                 :: (self:ParticleSystem, x,y:float) !foreign method "setOffset",
 		setParticleLifetime       :: (self:ParticleSystem, min:float, max:float=min) !foreign method "setParticleLifetime",
 		setPosition               :: (self:ParticleSystem, x,y:float) !foreign method "setPosition",
-		setQuads                  :: (self:ParticleSystem, quad1,quad2:Quad) !foreign method "setQuads",
-		setQuads                  :: (self:ParticleSystem, quads:[]Quad) !foreign method "setQuads",
 		setRadialAcceleration     :: (self:ParticleSystem, min:float, max:float=min) !foreign method "setRadialAcceleration",
 		setRelativeRotation       :: (self:ParticleSystem, enable:bool) !foreign method "setRelativeRotation",
 		setRotation               :: (self:ParticleSystem, min:float, max:float=min) !foreign method "setRotation",
@@ -737,7 +735,10 @@ export graphics :: namespace {
 		start                     :: (self:ParticleSystem) !foreign method "start",
 		stop                      :: (self:ParticleSystem) !foreign method "stop",
 		update                    :: (self:ParticleSystem, dt:float) !foreign method "update",
+		setQuads :: (self:ParticleSystem, quads:[]Quad) !foreign method "setQuads",
+		setQuads :: (self:ParticleSystem, ...:Quad)     !foreign method "setQuads",
 		getColors :: (self:ParticleSystem) -> (r1,g1,b1,a1:float, r2,g2,b2,a2,r3,g3,b3,a3,r4,g4,b4,a4,r5,g5,b5,a5,r6,g6,b6,a6,r7,g7,b7,a7,r8,g8,b8,a8:float|none) !foreign method "getColors",
+		getColorsAsVararg :: (self:ParticleSystem) -> (r1,g1,b1,a1,...:float) !foreign method "getColors",
 		setColors :: (self:ParticleSystem, r1,g1,b1,a1:float)                                                                                     !foreign method "setColors",
 		setColors :: (self:ParticleSystem, r1,g1,b1,a1,r2,g2,b2,a2:float)                                                                         !foreign method "setColors",
 		setColors :: (self:ParticleSystem, r1,g1,b1,a1,r2,g2,b2,a2,r3,g3,b3,a3:float)                                                             !foreign method "setColors",
@@ -746,21 +747,33 @@ export graphics :: namespace {
 		setColors :: (self:ParticleSystem, r1,g1,b1,a1,r2,g2,b2,a2,r3,g3,b3,a3,r4,g4,b4,a4,r5,g5,b5,a5,r6,g6,b6,a6:float)                         !foreign method "setColors",
 		setColors :: (self:ParticleSystem, r1,g1,b1,a1,r2,g2,b2,a2,r3,g3,b3,a3,r4,g4,b4,a4,r5,g5,b5,a5,r6,g6,b6,a6,r7,g7,b7,a7:float)             !foreign method "setColors",
 		setColors :: (self:ParticleSystem, r1,g1,b1,a1,r2,g2,b2,a2,r3,g3,b3,a3,r4,g4,b4,a4,r5,g5,b5,a5,r6,g6,b6,a6,r7,g7,b7,a7,r8,g8,b8,a8:float) !foreign method "setColors",
-		getSizes :: (self:ParticleSystem) -> (size1:int, size2,size3,size4,size5,size6,size7,size8:int|none) !foreign method "getSizes",
-		setSizes :: (self:ParticleSystem, size1:int)                                           !foreign method "setSizes",
-		setSizes :: (self:ParticleSystem, size1,size2:int)                                     !foreign method "setSizes",
-		setSizes :: (self:ParticleSystem, size1,size2,size3:int)                               !foreign method "setSizes",
-		setSizes :: (self:ParticleSystem, size1,size2,size3,size4:int)                         !foreign method "setSizes",
-		setSizes :: (self:ParticleSystem, size1,size2,size3,size4,size5:int)                   !foreign method "setSizes",
-		setSizes :: (self:ParticleSystem, size1,size2,size3,size4,size5,size6:int)             !foreign method "setSizes",
-		setSizes :: (self:ParticleSystem, size1,size2,size3,size4,size5,size6,size7:int)       !foreign method "setSizes",
-		setSizes :: (self:ParticleSystem, size1,size2,size3,size4,size5,size6,size7,size8:int) !foreign method "setSizes",
+		setColors :: (self:ParticleSystem, colors:[]float) {
+			local _setColors :: (self:ParticleSystem, ...:float) !foreign method "setColors"
+			local unpack     :: (arr:[]$T) -> ...T !foreign lua "unpack"
+			_setColors(self, unpack(colors))
+		},
+		getSizes :: (self:ParticleSystem) -> (size1:float, size2,size3,size4,size5,size6,size7,size8:float|none) !foreign method "getSizes",
+		getSizesAsVararg :: (self:ParticleSystem) -> (size1,...:float) !foreign method "getSizes",
+		setSizes :: (self:ParticleSystem, size1:float)                                           !foreign method "setSizes",
+		setSizes :: (self:ParticleSystem, size1,size2:float)                                     !foreign method "setSizes",
+		setSizes :: (self:ParticleSystem, size1,size2,size3:float)                               !foreign method "setSizes",
+		setSizes :: (self:ParticleSystem, size1,size2,size3,size4:float)                         !foreign method "setSizes",
+		setSizes :: (self:ParticleSystem, size1,size2,size3,size4,size5:float)                   !foreign method "setSizes",
+		setSizes :: (self:ParticleSystem, size1,size2,size3,size4,size5,size6:float)             !foreign method "setSizes",
+		setSizes :: (self:ParticleSystem, size1,size2,size3,size4,size5,size6,size7:float)       !foreign method "setSizes",
+		setSizes :: (self:ParticleSystem, size1,size2,size3,size4,size5,size6,size7,size8:float) !foreign method "setSizes",
+		setSizes :: (self:ParticleSystem, sizes:[]float) {
+			local _setSizes :: (self:ParticleSystem, ...:float) !foreign method "setSizes"
+			local unpack    :: (arr:[]$T) -> ...T !foreign lua "unpack"
+			_setSizes(self, unpack(sizes))
+		},
 	}
 	export Quad :: !foreign struct {
 		using Object,
 		getTextureDimensions :: (self:Quad) -> (sw,sh:float) !foreign method "getTextureDimensions",
 		getViewport          :: (self:Quad) -> (x,y:float, w,h:float) !foreign method "getViewport",
 		setViewport          :: (self:Quad, x,y:float, w,h:float, sw,sh:float) !foreign method "setViewport",
+		setViewport :: (self:Quad, x,y:float, w,h:float) !foreign method "setViewport",
 	}
 	export Shader :: !foreign struct {
 		using Object,
@@ -1306,8 +1319,8 @@ export joystick :: namespace {
 	export loadGamepadMappings :: (filenameOrMappings:string) !foreign lua "love.joystick.loadGamepadMappings"
 }
 export keyboard :: namespace {
-	export KeyConstant :: int
-	export Scancode :: int
+	export KeyConstant :: string
+	export Scancode :: string
 	export getKeyFromScancode :: (scancode:Scancode) -> (key:KeyConstant) !foreign lua "love.keyboard.getKeyFromScancode"
 	export getScancodeFromKey :: (key:KeyConstant) -> (scancode:Scancode) !foreign lua "love.keyboard.getScancodeFromKey"
 	export hasKeyRepeat       :: () -> (enabled:bool) !foreign lua "love.keyboard.hasKeyRepeat"

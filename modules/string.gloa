@@ -10,7 +10,7 @@
 	getBinaryRepresentationOfLuaFunction
 	getByte, bytesToString
 	repeat
-	replace, replacePattern, replaceWithPattern, replacePatternWithPattern
+	replace, replacePattern, replaceWithPattern, replaceWithFunction, replacePatternWithPattern, replacePatternWithFunction
 	reverse
 	toLower, toUpper
 
@@ -20,7 +20,7 @@ export getByte :: (s:string, pos:int=1)     -> int|none !foreign lua "string.byt
 export getByte :: (s:string, start,end:int) -> ...int   !foreign lua "string.byte"
 export bytesToString :: (...:int) -> string !foreign lua "string.char"
 
-local _find :: (s:string, needle:string, startPos:int, plain:bool) -> (start:int|none, end:int|none, ...:string) !foreign lua "string.find"
+local _find :: (s:string, needle:string, startPos:int, plain:bool) -> (start:int|none, end:int|none, ...:string|int) !foreign lua "string.find"
 
 export find :: (s:string, needle:string, startPos:int=1) -> (found:bool, start:int, end:int) {
 	local i1, i2 = _find(s, needle, startPos, true)
@@ -28,29 +28,29 @@ export find :: (s:string, needle:string, startPos:int=1) -> (found:bool, start:i
 	return true, cast(int) i1, cast(int) i2
 }
 
-export findPattern :: (s:string, pattern:string, startPos:int=1) -> (found:bool, start:int, end:int, ...:string) {
-	local helper :: (start:int|none, end:int|none, ...:string) -> (found:bool, start:int, end:int, ...:string) {
+export findPattern :: (s:string, pattern:string, startPos:int=1) -> (found:bool, start:int, end:int, ...:string|int) {
+	local helper :: (start:int|none, end:int|none, ...:string|int) -> (found:bool, start:int, end:int, ...:string|int) {
 		if start == nil  return false, 0, 0
 		return true, cast(int) start, cast(int) end, ...
 	}
 	return helper(_find(s, pattern, startPos, false))
 }
 
-export matchPattern :: (s:string, pattern:string, startPos:int=1) -> (found:bool, match1,...:string) {
-	local helper :: (match1,...:string) -> (found:bool, match1,...:string) {
+export matchPattern :: (s:string, pattern:string, startPos:int=1) -> (found:bool, match1,...:string|int) {
+	local helper :: (match1,...:string|int) -> (found:bool, match1,...:string|int) {
 		if match1 == NULL  return false, ""
 		return true, match1, ...
 	}
-	local match :: (s:string, pattern:string, startPos:int) -> (match1,...:string) !foreign lua "string.match"
+	local match :: (s:string, pattern:string, startPos:int) -> (match1,...:string|int) !foreign lua "string.match"
 
 	return helper(match(s, pattern, startPos))
 }
 
-local StringMatchIterator :: (_1,_2:none) -> (match:string|none) -- @Temp until we can handle variable amounts of values from iterators in 'for' loops (if that's a thing we actually want in the language).
--- local StringMatchIterator :: (_1,_2:none) -> (match:string|none, ...:string) -- How many matches there are actually depend on the pattern. Can this be solved in some nice way using metaprogramming? Do we require the pattern to be constant so we can count parentheses? Also, how do we hande "()" in patterns in general? Lots of tasks for metaprogramming!
+local StringMatchIterator :: (_1,_2:none) -> (match:string|int|none) -- @Temp until we can handle variable amounts of values from iterators in 'for' loops (if that's a thing we actually want in the language).
+-- local StringMatchIterator :: (_1,_2:none) -> (match:string|int|none, ...:string|int) -- How many matches there are actually depend on the pattern. Can this be solved in some nice way using metaprogramming? Do we require the pattern to be constant so we can count parentheses? Also, how do we hande "()" in patterns in general? Lots of tasks for metaprogramming!
 export eachPatternMatch :: (s:string, pattern:string, startPos:int=1) -> StringMatchIterator, none, none !foreign lua "string.gmatch"
 
-local gsub :: (s:string, pattern:string, replacementPattern:string, maxReplacements:int|none) -> (s:string, replacements:int) !foreign lua "string.gsub"
+local gsub :: (s:string, pattern:string, replacement:any, maxReplacements:int|none) -> (s:string, replacements:int) !foreign lua "string.gsub"
 
 export escapePattern :: (pattern:string) -> (s:string) {
 	return (gsub(pattern, "[-+*^?$.%%()[%]]", "%%%0", nil))
@@ -87,6 +87,41 @@ export replaceWithPattern :: (s:string, needle:string, replacementPattern:string
 
 export replacePatternWithPattern :: (s:string, pattern:string, replacementPattern:string)                      -> (s:string, replacements:int) !foreign lua "string.gsub"
 export replacePatternWithPattern :: (s:string, pattern:string, replacementPattern:string, maxReplacements:int) -> (s:string, replacements:int) !foreign lua "string.gsub"
+
+local checkReplacementFunction :: (funcName:string, info:TypeInfo) {
+	!import "basic"
+
+	-- @UX: Can we show the (first) calling location somehow?
+	if info.tag ~= TypeTag.FUNCTION  errorf(2, "%s() was called somewhere with a non-function as replacement value.", funcName)
+
+	local funcInfo = cast(TypeInfoFunction) info
+
+	if #funcInfo.argumentsOut ~= 1
+		errorf(2, "%s() was called somewhere with a function that doesn't return exactly one value. (It returns %d)", funcName, #funcInfo.argumentsOut)
+	if funcInfo.argumentsOut[1].argumentType ~= string|none
+		errorf(2, "%s() was called somewhere with a function that doesn't return string|none.", funcName)
+	-- We don't care about funcInfo.argumentsIn.
+}
+
+export replaceWithFunction :: (s:string, needle:string, func:$T) -> (s:string, replacements:int) {
+	!run checkReplacementFunction("replaceWithFunction", type_info(T))
+	needle = escapePattern(needle)
+	return gsub(s, needle, func, nil)
+}
+export replaceWithFunction :: (s:string, needle:string, func:$T, maxReplacements:int) -> (s:string, replacements:int) {
+	!run checkReplacementFunction("replaceWithFunction", type_info(T))
+	needle = escapePattern(needle)
+	return gsub(s, needle, func, maxReplacements)
+}
+
+export replacePatternWithFunction :: (s:string, pattern:string, func:$T) -> (s:string, replacements:int) {
+	!run checkReplacementFunction("replacePatternWithFunction", type_info(T))
+	return gsub(s, pattern, func, nil)
+}
+export replacePatternWithFunction :: (s:string, pattern:string, func:$T, maxReplacements:int) -> (s:string, replacements:int) {
+	!run checkReplacementFunction("replacePatternWithFunction", type_info(T))
+	return gsub(s, pattern, func, maxReplacements)
+}
 
 -- Note: Strings can be repeated like this: "foo" * 5
 export repeat :: (s:string, times:int) -> string !foreign lua "string.rep"

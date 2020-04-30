@@ -45,7 +45,8 @@
 local ERROR_HANDLER = templateToLua(
 	trimTemplate`
 		(function(lineMappings, getinfo, tonumber, outputFile, type, exit)
-			return function(err)
+			return function(err, level)
+				level            = (level or 1)+1
 				local mainSource = (getinfo(1, "S") or {}).source or "<UNKNOWN_SOURCE>"
 
 				if type(err) == "string" then
@@ -70,7 +71,7 @@ local ERROR_HANDLER = templateToLua(
 				end
 				outputFile:write("stack traceback:\n")
 
-				for level = 2, 1000 do
+				for level = level, 1000 do
 					local info = getinfo(level, "nSl")
 					if not info then  break  end
 
@@ -171,6 +172,7 @@ local foreignApiCompilerSymbols = {
 	compilerPath      = F("%q", COMPILER_PATH),
 	compilerDirectory = F("%q", COMPILER_DIRECTORY),
 
+	error   = `error`,
 	ipairsr = `_IPAIRSR`,
 
 	wrapFunctionInGloaErrorHandler = !(trimTemplate`
@@ -227,6 +229,8 @@ local foreignApiCompilerSymbolsDuringCompilation = {
 
 	appPath      = `metaprogramAppPath`,
 	appDirectory = `metaprogramAppDirectory`,
+
+	error = `compilerErrorHandler`,
 }
 
 for k in pairs(compilerApi) do
@@ -525,6 +529,9 @@ function _G.writeCast(state, writer, indent, nextLocalN, localsStack, cast, name
 
 	-- enum -> (real enum member type)
 	elseif typeInfoSource.tag == !(TYPE_ENUM) and typeInfoTarget == typeInfoSource.memberTypeInfo then
+		!!(WRITE_EXPRESSION)
+	-- (real enum member type) -> enum
+	elseif typeInfoTarget.tag == !(TYPE_ENUM) and typeInfoSource == typeInfoTarget.memberTypeInfo then
 		!!(WRITE_EXPRESSION)
 
 	-- (base struct) -> (substruct)
@@ -2433,9 +2440,10 @@ end
 
 -- writeCompilerSymbols( state, writer, relevantObjects=nil )
 function _G.writeCompilerSymbols(state, writer, relevantObjects)
-	local file = writer.file
+	local file          = writer.file
+	local outputRuntime = writer.outputRuntime
 
-	if writer.outputRuntime then
+	if outputRuntime then
 		file:write("local lineMappings      = {paths={},files={},lines={}}") ; writeEol(state, writer)
 		file:write("local programArguments  = {...}") ; writeEol(state, writer) -- Should we use 'arg' here? It has additional stuff in index 0 and below. metaprogramArguments needs to be updated too.
 		file:write!("local gloaErrorHandler = "..ERROR_HANDLER) ; writeEol(state, writer)
@@ -2511,16 +2519,17 @@ function _G.writeCompilerSymbols(state, writer, relevantObjects)
 
 	else
 		-- Note: lineMappings is not used in metaprograms because gloaErrorHandler() is different.
-		file:write("local programArguments = metaprogramArguments") ; writeEol(state, writer)
-		file:write("local gloaErrorHandler = compilerErrorHandler") ; writeEol(state, writer)
+		file:write("programArguments = metaprogramArguments") ; writeEol(state, writer)
+		file:write("gloaErrorHandler = compilerErrorHandler") ; writeEol(state, writer)
 
-		file:write("local _TYPES     = metaprogramTypeIds")   ; writeEol(state, writer)
-		file:write("local _TYPE_INFO = metaprogramTypeTable") ; writeEol(state, writer)
+		file:write("_TYPES     = metaprogramTypeIds")   ; writeEol(state, writer)
+		file:write("_TYPE_INFO = metaprogramTypeTable") ; writeEol(state, writer)
 	end
 
 	-- @Polish: Only output symbols actually used in the program.
 	!for i = 1, #COMPILER_SYMBOL_PAIRS, 2 do
-		file:write!("local "..COMPILER_SYMBOL_PAIRS[i].." = "..COMPILER_SYMBOL_PAIRS[i+1])
+		if outputRuntime then  file:write("local ")  end
+		file:write!(COMPILER_SYMBOL_PAIRS[i].." = "..COMPILER_SYMBOL_PAIRS[i+1])
 		writeEol(state, writer)
 	!end
 end
