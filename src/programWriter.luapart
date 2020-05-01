@@ -301,22 +301,22 @@ function _G.writeStringLiteral(writer, s)
 	writer.file:write(lua)
 end
 
--- writeStringConcatenation( state, writer, indent, nextLocalN, localsStack, left:AstNode|string, right:AstNode|string )
-function _G.writeStringConcatenation(state, writer, indent, nextLocalN, localsStack, left, right)
+-- writeBinaryOperatorChain( state, writer, indent, nextLocalN, localsStack, left:AstNode|string, right:AstNode|string, binaryOperation )
+function _G.writeBinaryOperatorChain(state, writer, indent, nextLocalN, localsStack, left, right, binOp)
 	if type(left) == "string" then
 		writer.file:write(left)
-	elseif left.nodeType == !(AST_BINARY) and left.operation == ".." then
-		writeStringConcatenation(state, writer, indent, nextLocalN, localsStack, left.left, left.right)
+	elseif left.nodeType == !(AST_BINARY) and left.operation == binOp then
+		writeBinaryOperatorChain(state, writer, indent, nextLocalN, localsStack, left.left, left.right, binOp)
 	else
 		writeExpression(state, writer, indent, nextLocalN, localsStack, left)
 	end
 
-	writer.file:write(" .. ")
+	writer.file:write(" ", binOp, " ")
 
 	if type(right) == "string" then
 		writer.file:write(right)
-	elseif right.nodeType == !(AST_BINARY) and right.operation == ".." then
-		writeStringConcatenation(state, writer, indent, nextLocalN, localsStack, right.left, right.right)
+	elseif right.nodeType == !(AST_BINARY) and right.operation == binOp then
+		writeBinaryOperatorChain(state, writer, indent, nextLocalN, localsStack, right.left, right.right, binOp)
 	else
 		writeExpression(state, writer, indent, nextLocalN, localsStack, right)
 	end
@@ -361,9 +361,10 @@ function _G.writeBinaryOperation(state, writer, indent, nextLocalN, localsStack,
 
 	addLineMapping(state, writer, token)
 
-	if binOp == ".." then
+	if !!(CONST_SET{"..","and","or"})[binOp] then
+		-- @Polish: For the logical operators there is probably more we can do, but we may have to dive deeper in the sub-trees to make some predictions or something...
 		if addParens then  file:write("(")  end
-		writeStringConcatenation(state, writer, indent, nextLocalN, localsStack, l, r) -- This makes sure consecutive string concatenations appear as one operation without any parentheses.
+		writeBinaryOperatorChain(state, writer, indent, nextLocalN, localsStack, l, r, binOp) -- This makes sure e.g. consecutive string concatenations appear as one operation without any parentheses.
 		if addParens then  file:write(")")  end
 
 	elseif binOp == "//" then
