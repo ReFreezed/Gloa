@@ -642,7 +642,7 @@ local function isStructMemberDefaultValueNil(state, struct, memberName, nodeForE
 	if valueExpr then
 		return isExpressionNil(valueExpr)
 	else
-		return decl.name.inferredType.tag == !(TYPE_NONE) -- Will probably never be true. Why would anyone use 'none' as a member type? That's silly!
+		return !!(CONST_SET{ TYPE_NONE, TYPE_ANY })[decl.name.inferredType.tag] or false
 	end
 end
 
@@ -1070,7 +1070,9 @@ function _G.writeDefaultValueForType(state, writer, indent, nextLocalN, localsSt
 	local file = writer.file
 	local tag  = typeInfo.tag
 
-	if tag == !(TYPE_BOOL) then
+	if tag == !(TYPE_ANY) then
+		file:write("nil")
+	elseif tag == !(TYPE_BOOL) then
 		file:write("false")
 	elseif tag == !(TYPE_INT) then
 		file:write("0")
@@ -2986,14 +2988,15 @@ end
 
 
 local HAS_DEFAULT_VALUE = !(Set{
+	TYPE_ANY,
+	TYPE_ARRAY,
 	TYPE_BOOL,
+	TYPE_FLOAT,
 	TYPE_INT,
 	TYPE_NONE,
-	TYPE_FLOAT,
 	TYPE_STRING,
-	TYPE_ARRAY,
-	TYPE_TABLE,
 	TYPE_STRUCT,
+	TYPE_TABLE,
 	TYPE_VARARG, -- Varargs never have any default value(s), but because it's a list we can just say that the default value is "nothing".
 })
 function _G.doesTypeHaveAnyDefaultValue(typeInfo)
