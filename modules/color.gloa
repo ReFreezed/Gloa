@@ -5,6 +5,7 @@
 --==============================================================
 
 	rgbToHsl, hslToRgb
+	rgbToHsp, hspToRgb
 	rgbToHsv, hsvToRgb
 
 --============================================================]]
@@ -12,6 +13,10 @@
 local math :: !import "math"
 
 
+
+--
+-- HSL (hue, saturation, lightness)
+--
 
 export rgbToHsl :: (r,g,b:float) -> (h,s,l:float) {
 	local max = math.max(r, g, b)
@@ -68,6 +73,10 @@ export hslToRgb :: (h,s,l:float) -> (r,g,b:float) {
 
 
 
+--
+-- HSV (hue, saturation, value)
+--
+
 export rgbToHsv :: (r,g,b:float) -> (h,s,v:float) {
 	local max, min = math.max(r, g, b), math.min(r, g, b)
 	local h, s, v: float = NULL, NULL, NULL
@@ -113,5 +122,108 @@ export hsvToRgb :: (h,s,v:float) -> (r,g,b:float) {
 
 	return r, g, b
 }
+
+
+
+
+
+
+
+
+
+--
+-- HSP (hue, saturation, perceived brightness)
+--
+-- Public domain, Darel Rex Finley, 2006
+-- http://alienryderflex.com/hsp.html
+--
+
+local PR :: .299
+local PG :: .587
+local PB :: .114
+
+-- This function expects the passed-in values to be on a scale
+-- of 0 to 1, and uses that same scale for the return values.
+export rgbToHsp :: (r,g,b:float) -> (h,s,p:float) {
+	-- Calculate the Perceived brightness.
+	local p = math.sqrt(r*r*PR + g*g*PG + b*b*PB)
+
+	-- Calculate the Hue and Saturation. (This part works
+	-- the same way as in the HSV/b and HSL systems?)
+	local h, s: float = NULL, NULL
+	if r == g and r == b {
+		h, s = 0, 0
+	} elseif r >= g and r >= b { -- R is largest.
+		if b >= g
+			h, s = 6/6-1/6*(b-g)/(r-g), 1-g/r
+		else
+			h, s = 0/6+1/6*(g-b)/(r-b), 1-b/r
+	} elseif g >= r and g >= b { -- G is largest.
+		if r >= b
+			h, s = 2/6-1/6*(r-b)/(g-b), 1-b/g
+		else
+			h, s = 2/6+1/6*(b-r)/(g-r), 1-r/g
+	} else                     { -- B is largest.
+		if g >= r
+			h, s = 4/6-1/6*(g-r)/(b-r), 1-r/b
+		else
+			h, s = 4/6+1/6*(r-g)/(b-g), 1-g/b
+	}
+
+	return h, s, p
+}
+
+--
+-- This function expects the passed-in values to be on a scale
+-- of 0 to 1, and uses that same scale for the return values.
+--
+-- Note that some combinations of HSP, even if in the scale
+-- 0-1, may return RGB values that exceed a value of 1. For
+-- example, if you pass in the HSP color 0,1,1, the result
+-- will be the RGB color 2.037,0,0.
+--
+export hspToRgb :: (h,s,p:float) -> (r,g,b:float) {
+	local r, g, b: float = NULL, NULL, NULL
+	local part:    float = NULL
+	local minOverMax     = 1-s
+
+	if minOverMax > 0 {
+		if       h < 1/6 { -- R>G>B
+			h = 6*( h-0/6) ; part = 1+h*(1/minOverMax-1)
+			b = p / math.sqrt(PR/minOverMax/minOverMax + PG*part*part + PB)
+			r = b/minOverMax ; g = b+h*(r-b)
+		} elseif h < 2/6 { -- G>R>B
+			h = 6*(-h+2/6) ; part = 1+h*(1/minOverMax-1)
+			b = p / math.sqrt(PG/minOverMax/minOverMax + PR*part*part + PB)
+			g = b/minOverMax ; r = b+h*(g-b)
+		} elseif h < 3/6 { -- G>B>R
+			h = 6*( h-2/6) ; part = 1+h*(1/minOverMax-1)
+			r = p / math.sqrt(PG/minOverMax/minOverMax + PB*part*part + PR)
+			g = r/minOverMax ; b = r+h*(g-r)
+		} elseif h < 4/6 { -- B>G>R
+			h = 6*(-h+4/6) ; part = 1+h*(1/minOverMax-1)
+			r = p / math.sqrt(PB/minOverMax/minOverMax + PG*part*part + PR)
+			b = r/minOverMax ; g = r+h*(b-r)
+		} elseif h < 5/6 { -- B>R>G
+			h = 6*( h-4/6) ; part = 1+h*(1/minOverMax-1)
+			g = p / math.sqrt(PB/minOverMax/minOverMax + PR*part*part + PG)
+			b = g/minOverMax ; r = g+h*(b-g)
+		} else           { -- R>B>G
+			h = 6*(-h+6/6) ; part = 1+h*(1/minOverMax-1)
+			g = p / math.sqrt(PR/minOverMax/minOverMax + PB*part*part + PG)
+			r = g/minOverMax ; b = g+h*(r-g)
+		}
+	} else {
+		if     h < 1/6 { h = 6*( h-0/6) ; r = math.sqrt(p*p / (PR+PG*h*h)) ; g, b = r*h, 0 } -- R>G>B
+		elseif h < 2/6 { h = 6*(-h+2/6) ; g = math.sqrt(p*p / (PG+PR*h*h)) ; r, b = g*h, 0 } -- G>R>B
+		elseif h < 3/6 { h = 6*( h-2/6) ; g = math.sqrt(p*p / (PG+PB*h*h)) ; b, r = g*h, 0 } -- G>B>R
+		elseif h < 4/6 { h = 6*(-h+4/6) ; b = math.sqrt(p*p / (PB+PG*h*h)) ; g, r = b*h, 0 } -- B>G>R
+		elseif h < 5/6 { h = 6*( h-4/6) ; b = math.sqrt(p*p / (PB+PR*h*h)) ; r, g = b*h, 0 } -- B>R>G
+		else           { h = 6*(-h+6/6) ; r = math.sqrt(p*p / (PR+PB*h*h)) ; b, g = r*h, 0 } -- R>B>G
+	}
+
+	return r, g, b
+}
+
 
 
