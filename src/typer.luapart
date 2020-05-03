@@ -459,48 +459,54 @@ function _G.findDeclaration(state, startNode, name, declToIgnore)
 			if not scope then  return  end
 		end
 
-		for _, decl in ipairs(scope.declarations) do
-			if decl ~= declToIgnore and decl.name.name == name and canNodeSeeDeclaration(state, startNode, decl) then
+		do
+			local decl = (
+				not scope.declarationsByName[declToIgnore]
+				and scope.declarationsByName[name]
+				or  scope.declarationsByName2[name]
+			)
+			if decl and decl ~= declToIgnore and canNodeSeeDeclaration(state, startNode, decl) then
 				return decl, nil
 			end
 		end
 
-		-- @Speed: Don't re-check already checked declarations. (Any potential speed-up may be neglectable though. Need to test with a bigger program.)
-
 		for _, import in ipairs(scope.imports) do
-			if import.fileScope then
-				for _, decl in ipairs(import.fileScope.declarations) do
-					if decl ~= declToIgnore and isDeclarationExported(decl) and decl.name.name == name then
-						return decl, nil
-					end
-				end
+			local fileScope = import.fileScope
+			local decl = fileScope and (
+				not fileScope.declarationsByName[declToIgnore]
+				and fileScope.declarationsByName[name]
+				or  fileScope.declarationsByName2[name]
+			)
+			if decl and decl ~= declToIgnore and isDeclarationExported(decl) then
+				return decl, nil
 			end
 		end
 
 		for _, using in ipairs(scope.usings) do
-			if using.scope then
-				local nodeType    = using.scope.nodeType
-				local onlyExports = !!(CONST_SET{ AST_FILE_SCOPE, AST_GLOBAL_SCOPE, AST_NAMESPACE })[nodeType]
-
-				for _, decl in ipairs(using.scope.declarations) do
-					if
-						decl.name.name == name
-						and (not onlyExports or isDeclarationExported(decl))
-						and decl ~= declToIgnore
-						and (
-							isDeclarationConstant(decl)
-							or (
-								using.variableDeclaration
-								and canNodeSeeDeclaration(state, startNode, using.variableDeclaration)
-							)
-						)
-					then
-						return decl, using
-					end
-				end
+			local usingScope = using.scope
+			local decl = usingScope and (
+				not usingScope.declarationsByName[declToIgnore]
+				and usingScope.declarationsByName[name]
+				or  usingScope.declarationsByName2[name]
+			)
+			if decl and decl ~= declToIgnore
+				and (
+					not !!(CONST_SET{ AST_FILE_SCOPE, AST_GLOBAL_SCOPE, AST_NAMESPACE })[usingScope.nodeType] -- Look for only exports in these scopes.
+					or isDeclarationExported(decl)
+				)
+				and (
+					isDeclarationConstant(decl)
+					or (
+						using.variableDeclaration
+						and canNodeSeeDeclaration(state, startNode, using.variableDeclaration)
+					)
+				)
+			then
+				return decl, using
 			end
 		end
 
+		-- @Speed: Loop slow. Lookup fast. Make it happen!
 		for _, decl in ipairs(scope.declarationsInTree[name] or EMPTY_TABLE) do
 			if decl ~= declToIgnore and canNodeSeeDeclaration(state, startNode, decl) then
 				return decl, nil
@@ -2415,6 +2421,7 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 				table.insert(morphLambda.statementsStatic, declBaked)
 				table.insert(morphLambda.declarations,     declBaked)
 				-- table.insert(morphLambda.bakeDeclarations, declBaked) -- Should we do this? It may be useless.
+				addDeclarationToNames(morphLambda, declBaked)
 
 				-- Reuse valueExpr instead of making a copy. Note that this is the
 				-- only thing in the morphed lambda that will already be inferred.
@@ -4924,6 +4931,7 @@ end
 			table.insert(scope.declarations, decl)
 			newlyDeclared[decl]           = true
 			newlyDeclared[decl.name.name] = true
+			addDeclarationToNames(scope, decl)
 		end
 		for _, import in ipairs(branchToUse.imports) do
 			if import.exported then  errorInternal(state, import, "@Incomplete: Export from static if.")  end
@@ -5084,6 +5092,7 @@ local function addDeclarationInForLoop(state, forLoop, name, typeInfo)
 
 	table.insert(forLoop.statementsDynamic, decl)
 	table.insert(forLoop.declarations,      decl)
+	addDeclarationToNames(forLoop, decl)
 
 	addToQueueRecursively(state, decl, forLoop, #forLoop, !(PIPE_DONE))
 	moveToNextRelevantPipe(state, decl, !(PIPE_INFER))
@@ -5569,7 +5578,7 @@ end
 
 	-- Inherit members from other structs.
 	if struct.inherits[1] then
-		local declarationsWithNew = {} -- Declarations will be sorted as expected.
+		local declarationsIncludingNew = {} -- Declarations will be sorted as expected.
 		local inheritIndices      = {}
 
 		for i, typeExpr in ipairs(struct.inherits) do
@@ -5579,7 +5588,7 @@ end
 		for _, statement in ipairs(struct.statementsStatic) do
 			if statement.nodeType == !(AST_DECLARATION) then
 				local decl = statement
-				table.insert(declarationsWithNew, decl)
+				table.insert(declarationsIncludingNew, decl)
 
 			elseif inheritIndices[statement] then
 				local typeExpr            = statement
@@ -5607,7 +5616,8 @@ end
 					local decl = findMemberDeclaration(state, struct, declToInherit.name.name)
 					if not decl or decl.parent ~= struct then
 						table.insert(struct.declarations,      declToInherit)
-						table.insert(declarationsWithNew, declToInherit)
+						table.insert(declarationsIncludingNew, declToInherit)
+						addDeclarationToNames(struct, declToInherit)
 					elseif isDeclarationConstant(decl) and isDeclarationConstant(declToInherit) then
 						-- void  Shadowing/overriding static declarations is permitted. (@Design: Should we limit this to only functions, methods, or even foreign methods?)
 					else
@@ -5653,7 +5663,7 @@ end
 			end
 		end
 
-		struct.declarations = declarationsWithNew
+		struct.declarations = declarationsIncludingNew
 	end
 
 	-- Check invalid recursiveness.

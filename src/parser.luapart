@@ -9,6 +9,7 @@
 --=
 --==============================================================
 
+	addDeclarationToNames
 	astCopy
 	astFindParent*, astFindParentScope, astFindCommonParent, astHasParent, astFindInTree
 	astGetDepth
@@ -363,13 +364,15 @@ _G.!structAst"AstDefer:_AstNode"{
 }
 
 !structAst"_AstScope:_AstNode"{
-	{`statementsStatic`,   {}, ast="array"},    -- []AstNode
-	{`statementsDynamic`,  {}, ast="array"},    -- []AstNode
-	{`declarations`,       {}, astRef="array"}, -- []AstDeclaration  (Note that inner blocks have their own declarations.)
-	{`imports`,            {}, astRef="array"}, -- []AstImport
-	{`usings`,             {}, astRef="array"}, -- []AstUsing
+	{`statementsStatic`,    {}, ast="array"},    -- []AstNode
+	{`statementsDynamic`,   {}, ast="array"},    -- []AstNode
+	{`declarations`,        {}, astRef="array"}, -- []AstDeclaration  (Note that inner blocks have their own declarations.)
+	{`declarationsByName`,  {}, astRef="names"}, -- { name1, name1=declaration1, [declaration1]=nameIndex1, ... }
+	{`declarationsByName2`, {}, astRef="names"}, -- Fallback for declarationsByName when checking for redeclarations/overloads.
+	{`imports`,             {}, astRef="array"}, -- []AstImport
+	{`usings`,              {}, astRef="array"}, -- []AstUsing
 	-- Type phase:
-	{`declarationsInTree`, {}, doNotCopy=true}, -- Includes all child scopes. Does not include shadows.
+	{`declarationsInTree`,  {}, doNotCopy=true}, -- Includes all child scopes. Does not include shadows.
 }
 _G.!structAst"AstBlock:_AstScope"{
 	_overrides = {{`nodeType`,AST_BLOCK}},
@@ -1111,6 +1114,7 @@ function _G.parseStruct(state, parent)
 			table.insert(struct.statementsStatic, decl)
 			table.insert(struct.declarations,     decl)
 			table.insert(struct.bakeDeclarations, decl)
+			addDeclarationToNames(struct, decl)
 		end
 
 		tokType, tokValue = eatNextToken(state)
@@ -1560,6 +1564,7 @@ function _G.parseDeclarationStatement(state, scope, imperative, declType)
 	for _, decl in ipairs(declarations) do
 		table.insert(statements,         decl)
 		table.insert(scope.declarations, decl)
+		addDeclarationToNames(scope, decl)
 	end
 
 	if assignment then
@@ -2763,6 +2768,7 @@ function _G.parseLambda(state, parent)
 				table.insert(lambda.statementsStatic, decl)
 				table.insert(lambda.declarations,     decl)
 				table.insert(lambda.bakeDeclarations, decl)
+				addDeclarationToNames(lambda, decl)
 
 				return !(VISIT_IGNORE_CHILDREN)
 			end)
@@ -2772,9 +2778,10 @@ function _G.parseLambda(state, parent)
 		table.insert(lambda.statementsStatic, args)
 
 		for _, arg in ipairs(args.arguments) do
-			table.insert(lambda.declarations, arg.declaration)
-
 			local decl = arg.declaration
+
+			table.insert(lambda.declarations, decl)
+			addDeclarationToNames(lambda, decl)
 
 			if arg.autobake == !(AUTOBAKE_REQUIRED) then
 				lambda.isPolymorphic = true
@@ -4427,6 +4434,16 @@ do
 		local TEMPLATE_COPY_VALUE_ARRAY_IF_SET = `
 			copy.$field = node.$field and {unpack(node.$field)}
 		`
+		local TEMPLATE_COPY_VALUE_NAMES = `
+			local arr     = node.$field
+			local arrCopy = copy.$field
+			for i, name in ipairs(arr) do
+				local subNode    = arr[name]
+				arrCopy[i]       = name
+				arrCopy[name]    = subNode
+				arrCopy[subNode] = i
+			end
+		`
 		local TEMPLATE_COPY_NODE_IF_SET = `
 			copy.$field = node.$field and copyTree(node.$field, token, copy, copies)
 		`
@@ -4505,7 +4522,9 @@ do
 					error(field.ast)
 
 				else
-					if field.astRef ~= "array" then
+					if field.astRef == "names" then
+						__LUA(templateToLua(TEMPLATE_COPY_VALUE_NAMES, {field=k}))
+					elseif field.astRef ~= "array" then
 						__LUA(templateToLua(TEMPLATE_COPY_VALUE, {field=k}))
 					elseif field[2] then
 						__LUA(templateToLua(TEMPLATE_COPY_VALUE_ARRAY, {field=k}))
@@ -4551,6 +4570,18 @@ do
 				end
 			end
 		`
+		local TEMPLATE_FIX_NAMES = `
+			local arrCopy = copy.$field
+			for i, name in ipairs(arrCopy) do
+				local node    = arrCopy[name]
+				local subCopy = copies[node]
+				if subCopy then
+					arrCopy[node]    = nil
+					arrCopy[name]    = subCopy
+					arrCopy[subCopy] = i
+				end
+			end
+		`
 
 		for nodeType, name in ipairs(astTypeToStructName) do
 			local fields = structs[name] or error(name)
@@ -4570,6 +4601,8 @@ do
 					else
 						__LUA(templateToLua(TEMPLATE_FIX_ARRAY_IF_SET, {field=k}))
 					end
+				elseif field.astRef == "names" then
+					__LUA(templateToLua(TEMPLATE_FIX_NAMES, {field=k}))
 				else
 					error(field.astRef)
 				end
@@ -4706,6 +4739,27 @@ function _G.astGetReplacement(node)
 		node = node.replacedBy
 	end
 	return node
+end
+
+
+
+function _G.addDeclarationToNames(scope, decl)
+	local name = decl.name.name
+
+	local declarationsByName = scope.declarationsByName
+	local declExisting       = declarationsByName[name]
+
+	if declExisting then
+		-- Assume this is/will be an overloaded function. Error checking must happen by the caller.
+		declarationsByName = scope.declarationsByName2
+		declExisting       = declarationsByName[name]
+		if declExisting then  return  end
+	end
+
+	local i                  = #declarationsByName+1
+	declarationsByName[i]    = name
+	declarationsByName[name] = decl
+	declarationsByName[decl] = i
 end
 
 
