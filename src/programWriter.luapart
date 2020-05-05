@@ -611,15 +611,21 @@ local function doesTypeContainBoolOrNone(typeInfo)
 	return false
 end
 
--- lambda = getDataForHandlingMissingArguments( callee )
-local function getDataForHandlingMissingArguments(callee)
+-- lambda = getDataForHandlingMissingArguments( state, callee )
+local function getDataForHandlingMissingArguments(state, callee)
 	if callee.nodeType ~= !(AST_IDENTIFIER) then  return nil  end
 
 	local ident = callee
+	if not isDeclarationConstant(ident.declaration) then  return nil  end
+
 	local const = ident.declaration.valueConstant
 	if not const then  return nil  end
 
-	local funcSig    = const.valueType
+	local funcSig = const.valueType
+	if funcSig.tag ~= !(TYPE_FUNCTION) then
+		errorInternal(state, ident, getFriendlyTypeInfoName(funcSig))
+	end
+
 	local argTypesIn = funcSig.argumentTypesIn
 	if not argTypesIn[1] or argTypesIn[1].tag == !(TYPE_VARARG) then  return nil  end
 
@@ -723,7 +729,7 @@ function _G.writeExpression(state, writer, indent, nextLocalN, localsStack, expr
 		end
 
 		-- Write given named arguments and handle default values.
-		local lambda = getDataForHandlingMissingArguments(callee)
+		local lambda = getDataForHandlingMissingArguments(state, callee)
 
 		if lambda then
 			local lastValue = getLast(call.arguments)
