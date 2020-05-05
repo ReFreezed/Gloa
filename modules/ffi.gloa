@@ -1,14 +1,213 @@
---[[============================================================
+--[=[===========================================================
 --=
---=  LuaFFI bindings
+--=  LuaJIT FFI bindings
 --=
 --==============================================================
 
-	Structs:
+	castTo
+	getType
+	hasAbi
+	isNull
+	load, loadGlobal
+	new, newArray
+	newInterface
+	toString
+	toInt, toFloat
+
+	-- Types:
+	Carray
 	Cdata
+	Cdecl
+	Ctype, CtypeSpec
 
---============================================================]]
+	-- Enums:
+	AbiName
+	ArchName
+	OsName
 
-export Cdata :: !foreign struct {}
+----------------------------------------------------------------
 
--- @Incomplete!
+	-- Example:
+	local ffi :: !import "ffi"
+
+	local basicUsage :: {
+		ffi.define[[
+			void Sleep(int ms);
+		]]
+		local C = ffi.newInterface( !foreign struct {
+			Sleep: (ms:int) -> void;
+		})
+
+		C.Sleep(2000)
+	}
+
+
+--===========================================================]=]
+
+!import "basic"
+
+
+
+export OsName :: enum {
+	WINDOWS :: "Windows",
+	LINUX   :: "Linux",
+	OSX     :: "OSX",
+	BSD     :: "BSD",
+	POSIX   :: "POSIX",
+	OTHER   :: "Other",
+}
+export ArchName :: enum {
+	X86    :: "x86",
+	X64    :: "x64",
+	ARM    :: "arm",
+	PPC    :: "ppc",
+	PPCSPE :: "ppcspe",
+	MIPS   :: "mips",
+}
+export AbiName :: enum {
+	BIT32  :: "32bit",  -- 32 bit architecture.
+	BIT64  :: "64bit",  -- 64 bit architecture.
+	LE     :: "le",     -- Little-endian architecture.
+	BE     :: "be",     -- Big-endian architecture.
+	FPU    :: "fpu",    -- Target has a hardware FPU.
+	SOFTFP :: "softfp", -- softfp calling conventions.
+	HARDFP :: "hardfp", -- hardfp calling conventions.
+	EABI   :: "eabi",   -- EABI variant of the standard ABI.
+	WIN    :: "win",    -- Windows variant of the standard ABI.
+}
+
+
+
+export OS:   OsName   : !foreign lua "require'ffi'.os"
+export ARCH: ArchName : !foreign lua "require'ffi'.arch"
+
+export Cdecl     :: string
+export CtypeSpec :: Cdecl|Ctype|Cdata
+
+local ParamForNew :: int|float|string|Cdata -- Not sure what exact types are allowed here.
+
+
+
+export Cdata :: !foreign struct {
+	!value: Cdata,
+
+	as :: (cdata:Cdata, $T:Type) -> T {
+		return cast(T) cast(any) cdata
+	},
+}
+
+export Ctype :: !foreign struct {
+	using Cdata,
+
+	!call    :: new,
+	new      :: (ctype:Ctype,            ...:ParamForNew) -> (success:bool, cdata:Cdata) { return new     (ctype,        ...) },
+	newArray :: (ctype:Ctype, count:int, ...:ParamForNew) -> (success:bool, cdata:Cdata) { return newArray(ctype, count, ...) },
+}
+
+export Carray :: struct (Item:Type) {
+	-- We want zero-indexed arrays and this is the only way to achieve that (otherwise expressions like arr[0] will trigger a compiler error).
+	!key:   int,
+	!value: Item,
+
+	-- @Incomplete: Iterator. (Can we detect the length of the array? Maybe we need the array to be zero-terminated?)
+	-- !iterator :: (arr:Carray(Item), i:int) -> (i:int|none, v:Item) {
+	-- 	if arr[i] == NULL  return nil, NULL -- I have a feeling this may read outside allocated memory...
+	-- 	return i+1, arr[i]
+	-- },
+}
+
+
+
+local pcall :: (func:any, ...:any) -> bool, ...any !foreign lua "pcall"
+
+export define :: (definitions:Cdecl) !foreign lua "require'ffi'.cdef"
+
+-- @Incomplete: Allow the second argument to be a table-like with params.
+export new :: (ct:CtypeSpec, ...:ParamForNew) -> (success:bool, cdata:Cdata, err:string) {
+	local helper :: (ct:CtypeSpec, ...:ParamForNew) -> Cdata !foreign lua "require'ffi'.new"
+
+	local ok, cdataOrErr = pcall(helper, ct, ...)
+	if not ok  return false, NULL, cast(string)cdataOrErr
+
+	return true, cast(Cdata)cdataOrErr, ""
+}
+
+-- If ct is Cdecl (string) then it should end with "[?]".
+export newArray :: (ct:CtypeSpec, count:int, ...:ParamForNew) -> (success:bool, variableLengthObject:Cdata, err:string) {
+	local helper :: (ct:CtypeSpec, count:int, ...:ParamForNew) -> Cdata !foreign lua "require'ffi'.new"
+
+	local ok, cdataOrErr = pcall(helper, ct, count, ...)
+	if not ok  return false, NULL, cast(string)cdataOrErr
+
+	return true, cast(Cdata)cdataOrErr, ""
+}
+
+local Clib :: !foreign struct {}
+
+local _newInterface :: (clib:Clib, $Interface:Type, $callerName:string) -> Interface {
+	!run {
+		local _info = cast(TypeInfo) type_info(Interface)
+		-- @Compiler @Bug: _info is (sometimes?) nil here! :|
+		-- if _info.tag ~= TypeTag.STRUCT  errorf("%s: The interface argument must be a struct.", callerName)
+
+		-- @Incomplete: Ensure the struct is foreign.  @Compiler: Expose that property.
+		-- local info = cast(TypeInfoStruct) _info
+		-- if not info.isForeign  errorf("%s: The interface struct must be !foreign.", callerName)
+	}
+	return cast(Interface) cast(any) clib
+}
+
+export newInterface :: ($Interface:Type) -> Interface {
+	local GLOBAL_SYMBOLS: Clib : !foreign lua "require'ffi'.C"
+	return _newInterface(GLOBAL_SYMBOLS, Interface, "ffi.newInterface")
+}
+
+local loadHelper :: (name:string, global=false) -> Clib !foreign lua "require'ffi'.load"
+
+export load :: (name:string, $Interface:Type) -> (success:bool, interface:Interface, err:string) {
+	local ok, clibOrErr = pcall(loadHelper, name)
+	if not ok  return false, NULL, cast(string)clibOrErr
+
+	return true, _newInterface(cast(Clib)clibOrErr, Interface, "ffi.load"), ""
+}
+-- This only works on POSIX systems.
+export loadGlobal :: (name:string) -> (success:bool, err:string) {
+	local ok, err = pcall(loadHelper, name, true)
+	if not ok  return false, cast(string)err
+
+	return true, ""
+}
+
+export getType :: (cdata:CtypeSpec) -> Ctype !foreign lua "require'ffi'.typeof"
+
+export toString :: (pointer:Cdata, len=0--[[strlen(pointer)]]) -> string !foreign lua "require'ffi'.string"
+
+export toInt   :: (cdata:Cdata) -> int { return cast(int) toFloat(cdata) }
+export toFloat :: (cdata:Cdata) -> float !foreign lua "tonumber"
+
+export hasAbi :: (name:AbiName) -> bool !foreign lua "require'ffi'.abi"
+
+export castTo :: (ct:CtypeSpec, init:Cdata) -> Cdata !foreign lua "require'ffi'.cast"
+
+export isNull :: (pointer:Cdata) -> bool {
+	return pointer == NULL -- A null pointer can be compared to nil (at least in LuaJIT). Nil itself will be treated like a null pointer in this case.
+	-- return toInt(castTo("intptr_t", pointer)) == 0 -- If the above turns out not to work then we can fall back on this.
+}
+
+-- @Incomplete:
+-- ctype  = ffi.metatype(ct, metatable)
+-- cdata  = ffi.gc(cdata, finalizer)
+-- size   = ffi.sizeof(ct [,nelem])
+-- align  = ffi.alignof(ct)
+-- ofs [,bpos,bsize] = ffi.offsetof(ct, field)
+-- status = ffi.istype(ct, obj)
+-- err    = ffi.errno([newerr])
+-- ffi.copy(dst, src, len)
+-- ffi.copy(dst, str)
+-- ffi.fill(dst, len [,c])
+-- cb:free()
+-- cb:set(func)
+-- iter, obj, start = pairs(cdata)
+-- iter, obj, start = ipairs(cdata)
+
+

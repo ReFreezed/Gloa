@@ -1,0 +1,122 @@
+--[[============================================================
+--=
+--=  PhysFS functionality through LÖVE
+--=
+--==============================================================
+
+	getSearchPaths
+	getWriteDirectory, setWriteDirectory, disableWriting
+	mount
+	mountReadDirectory, unmountReadDirectory
+
+--============================================================]]
+
+!import "basic"
+!import "string"
+local ffi :: !import "ffi"
+
+-- https://icculus.org/physfs/docs/html/physfs_8h.html
+local DEFINITIONS = [[//C
+	const char * PHYSFS_getWriteDir   (void);
+	bool         PHYSFS_setWriteDir   (const char *dir);
+	bool         PHYSFS_mount         (const char *dir, const char *mountPoint, bool appendToPath);
+	bool         PHYSFS_unmount       (const char *dir);
+	char **      PHYSFS_getSearchPath (void);
+]]
+local loveLib: !foreign struct {
+	PHYSFS_getWriteDir:   () -> ffi.Cdata;
+	PHYSFS_setWriteDir:   (dir:string|none) -> bool;
+	PHYSFS_mount:         (dir:string, mountPoint:string|none, appendToPath:bool) -> bool;
+	PHYSFS_unmount:       (dir:string) -> bool;
+	PHYSFS_getSearchPath: () -> ffi.Cdata;
+} = NULL
+
+local init :: () {
+	static initted = false
+	if initted  return
+
+	ffi.define(DEFINITIONS)
+
+	local ok, ^loveLib = ffi.load("love", type_of(loveLib))
+	assert(ok)
+
+	initted = true
+}
+
+--
+-- mount()
+--   Conveniently read from/save to anywhere on the computer in LÖVE.
+--   To use, wrap paths with mount() at the calling site.
+--
+--   WARNING: This may add a lot of directory paths to an internal list in PhysFS.
+--   See mountReadDirectory(), unmountReadDirectory() and getSearchPaths() for more control.
+--
+-- Examples:
+--   local mount :: physfs.mount
+--   love.graphics.newImage(mount"D:/Foo/Bar/test.png")
+--   imageData.encode!(mount"D:/Foo/Bar/test.png")
+--   love.filesystem.getDirectoryItems(mount"D:/Foo/Bar")
+--   love.filesystem.createDirectory(mount"D:/Foo/Bar")
+--
+-- https://love2d.org/forums/viewtopic.php?p=227121#p227121
+--
+export mount :: (path:string) -> (name:string) {
+	init()
+
+	local ok, parentDir, name = matchPattern(path, "^(.+)/([^/]+)$")
+	assert(ok)
+
+	assert(loveLib.PHYSFS_setWriteDir(cast(string)parentDir))
+	assert(loveLib.PHYSFS_mount(cast(string)parentDir, nil, false))
+
+	return cast(string) name
+}
+
+export getWriteDirectory :: () -> (hasWriteDir:bool, dir:string) {
+	init()
+
+	local cDir = loveLib.PHYSFS_getWriteDir()
+	if ffi.isNull(cDir)  return false, NULL
+
+	return true, ffi.toString(cDir)
+}
+export setWriteDirectory :: (dir:string) -> (success:bool) {
+	init()
+	return loveLib.PHYSFS_setWriteDir(dir)
+}
+export disableWriting :: () -> (success:bool) {
+	init()
+	return loveLib.PHYSFS_setWriteDir(nil)
+}
+
+-- Mount a directory to the root ("/").
+-- If append is false then the directory gets prepended.
+export mountReadDirectory :: (dir:string, append=false) -> (success:bool) {
+	init()
+	return loveLib.PHYSFS_mount(dir, nil, append)
+}
+-- Mount a directory to a specific mount point.
+export mountReadDirectory :: (dir:string, mountPoint:string, append=false) -> (success:bool) {
+	init()
+	return loveLib.PHYSFS_mount(dir, mountPoint, append)
+}
+
+-- Note: This function wants the mounted directory - not the mount point!
+export unmountReadDirectory :: (dir:string) -> (success:bool) {
+	init()
+	return loveLib.PHYSFS_unmount(dir)
+}
+
+export getSearchPaths :: () -> []string {
+	init()
+
+	local paths: []string
+	local cPaths = loveLib.PHYSFS_getSearchPath()
+
+	for i = 0, 256^3 {
+		if ffi.isNull(cPaths[i])  break
+		paths[i+1] = ffi.toString(cPaths[i])
+	}
+
+	return paths
+}

@@ -1,0 +1,104 @@
+--
+-- LuaJIT FFI test
+--
+-- This project uses FFI through the LÖVE framework!
+--
+-- It also uses zlib for testing, but we only have a .dll at the moment.
+-- So, Windows-only for now.
+--
+-- Original source for some of the code: luajit.org/ext_ffi_tutorial.html
+--
+
+!import "basic"
+!import "io"
+!import "os"
+local ffi :: !import "ffi"
+
+local getSource :: () -> string !foreign lua "love.filesystem.getSource"
+local quit      :: ()           !foreign lua "love.event.quit"
+
+!run {
+	!import "compiler"
+	compile("conf.gloa")
+}
+
+local main :: () {
+	disableBuffering(STDOUT)
+	disableBuffering(STDERR)
+	print()
+
+	testStandardSystemFunctions()
+	testDynamicLibraries()
+
+	print()
+	quit()
+}
+
+local testStandardSystemFunctions :: () {
+	ffi.define[[
+		void Sleep(int ms); // Windows.
+		int  poll(struct pollfd *fds, unsigned long nfds, int timeout); // Most non-Windows systems (supposedly).
+	]]
+
+	local C = ffi.newInterface(!foreign struct {
+		Sleep: (ms:int);
+		poll:  (fds:ffi.Cdata|none, nfds:int, timeout:int) -> int;
+	})
+
+	local sleep = [C] (sec:float) {
+		C.Sleep(cast(int) (sec*1000))
+	}
+
+	for 1, 100 {
+		write(STDOUT, ".")
+		sleep(0.01)
+	}
+	write(STDOUT, "\n")
+}
+
+local testDynamicLibraries :: () {
+	ffi.define[[
+		unsigned long compressBound(unsigned long sourceLen);
+		int compress2 (uint8_t *dest, unsigned long *destLen, const uint8_t *source, unsigned long sourceLen, int level);
+		int uncompress(uint8_t *dest, unsigned long *destLen, const uint8_t *source, unsigned long sourceLen);
+	]]
+
+	static zlib: !foreign struct {
+		compressBound: (sourceLen:int) -> int;
+		compress2:     (dest:ffi.Cdata, destLen:ffi.Cdata, source:string, sourceLen:int, level:int) -> int;
+		uncompress:    (dest:ffi.Cdata, destLen:ffi.Cdata, source:string, sourceLen:int) -> int;
+	} = NULL
+
+	local ok, ^zlib, err = ffi.load(getSource().."/zlibwapi", type_of(zlib))
+	assert(ok, err)
+
+	local IntArray :: ffi.Carray(int) -- Allows zero-indexing.
+
+	local compress :: (data:string) -> string {
+		local bound           = zlib.compressBound(#data)
+		local _, buffer       = ffi.newArray("uint8_t[?]", bound)
+		local _, bufferLength = ffi.new("unsigned long[1]", bound)
+
+		local result = zlib.compress2(buffer, bufferLength, data, #data, 9)
+		assert(result == 0)
+
+		return ffi.toString(buffer, bufferLength.as!(IntArray)[0])
+	}
+
+	local uncompress :: (comp:string, length:int) -> string {
+		local _, buffer       = ffi.newArray("uint8_t[?]", length)
+		local _, bufferLength = ffi.new("unsigned long[1]", length)
+
+		local result = zlib.uncompress(buffer, bufferLength, comp, #comp)
+		assert(result == 0)
+
+		return ffi.toString(buffer, bufferLength.as!(IntArray)[0])
+	}
+
+	local data = "abcd" * 1000
+	printf("Uncompressed size: %d", #data)
+	local compressed = compress(data)
+	printf("Compressed size: %d", #compressed)
+	local uncompressed = uncompress(compressed, #data)
+	assert(uncompressed == data)
+}
