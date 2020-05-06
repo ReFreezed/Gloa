@@ -10,6 +10,8 @@
 --==============================================================
 
 	doesTypeHaveAnyDefaultValue
+	formatInfoComment
+	shouldOperationHaveSurroundingParentheses
 	unicodeToLuaIdentifier
 	validateForeignSource
 	writeProgram, write*
@@ -19,11 +21,10 @@
 	Format for written programs:
 	1. Glóa header.
 	2. Foreign imports.
-	3. Constants.
-	4. Forward declarations.
-	5. Functions.
-	6. Global/file-scope variables.
-	7. Program entry point.
+	3. Forward declarations.
+	4. Constants (including functions).
+	5. Global/file-scope variables.
+	6. Program entry point.
 
 	Notes:
 	- Usage of Lua globals is minimized. (Glóa globals are not Lua globals.)
@@ -258,6 +259,8 @@ _G.!struct"WriterState"{
 	{`currentOutputLine`, 1},
 	{`lineMappingFiles`,  {}},
 	{`lineMappingLines`,  {}},
+
+	{`remainingUpvalues`, 0},
 }
 
 
@@ -2587,48 +2590,56 @@ function _G.writeForeignImports(state, writer, constants, asGlobals, relevantObj
 	end
 end
 
--- writtenObjectCount = writeConstantObjectsExceptFunctions( state, writer, constants, asGlobals [, relevantObjects=all ] )
-function _G.writeConstantObjectsExceptFunctions(state, writer, constants, asGlobals, relevantObjects)
-	local file               = writer.file
-	local writtenObjectCount = 0
+-- writeConstantObjectsAndForwardDeclarations( state, writer, constants, topScopeNames [, relevantObjects=all ] )
+function _G.writeConstantObjectsAndForwardDeclarations(state, writer, constants, topScopeNames, relevantObjects)
+	local constantNamesToWrite = {}
+	local constantFunctions    = {}
+	local constantNonFunctions = {}
+	local file                 = writer.file
 
 	for _, const in ipairs(constants) do
-		if relevantObjects and not relevantObjects[const] then
+		if not const.isObject or (relevantObjects and not relevantObjects[const]) then
 			-- void
 
-		elseif const.isObject and not (const.kind == !(CONST_KIND_NORMAL) and const.valueType.tag == !(TYPE_FUNCTION)) then
-			local nodeForError = (type(const.value) == "table" and const.value.nodeType and const.value.s and const.value or nil) -- @Hack @Robustness
-
-			file:write("\t")
-			if not asGlobals then  file:write("local ")  end
-			file:write(const.name, " = ")
-			writeConstantValue(state, writer, const, nodeForError)
-			writeEol(state, writer)
-
-			writtenObjectCount = writtenObjectCount+1
-		end
-	end
-
-	return writtenObjectCount
-end
-
--- writeFunctionObjects( state, writer, constants [, relevantObjects=all ] )
-function _G.writeFunctionObjects(state, writer, constants, relevantObjects)
-	local functionConstants = {}
-
-	for _, const in ipairs(constants) do
-		if relevantObjects and not relevantObjects[const] then
-			--void
 		elseif const.kind == !(CONST_KIND_NORMAL) and const.valueType.tag == !(TYPE_FUNCTION) then
 			local lambda = const.value
+
 			-- @Cleanup: Don't generate constants for polymorphic functions. (It's probably declarations doing this.) (I guess don't generate constants for foreign methods either.)
 			if not (lambda.isPolymorphic or (lambda.bodyIsForeign and lambda.foreignSource == "method")) then
-				table.insert(functionConstants, const)
+				table.insert(constantFunctions,         const)
+				table.insert(constantNamesToWrite, const.name)
 			end
+
+		else
+			table.insert(constantNonFunctions,      const)
+			table.insert(constantNamesToWrite, const.name)
 		end
 	end
 
-	table.sort(functionConstants, function(a, b)
+	if not (constantNamesToWrite[1] or topScopeNames[1]) then  return  end
+
+	if writer.remainingUpvalues > 0 then
+		local first = true
+		file:write("\tlocal ")
+
+		for i = 1, math.min(writer.remainingUpvalues, #constantNamesToWrite) do
+			if not first then  file:write(", ")  end
+			first = false
+			file:write(constantNamesToWrite[i])
+		end
+		writer.remainingUpvalues = writer.remainingUpvalues - #constantNamesToWrite
+
+		for i = 1, math.min(writer.remainingUpvalues, #topScopeNames) do
+			if not first then  file:write(", ")  end
+			first = false
+			file:write(topScopeNames[i])
+		end
+		writer.remainingUpvalues = writer.remainingUpvalues - #topScopeNames
+
+		writeEol(state, writer)
+	end
+
+	table.sort(constantFunctions, function(a, b)
 		a = a.value
 		b = b.value
 		if a.bodyIsForeign ~= b.bodyIsForeign then  return a.bodyIsForeign    end
@@ -2636,12 +2647,19 @@ function _G.writeFunctionObjects(state, writer, constants, relevantObjects)
 		return a.s < b.s
 	end)
 
-	local file = writer.file
-
-	for _, const in ipairs(functionConstants) do
+	for _, const in ipairs(constantFunctions) do
 		local lambda = const.value
-		file:write("\t", const.name, " = ")
+		file:write("\t")
+		file:write(const.name, " = ")
 		writeFunction(state, writer, 1, 1, {}, lambda)
+		writeEol(state, writer)
+	end
+
+	for _, const in ipairs(constantNonFunctions) do
+		local nodeForError = (type(const.value) == "table" and const.value.nodeType and const.value.s and const.value or nil) -- @Hack @Robustness
+		file:write("\t")
+		file:write(const.name, " = ")
+		writeConstantValue(state, writer, const, nodeForError)
 		writeEol(state, writer)
 	end
 end
@@ -2792,7 +2810,7 @@ function _G.writeProgram(state, writer)
 	local file  = assert(io.open(state.settings.outputFilePath, "w"))
 	writer.file = file
 
-	writer.currentOutputLine = 1 -- @Cleanup: Not sure we need to reset this. The runner uses its own writer, right?
+	!ASSERT `writer.currentOutputLine == 1`
 
 	if outputType == !(OUTPUT_TYPE_LUA_APP) then
 		-- @Incomplete: Setting to specify the prefix for the written file (shebang and maybe a comment with copyright info, library documentation etc.).
@@ -2809,50 +2827,10 @@ function _G.writeProgram(state, writer)
 	file:write("local function runProgram()") ; writeEol(state, writer)
 
 	writeForeignImports(state, writer, state.constants, false, relevantObjects)
-	local declCount = writeConstantObjectsExceptFunctions(state, writer, state.constants, false, relevantObjects)
 
-	if state.constants[1] or state.topScopeNames[1] then
-		-- @Incomplete @Robustness: A nicer/better way of supporting more upvalues than Lua. Right now we just limit forward declarations of Glóa globals.
-		!local MAX_UPVALUES = 60
-		!local MAX_NAMES    = MAX_UPVALUES - COMPILER_SYMBOL_COUNT
-
-		-- Forward declarations.
-		local first = true
-		file:write("\tlocal ")
-
-		-- Constants, functions.
-		for _, const in ipairs(state.constants) do
-			if relevantObjects and not relevantObjects[const] then
-				-- void
-
-			elseif const.kind == !(CONST_KIND_NORMAL) and const.valueType.tag == !(TYPE_FUNCTION) then
-				local lambda = const.value
-
-				if not (lambda.isPolymorphic or (lambda.bodyIsForeign and lambda.foreignSource == "method")) then
-					declCount = declCount+1
-					if declCount > !(MAX_NAMES) then  break  end
-
-					if not first then  file:write(", ")  end
-					first = false
-					file:write(const.name)
-				end
-			end
-		end
-
-		-- Top-level declarations. (Note: Glóa globals are not Lua globals.)
-		for _, topScopeName in ipairs(state.topScopeNames) do
-			declCount = declCount+1
-			if declCount > !(MAX_NAMES) then  break  end
-
-			if not first then  file:write(", ")  end
-			first = false
-			file:write(topScopeName)
-		end
-
-		writeEol(state, writer)
-	end
-
-	writeFunctionObjects(state, writer, state.constants, relevantObjects) -- Must be after forward declarations!
+	!local MAX_UPVALUES = 60
+	writer.remainingUpvalues = !(MAX_UPVALUES - COMPILER_SYMBOL_COUNT) -- @Incomplete: This system for solving the upvalue limit in Lua can be improved. A lot!
+	writeConstantObjectsAndForwardDeclarations(state, writer, state.constants, state.topScopeNames, relevantObjects)
 	writeTopScopeDeclarations(state, writer, topScopeDeclarations, relevantObjects)
 
 	-- Write program entry point.

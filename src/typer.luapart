@@ -1129,7 +1129,10 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 
 		else
 			moveToNextRelevantPipe(state, identOrVararg)
-			if ident then
+			if
+				ident
+				and isDeclarationConstant(decl) and followIdentifiersToConstantValue(ident).nodeType ~= !(AST_TABLE) -- Not sure how robust this is. @Robustness
+			then
 				simplifyExpressionIfConstant(state, ident)
 			end
 		end
@@ -2971,12 +2974,15 @@ end
 	local isConst   = isDeclarationConstant(decl)
 
 	if valueExpr then
-		if not valueExpr.inferredType then
-			if valueExpr.nodeType == !(AST_TABLE) then
-				!DEPEND_AND_RETURN(`decl`, DEPEND_NODE_PASSED_INFER, `valueExpr`)
-			else
-				!DEPEND_AND_RETURN(`decl`, DEPEND_NODE_INFERRED, `valueExpr`)
+		if valueExpr.nodeType == !(AST_TABLE) then
+			local tableNode = valueExpr
+
+			if tableNode.queued.pipe <= !(PIPE_INFER) then
+				!DEPEND_AND_RETURN(`decl`, DEPEND_NODE_PASSED_INFER, `tableNode`, nil, toLua(VISIT_BREAK))
 			end
+
+		elseif not valueExpr.inferredType then
+			!DEPEND_AND_RETURN(`decl`, DEPEND_NODE_INFERRED, `valueExpr`)
 		end
 
 		if isConst and valueExpr.nodeType == !(AST_STRUCT) or valueExpr.nodeType == !(AST_ENUM) then
@@ -3060,31 +3066,38 @@ end
 		end
 
 		if shouldDeclarationValueDefinitivelyBeConstant(decl) or isScopeDeclarative(scope) then
-			if isExpressionConstant(state, valueExpr, false) then
+			local valueIsConst, dynExpr = isExpressionConstant(state, valueExpr, false)
+			if valueIsConst then
 				-- void
 
-			elseif valueExpr.nodeType == !(AST_FOREIGN) then
+			elseif dynExpr.nodeType == !(AST_FOREIGN) then
 				-- void
 				-- We usually treat foreign values as runtime values. The only exception is when
 				-- it's placed directly on a declaration. (Can this be solved in a better way?)
 				-- :SpecialForeignValueRules
 
-			elseif astFindInTree(valueExpr, !(AST_FOREIGN)) then
-				local foreign = astFindInTree(valueExpr, !(AST_FOREIGN))
+			elseif dynExpr.nodeType == !(AST_LAMBDA) then
+				local lambda = dynExpr
+				!assert `lambda.captures[1]`
+				typeError(
+					state, lambda,
+					"Value for declared %s '%s' is not a constant expression. (Functions with captures are not constant.)",
+					(isConst and "constant" or "variable"),
+					identOrVararg.name
+				)
+
+			elseif astFindInUnit(dynExpr, !!(CONST_SET{ AST_FOREIGN })) then
+				local foreign = astFindInUnit(dynExpr, !!(CONST_SET{ AST_FOREIGN }))
 				typeError(state, foreign, "Cannot evaluate foreign values during compile time.")
 
 			else
-				-- @UX: If the expression is/contains a table with a non-constant field, point out which field key or value!
 				typeError(
-					state, astGetExpressionVisuallyFurthestToTheLeft(valueExpr),
-					"Value for declared %s '%s' is not a constant expression.%s",
+					state, dynExpr,
+					"%s for declared %s '%s' is not a constant expression.%s",
+					(dynExpr == valueExpr and "Value" or "Sub-expression inside the value"),
 					(isConst and "constant" or "variable"),
 					identOrVararg.name,
-					(
-						(valueExpr.nodeType == !(AST_LAMBDA) and valueExpr.captures[1] and " (Functions with captures are not constant.)") or
-						(not isConst and isScopeDeclarative(scope) and " (All values in declarative scopes must be constant.)") or
-						""
-					)
+					(not isConst and isScopeDeclarative(scope) and " (All values in declarative scopes must be constant.)" or "")
 				)
 			end
 		end
@@ -6272,10 +6285,9 @@ function _G.prepareToRun(state, dependent, lambda)
 	writeLuaPreloads(state, writer, state.luaPreloads, state.runnerWrittenPreloads+1)
 	state.runnerWrittenPreloads = #state.luaPreloads
 
-	writeForeignImports                (state, writer, newConstants, true)
-	writeConstantObjectsExceptFunctions(state, writer, newConstants, true)
-	writeFunctionObjects               (state, writer, newConstants)
-	writeTopScopeDeclarations          (state, writer, newTopScopeDeclarations)
+	writeForeignImports                       (state, writer, newConstants, true)
+	writeConstantObjectsAndForwardDeclarations(state, writer, newConstants, EMPTY_TABLE)
+	writeTopScopeDeclarations                 (state, writer, newTopScopeDeclarations)
 
 	-- !ifDEBUG `print(writer.file:getBuffer())`
 	runnerRunBufferAsChunk(state)
@@ -6384,18 +6396,25 @@ local NEVER_CONST = !(Set{
 	AST_TYPE_INFO, -- @Incomplete: Make type_info() a constant expression.
 	AST_VARARG,
 })
+-- isConstant, firstDynamicExpression = isExpressionConstant( state, expr, foreignIsConst )
 function _G.isExpressionConstant(state, expr, foreignIsConst)
+	if not expr.inferredType then
+		errorInternal(state, expr, "Missing inferred type.")
+	end
+
 	local nodeType = expr.nodeType
 
 	if ALWAYS_CONST[nodeType] then
-		return true
+		return true, nil
 	elseif NEVER_CONST[nodeType] then
-		return false
+		return false, expr
 
 	elseif nodeType == !(AST_IDENTIFIER) then
 		local ident = expr
 		local decl  = ident.declaration or errorInternal(state, ident)
-		return isDeclarationConstant(decl) and isExpressionConstant(state, decl.value, foreignIsConst)
+		if not isDeclarationConstant(decl) then  return false, ident  end
+
+		return isExpressionConstant(state, decl.value, foreignIsConst)
 
 	elseif nodeType == !(AST_CAST) then
 		local cast = expr
@@ -6404,45 +6423,66 @@ function _G.isExpressionConstant(state, expr, foreignIsConst)
 	elseif nodeType == !(AST_UNARY) then
 		local unary = expr
 		return isExpressionConstant(state, unary.expression, foreignIsConst)
+
 	elseif nodeType == !(AST_BINARY) then
 		local binary = expr
-		return isExpressionConstant(state, binary.left, foreignIsConst) and isExpressionConstant(state, binary.right, foreignIsConst)
+
+		local isConst, dynExpr = isExpressionConstant(state, binary.left, foreignIsConst)
+		if not isConst then  return false, dynExpr  end
+
+		return isExpressionConstant(state, binary.right, foreignIsConst)
 
 	elseif nodeType == !(AST_LAMBDA) then -- Note: We should not get here for AstType nodes.
 		local lambda = expr
-		return not lambda.captures[1]
+		if lambda.captures[1] then  return false, lambda  end
+		return true, nil
 
 	elseif nodeType == !(AST_CONDITIONAL) then
 		local conditional = expr
-		return (
-			isExpressionConstant(state, conditional.condition, foreignIsConst)
-			and (conditional.branchTrue == nil or isExpressionConstant(state, conditional.branchTrue, foreignIsConst))
-			and isExpressionConstant(state, conditional.branchFalse, foreignIsConst)
-		)
+
+		local isConst, dynExpr = isExpressionConstant(state, conditional.condition, foreignIsConst)
+		if not isConst then  return false, dynExpr  end
+
+		if conditional.branchTrue then
+			local isConst, dynExpr = isExpressionConstant(state, conditional.branchTrue, foreignIsConst)
+			if not isConst then  return false, dynExpr  end
+		end
+
+		return isExpressionConstant(state, conditional.branchFalse, foreignIsConst)
 
 	elseif nodeType == !(AST_ACCESS) then
 		local access = expr
-		return isExpressionConstant(state, access.object, foreignIsConst) and isExpressionConstant(state, access.member, foreignIsConst)
+
+		local isConst, dynExpr = isExpressionConstant(state, access.object, foreignIsConst)
+		if not isConst then  return false, dynExpr  end
+
+		return isExpressionConstant(state, access.member, foreignIsConst)
 
 	elseif nodeType == !(AST_TABLE) then
 		local tableNode = expr
-		if tableNode.trailingExpression then  return false  end
+		if tableNode.trailingExpression then  return false, tableNode.trailingExpression  end
 
 		for _, tableField in ipairs(tableNode.fields) do
-			if not isExpressionConstant(state, tableField.key,   foreignIsConst) then  return false  end
-			if not isExpressionConstant(state, tableField.value, foreignIsConst) then  return false  end
+			local isConst, dynExpr = isExpressionConstant(state, tableField.key,   foreignIsConst)
+			if not isConst then  return false, dynExpr  end
+
+			local isConst, dynExpr = isExpressionConstant(state, tableField.value, foreignIsConst)
+			if not isConst then  return false, dynExpr  end
 		end
 
-		return true
+		return true, nil
 
 	elseif nodeType == !(AST_FOREIGN) then
 		-- Technically foreign values are seen as constant at runtime, but since we don't
 		-- know what they are at compile-time we (usually) treat them as runtime values.
-		return foreignIsConst
+		local foreign = expr
+		if foreignIsConst then  return true, nil  end
+		return false, foreign
 
 	elseif nodeType == !(AST_LOCATION) then
 		local loc = expr
-		return loc.ofCaller -- @Incomplete: Make !location() a constant expression (that can be simplified).
+		if loc.ofCaller then  return true, nil  end
+		return false, loc -- @Incomplete: Make !location() a constant expression (that can be simplified).
 
 	else
 		errorUnhandledNodeType(state, expr)
