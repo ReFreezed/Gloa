@@ -926,36 +926,22 @@ function _G.writeExpression(state, writer, indent, nextLocalN, localsStack, expr
 			end
 
 		elseif tableNode.inferredType.tag == !(TYPE_ARRAY) then
-			local items = {}
-
 			for _, tableField in ipairs(tableNode.fields) do
 				!ASSERT("tableField.key.nodeType == "..AST_LITERAL) -- :VariableArrayIndices
 
-				local literal     = tableField.key
-				local arrayIndex  = literal.value
-				items[arrayIndex] = tableField.value
-			end
-
-			for _, expr in ipairs(items) do
 				if not first then  file:write(", ")  end
 				first = false
-				writeExpression(state, writer, indent, nextLocalN, localsStack, expr)
+
+				if not tableField.keyIsGenerated then
+					writeTableConstructorKey(state, writer, indent, nextLocalN, localsStack, tableField.key)
+					file:write("=")
+				end
+				writeExpression(state, writer, indent, nextLocalN, localsStack, tableField.value)
 			end
 
 		elseif tableNode.inferredType.tag == !(TYPE_STRUCT) then
 			local structInfo = tableNode.inferredType
 			!ASSERT `not structInfo.isPolymorphic`
-
-			for _, tableField in ipairs(tableNode.fields) do
-				if not isExpressionNil(tableField.value) then
-					if not first then  file:write(", ")  end
-					first = false
-
-					writeTableConstructorKey(state, writer, indent, nextLocalN, localsStack, tableField.key)
-					file:write("=")
-					writeExpression(state, writer, indent, nextLocalN, localsStack, tableField.value)
-				end
-			end
 
 			for _, member in ipairs(structInfo.members) do
 				local tableField = findTableFieldByNameInStructConstructor(state, tableNode, member.name)
@@ -967,6 +953,19 @@ function _G.writeExpression(state, writer, indent, nextLocalN, localsStack, expr
 					writeTableConstructorKeyName(writer, member.name)
 					file:write("=")
 					writeDefaultValueForStructMember(state, writer, indent, nextLocalN, localsStack, structInfo, member, tableNode) -- @UX: Maybe use a better nodeForError.
+				end
+			end
+
+			for _, tableField in ipairs(tableNode.fields) do
+				if tableField.keyIsGenerated or not isExpressionNil(tableField.value) then
+					if not first then  file:write(", ")  end
+					first = false
+
+					if not tableField.keyIsGenerated then
+						writeTableConstructorKey(state, writer, indent, nextLocalN, localsStack, tableField.key)
+						file:write("=")
+					end
+					writeExpression(state, writer, indent, nextLocalN, localsStack, tableField.value)
 				end
 			end
 
