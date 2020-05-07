@@ -3780,23 +3780,116 @@ end
 	end
 end
 
-local function inferTableArray(state, tableNode, arraySig)
+local function validateIndiciesInArrayLikeConstructor(state, tableNode, itemType)
 	for _, tableField in ipairs(tableNode.fields) do
-		local indexLiteral = tableField.key
+		local indexExpr = tableField.key
 
-		if not indexLiteral.inferredType then
-			!DEPEND_AND_RETURN(`tableNode`, DEPEND_NODE_INFERRED, `indexLiteral`)
-		elseif indexLiteral.inferredType.tag ~= !(TYPE_INT) then
-			typeError(
-				state, astGetExpressionVisuallyFurthestToTheLeft(indexLiteral),
-				"Array indices must be integers. (This is %s)",
-				getFriendlyTypeInfoName(indexLiteral.inferredType)
-			)
-		elseif indexLiteral.nodeType ~= !(AST_LITERAL) then
+		if indexExpr.inferredType.tag == !(TYPE_INT) and indexExpr.nodeType ~= !(AST_LITERAL) then
 			-- @Incomplete: Allow indices to be variable? :VariableArrayIndices
 			typeError(
-				state, astGetExpressionVisuallyFurthestToTheLeft(indexLiteral),
-				"Indices must be constant in array constructors."
+				state, astGetExpressionVisuallyFurthestToTheLeft(indexExpr),
+				"Array indices must be constant in constructors."
+			)
+		end
+	end
+
+	local trailingExpr = tableNode.trailingExpression
+	if trailingExpr then
+		adjustTypeToOne(state, trailingExpr, trailingExpr.inferredType) -- Ensure this is not a call that returns nothing.
+	end
+
+	-- Validate indices and sequence.
+	local indexLiterals       = {}
+	local highestLiteralIndex = 0
+
+	for _, tableField in ipairs(tableNode.fields) do
+		local literal = tableField.key
+
+		if literal.inferredType.tag == !(TYPE_INT) then
+			local arrayIndex = literal.value
+
+			if indexLiterals[arrayIndex] then
+				typeError2(state,
+					literal,                   F("Duplicate array index %d.", arrayIndex),
+					indexLiterals[arrayIndex], F("...first occurance is here.")
+				)
+			elseif arrayIndex <= 0 then
+				typeError(state, literal, "Array index is not positive. (It is %d)", arrayIndex)
+			end
+
+			indexLiterals[arrayIndex] = literal
+			highestLiteralIndex       = math.max(highestLiteralIndex, arrayIndex)
+		end
+	end
+
+	if trailingExpr and highestLiteralIndex > tableNode.highestGeneratedIndex then
+		-- We get here if explicit indices are combined with a trailing expression.
+		for i = tableNode.highestGeneratedIndex+1, highestLiteralIndex do
+			local overlap = indexLiterals[i]
+			if overlap then
+				typeError2(state,
+					trailingExpr, F("Potentially overlapping value(s) at or after array index %d because of this expression.", tableNode.highestGeneratedIndex+1),
+					overlap,      F("...first overlap would be here.")
+				)
+			end
+		end
+		errorInternal() -- highestLiteralIndex would be incorrect if we're here.
+	end
+
+	for arrayIndex = 1, highestLiteralIndex do
+		if not indexLiterals[arrayIndex] then
+			typeError(state, tableNode, "Array is not a sequence. Missing item at index %d.", arrayIndex)
+		end
+	end
+
+	-- Validate trailing expression.
+	if not trailingExpr then
+		-- void
+
+	elseif trailingExpr.nodeType == !(AST_VARARG) then
+		if not isTypeCompatibleWith(trailingExpr.inferredType.itemType, itemType) then
+			typeError(
+				state, trailingExpr,
+				"Array item type mismatch for vararg. (Wanted %s, got %s)",
+				getFriendlyTypeInfoName(itemType),
+				getFriendlyTypeInfoName(trailingExpr.inferredType.itemType)
+			)
+		end
+
+	elseif trailingExpr.nodeType == !(AST_CALL) then
+		local call        = trailingExpr
+		local argTypesOut = call.callee.inferredType.argumentTypesOut
+
+		for i, argTypeInfo in ipairs(argTypesOut) do
+			argTypeInfo = adjustTypeToOne(state, call, argTypeInfo)
+
+			if not isTypeCompatibleWith(argTypeInfo, itemType) then
+				typeError(
+					state, call,
+					"Array item type mismatch for return value #%d from call. (Wanted %s, got %s)",
+					i,
+					getFriendlyTypeInfoName(itemType),
+					getFriendlyTypeInfoName(argTypeInfo)
+				)
+			end
+		end
+
+	else
+		errorUnhandledNodeType(state, trailingExpr)
+	end
+end
+
+local function inferTableArray(state, tableNode, arraySig)
+	for _, tableField in ipairs(tableNode.fields) do
+		local indexExpr = tableField.key
+
+		if not indexExpr.inferredType then
+			!DEPEND_AND_RETURN(`tableNode`, DEPEND_NODE_INFERRED, `indexExpr`)
+		elseif indexExpr.inferredType.tag ~= !(TYPE_INT) then
+			typeError(
+				state, astGetExpressionVisuallyFurthestToTheLeft(indexExpr),
+				"Array indices must be integers. (This is %s)",
+				getFriendlyTypeInfoName(indexExpr.inferredType)
 			)
 		end
 
@@ -3827,89 +3920,9 @@ local function inferTableArray(state, tableNode, arraySig)
 		end
 	end
 
+	validateIndiciesInArrayLikeConstructor(state, tableNode, arraySig.itemType)
+
 	tableNode.inferredType = arraySig
-
-	local trailingExpr = tableNode.trailingExpression
-	if trailingExpr then
-		adjustTypeToOne(state, trailingExpr, trailingExpr.inferredType) -- Ensure this is not a call that returns nothing.
-	end
-
-	-- Validate indices and sequence. :ConstructorTrailingCall
-	local indexLiterals       = {}
-	local highestLiteralIndex = 0
-
-	for _, tableField in ipairs(tableNode.fields) do
-		local literal    = tableField.key
-		local arrayIndex = literal.value
-
-		if indexLiterals[arrayIndex] then
-			typeError2(state,
-				literal,                   F("Duplicate index %d.", arrayIndex),
-				indexLiterals[arrayIndex], F("...first occurance is here.")
-			)
-		elseif arrayIndex <= 0 then
-			typeError(state, literal, "Array index is not positive. (It is %d)", arrayIndex)
-		end
-
-		indexLiterals[arrayIndex] = literal
-		highestLiteralIndex       = math.max(highestLiteralIndex, arrayIndex)
-	end
-
-	if trailingExpr and highestLiteralIndex > tableNode.highestGeneratedIndex then
-		-- We get here if explicit indices are combined with a trailing expression.
-		for i = tableNode.highestGeneratedIndex+1, highestLiteralIndex do
-			local overlap = indexLiterals[i]
-			if overlap then
-				typeError2(state,
-					trailingExpr, F("Potentially overlapping value(s) at or after array index %d because of this expression.", tableNode.highestGeneratedIndex+1),
-					overlap,      F("...first overlap would be here.")
-				)
-			end
-		end
-		errorInternal() -- highestLiteralIndex would be incorrect if we're here.
-	end
-
-	for arrayIndex = 1, highestLiteralIndex do
-		if not indexLiterals[arrayIndex] then
-			typeError(state, tableNode, "Array is not a sequence. Missing item at index %d.", arrayIndex)
-		end
-	end
-
-	-- Validate trailing expression.
-	if not trailingExpr then
-		-- void
-
-	elseif trailingExpr.nodeType == !(AST_VARARG) then
-		if not isTypeCompatibleWith(trailingExpr.inferredType.itemType, arraySig.itemType) then
-			typeError(
-				state, trailingExpr,
-				"Array item type mismatch for vararg. (Wanted %s, got %s)",
-				getFriendlyTypeInfoName(arraySig.itemType),
-				getFriendlyTypeInfoName(trailingExpr.inferredType.itemType)
-			)
-		end
-
-	elseif trailingExpr.nodeType == !(AST_CALL) then
-		local call        = trailingExpr
-		local argTypesOut = call.callee.inferredType.argumentTypesOut
-
-		for i, argTypeInfo in ipairs(argTypesOut) do
-			argTypeInfo = adjustTypeToOne(state, call, argTypeInfo)
-
-			if not isTypeCompatibleWith(argTypeInfo, arraySig.itemType) then
-				typeError(
-					state, call,
-					"Array item type mismatch for return value #%d from call. (Wanted %s, got %s)",
-					i,
-					getFriendlyTypeInfoName(arraySig.itemType),
-					getFriendlyTypeInfoName(argTypeInfo)
-				)
-			end
-		end
-
-	else
-		errorUnhandledNodeType(state, trailingExpr)
-	end
 end
 
 local function inferTableStruct(state, tableNode, structInfo)
@@ -3965,10 +3978,28 @@ local function inferTableStruct(state, tableNode, structInfo)
 		end
 	end
 
-	tableNode.inferredType = structInfo
+	if structInfo.kind == !(STRUCT_KIND_ARRAY) then
+		validateIndiciesInArrayLikeConstructor(state, tableNode, structInfo.valueType)
+	end
+
+	-- Check trailing expression.
+	if not tableNode.trailingExpression or structInfo.kind == !(STRUCT_KIND_ARRAY) then
+		-- void
+	elseif structInfo.kind == !(STRUCT_KIND_TABLE) then
+		errorInternal(state,
+			astGetExpressionVisuallyFurthestToTheLeft(tableNode.trailingExpression),
+			"@Incomplete: Handle trailing expressions for table-like structs."
+		)
+	else
+		typeError(state,
+			astGetExpressionVisuallyFurthestToTheLeft(tableNode.trailingExpression),
+			"Trailing expressions are only allowed for array-like structs. (The struct is '%s')",
+			getFriendlyTypeInfoName(structInfo)
+		)
+	end
 
 	-- Check for duplicate keys.
-	-- @Incomplete: Check non-string keys.
+	-- @Incomplete: Check non-string keys (except integer keys if we're array-like).
 	local keyLiterals = {}
 
 	for _, tableField in ipairs(tableNode.fields) do
@@ -3987,9 +4018,7 @@ local function inferTableStruct(state, tableNode, structInfo)
 		end
 	end
 
-	if tableNode.trailingExpression then
-		errorInternal(state, tableNode.trailingExpression, "@Incomplete: Handle trailing expression in struct constructors.") -- :ConstructorTrailingCall (and vararg)
-	end
+	tableNode.inferredType = structInfo
 end
 
 !NODE_INFERRER `function nodeInferrers.AstTable(state, tableNode)`
