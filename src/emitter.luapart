@@ -388,22 +388,30 @@ function _G.emitDeclaration(state, decl)
 		if outputDebugInfo then
 			local name = decl.name.name
 
-			if name == "!call" then -- @Ugly detection.
-				!ASSERT("decl.parent.nodeType == "..AST_STRUCT) -- Only structs can have !call declarations at the moment. 2020-03-22
-				name = decl.parent.representedType.name
-				if name ~= "" then
-					maybeSetConstantName(state, const, name.."_call")
-				end
+			if name:byte(1) == !(getByte"!") then
+				if name:find"^!call" or name:find"^!iterator" then -- @Ugly detection.
+					local struct = decl.parent
 
-			elseif name == "!iterator" then -- @Ugly detection.
-				!ASSERT("decl.parent.nodeType == "..AST_STRUCT) -- Only structs can have !iterator declarations at the moment. 2020-03-28
-				name = decl.parent.representedType.name
-				if name ~= "" then
-					maybeSetConstantName(state, const, name.."_iterator")
-				end
+					if decl.addedByPolymorph then
+						!ASSERT("struct.nodeType == "..AST_LAMBDA)
+						!ASSERT("struct.parent.nodeType == "..AST_DECLARATION)
+						struct = struct.parent.parent
+					end
 
-			-- elseif name:byte(1) == !(getByte"!") then
-			-- 	maybeSetConstantName(state, const, name:sub(2))
+					if struct.nodeType ~= !(AST_STRUCT) then
+						-- Only structs can have !call/iterator declarations at the moment. 2020-03-22
+						!ifDEBUG `astPrint(struct)`
+						errorInternal(state, decl)
+					end
+
+					name = struct.representedType.name
+					if name ~= "" then
+						maybeSetConstantName(state, const, name.."_"..name:sub(2))
+					end
+
+				else
+					maybeSetConstantName(state, const, name:sub(2))
+				end
 
 			else
 				maybeSetConstantName(state, const, name)
