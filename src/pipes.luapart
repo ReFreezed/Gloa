@@ -550,11 +550,32 @@ function _G.errorPipesAreStuck(state)
 		elseif name == "..." then
 			errorParsing(state, node.token, "This is not inside a vararg function.") -- Probably an internal compiler error at this point.
 
-		elseif node.nodeType == !(AST_ACCESS) then
-			local access = node
+		elseif node.nodeType == !(AST_ACCESS) or queued.waitingOn.extraData then
+			local scopeType, nameNode
 
-			if access.object.inferredType.tag == !(TYPE_NAMESPACE) and access.object.inferredType.scope.nodeType == !(AST_FILE_SCOPE) then
-				local fileScope = access.object.inferredType.scope
+			if node.nodeType == !(AST_ACCESS) then
+				local access = node
+				scopeType    = access.object.inferredType
+				nameNode     = access.member
+			else
+				scopeType    = queued.waitingOn.extraData.inferredType
+				nameNode     = node
+			end
+
+			if nameNode.nodeType == !(AST_TABLE) then
+				-- Find what field exactly the table is waiting for. Since the node with the
+				-- actual name is a string literal - not an identifier - the table never had
+				-- to wait for the field key to be inferred.
+				for _, tableField in ipairs(node.fields) do
+					if tableField.key.nodeType == !(AST_LITERAL) and tableField.key.literalType == !(LITERAL_STRING) and tableField.key.value == name then
+						nameNode = tableField.key
+						break
+					end
+				end
+			end
+
+			if scopeType.tag == !(TYPE_NAMESPACE) and scopeType.scope.nodeType == !(AST_FILE_SCOPE) then
+				local fileScope = scopeType.scope
 				!!(REPORT_START)
 				typeError(
 					state, node.member,
@@ -567,16 +588,19 @@ function _G.errorPipesAreStuck(state)
 
 			else
 				local scope  = nil
-				local tag    = access.object.inferredType.tag
+				local tag    = scopeType.tag
 				local ignore = false
 
-				if tag == !(TYPE_NAMESPACE) then
-					scope = access.object.inferredType.scope
+				if queued.waitingOn.extraData then
+					scope = queued.waitingOn.extraData
+					if scope.nodeType == !(AST_STRUCT) and not scope.representedType.hasMembers then  ignore = true  end -- Better to report the next issue, probably.
+				elseif tag == !(TYPE_NAMESPACE) then
+					scope = scopeType.scope
 				elseif tag == !(TYPE_ENUM) then
-					scope = access.object.inferredType.astNode
+					scope = scopeType.astNode
 				elseif tag == !(TYPE_STRUCT) then
-					scope = access.object.inferredType.astNode
-					if not access.object.inferredType.hasMembers then  ignore = true  end -- Better to report the next issue, probably.
+					scope = scopeType.astNode
+					if not scopeType.hasMembers then  ignore = true  end -- Better to report the next issue, probably.
 				else
 					-- What could this be?
 				end
@@ -584,7 +608,7 @@ function _G.errorPipesAreStuck(state)
 				if not ignore then
 					!!(REPORT_START)
 					printerr()
-					typeMessage(io.stderr, state, access.member, "Error", "Undeclared identifier '%s'.", name)
+					typeMessage(io.stderr, state, nameNode, "Error", "Undeclared identifier '%s'.", name)
 					if scope then
 						typeMessage(io.stderr, state, scope, "Info", "...here is the accessed scope.")
 					end
