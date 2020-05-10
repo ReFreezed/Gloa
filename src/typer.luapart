@@ -4842,11 +4842,22 @@ end
 
 		elseif expr.replacing.nodeType == !(AST_BINARY) then
 			local binary = expr.replacing
-			typeError(
-				state, binary,
-				"Binary assertion failed! (Left is %s, right is %s)",
-				getFriendlyTypeInfoName(binary.left.inferredType), getFriendlyTypeInfoName(binary.right.inferredType)
-			)
+
+			local l
+				=  binary.left.nodeType == !(AST_LITERAL) and (binary.left.literalType == !(LITERAL_STRING) and F("'%s'", binary.left.value) or tostring(binary.left.value))
+				or binary.left.nodeType == !(AST_TYPE)    and getFriendlyTypeInfoName(binary.left.representedType)
+				or nil
+
+			local r
+				=  binary.right.nodeType == !(AST_LITERAL) and (binary.right.literalType == !(LITERAL_STRING) and F("'%s'", binary.right.value) or tostring(binary.right.value))
+				or binary.right.nodeType == !(AST_TYPE)    and getFriendlyTypeInfoName(binary.right.representedType)
+				or nil
+
+			if l and r then
+				typeError(state, binary, "Binary assertion failed! (Left is %s, right is %s)", l, r)
+			else
+				typeError(state, binary, "Binary assertion failed!")
+			end
 
 		elseif expr.replacing.nodeType == !(AST_CAST) and expr.replacing.expression.inferredType.tag ~= !(TYPE_BOOL) then
 			local cast      = expr.replacing
@@ -5764,9 +5775,27 @@ end
 
 	fulfillDependencies(state, struct, !(DEPEND_STRUCT_MEMBERS_READY))
 
-	if structInfo.keyType and (structInfo.members[1] or struct.declarations[1]) and structInfo.keyType.tag == !(TYPE_STRING) then
-		-- Note: We trigger this error for static members too, not just dynamic, as some lookups would otherwise be ambigous.
-		typeError(state, typeSourceNodeK, "Strongly typed tables with string keys cannot also have members.")
+	if structInfo.keyType then
+		if (structInfo.members[1] or struct.declarations[1]) and (structInfo.keyType.tag == !(TYPE_STRING) or structInfo.keyType.tag == !(TYPE_ANY)) then
+			-- Note: We trigger this error for static members too, not just dynamic, as some lookups would otherwise be ambigous.
+			typeError(
+				state, typeSourceNodeK,
+				"Table-like structs with keys of type '%s' cannot also have members as that would create ambiguity in some cases.%s",
+				(structInfo.keyType.tag == !(TYPE_STRING) and "string" or "any"),
+				(struct.polymorphSourceStruct and " (Note that arguments to polymorphic structs become static members.)" or "")
+			)
+		elseif structInfo.keyType.tag == !(TYPE_NONE) then
+			typeError(state, typeSourceNodeK, "!key type cannot be 'none'.")
+		elseif structInfo.keyType.tag == !(TYPE_COMPOUND) and indexWith1(structInfo.keyType, "tag", !(TYPE_NONE)) then
+			typeError(state, typeSourceNodeK, "!key type cannot contain 'none'. (Type is %s)", getFriendlyTypeInfoName(structInfo.keyType))
+		end
+	end
+	if structInfo.valueType then
+		if structInfo.valueType.tag == !(TYPE_NONE) then
+			typeError(state, typeSourceNodeV, "!value type cannot be 'none'.")
+		elseif structInfo.valueType.tag == !(TYPE_COMPOUND) and indexWith1(structInfo.valueType, "tag", !(TYPE_NONE)) then
+			typeError(state, typeSourceNodeV, "!value type cannot contain 'none'. (Type is %s)", getFriendlyTypeInfoName(structInfo.valueType))
+		end
 	end
 
 	moveToNextRelevantPipe(state, struct)

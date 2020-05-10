@@ -87,7 +87,7 @@ while args[i] do
 		debugger    = true
 		i           = i+1
 	elseif arg == "--gloadir" then
-		dirGloa     = args[i+1] or error("[GloaBuildArgs] Expected value after "..arg..".")
+		dirGloa     = (args[i+1] or error("[GloaBuildArgs] Expected value after "..arg..".")):gsub("\\", "/")
 		i           = i+2
 
 	-- Secret options:

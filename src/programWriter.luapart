@@ -103,8 +103,8 @@ local ERROR_HANDLER = templateToLua(
 							outputFile:write(" ")
 							if info.namewhat == "method" or info.namewhat == "field" then  outputFile:write(info.namewhat, " ")  end
 							outputFile:write("'", info.name, "'")
-						elseif info.source == mainSource and (lineMappings.lines[info.linedefined] or 0) > 0 and info.linedefined ~= info.currentline then
-							outputFile:write(" (linedefined:", lineMappings.lines[info.linedefined], ")")
+						--[[elseif info.source == mainSource and (lineMappings.lines[info.linedefined] or 0) > 0 and info.linedefined ~= info.currentline then
+							outputFile:write(" (linedefined:", lineMappings.lines[info.linedefined], ")")]]
 						end
 
 						local source = nil
@@ -119,9 +119,9 @@ local ERROR_HANDLER = templateToLua(
 
 						if source then
 							outputFile:write(" (", source)
-							if info.linedefined > 0 and info.linedefined ~= info.currentline then
+							--[[if info.linedefined > 0 and info.linedefined ~= info.currentline then
 								outputFile:write(", linedefined:", info.linedefined)
-							end
+							end]]
 							outputFile:write(")")
 						end
 					end
@@ -178,44 +178,61 @@ local foreignApiCompilerSymbols = {
 
 	wrapFunctionInGloaErrorHandler = !(trimTemplate`
 		(function(select, xpcall, unpack, exit, gloaErrorHandler)
+			local function pack(...)
+				return {n=select("#", ...), ...}
+			end
+
 			return function(cb)
 				return function(...)
-					local args = {n=select("#", ...), ...}
+					local args = pack(...)
 
-					if not xpcall(
-						function()
-							cb(unpack(args, 1, args.n))
-						end,
+					args = pack(xpcall(
+						function() return cb(unpack(args, 1, args.n)) end,
 						gloaErrorHandler
-					) then
-						exit(1)
-					end
+					))
+					if not args[1] then  exit(1)  end
+
+					return unpack(args, 2, args.n)
 				end
 			end
 		end)(select, xpcall, unpack, os.exit, gloaErrorHandler)
 	`),
 
 	getProgramArguments = !(trimTemplate`
-		(function(programArguments)
+		(function(args, unpack)
 			return function()
-				return {unpack(programArguments)}
+				return {unpack(args)}
 			end
-		end)(programArguments)
+		end)(programArguments, unpack)
+	`),
+
+	getCommandLineArguments = !(trimTemplate`
+		(function(args, HUGE, unpack)
+			return function()
+				local argsCopy = {unpack(args)}
+				for i = 0, -HUGE, -1 do
+					if args[i] == nil then  return argsCopy  end
+					argsCopy[i] = args[i]
+				end
+			end
+		end)(luaArguments, math.huge, unpack)
 	`),
 
 	getAllTypes = !(trimTemplate`
-		function(T)
-			if not _TYPES[1000] then
-				return {unpack(_TYPES)}
-			end
+		(function(unpack)
+			return function(T)
+				if not _TYPES[1000] then
+					return {unpack(_TYPES)}
+				end
 
-			local types = {unpack(_TYPES, 1, 1000)}
-			for i = 1001, #_TYPES do
-				types[i] = _TYPES[i]
-			end
+				local types = {unpack(_TYPES, 1, 1000)}
+				for i = 1001, #_TYPES do
+					types[i] = _TYPES[i]
+				end
 
-			return types
-		end
+				return types
+			end
+		end)(unpack)
 	`),
 
 	getTypeInfo = !(trimTemplate`
@@ -2482,7 +2499,8 @@ function _G.writeCompilerSymbols(state, writer, relevantObjects)
 
 	if outputRuntime then
 		file:write("local lineMappings      = {paths={},files={},lines={}}") ; writeEol(state, writer)
-		file:write("local programArguments  = {...}") ; writeEol(state, writer) -- Should we use 'arg' here? It has additional stuff in index 0 and below. metaprogramArguments needs to be updated too.
+		file:write("local programArguments  = arg") ; writeEol(state, writer)
+		file:write("local luaArguments      = arg") ; writeEol(state, writer)
 		file:write!("local gloaErrorHandler = "..ERROR_HANDLER) ; writeEol(state, writer)
 
 		local writeAllTypes = not relevantObjects or relevantObjects.allTypeInfos
@@ -2557,6 +2575,7 @@ function _G.writeCompilerSymbols(state, writer, relevantObjects)
 	else
 		-- Note: lineMappings is not used in metaprograms because gloaErrorHandler() is different.
 		file:write("programArguments = metaprogramArguments") ; writeEol(state, writer)
+		file:write("luaArguments     = compilerLuaArguments") ; writeEol(state, writer)
 		file:write("gloaErrorHandler = compilerErrorHandler") ; writeEol(state, writer)
 
 		file:write("_TYPES     = metaprogramTypeIds")   ; writeEol(state, writer)

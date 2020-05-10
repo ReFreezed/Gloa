@@ -936,7 +936,7 @@ state.file:write(MODULE_HEADER, "\n")
 
 state.file:write[[
 export Filename      :: string
-export Variant       :: string|float|bool|table|Object -- Functions and Lua userdata are not supported. Tables have to be "simple".
+export Variant       :: string|int|float|bool|table|Object -- Functions and Lua userdata are not supported. Tables have to be "simple".
 export Color         :: []float
 export Pointer       :: !foreign struct {}
 export LightUserdata :: !foreign struct {} -- Actually a value (int) representing a pointer, but for the sake of type safety it's probably better to say it's its own type.
@@ -1018,6 +1018,13 @@ export font :: namespace {
 	export newRasterizer         :: (filename:Filename|filesystem.FileData)    -> (rasterizer:Rasterizer) !foreign lua "love.font.newRasterizer"
 	export newTrueTypeRasterizer :: (size:int, hintingMode:HintingMode)        -> (rasterizer:Rasterizer) !foreign lua "love.font.newTrueTypeRasterizer"
 	export newBMFontRasterizer   :: (imageData:image.ImageData, glyphs:string) -> (rasterizer:Rasterizer) !foreign lua "love.font.newBMFontRasterizer"
+}
+]]
+
+-- This is just missing from all documentation even though the default love.run() clearly uses it.
+state.file:write[[
+export arg :: namespace {
+	export parseGameArguments :: (rawArguments:[]string) -> (arguments:[]string) !foreign lua "love.arg.parseGameArguments"
 }
 ]]
 
