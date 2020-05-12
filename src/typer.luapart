@@ -5503,16 +5503,16 @@ local function checkForRecursiveStruct(state, declThatWeAreChecking, memberPath,
 	if memberType.tag == !(TYPE_STRUCT) then
 		structInfoInner = memberType
 
+		local decl
+			=  findMemberDeclaration(state, parentStructInfo.astNode, memberName)
+			or errorInternal(state, declThatWeAreChecking, "%s", table.concat(memberPath, "."))
+
+		local valueExpr = decl.value
+		if valueExpr and !!(CONST_SET{ AST_FOREIGN, AST_NULL })[valueExpr.nodeType] then
+			return
+		end
+
 		if structInfoInner == structInfo then
-			local decl
-				=  findMemberDeclaration(state, parentStructInfo.astNode, memberName)
-				or errorInternal(state, declThatWeAreChecking, "%s", table.concat(memberPath, "."))
-
-			local valueExpr = decl.value
-			if valueExpr and !!(CONST_SET{ AST_FOREIGN, AST_NULL })[valueExpr.nodeType] then
-				return
-			end
-
 			local niceTypeName = getFriendlyTypeInfoName(structInfo)
 
 			typeError2(state,
@@ -5746,6 +5746,7 @@ end
 		if decl.nodeType == !(AST_DECLARATION) then
 			local memberName = decl.name.name
 			local memberType = decl.name.inferredType or errorInternal()
+			-- ifDEBUG `print(memberName, getFriendlyTypeInfoName(memberType))`
 			checkForRecursiveStruct(state, decl, {memberName},memberName,memberType, structInfo, structInfo)
 		end
 	end
