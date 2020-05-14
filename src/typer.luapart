@@ -2696,9 +2696,12 @@ end
 	local calleeType = callee.inferredType
 
 	-- Wait for callee.
-	if not calleeType then
-		!DEPEND_AND_RETURN(`call`, DEPEND_NODE_INFERRED, `callee`)
+	if callee.queued.pipe <= !(PIPE_INFER) then -- :WaitForCalleeToPassInfer
+		!DEPEND_AND_RETURN(`call`, DEPEND_NODE_PASSED_INFER, `callee`)
 	end
+	-- if not calleeType then -- Not enough?
+	-- 	!DEPEND_AND_RETURN(`call`, DEPEND_NODE_INFERRED, `callee`)
+	-- end
 
 	local isCallingConstantNameOrDeclaredType = (
 		(
@@ -2711,6 +2714,9 @@ end
 	-- Wait for constant declaration.  (Waiting for the callee isn't enough
 	-- for some reason. Maybe there's a problem with things waiting for
 	-- declaration.name instead of declarations themselves. 2020-05-12)
+	--
+	-- (Needed anymore since :WaitForCalleeToPassInfer?)
+	--
 	if isCallingConstantNameOrDeclaredType and callee.declaration.queued.pipe <= !(PIPE_INFER) then
 		!DEPEND_AND_RETURN(`call`, DEPEND_NODE_PASSED_INFER, `callee.declaration`)
 	end
@@ -2805,12 +2811,9 @@ end
 	local funcSig = calleeType
 	!ASSERT("funcSig.tag == "..TYPE_FUNCTION)
 
-	!if DEBUG then
-		if call.isMethod and callee.nodeType ~= !(AST_ACCESS) then
-			astPrint(callee)
-			errorInternal(state, call)
-		end
-	!end
+	if call.isMethod and callee.nodeType ~= !(AST_ACCESS) then
+		typeError(state, callee, "This is not an object that allows method calls.")
+	end
 
 	local realArguments     = (call.isMethod and {callee, unpack(call.arguments)} or call.arguments)
 	local realArgumentTypes = {}
