@@ -16,7 +16,7 @@
 	concatinate
 	copyArray
 	indexOf, indexWith, itemWith
-	insert, remove
+	insert, insertIfUnique, remove
 	next
 	pairs, ipairs
 	sort
@@ -28,12 +28,12 @@ export toString :: (value:any) -> string !foreign lua "tostring"
 
 export StringFormat :: string
 export format :: (s:StringFormat, ...:int|float|string|Type) -> string !foreign lua "string.format"
-export print  :: (...:any) !foreign lua "print"
+export print  :: (...:any)                                   !foreign lua "print"
 export printf :: (s:StringFormat, ...:int|float|string|Type) { print(format(s, ...)) }
 
--- We change these a bit to be more strict than the Lua equivalents.
-export error  :: (message:string)            !foreign compiler "error"
-export error  :: (message:string, level:int) !foreign compiler "error"
+-- We change these a bit to be more strict than the Lua equivalents regarding the argument types.
+export error  :: (level=1)                             { error("Error!", level+1) }
+export error  :: (message:string, level=1)             !foreign compiler "error"
 export assert :: (b:bool, message="Assertion failed!") { if not b  error(message, 2) }
 
 export errorf :: (           s:StringFormat, ...:int|float|string|Type) { error(format(s, ...), 2) }
@@ -83,6 +83,14 @@ export ipairsr :: (array:[]$T) -> (iter:(array:[]T,i:int)->(i:int|none,item:T), 
 export insert :: (array:[]$T, value:T)            !foreign lua "table.insert"
 export insert :: (array:[]$T, index:int, value:T) !foreign lua "table.insert"
 
+export insertIfUnique :: (array:[]$T, value:T) -> (wasInserted:bool) {
+	for array {
+		if it == value  return false
+	}
+	insert(array, value)
+	return true
+}
+
 export remove :: (array:[]$T) -> (success:bool, removedItem:T) {
 	local _remove :: (array:[]T) -> T|none !foreign lua "table.remove"
 	local item = _remove(array)
@@ -94,7 +102,7 @@ export remove :: (array:[]$T, index:int) -> (success:bool, removedItem:T) {
 	return (item ~= nil), cast(T)item
 }
 
-export unpack :: (arr:[]$T, from=1, to=#arr) -> ...T !foreign lua "unpack"
+export unpack :: (array:[]$T, from=1, to=#array) -> ...T !foreign lua "unpack"
 
 export concatinate :: (strings:[]string, delimiter="") -> string !foreign lua "table.concat"
 
@@ -104,44 +112,44 @@ export copyArray :: (array:[]$T) -> []T {
 	return copy
 }
 
-export indexOf :: (arr:[]$T, v:T) -> (found:bool, i:int) {
-	for arr {
+export indexOf :: (array:[]$T, v:T) -> (found:bool, i:int) {
+	for array {
 		if it == v  return true, itIndex
 	}
 	return false, NULL
 }
 
-export indexWith :: (arr:[]$T, $k:string, v:type_of(T[k])) -> (found:bool, i:int) {
-	for arr  if it[k]==v  return true, itIndex
+export indexWith :: (array:[]$T, $k:string, v:type_of(T[k])) -> (found:bool, i:int) {
+	for array  if it[k]==v  return true, itIndex
 	return false, NULL
 }
-export indexWith :: (arr:[]$T, $k1:string,v1:type_of(T[k]), $k2:string,v2:type_of(T[k])) -> (found:bool, i:int) {
-	for arr  if it[k1]==v1 and it[k2]==v2  return true, itIndex
+export indexWith :: (array:[]$T, $k1:string,v1:type_of(T[k]), $k2:string,v2:type_of(T[k])) -> (found:bool, i:int) {
+	for array  if it[k1]==v1 and it[k2]==v2  return true, itIndex
 	return false, NULL
 }
-export indexWith :: (arr:[]$T, $k1:string,v1:type_of(T[k]), $k2:string,v2:type_of(T[k]), $k3:string,v3:type_of(T[k])) -> (found:bool, i:int) {
-	for arr  if it[k1]==v1 and it[k2]==v2 and it[k3]==v3  return true, itIndex
-	return false, NULL
-}
-
-export itemWith :: (arr:[]$T, $k:string, v:type_of(T[k])) -> (found:bool, v:T) {
-	for arr  if it[k]==v  return true, it
-	return false, NULL
-}
-export itemWith :: (arr:[]$T, $k1:string,v1:type_of(T[k]), $k2:string,v2:type_of(T[k])) -> (found:bool, v:T) {
-	for arr  if it[k1]==v1 and it[k2]==v2  return true, it
-	return false, NULL
-}
-export itemWith :: (arr:[]$T, $k1:string,v1:type_of(T[k]), $k2:string,v2:type_of(T[k]), $k3:string,v3:type_of(T[k])) -> (found:bool, v:T) {
-	for arr  if it[k1]==v1 and it[k2]==v2 and it[k3]==v3  return true, it
+export indexWith :: (array:[]$T, $k1:string,v1:type_of(T[k]), $k2:string,v2:type_of(T[k]), $k3:string,v3:type_of(T[k])) -> (found:bool, i:int) {
+	for array  if it[k1]==v1 and it[k2]==v2 and it[k3]==v3  return true, itIndex
 	return false, NULL
 }
 
-export sort :: (arr:[]int)    !foreign lua "table.sort"
-export sort :: (arr:[]float)  !foreign lua "table.sort"
-export sort :: (arr:[]string) !foreign lua "table.sort"
+export itemWith :: (array:[]$T, $k:string, v:type_of(T[k])) -> (found:bool, v:T) {
+	for array  if it[k]==v  return true, it
+	return false, NULL
+}
+export itemWith :: (array:[]$T, $k1:string,v1:type_of(T[k]), $k2:string,v2:type_of(T[k])) -> (found:bool, v:T) {
+	for array  if it[k1]==v1 and it[k2]==v2  return true, it
+	return false, NULL
+}
+export itemWith :: (array:[]$T, $k1:string,v1:type_of(T[k]), $k2:string,v2:type_of(T[k]), $k3:string,v3:type_of(T[k])) -> (found:bool, v:T) {
+	for array  if it[k1]==v1 and it[k2]==v2 and it[k3]==v3  return true, it
+	return false, NULL
+}
 
-export sort :: (arr:[]$T, comparer:(a,b:T)->(aIsLessThanB:bool)) !foreign lua "table.sort"
+export sort :: (array:[]int)    !foreign lua "table.sort"
+export sort :: (array:[]float)  !foreign lua "table.sort"
+export sort :: (array:[]string) !foreign lua "table.sort"
+
+export sort :: (array:[]$T, comparer:(a,b:T)->(aIsLessThanB:bool)) !foreign lua "table.sort"
 
 
 
