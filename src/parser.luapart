@@ -801,7 +801,7 @@ function _G.parseArguments(state, parent, isInput)
 				tokType, tokValue = eatNextToken(state)
 			end
 
-			if not (tokType == !(TOKEN_IDENTIFIER) or isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"...")) then
+			if not (tokType == !(TOKEN_IDENTIFIER) or isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"...","_")) then
 				!ERROR_OR_RETURN `errorParsing(state, token, "Argument list: Expected an identifier.")`
 			end
 
@@ -828,7 +828,7 @@ function _G.parseArguments(state, parent, isInput)
 				end
 				takenNames[ident.name] = true
 
-			else
+			elseif tokValue == "..." then
 				gotVararg = true
 
 				if isUsing then
@@ -840,6 +840,13 @@ function _G.parseArguments(state, parent, isInput)
 				local vararg       = astNewNode(AstVararg, token, decl)
 				vararg.declaration = decl
 				decl.name          = vararg
+
+			else
+				decl.name = astNewNode(AstBlank, token, decl)
+
+				if arg.autobake ~= !(AUTOBAKE_DISABLED) then
+					errorParsing(state, state.nextToken-2, "Blank arguments cannot be auto-baked.")
+				end
 			end
 
 			tokType, tokValue = peekNextToken(state)
@@ -3107,7 +3114,7 @@ function _G.parseExpression(state, parent, prevOpPrecedence, expectLvalue)
 				or (
 					(
 						isToken(tokType2,tokValue2, !(TOKEN_IDENTIFIER)) or
-						isToken(tokType2,tokValue2, !(TOKEN_PUNCTUATION),"...")
+						isToken(tokType2,tokValue2, !(TOKEN_PUNCTUATION),"...","_")
 					)
 					and isToken(tokType3,tokValue3, !(TOKEN_PUNCTUATION),":",",","=")
 				)
