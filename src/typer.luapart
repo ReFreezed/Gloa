@@ -5158,11 +5158,9 @@ end
 	-- @Incomplete: Simplify AstSwitch.
 end
 
-local function addDeclarationInForLoop(state, forLoop, name, typeInfo)
-	-- @Incomplete: Care about name shadowing.
-
-	local decl         = astNewNode(AstDeclaration, forLoop.token, forLoop)
-	local ident        = astNewNode(AstIdentifier, decl.token, decl)
+local function addDeclarationInForLoop(state, forLoop, name, token, isImplicit, typeInfo)
+	local decl         = astNewNode(AstDeclaration, token, forLoop)
+	local ident        = astNewNode(AstIdentifier,  token, decl)
 	ident.name         = name
 	ident.declaration  = decl
 	ident.inferredType = typeInfo
@@ -5171,6 +5169,26 @@ local function addDeclarationInForLoop(state, forLoop, name, typeInfo)
 	table.insert(forLoop.statementsDynamic, decl)
 	table.insert(forLoop.declarations,      decl)
 	addDeclarationToNames(forLoop, decl)
+
+	--
+	-- @UX: For now we allow implicit loop variables to shadow anything outside the loop
+	-- which allows for this confusing situation:
+	--
+	--   local x = 0
+	--   local arrOrArr: [][]int
+	--   for arrOrArr  for it  x += it  -- The left 'it' belongs to the outer loop and the right 'it' to the inner.
+	--
+	-- Can we improve this behavior?
+	--
+	if not isImplicit then
+		local declExisting = findDeclaration(state, forLoop, name)
+		if declExisting then
+			typeError2(state,
+				ident,             F("'%s' has already been declared.", name),
+				declExisting.name, F("...it was declared here.")
+			)
+		end
+	end
 
 	addToQueueRecursively(state, decl, forLoop, #forLoop, !(PIPE_DONE))
 	moveToNextRelevantPipe(state, decl, !(PIPE_INFER))
@@ -5227,7 +5245,13 @@ end
 				end
 			end
 
-			addDeclarationInForLoop(state, forLoop, (names[1] and names[1].name or "it"), values[1].inferredType)
+			addDeclarationInForLoop(
+				state, forLoop,
+				(names[1] and names[1].name  or "it"),
+				(names[1] and names[1].token or forLoop.token),
+				(names[1] == nil),
+				values[1].inferredType
+			)
 
 		----------------------------------------------------------------
 		-- for [ v1, ... : ] obj
@@ -5248,30 +5272,36 @@ end
 				if names[3] then
 					typeError(state, names[3], "For loop: Too many names for short-form array loop. (Expected at most a value name and an index name.)")
 				end
-				local name1 = (names[1] and names[1].name) or "it"
-				local name2 = (names[2] and names[2].name) or "itIndex"
-				addDeclarationInForLoop(state, forLoop, name2, getTypeInfoForBuiltinType(state, "int"))
-				addDeclarationInForLoop(state, forLoop, name1, arraySig.itemType)
+				local name1  = (names[1] and names[1].name ) or "it"
+				local name2  = (names[2] and names[2].name ) or "itIndex"
+				local token1 = (names[1] and names[1].token) or forLoop.token
+				local token2 = (names[2] and names[2].token) or forLoop.token
+				addDeclarationInForLoop(state, forLoop, name2, token2, names[2]==nil, getTypeInfoForBuiltinType(state, "int"))
+				addDeclarationInForLoop(state, forLoop, name1, token1, names[1]==nil, arraySig.itemType)
 
 			elseif objType.tag == !(TYPE_VARARG) then
 				local varargSig = objType
 				if names[3] then
 					typeError(state, names[3], "For loop: Too many names for short-form vararg loop. (Expected at most a value name and an index name.)")
 				end
-				local name1 = (names[1] and names[1].name) or "it"
-				local name2 = (names[2] and names[2].name) or "itIndex"
-				addDeclarationInForLoop(state, forLoop, name2, getTypeInfoForBuiltinType(state, "int"))
-				addDeclarationInForLoop(state, forLoop, name1, varargSig.itemType)
+				local name1  = (names[1] and names[1].name ) or "it"
+				local name2  = (names[2] and names[2].name ) or "itIndex"
+				local token1 = (names[1] and names[1].token) or forLoop.token
+				local token2 = (names[2] and names[2].token) or forLoop.token
+				addDeclarationInForLoop(state, forLoop, name2, token2, names[2]==nil, getTypeInfoForBuiltinType(state, "int"))
+				addDeclarationInForLoop(state, forLoop, name1, token1, names[1]==nil, varargSig.itemType)
 
 			elseif objType.tag == !(TYPE_TABLE) then
 				if names[3] then
 					typeError(state, names[3], "For loop: Too many names for short-form table loop. (Expected at most a value name and a key name.)")
 				end
-				local name1    = (names[1] and names[1].name) or "it"
-				local name2    = (names[2] and names[2].name) or "itIndex"
+				local name1    = (names[1] and names[1].name ) or "it"
+				local name2    = (names[2] and names[2].name ) or "itIndex"
+				local token1   = (names[1] and names[1].token) or forLoop.token
+				local token2   = (names[2] and names[2].token) or forLoop.token
 				local typeInfo = getTypeInfoForBuiltinType(state, "any")
-				addDeclarationInForLoop(state, forLoop, name2, typeInfo)
-				addDeclarationInForLoop(state, forLoop, name1, typeInfo)
+				addDeclarationInForLoop(state, forLoop, name2, token2, names[2]==nil, typeInfo)
+				addDeclarationInForLoop(state, forLoop, name1, token1, names[1]==nil, typeInfo)
 
 			elseif objType.tag == !(TYPE_STRUCT) then
 				local structInfo = objType
@@ -5356,10 +5386,12 @@ end
 					if names[3] then
 						typeError(state, names[3], "For loop: Too many names for short-form array loop. (Expected at most a value name and an index name.)")
 					end
-					local name1 = (names[1] and names[1].name) or "it"
-					local name2 = (names[2] and names[2].name) or "itIndex"
-					addDeclarationInForLoop(state, forLoop, name2, getTypeInfoForBuiltinType(state, "int"))
-					addDeclarationInForLoop(state, forLoop, name1, structInfo.valueType)
+					local name1  = (names[1] and names[1].name ) or "it"
+					local name2  = (names[2] and names[2].name ) or "itIndex"
+					local token1 = (names[1] and names[1].token) or forLoop.token
+					local token2 = (names[2] and names[2].token) or forLoop.token
+					addDeclarationInForLoop(state, forLoop, name2, token2, names[2]==nil, getTypeInfoForBuiltinType(state, "int"))
+					addDeclarationInForLoop(state, forLoop, name1, token1, names[1]==nil, structInfo.valueType)
 
 				else
 					typeError(state, objExpr, "For loop: %s has no default iterator and is not array-like.", getFriendlyTypeInfoName(structInfo))
@@ -5482,16 +5514,25 @@ end
 					typeInfo = typeInfo[2].tag == !(TYPE_NONE) and typeInfo[1] or typeInfo[2] or errorInternal()
 				end
 
-				addDeclarationInForLoop(state, forLoop, ident.name, typeInfo)
+				addDeclarationInForLoop(state, forLoop, ident.name, ident.token, false, typeInfo)
 			end
 
 		----------------------------------------------------------------
 		else
 			errorInternal(state, forLoop, "%d", forLoop.forType)
 		end
+
+		-- Now that loop declarations have been added we can infer the body.
+		local i = indexOf(forLoop.statementsStatic, forLoop.body) or errorInternal(state, forLoop.body)
+		addToQueueRecursively(state, forLoop.body, forLoop.statementsStatic, i, !(PIPE_INFER))
 	end
 
-	for _, statement in ipairs(forLoop) do
+	for _, statement in ipairs(forLoop.statementsStatic) do
+		if statement.queued.pipe <= !(PIPE_INFER) then
+			!DEPEND_AND_RETURN(`forLoop`, DEPEND_NODE_INFERRED, `statement`)
+		end
+	end
+	for _, statement in ipairs(forLoop.statementsDynamic) do
 		if statement.queued.pipe <= !(PIPE_INFER) then
 			!DEPEND_AND_RETURN(`forLoop`, DEPEND_NODE_INFERRED, `statement`)
 		end

@@ -244,6 +244,21 @@ do
 
 			elseif !!(CONST_SET{ AST_LAMBDA, AST_STRUCT })[node.nodeType] and node.isPolymorphic then
 				return !(VISIT_IGNORE_CHILDREN) -- We don't need to queue anything inside polymorphic functions or structs (I think).
+
+			elseif node.nodeType == !(AST_FOR) then
+				local forLoop = node
+				for _, expr in ipairs(forLoop.expressions) do
+					registerNodesToAddToQueue(state, expr, nodesToAdd)
+				end
+				for _, statement in ipairs(forLoop.statementsStatic) do
+					if statement ~= forLoop.body then
+						registerNodesToAddToQueue(state, statement, nodesToAdd)
+					end
+				end
+				for _, statement in ipairs(forLoop.statementsDynamic) do
+					registerNodesToAddToQueue(state, statement, nodesToAdd)
+				end
+				return !(VISIT_IGNORE_CHILDREN)
 			end
 		end)
 	end
@@ -299,6 +314,26 @@ do
 
 				elseif !!(CONST_SET{ AST_LAMBDA, AST_STRUCT })[node.nodeType] and node.isPolymorphic then
 					return !(VISIT_IGNORE_CHILDREN) -- We don't need to queue anything inside polymorphic functions or structs (I think).
+
+				elseif node.nodeType == !(AST_FOR) then
+					local forLoop = node
+					for _, expr in ipairs(forLoop.expressions) do
+						if not expr.queued then
+							nodesToAdd[expr] = true
+							registerNodesToAddToQueue(state, expr, nodesToAdd)
+						end
+					end
+					for _, statement in ipairs(forLoop.statementsStatic) do
+						if not statement.queued and statement ~= forLoop.body then
+							registerNodesToAddToQueue(state, statement, nodesToAdd)
+						end
+					end
+					for _, statement in ipairs(forLoop.statementsDynamic) do
+						if not statement.queued then
+							registerNodesToAddToQueue(state, statement, nodesToAdd)
+						end
+					end
+					return !(VISIT_IGNORE_CHILDREN)
 				end
 			end
 		end)
