@@ -1223,13 +1223,13 @@ local function handleContinueAfterBlock(state, writer, parentContinueDepth, prev
 	end
 
 	if not (writer.continueDepth == 1 and !!(CONST_SET{ AST_FOR, AST_WHILE })[siblings[1].parent.parent.nodeType] and siblings[1].parent.parent.hasContinues) then
+		local hasContinue = false
+
 		for i = siblingIndex, 1, -1 do
 			if i < siblingIndex and !!(CONST_SET{ AST_FOR, AST_WHILE, AST_BLOCK, AST_IF, AST_SWITCH })[siblings[i].nodeType] then
 				-- This should be the last time handleContinueAfterBlock() was called in this scope.
 				break
 			end
-
-			local hasContinue = false
 
 			astVisitAllNodesInUnit(siblings[i], false, function(node)
 				-- @Polish: Only look for continues crossing our block.
@@ -1239,14 +1239,16 @@ local function handleContinueAfterBlock(state, writer, parentContinueDepth, prev
 				end
 			end)
 
-			if not hasContinue then
-				writer.file:write(indentStr, "do") ; writeEol(state, writer) -- @Cleanup: Don't write this unnecessary 'do'.
+			if hasContinue then  break  end
+		end
 
-				indent    = indent+1
-				indentStr = indentStr.."\t"
+		if not hasContinue then
+			writer.file:write(indentStr, "do") ; writeEol(state, writer) -- @Cleanup: Don't write this unnecessary 'do'.
 
-				return indent, indentStr
-			end
+			indent    = indent+1
+			indentStr = indentStr.."\t"
+
+			return indent, indentStr
 		end
 	end
 
