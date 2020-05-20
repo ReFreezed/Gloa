@@ -954,8 +954,8 @@ local function checkRedeclaration(state, ident, decl, isMember, scope)
 	-- Function overload. (Note: Overloads have to be registered before the identifier DEPEND_AND_RETURN on anything.)
 	elseif
 		isDeclarationConstant(decl) and isDeclarationConstant(declExisting)
-		and decl        .value.nodeType == !(AST_LAMBDA)
-		and declExisting.value.nodeType == !(AST_LAMBDA)
+		and !!(CONST_SET{ AST_LAMBDA, AST_VARIANT_OF })[followIdentifiersToConstantValue(decl        .value).nodeType]
+		and !!(CONST_SET{ AST_LAMBDA, AST_VARIANT_OF })[followIdentifiersToConstantValue(declExisting.value).nodeType]
 	then
 		declExisting = getOverloadBase(declExisting) or declExisting
 
@@ -984,17 +984,16 @@ local function checkRedeclaration(state, ident, decl, isMember, scope)
 			decl.overloadOf = declExisting
 			table.insert(declExisting.overloads, decl)
 
-			local lambda         = decl.value
-			local lambdaExisting = declExisting.value
+			local lambdaOrVariantOf         = followIdentifiersToConstantValue(decl.value)
+			local lambdaOrVariantOfExisting = followIdentifiersToConstantValue(declExisting.value)
 
-			assert(not lambdaExisting.inferredType)
+			assert(not lambdaOrVariantOfExisting.inferredType)
 
-			-- This dependency means lambdaExisting won't get inferred until earliest next cycle
-			-- by which time all overloads should have been added (I think). This should work as
-			-- the first occurence of a name will make the second occurence wait before the
-			-- second has been able to do anything. (This is true even when we remove unordered
-			-- from the queue.)
-			addDependency(state, lambdaExisting, !(DEPEND_NODE_INFERRED), lambda)
+			-- This dependency means lambdaOrVariantOfExisting won't get inferred until earliest next
+			-- cycle by which time all overloads should have been added (I think). This should work as
+			-- the first occurence of a name will make the second occurence wait before the second has
+			-- been able to do anything. (This is true even when we remove unordered from the queue.)
+			addDependency(state, lambdaOrVariantOfExisting, !(DEPEND_NODE_INFERRED), lambdaOrVariantOf)
 		end
 
 	-- Non-shadow.
@@ -1202,14 +1201,14 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 	if decl.overloadOf == decl then
 		for i = 1, #decl.overloads-1 do
 			local decl1     = decl.overloads[i]
-			local lambda1   = decl1.value
+			local lambda1   = followIdentifiersToConstantValue(decl1.value)
 			local args1     = lambda1.argumentsIn and lambda1.argumentsIn.arguments
 			local funcSig1  = lambda1.inferredType
 			local argTypes1 = funcSig1.argumentTypesIn
 
 			for i = i+1, #decl.overloads do
 				local decl2     = decl.overloads[i]
-				local lambda2   = decl2.value
+				local lambda2   = followIdentifiersToConstantValue(decl2.value)
 				local args2     = lambda2.argumentsIn and lambda2.argumentsIn.arguments
 				local funcSig2  = lambda2.inferredType
 				local argTypes2 = funcSig2.argumentTypesIn
