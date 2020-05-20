@@ -1654,13 +1654,13 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 
 		----------------------------------------------------------------
 		elseif nodeType == !(AST_BLOCK) then
-			local block = statement
+			local innerBlock = statement
 
 			file:write(indentStr, "do")
 			writeEol(state, writer)
 
 			local prevContinueDepth = writer.continueDepth
-			writeBlock(state, writer, indent+1, nextLocalN, localsStack, block, false, block.statementsDynamic, statementIndex)
+			writeBlock(state, writer, indent+1, nextLocalN, localsStack, innerBlock, false, block.statementsDynamic, statementIndex)
 
 			file:write(indentStr, "end") ; writeEol(state, writer)
 			indent, indentStr = handleContinueAfterBlock(state, writer, parentContinueDepth, prevContinueDepth, block.statementsDynamic, statementIndex, indent, indentStr)
@@ -2002,7 +2002,14 @@ function _G.writeForeignReference(state, writer, foreignSourceId, nodeForError)
 			errorLine("ProgramWriter", "Trying to write runtime reference to compile-time-only symbol.")
 		end
 	end
-	writer.file:write(writer.foreignReferences[foreignSourceId])
+
+	local foreignRef = writer.foreignReferences[foreignSourceId]
+	writer.file:write(foreignRef)
+
+	if outputDebugInfo and foreignRef:find"\n" then
+		local _, nlCount         = foreignRef:gsub("\n", "%0")
+		writer.currentOutputLine = writer.currentOutputLine + nlCount -- @Incomplete: Call addLineMapping() for every line here.
+	end
 end
 
 function _G.writeFunction(state, writer, indent, nextLocalN, localsStack, lambda)
@@ -2091,7 +2098,7 @@ function _G.writeForeignImportIfNew(state, writer, typeInfo, foreignSource, fore
 
 		if foreignSourceName:find"\n" then
 			local _, nlCount         = foreignSourceName:gsub("\n", "%0")
-			writer.currentOutputLine = writer.currentOutputLine + nlCount -- @Incomplete: Call addLineMapping(state,) for every line here.
+			writer.currentOutputLine = writer.currentOutputLine + nlCount -- @Incomplete: Call addLineMapping() for every line here.
 		end
 
 	elseif foreignSource == "compiler" then
@@ -2120,7 +2127,7 @@ function _G.writeForeignImportIfNew(state, writer, typeInfo, foreignSource, fore
 
 		if lua:find"\n" then
 			local _, nlCount         = lua:gsub("\n", "%0")
-			writer.currentOutputLine = writer.currentOutputLine + nlCount -- @Incomplete: Call addLineMapping(state,) for every line here.
+			writer.currentOutputLine = writer.currentOutputLine + nlCount -- @Incomplete: Call addLineMapping() for every line here.
 		end
 
 	else
