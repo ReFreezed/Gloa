@@ -1,0 +1,334 @@
+--[[============================================================
+--=
+--=  Glóa file path parsing module
+--=
+--==============================================================
+
+	-- Types:
+	Path
+
+	-- Functions:
+	Path, Path.parse
+	Path.clone
+	Path.contains
+	Path.getDirectory, Path.getFilename, Path.getDirectoryAndFilename
+	Path.getRelativeTo
+	Path.isEmpty
+	Path.pop
+	Path.prepend, Path.append
+	Path.setFilename
+	Path.toString, Path.toDirectory
+
+	-- Values:
+	Path.RELATIVE
+
+--============================================================]]
+
+local DO_TESTS_AND_EXIT :: 1==0
+
+!import "basic"
+!import "string"
+local math :: !import "math"
+
+export Path :: struct {
+	RELATIVE: Path : {},
+
+	drive = "", -- E.g. "C:" or "~".
+	path: []string,
+	isAbsolute = false,
+
+	clone :: (pathObj:Path) -> Path {
+		return {
+			drive      = pathObj.drive,
+			path       = {unpack(pathObj.path)},
+			isAbsolute = pathObj.isAbsolute,
+		}
+	},
+
+	!call :: variant_of(parse("")),
+	!call :: variant_of(parse("", "")),
+
+	-- Note: Network paths are not supported.
+	-- Paths like "C:foo.txt" are assumed to be mistyped and become "C:/foo.txt".
+	parse :: (path:string, rootStr:string) -> Path {
+		return parse(path, parse(rootStr))
+	},
+
+	parse :: (path:string, referencePathObj=RELATIVE) -> Path {
+		local pathObj: Path
+		path = replacePattern(path, "\\", "/")
+
+		local pathToSplit: string = NULL
+
+		if findPattern(path, "^%a:") {
+			local _, drive, rhs = matchPattern(path, "^(%a:)/?(.*)$")
+			pathObj.drive       = toUpper(cast(string) drive)
+			pathObj.isAbsolute  = true
+			pathToSplit         = cast(string) rhs
+
+		} elseif findPattern(path, "^~/") {
+			pathObj.drive       = "~"
+			pathObj.isAbsolute  = true
+			pathToSplit         = getSubstring(path, 3)
+
+		} elseif findPattern(path, "^/") {
+			pathObj.drive       = referencePathObj.drive
+			pathObj.isAbsolute  = true
+			pathToSplit         = getSubstring(path, 2)
+
+		} else {
+			pathObj.path        = {unpack(referencePathObj.path)}
+			pathObj.drive       = referencePathObj.drive
+			pathObj.isAbsolute  = referencePathObj.isAbsolute
+			pathToSplit         = path
+		}
+
+		for segment in eachPatternMatch(pathToSplit, "[^/]+") {
+			insert(pathObj.path, cast(string)segment)
+		}
+
+		pathObj._clean!()
+		return pathObj
+	},
+
+	_clean :: (pathObj:Path) {
+		-- Remove all "."
+		for #pathObj.path, 1, -1 {
+			if pathObj.path[it] == "."  remove(pathObj.path, it)
+		}
+
+		-- Remove correct ".."
+		local i = 1
+		while pathObj.path[i] ~= NULL {
+			if pathObj.path[i+1] == ".." and pathObj.path[i] ~= ".." {
+				remove(pathObj.path, i+1)
+				remove(pathObj.path, i)
+				i = math.max(i-1, 1)
+			} else {
+				i = i+1
+			}
+		}
+
+		-- Remove all incorrect ".."
+		if pathObj.isAbsolute {
+			while pathObj.path[1] == ".."  remove(pathObj.path, 1)
+		}
+	},
+
+	toString :: (pathObj:Path) -> string {
+		if not pathObj.isAbsolute  return concatinate(pathObj.path, "/")
+
+		return pathObj.drive .. "/" .. concatinate(pathObj.path, "/")
+	},
+
+	-- Same as toString() except the string is never empty and never ends with "/".
+	toDirectory :: (pathObj:Path) -> string {
+		local path = pathObj.toString!()
+		if path == ""               return "."
+		if findPattern(path, "/$")  return path.."."
+		return path
+	},
+
+	getRelativeTo :: (path:string,  referencePath:string)  -> (success:bool, pathObj:Path) { return getRelativeTo(parse(path), parse(referencePath)) },
+	getRelativeTo :: (path:string,  referencePathObj:Path) -> (success:bool, pathObj:Path) { return getRelativeTo(parse(path), referencePathObj)     },
+	getRelativeTo :: (pathObj:Path, referencePath:string)  -> (success:bool, pathObj:Path) { return getRelativeTo(pathObj,     parse(referencePath)) },
+	getRelativeTo :: (pathObj:Path, referencePathObj:Path) -> (success:bool, pathObj:Path) {
+		if not (pathObj.isAbsolute and referencePathObj.isAbsolute)  return false, NULL
+
+		if pathObj.drive ~= pathObj.drive  return false, NULL
+
+		local minLen    = math.min(#pathObj.path, #referencePathObj.path)
+		local firstDiff = minLen + 1
+
+		for 1, minLen {
+			if pathObj.path[it] ~= referencePathObj.path[it] {
+				firstDiff = it
+				break
+			}
+		}
+
+		local result: Path
+		for firstDiff, #referencePathObj.path  insert(result.path, "..")
+		for firstDiff, #pathObj.path           insert(result.path, pathObj.path[it])
+
+		return true, result
+	},
+
+	getDirectory :: (path:string)  -> (success:bool, directory:string) { return getDirectory(parse(path)) },
+	getDirectory :: (pathObj:Path) -> (success:bool, directory:string) {
+		if not pathObj.path  return false, NULL
+
+		local len         = #pathObj.path
+		local filename    = pathObj.path[len]
+		pathObj.path[len] = NULL
+		local dir         = pathObj.toDirectory!()
+		pathObj.path[len] = filename
+
+		return true, dir
+	},
+	getFilename :: (path:string)  -> (success:bool, filename:string) { return getFilename(parse(path)) },
+	getFilename :: (pathObj:Path) -> (success:bool, filename:string) {
+		local filename = pathObj.path[#pathObj.path]
+		return (filename ~= NULL), filename
+	},
+	getDirectoryAndFilename :: (path:string)  -> (success:bool, directory,filename:string) { return getDirectoryAndFilename(parse(path)) },
+	getDirectoryAndFilename :: (pathObj:Path) -> (success:bool, directory,filename:string) {
+		if not pathObj.path  return false, NULL, NULL
+
+		local len         = #pathObj.path
+		local filename    = pathObj.path[len]
+		pathObj.path[len] = NULL
+		local dir         = pathObj.toDirectory!()
+		pathObj.path[len] = filename
+
+		return true, dir, filename
+	},
+
+	setFilename :: (pathObj:Path, filename:string) {
+		pathObj.path[math.max(#pathObj.path, 1)] = filename
+	},
+
+	prepend :: (pathObj:Path, pathToPrepend:string) -> (success:bool) {
+		return prepend(pathObj, Path(pathToPrepend))
+	},
+	prepend :: (pathObj:Path, pathObjToPrepend:Path) -> (success:bool) {
+		if pathObj.isAbsolute  return false
+
+		pathObj.drive      = pathObjToPrepend.drive
+		pathObj.isAbsolute = pathObjToPrepend.isAbsolute
+
+		for pathObjToPrepend.path  insert(pathObj.path, itIndex, it)
+
+		pathObj._clean!()
+		return true
+	},
+
+	append :: (pathObj:Path, pathToAppend:string) -> (success:bool) {
+		return append(pathObj, Path(pathToAppend))
+	},
+	append :: (pathObj:Path, pathObjToAppend:Path) -> (success:bool) {
+		if pathObjToAppend.isAbsolute  return false
+
+		for pathObjToAppend.path  insert(pathObj.path, it)
+
+		pathObj._clean!()
+		return true
+	},
+
+	isEmpty :: (pathObj:Path) -> bool {
+		return not (pathObj.isAbsolute or pathObj.path)
+	},
+
+	pop :: (pathObj:Path) -> (success:bool, pathSegment:string) {
+		return remove(pathObj.path)
+	},
+
+	-- If both paths are relative then they are assumed to be relative to the same directory.
+	contains :: (containerPath:string,  otherPath:string)  -> (containsOrIsSame:bool) { return contains(parse(containerPath), parse(otherPath)) },
+	contains :: (containerPath:string,  otherPathObj:Path) -> (containsOrIsSame:bool) { return contains(parse(containerPath), otherPathObj)     },
+	contains :: (containerPathObj:Path, otherPath:string)  -> (containsOrIsSame:bool) { return contains(containerPathObj,     parse(otherPath)) },
+	contains :: (containerPathObj:Path, otherPathObj:Path) -> (containsOrIsSame:bool) {
+		if containerPathObj.isAbsolute ~= otherPathObj.isAbsolute  return false
+		if containerPathObj.drive      ~= otherPathObj.drive       return false
+
+		for containerPathObj.path {
+			if it ~= otherPathObj.path[itIndex]  return false
+		}
+
+		return true
+	},
+}
+
+!if DO_TESTS_AND_EXIT  !run {
+	local DIRS :: {
+		-- Input                  Expected output
+		"C:/foo/bar",             "C:/foo/bar",
+		"c:..\\foo\\bar",         "C:/foo/bar",
+		"/majestic/doggo/.",      "/majestic/doggo",
+		"~/Only trees",           "~/Only trees",
+		"My Game/src/",           "My Game/src",
+		"./cutest/cat/..",        "cutest",
+		"ceiling/cat/../..",      ".",
+		"../almighty/cricket/..", "../almighty",
+		"",                       ".",
+		".",                      ".",
+		"..",                     "..",
+		"foo/../..",              "..",
+		"C:/",                    "C:/.",
+		"C/",                     "C",
+		"C:foo",                  "C:/foo",
+		"/",                      "/.",
+	}
+	local FILES :: {
+		-- Input                        Expected output
+		"C:/foo/bar/a.txt",             "C:/foo/bar/a.txt",
+		"c:..\\foo\\bar\\a.txt",        "C:/foo/bar/a.txt",
+		"/majestic/doggo/./a.txt",      "/majestic/doggo/a.txt",
+		"~/Only trees/a.txt",           "~/Only trees/a.txt",
+		"./cutest/cat/../a.txt",        "cutest/a.txt",
+		"ceiling/cat/../../a.txt",      "a.txt",
+		"../almighty/cricket/../a.txt", "../almighty/a.txt",
+		"",                             "",
+		"a.txt",                        "a.txt",
+		"./a.txt",                      "a.txt",
+		"../a.txt",                     "../a.txt",
+		"foo/../../a.txt",              "../a.txt",
+		"C:/a.txt",                     "C:/a.txt",
+		"C/a.txt",                      "C/a.txt",
+		"C:foo/a.txt",                  "C:/foo/a.txt",
+		"/a.txt",                       "/a.txt",
+	}
+	local RELATIVES: [](string|bool) : {
+		-- Input            Reference     Expected output
+		"C:/foo/o/bar.png", "C:/foo",     true,  "o/bar.png",
+		"C:/foo/bar.png",   "C:/foo",     true,  "bar.png",
+		"C:/foo/bar.png",   "C:/foo/cat", true,  "../bar.png",
+		"C:/foo/bar.png",   "nope",       false, "",
+		"nope.jpg",         "C:/foo",     false, "",
+		"nope.jpg",         "nope",       false, "", -- Do we want the case of both paths being relative to be able to succeed?
+	}
+
+	for 1, #DIRS, 2 {
+		local pathOut = Path(DIRS[it]).toDirectory!()
+		printf('DIR  IN   "%s"', DIRS[it])
+		printf('DIR  OUT  "%s"', pathOut)
+		printf('DIR  WANT "%s"', DIRS[it+1])
+		assert(pathOut == DIRS[it+1])
+		print(20 * "-")
+	}
+	for 1, #FILES, 2 {
+		local pathOut = Path(FILES[it]).toString!()
+		printf('FILE IN   "%s"', FILES[it])
+		printf('FILE OUT  "%s"', pathOut)
+		printf('FILE WANT "%s"', FILES[it+1])
+		assert(pathOut == FILES[it+1])
+		print(20 * "-")
+	}
+	for 1, #RELATIVES, 4 {
+		local path1          = Path(cast(string) RELATIVES[it])
+		local path2          = Path(cast(string) RELATIVES[it+1])
+		local ok, pathOutObj = path1.getRelativeTo!(path2)
+		local pathOut        = ok ? pathOutObj.toString!() : ""
+		printf('REL  IN   "%s"', cast(string) RELATIVES[it])
+		printf('REL  REF  "%s"', cast(string) RELATIVES[it+1])
+		printf('REL  OUT  "%s"', toString(pathOut))
+		printf('REL  WANT "%s"', cast(string) RELATIVES[it+3])
+		assert(ok == cast(bool) RELATIVES[it+2])
+		if ok  assert(pathOut == cast(string) RELATIVES[it+3])
+		print(20 * "-")
+	}
+
+	assert(Path.contains("C:/foo", "C:/foo/dog.png" ) == true )
+	assert(Path.contains("C:/foo", "C:/dog.png"     ) == false)
+	assert(Path.contains("C:/foo", "C:/nope/dog.png") == false)
+
+	assert(Path.contains("foo",    "foo/dog.png"    ) == true )
+	assert(Path.contains("foo",    "dog.png"        ) == false)
+	assert(Path.contains("foo",    "nope/dog.png"   ) == false)
+
+	assert(Path.contains("C:/foo", "foo/dog.png"    ) == false)
+	assert(Path.contains("foo",    "C:/foo/dog.png" ) == false)
+
+	print("All tests passed!")
+	!import"os".exit(2)
+}

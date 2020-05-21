@@ -1,0 +1,86 @@
+--[[============================================================
+--=
+--=  Lua UTF-8 module bindings
+--=  https://www.lua.org/manual/5.3/manual.html#6.5
+--=
+--==============================================================
+
+	-- Types:
+	Codepoint
+
+	-- Functions:
+	eachCodepoint
+	getCodepoint, codepointsToString
+	getLength
+	getOffset, getBounds
+	isValid
+
+	-- Values:
+	CHARACTER_PATTERN
+
+--============================================================]]
+
+!import "basic"
+
+export CHARACTER_PATTERN :: "[%z\1-\x7F\xC2-\xF4][\x80-\xBF]*"
+
+export Codepoint :: int
+
+export getCodepoint       :: (s:string, bytePos=1)                 -> Codepoint|none !foreign lua "require'utf8'.codepoint"
+export getCodepoint       :: (s:string, fromBytePos,toBytePos:int) -> ...Codepoint   !foreign lua "require'utf8'.codepoint"
+export codepointsToString :: (...:Codepoint) -> string                               !foreign lua "require'utf8'.char"
+
+local  CodepointIterator :: (_,_:none) -> (bytePos:int|none, cp:Codepoint)
+export eachCodepoint     :: (s:string) -> CodepointIterator, none, none !foreign lua "require'utf8'.codes"
+
+local utf8Len    :: (s:string, fromBytePos=1, toBytePos=-1) -> (len:int, errPos:int) !foreign lua "require'utf8'.len"
+local utf8Offset :: (s:string, charNum:int, fromBytePos=1--[[if charNum is positive, otherwise #s+1]]) -> (bytePos:int|none) !foreign lua "require'utf8'.offset"
+
+-- Returns -1 if the string is invalid UTF-8.
+export getLength :: (s:string, fromBytePos=1, toBytePos=-1) -> int {
+	local len, errPos = utf8Len(s, fromBytePos, toBytePos)
+	if errPos ~= NULL  return -1
+	return cast(int) len
+}
+
+export isValid :: (s:string, fromBytePos=1, toBytePos=-1) -> (valid:bool, errPos:int) {
+	local _, errPos = utf8Len(s, fromBytePos, toBytePos)
+	if errPos == NULL  return true, 0
+	return false, errPos
+}
+
+-- Returns -1 if charNum isn't in the subject nor right after it's end.
+export getOffset :: (s:string, charNum:int) -> (startBytePos:int) {
+	local i = utf8Offset(s, charNum)
+	if i == nil  return -1
+	return cast(int) i
+}
+
+-- Returns -1 if charNum isn't in the subject nor right after it's end.
+-- Note: fromBytePos must be at the start of a character (except if charNum is 0).
+export getOffset :: (s:string, charNum:int, fromBytePos:int) -> (startBytePos:int) {
+	local i = utf8Offset(s, charNum, fromBytePos)
+	if i == nil  return -1
+	return cast(int) i
+}
+
+-- Returns -1 if charNum isn't in the subject.
+export getBounds :: (s:string, charNum:int) -> (startBytePos,endBytePos:int) {
+	local i = getOffset(s, charNum)
+	if i < 0 or i > #s  return -1, -1
+
+	local len = getLength(s, i, i)
+
+	return i, i+len-1
+}
+
+-- Returns -1 if charNum isn't in the subject.
+export getBounds :: (s:string, charNum:int, fromBytePos:int) -> (startBytePos,endBytePos:int) {
+	local i = getOffset(s, 0, fromBytePos)
+	if i < 0 or i > #s  return -1, -1
+
+	i         = getOffset(s, charNum, i)
+	local len = getLength(s, i, i)
+
+	return i, i+len-1
+}
