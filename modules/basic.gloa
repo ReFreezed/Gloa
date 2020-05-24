@@ -14,7 +14,7 @@
 
 	-- Array/table functions:
 	concatinate
-	copyArray
+	copyArray, copyTable, copyTableRecursive
 	indexOf, indexWith, itemWith
 	insert, insertIfUnique, remove, removeItem
 	next
@@ -115,8 +115,26 @@ export unpack :: (array:[]$T, from=1, to=#array) -> ...T !foreign lua "unpack"
 export concatinate :: (strings:[](string|int|float|Type), delimiter="") -> string !foreign lua "table.concat"
 
 export copyArray :: (array:[]$T) -> []T {
-	local copy:[]T
+	local copy: []T
 	for array  copy[itIndex] = it
+	return copy
+}
+
+export copyTable :: (t:$T) -> T {
+	-- @Robustness: Assert that T is table-like.
+	local copy: table
+	for cast(table) t  copy[itIndex] = it
+	return cast(T) cast(any) copy -- @Temp
+	-- return cast(T) copy -- @Compiler @Incomplete: Casting from table to table-like should work!
+}
+
+export copyTableRecursive :: (t:table) -> table {
+	local getLuaType :: (v:any) -> string !foreign lua "type"
+
+	local copy: table
+	for t {
+		copy[itIndex] = getLuaType(it) == "table" ? (cast(any) copyTableRecursive(cast(table) it)) : it
+	}
 	return copy
 }
 
