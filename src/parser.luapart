@@ -2510,9 +2510,14 @@ function _G.parseFileScopeOrNamespaceStatements(state, scope, isTopLevel, single
 				!ERROR_OR_RETURN_FALSE `errorParsingNext(state, "!preload statements are only supported directly in file-scope.")`
 			end
 
-			local forRuntime = false
+			local forCompiletime = false
+			local forRuntime     = false
+
 			tokType, tokValue = peekNextToken(state)
-			if isToken(tokType,tokValue, !(TOKEN_IDENTIFIER),"runtime") then
+			if isToken(tokType,tokValue, !(TOKEN_IDENTIFIER),"compiletime") then
+				eatNextToken(state)
+				forCompiletime = true
+			elseif isToken(tokType,tokValue, !(TOKEN_IDENTIFIER),"runtime") then
 				eatNextToken(state)
 				forRuntime = true
 			end
@@ -2541,7 +2546,12 @@ function _G.parseFileScopeOrNamespaceStatements(state, scope, isTopLevel, single
 				!ERROR_OR_RETURN_FALSE `errorParsingLast(state, "This string does not contain valid Lua code: %s", err)`
 			end
 
-			table.insert((forRuntime and state.luaPreloadsRuntime or state.luaPreloads), {
+			local preloads
+				=  forCompiletime and state.luaPreloadsCompiletime
+				or forRuntime     and state.luaPreloadsRuntime
+				or state.luaPreloads
+
+			table.insert(preloads, {
 				lua        = lua,
 				token      = token,
 				lineOffset = lineOffset,
