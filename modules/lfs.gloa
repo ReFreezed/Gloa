@@ -1,0 +1,150 @@
+--[[============================================================
+--=
+--=  LuaFileSystem bindings
+--=
+--=  Supported versions: 1.8.0 (older versions probably work too)
+--=
+--==============================================================
+
+	attributes, symlinkAttributes
+	changeDirectory, currentDirectory, directory
+	isFile, isDirectory
+	link
+	lock, lockDir, unlock
+	makeDirectory, removeDirectory
+	setMode
+	touch
+
+	-- Types:
+	AttributeTable
+	DirectoryObject
+	Lock
+
+	-- Enums:
+	Attribute
+	LockMode
+	ProtectionMode
+	WritingMode
+
+--============================================================]]
+
+local File :: !import"io".File
+
+export Attribute :: enum {
+	DEV          :: "dev",
+	INO          :: "ino",
+	MODE         :: "mode",
+	NLINK        :: "nlink",
+	UID          :: "uid",
+	GID          :: "gid",
+	RDEV         :: "rdev",
+	ACCESS       :: "access",
+	MODIFICATION :: "modification",
+	CHANGE       :: "change",
+	SIZE         :: "size",
+	PERMISSIONS  :: "permissions",
+	BLOCKS       :: "blocks",
+	BLKSIZE      :: "blksize",
+	TARGET       :: "target", -- Can only be used with symlinkAttributes().
+}
+
+export ProtectionMode :: enum {
+	FILE         :: "file",
+	DIRECTORY    :: "directory",
+	LINK         :: "link",
+	SOCKET       :: "socket",
+	NAMED_PIPE   :: "named pipe",
+	CHAR_DEVICE  :: "char device",
+	BLOCK_DEVICE :: "block device",
+	OTHER        :: "other",
+}
+
+export LockMode :: enum {
+	R :: "r", -- Read/shared.
+	W :: "w", -- Write/exclusive.
+}
+
+export WritingMode :: enum {
+	BINARY :: "binary",
+	TEXT   :: "text",
+}
+
+export AttributeTable :: struct {
+	mode = ProtectionMode.OTHER,
+	dev:          int,
+	ino:          int,
+	nlink:        int,
+	uid:          int,
+	gid:          int,
+	rdev:         int,
+	access:       int,
+	modification: int,
+	change:       int,
+	size:         int,
+	permissions:  string,
+	blocks:       int,
+	blksize:      int,
+	target:       string, -- Only filled by symlinkAttributes().
+}
+
+export Lock :: !foreign struct {
+	free :: (lock:Lock) !foreign method "free",
+}
+
+export DirectoryObject :: !foreign struct {
+	next  :: (dirObj:DirectoryObject) -> (entry:string|none) !foreign method "next",
+	close :: (dirObj:DirectoryObject) !foreign method "close",
+}
+
+export attributes :: (filepath:string, result:AttributeTable={}) -> (resultOrNull:AttributeTable, err:string, errCode:int) !foreign lua "require'lfs'.attributes"
+
+export attributes :: (filepath:string, $attr:Attribute) -> (valueOrNull:type_of(AttributeTable[cast(string)attr]), err:string, errCode:int) {
+	local T      :: type_of(AttributeTable[cast(string)attr])
+	local helper :: (filepath:string, attr:Attribute) -> (valueOrNull:T, err:string, errCode:int) !foreign lua "require'lfs'.attributes"
+	return helper(filepath, attr)
+}
+
+-- Note: Not fully implemented for Windows until v1.8.0.
+export symlinkAttributes :: (filepath:string, result:AttributeTable={}) -> (resultOrNull:AttributeTable, err:string, errCode:int) !foreign lua "require'lfs'.symlinkattributes"
+
+-- Note: Not fully implemented for Windows until v1.8.0.
+export symlinkAttributes :: (filepath:string, $attr:Attribute) -> (valueOrNull:type_of(AttributeTable[cast(string)attr]), err:string, errCode:int) {
+	local T      :: type_of(AttributeTable[cast(string)attr])
+	local helper :: (filepath:string, attr:Attribute) -> (valueOrNull:T, err:string, errCode:int) !foreign lua "require'lfs'.symlinkattributes"
+	return helper(filepath, attr)
+}
+
+export changeDirectory  :: (path:string) -> (success:bool|none, err:string) !foreign lua "require'lfs'.chdir"
+export currentDirectory :: ()            -> (pathOrNull:string, err:string) !foreign lua "require'lfs'.currentdir"
+
+export directory :: (path:string) -> (iter:(dirObj:DirectoryObject,_:none)->(entry:string|none), dirObj:DirectoryObject, _:none) !foreign lua "require'lfs'.dir"
+
+export lockDir :: (path:string, secondsStale=--[[INT_MAX]]0) -> (lockOrNull:Lock, err:string) !foreign lua "require'lfs'.lock_dir"
+
+export lock   :: (file:File, mode:LockMode)                        -> (success:bool|none, err:string) !foreign lua "require'lfs'.lock"
+export lock   :: (file:File, mode:LockMode, start:int)             -> (success:bool|none, err:string) !foreign lua "require'lfs'.lock"
+export lock   :: (file:File, mode:LockMode, start:int, length:int) -> (success:bool|none, err:string) !foreign lua "require'lfs'.lock"
+export unlock :: (file:File)                                       -> (success:bool|none, err:string) !foreign lua "require'lfs'.unlock"
+export unlock :: (file:File, start:int)                            -> (success:bool|none, err:string) !foreign lua "require'lfs'.unlock"
+export unlock :: (file:File, start:int, length:int)                -> (success:bool|none, err:string) !foreign lua "require'lfs'.unlock"
+
+-- Note: Not implemented for Windows until v1.8.0.
+export link :: (old:string, new:string, symlink=false) -> (success:bool|none, err:string) !foreign lua "require'lfs'.link"
+
+export makeDirectory   :: (dirName:string) -> (success:bool|none, err:string, errCode:int) !foreign lua "require'lfs'.mkdir"
+export removeDirectory :: (dirName:string) -> (success:bool|none, err:string, errCode:int) !foreign lua "require'lfs'.rmdir"
+
+export setMode :: (file:File, mode:WritingMode) -> (success:bool|none, previousModeOrErr:WritingMode|string) !foreign lua "require'lfs'.setmode"
+
+export touch :: (filepath:string, accessTime=--[[os.getTime()]]0, modificationTime=accessTime) -> (success:bool|none, err:string, errCode:int) !foreign lua "require'lfs'.touch"
+
+--
+-- Extras
+--
+
+export isFile :: (path:string) -> bool {
+	return attributes(path, Attribute.MODE) == ProtectionMode.FILE -- Note: We don't handle any error.
+}
+export isDirectory :: (path:string) -> bool {
+	return attributes(path, Attribute.MODE) == ProtectionMode.DIRECTORY -- Note: We don't handle any error.
+}
