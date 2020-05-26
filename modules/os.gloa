@@ -4,7 +4,7 @@
 --=
 --==============================================================
 
-	execute, escapeArguments
+	execute, escapeArguments, isShellAvailable
 	exit
 	getClock
 	getDate, getDateUtc
@@ -48,17 +48,22 @@ export escapeArguments :: (arguments:[]string) -> (success:bool, error:string, r
 	return true, "", concatinate(buffer)
 }
 
-export execute :: (command:string) -> (exitCode:int) !foreign lua "os.execute"
+export execute :: (command:string) -> (statusCode:int) !foreign lua "os.execute"
 
-export execute :: (program:string, arguments:[]string) -> (success:bool, error:string, exitCode:int) {
+export execute :: (program:string, arguments:[]string) -> (success:bool, error:string, statusCode:int, command:string) {
 	local ok, err, argsStr = escapeArguments(arguments)
-	if not ok  return false, err, 0
+	if not ok  return false, err, 0, ""
 
 	local command = format([[""%s" %s"]], program, argsStr)
-	return true, "", execute(command)
+	return true, "", execute(command), command
 }
 
-export exit :: (exitCode:int=0) !foreign lua "os.exit"
+export isShellAvailable :: () -> bool {
+	local helper :: () -> int !foreign lua "os.execute"
+	return helper() ~= 0
+}
+
+export exit :: (statusCode=0--[[or whatever is the success code for the OS]]) !foreign lua "os.exit"
 
 export getClock :: () -> float !foreign lua "os.clock"
 
