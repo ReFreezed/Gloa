@@ -4,9 +4,8 @@
 --=
 --==============================================================
 
-	-- Constants:
-	APP_PATH, APP_DIRECTORY, COMPILER_PATH, COMPILER_DIRECTORY
-	STDIN, STDERR, STDOUT
+	-- Types:
+	File
 
 	-- Functions:
 	close
@@ -16,11 +15,16 @@
 	readEntireFile, writeEntireFile
 	readNumber, readRemaining, readLine, readBytes
 	remove, rename, copy
+	stdWrite
+	write, writef, writeLine
 
-	-- Structs:
-	File
+	-- Values:
+	APP_PATH, APP_DIRECTORY, COMPILER_PATH, COMPILER_DIRECTORY
+	STDIN, STDERR, STDOUT
 
 --============================================================]]
+
+!import "basic"
 
 -- Get the path to the application file. The path may be relative to the current working directory.
 export APP_PATH           : string : !foreign compiler "appPath"
@@ -75,33 +79,61 @@ export readBytes :: (file:File, maxBytes:int) -> (success:bool, data:string) {
 }
 
 export write :: (file:File, ...:string) !foreign method "write"
+export write :: (file:File, strings:[]string) {
+	for strings  write(file, it)
+}
+export writef :: (file:File, s:string, ...:string|int|float|Type) {
+	write(file, format(s, ...))
+}
 export writeLine :: (file:File, ...:string) {
 	write(file, ...)
 	write(file, "\n")
 }
 
-export readEntireFile :: (path:string) -> (success:bool, data:string, error:string) {
-	local ok, file, err = openForReading(path)
+local _readEntireFile :: ($text:bool, path:string) -> (success:bool, data:string, error:string) {
+	!if text  local ok, file, err = openForReadingText(path)
+	else      local ok, file, err = openForReading(path)
+
 	if not ok  return false, "", err
 
-	local data:string
-	ok, data = readRemaining(file)
+	local ^ok, data = readRemaining(file)
 	close(file)
 	if not ok  return false, "", "Could not read from the file."
 
 	return true, data, ""
 }
-export writeEntireFile :: (path:string, data:string) -> (success:bool, error:string) {
-	local ok, file, err = openForWriting(path)
+local _writeEntireFile :: ($text:bool, path:string, data:string) -> (success:bool, error:string) {
+	!if text  local ok, file, err = openForWritingText(path)
+	else      local ok, file, err = openForWriting(path)
+
 	if not ok  return false, err
 
 	write(file, data)
 	close(file)
 	return true, ""
 }
+local _writeEntireFile2 :: ($text:bool, path:string, data:[]string, dataSuffix="") -> (success:bool, error:string) {
+	!if text  local ok, file, err = openForWritingText(path)
+	else      local ok, file, err = openForWriting(path)
 
-export eachLine :: (path:string) -> (iter:(_1,_2:none)->(line:string|none), _1,_2:none) !foreign lua "io.lines"
-export eachLine :: (file:File)   -> (iter:(_1,_2:none)->(line:string|none), _1,_2:none) !foreign method "lines"
+	if not ok  return false, err
+
+	for data {
+		write(file, it)
+		if dataSuffix  write(file, dataSuffix)
+	}
+	close(file)
+	return true, ""
+}
+export readEntireFile      : (path:string)                               -> (success:bool, data:string, error:string) : variant_of( _readEntireFile  (false, "") )
+export readEntireTextFile  : (path:string)                               -> (success:bool, data:string, error:string) : variant_of( _readEntireFile  (true,  "") )
+export writeEntireFile     : (path:string, data:string)                  -> (success:bool, error:string)              : variant_of( _writeEntireFile (false, "", "") )
+export writeEntireTextFile : (path:string, data:string)                  -> (success:bool, error:string)              : variant_of( _writeEntireFile (true,  "", "") )
+export writeEntireFile     : (path:string, data:[]string, dataSuffix="") -> (success:bool, error:string)              : variant_of( _writeEntireFile2(false, "", cast([]string)NULL, "") )
+export writeEntireTextFile : (path:string, data:[]string, dataSuffix="") -> (success:bool, error:string)              : variant_of( _writeEntireFile2(true,  "", cast([]string)NULL, "") )
+
+export eachLine :: (path:string) -> (iter:(_,_:none)->(line:string|none), _,_:none) !foreign lua "io.lines"
+export eachLine :: (file:File)   -> (iter:(_,_:none)->(line:string|none), _,_:none) !foreign method "lines"
 
 export remove :: (path:string) -> (success:bool, error:string) {
 	local helper :: (path:string) -> bool|none, none|string !foreign lua "os.remove"
@@ -130,4 +162,7 @@ export enableLineBuffering :: (file:File, size:int) { setvbuf(file, "line", size
 
 export flush :: (file:File) !foreign method "flush"
 
--- @Incomplete: os.tmpname
+export stdWrite :: (...:string) !foreign lua "io.write"
+
+export openTemporaryFile :: () -> File   !foreign lua "io.tmpfile" -- Opened in update mode.
+export getTemporaryName  :: () -> string !foreign lua "os.tmpname" -- Warning: On Windows this may return a name ending with "." which is an illegal filename.

@@ -11,14 +11,16 @@
 	isFile, isDirectory
 	link
 	lock, lockDir, unlock
-	makeDirectory, removeDirectory
+	makeDirectory, makeDirectoryRecursive, removeDirectory, removeDirectoryRecursive, emptyDirectory
 	setMode
 	touch
+	traverseDirectory
 
 	-- Types:
 	AttributeTable
-	DirectoryObject
+	Directory
 	Lock
+	Traverse
 
 	-- Enums:
 	Attribute
@@ -28,7 +30,8 @@
 
 --============================================================]]
 
-local File :: !import"io".File
+local io :: !import "io"
+!import "io/path"
 
 export Attribute :: enum {
 	DEV          :: "dev",
@@ -69,6 +72,8 @@ export WritingMode :: enum {
 	TEXT   :: "text",
 }
 
+export Traverse :: enum { CONTINUE, STOP, IGNORE }
+
 export AttributeTable :: struct {
 	mode = ProtectionMode.OTHER,
 	dev:          int,
@@ -91,9 +96,9 @@ export Lock :: !foreign struct {
 	free :: (lock:Lock) !foreign method "free",
 }
 
-export DirectoryObject :: !foreign struct {
-	next  :: (dirObj:DirectoryObject) -> (entry:string|none) !foreign method "next",
-	close :: (dirObj:DirectoryObject) !foreign method "close",
+export Directory :: !foreign struct {
+	next  :: (dirObj:Directory) -> (entry:string|none) !foreign method "next",
+	close :: (dirObj:Directory) !foreign method "close",
 }
 
 export attributes :: (filepath:string, result:AttributeTable={}) -> (resultOrNull:AttributeTable, err:string, errCode:int) !foreign lua "require'lfs'.attributes"
@@ -117,24 +122,24 @@ export symlinkAttributes :: (filepath:string, $attr:Attribute) -> (valueOrNull:t
 export changeDirectory  :: (path:string) -> (success:bool|none, err:string) !foreign lua "require'lfs'.chdir"
 export currentDirectory :: ()            -> (pathOrNull:string, err:string) !foreign lua "require'lfs'.currentdir"
 
-export directory :: (path:string) -> (iter:(dirObj:DirectoryObject,_:none)->(entry:string|none), dirObj:DirectoryObject, _:none) !foreign lua "require'lfs'.dir"
+export directory :: (path:string) -> (iter:(dirObj:Directory,_:none)->(entry:string|none), dirObj:Directory, _:none) !foreign lua "require'lfs'.dir"
 
 export lockDir :: (path:string, secondsStale=--[[INT_MAX]]0) -> (lockOrNull:Lock, err:string) !foreign lua "require'lfs'.lock_dir"
 
-export lock   :: (file:File, mode:LockMode)                        -> (success:bool|none, err:string) !foreign lua "require'lfs'.lock"
-export lock   :: (file:File, mode:LockMode, start:int)             -> (success:bool|none, err:string) !foreign lua "require'lfs'.lock"
-export lock   :: (file:File, mode:LockMode, start:int, length:int) -> (success:bool|none, err:string) !foreign lua "require'lfs'.lock"
-export unlock :: (file:File)                                       -> (success:bool|none, err:string) !foreign lua "require'lfs'.unlock"
-export unlock :: (file:File, start:int)                            -> (success:bool|none, err:string) !foreign lua "require'lfs'.unlock"
-export unlock :: (file:File, start:int, length:int)                -> (success:bool|none, err:string) !foreign lua "require'lfs'.unlock"
+export lock   :: (file:io.File, mode:LockMode)                        -> (success:bool|none, err:string) !foreign lua "require'lfs'.lock"
+export lock   :: (file:io.File, mode:LockMode, start:int)             -> (success:bool|none, err:string) !foreign lua "require'lfs'.lock"
+export lock   :: (file:io.File, mode:LockMode, start:int, length:int) -> (success:bool|none, err:string) !foreign lua "require'lfs'.lock"
+export unlock :: (file:io.File)                                       -> (success:bool|none, err:string) !foreign lua "require'lfs'.unlock"
+export unlock :: (file:io.File, start:int)                            -> (success:bool|none, err:string) !foreign lua "require'lfs'.unlock"
+export unlock :: (file:io.File, start:int, length:int)                -> (success:bool|none, err:string) !foreign lua "require'lfs'.unlock"
 
 -- Note: Not implemented for Windows until v1.8.0.
 export link :: (old:string, new:string, symlink=false) -> (success:bool|none, err:string) !foreign lua "require'lfs'.link"
 
-export makeDirectory   :: (dirName:string) -> (success:bool|none, err:string, errCode:int) !foreign lua "require'lfs'.mkdir"
-export removeDirectory :: (dirName:string) -> (success:bool|none, err:string, errCode:int) !foreign lua "require'lfs'.rmdir"
+export makeDirectory   :: (dirPath:string) -> (success:bool|none, err:string, errCode:int) !foreign lua "require'lfs'.mkdir"
+export removeDirectory :: (dirPath:string) -> (success:bool|none, err:string, errCode:int) !foreign lua "require'lfs'.rmdir"
 
-export setMode :: (file:File, mode:WritingMode) -> (success:bool|none, previousModeOrErr:WritingMode|string) !foreign lua "require'lfs'.setmode"
+export setMode :: (file:io.File, mode:WritingMode) -> (success:bool|none, previousModeOrErr:WritingMode|string) !foreign lua "require'lfs'.setmode"
 
 export touch :: (filepath:string, accessTime=--[[os.getTime()]]0, modificationTime=accessTime) -> (success:bool|none, err:string, errCode:int) !foreign lua "require'lfs'.touch"
 
@@ -147,4 +152,91 @@ export isFile :: (path:string) -> bool {
 }
 export isDirectory :: (path:string) -> bool {
 	return attributes(path, Attribute.MODE) == ProtectionMode.DIRECTORY -- Note: We don't handle any error.
+}
+
+export makeDirectoryRecursive :: (dirPath:string) -> (success:bool, err:string, errCode:int) {
+	!import "basic"
+
+	local dirObj   = Path(dirPath)
+	local segments = dirObj.path
+	dirObj.path    = {}
+
+	for segments {
+		insert(dirObj.path, it)
+		local path = dirObj.toString!()
+
+		if not isDirectory(path) {
+			local ok, err, errCode = makeDirectory(path)
+			if not ok  return false, err, errCode
+		}
+	}
+
+	return true, NULL, NULL
+}
+
+export emptyDirectory :: (dirPath:string, continueOnError=false) -> (success:bool, firstError:string) {
+	local allOk, err1 = true, ""
+
+	traverseDirectory(dirPath, bottomUp=true, [continueOnError, allOk, err1] (path:string) -> Traverse {
+		local ok: bool|none = NULL
+		local err: string   = NULL
+
+		if isDirectory(path)
+			ok, err = removeDirectory(path)
+		else
+			ok, err = io.remove(path)
+
+		if not ok and allOk  allOk, err1 = false, err
+
+		if not (allOk or continueOnError)  return Traverse.STOP
+
+		return Traverse.CONTINUE
+	})
+
+	return allOk, err1
+}
+
+export removeDirectoryRecursive :: (dirPath:string, continueOnError=false) -> (success:bool, firstError:string) {
+	local ok: bool|none = NULL
+
+	local ^ok, err = emptyDirectory(dirPath, continueOnError)
+	if not ok  return false, err
+
+	ok, err = removeDirectory(dirPath)
+	return (ok == true), err
+}
+
+export traverseDirectory :: (dirPath:string, cb:((path:string)->Traverse), bottomUp=false) {
+	local traverse :: (pathObj:Path, cb:((path:string)->Traverse), bottomUp:bool) -> Traverse {
+		local entryIndex = #pathObj.path + 1
+
+		for name in directory(pathObj.toString!())  if not (name == "." or name == "..") {
+			pathObj.path[entryIndex] = name
+			local path = pathObj.toString!()
+
+			if attributes(path, Attribute.MODE) == ProtectionMode.DIRECTORY {
+				if bottomUp {
+					local action = traverse(pathObj, cb, bottomUp)
+					if action == Traverse.STOP  return Traverse.STOP
+				}
+
+				local action = cb(path)
+				if action == Traverse.STOP  return Traverse.STOP
+
+				if not bottomUp and action ~= Traverse.IGNORE {
+					action = traverse(pathObj, cb, bottomUp)
+					if action == Traverse.STOP  return Traverse.STOP
+				}
+
+			} else {
+				local action = cb(path)
+				if action == Traverse.STOP  return Traverse.STOP
+			}
+		}
+
+		pathObj.path[entryIndex] = NULL
+		return Traverse.CONTINUE
+	}
+
+	traverse(Path(dirPath), cb, bottomUp)
 }
