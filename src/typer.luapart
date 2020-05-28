@@ -7725,7 +7725,7 @@ function _G.getExpectedTypeInfo(state, node, strict, expectantTerm, nodeForError
 
 		if
 			(not argTypeInfo and argTypesOut[1] and argTypesOut[#argTypesOut].tag == !(TYPE_VARARG))
-			or (argTypeInfo.tag == !(TYPE_VARARG))
+			or (argTypeInfo and argTypeInfo.tag == !(TYPE_VARARG))
 		then
 			local varargSig = argTypeInfo or argTypesOut[#argTypesOut]
 			argTypeInfo     = varargSig.itemType
@@ -7737,6 +7737,36 @@ function _G.getExpectedTypeInfo(state, node, strict, expectantTerm, nodeForError
 		end
 
 		return argTypeInfo
+
+	elseif parentNodeType == !(AST_CONDITIONAL) then
+		local conditional = node.parent
+		local branchTrue  = conditional.branchTrue -- Note: We don't fall back to conditionAndBranchTrue here. (See :DoNotExpectBoolCondition)
+		local branchFalse = conditional.branchFalse
+		local typeInfo
+
+		if node == branchTrue then
+			typeInfo = branchFalse.inferredType
+			if not typeInfo then
+				!DEPEND_AND_RETURN(`node`, DEPEND_NODE_INFERRED, `branchFalse`, nil, `nil`)
+			end
+
+		elseif node == branchFalse then
+			branchTrue = branchTrue or conditional.conditionAndBranchTrue
+
+			typeInfo = branchTrue.inferredType
+			if not typeInfo then
+				!DEPEND_AND_RETURN(`node`, DEPEND_NODE_INFERRED, `branchTrue`, nil, `nil`)
+			end
+
+		else
+			assert(node == conditional.condition)
+			-- Note: We don't return bool here, even though it's expected,
+			-- because it would make NULL seem valid (and contructors, though
+			-- those have additional checking). :DoNotExpectBoolCondition
+			return (getExpectedTypeInfoUsingContents(state, node, strict, expectantTerm, nodeForError))
+		end
+
+		return typeInfo
 
 	elseif strict then
 		return (getExpectedTypeInfoUsingContents(state, node, strict, expectantTerm, nodeForError))
