@@ -5210,13 +5210,25 @@ end
 			!ASSERT `#names <= 1`
 			!ASSERT `values[2] and not values[4]`
 
+			local anyFloat = false
+
 			for _, valueExpr in ipairs(values) do
 				local typeInfo = adjustTypeToOne(state, valueExpr, valueExpr.inferredType, true)
 
-				if typeInfo.tag ~= !(TYPE_INT) then
+				if typeInfo.tag == !(TYPE_FLOAT) then
+					anyFloat = true
+					break
+				end
+			end
+
+			for _, valueExpr in ipairs(values) do
+				local typeInfo = adjustTypeToOne(state, valueExpr, valueExpr.inferredType, true)
+
+				if not (typeInfo.tag == !(TYPE_INT) or typeInfo.tag == !(TYPE_FLOAT)) then
 					typeError(
 						state, astGetExpressionVisuallyFurthestToTheLeft(valueExpr),
-						"For loop: Expected an int. (Got %s)",
+						"For loop: Expected %s. (Got %s)",
+						(anyFloat and "a float" or "an int"),
 						getFriendlyTypeInfoName(typeInfo)
 					)
 				end
@@ -5247,7 +5259,7 @@ end
 				(names[1] and names[1].name  or "it"),
 				(names[1] and names[1].token or forLoop.token),
 				(names[1] == nil),
-				values[1].inferredType
+				getTypeInfoForBuiltinType(state, (anyFloat and "float" or "int"))
 			)
 
 		----------------------------------------------------------------
