@@ -6916,6 +6916,7 @@ local function simplifyCast(state, cast)
 		literal.inferredType = castTypeInfo
 
 		replaceQueuedNodeAndUnqueueOldTree(state, cast, literal)
+		validateIntegerRange(state, literal.value, literal)
 		moveToNextRelevantPipe(state, literal, !(PIPE_INFER))
 
 	-- (numeric) -> bool
@@ -7151,6 +7152,7 @@ local function simplifyBinary(state, binary)
 	-- @Incomplete: Simplify these kinds of expressions: (1+x)+2 => (1+2)+x => 3+x
 	-- @Incomplete: Simplify these kinds of expressions: 1 + -x => 1 - x
 	local typeInfo = binary.inferredType
+	local replacement
 
 	if op == "*" and typeInfo.tag == !(TYPE_STRING) then
 		local s     = l.value
@@ -7160,9 +7162,7 @@ local function simplifyBinary(state, binary)
 			s, count = count, s
 		end
 
-		local literal = newLiteral(binary.parent, binary.token, !(LITERAL_STRING), s:rep(count), typeInfo)
-		replaceQueuedNodeAndUnqueueOldTree(state, binary, literal)
-		moveToNextRelevantPipe(state, literal, !(PIPE_INFER))
+		replacement = newLiteral(binary.parent, binary.token, !(LITERAL_STRING), s:rep(count), typeInfo)
 
 	!for _, opArithmeticKeepType in ipairs{"+","-","*","^","%"} do
 	elseif op == !(opArithmeticKeepType) then
@@ -7175,24 +7175,18 @@ local function simplifyBinary(state, binary)
 
 		local n = l.value !!(opArithmeticKeepType) r.value -- This should produce the correct result for any combination of int and float.
 
-		local literal = newLiteral(binary.parent, binary.token, literalType, n, typeInfo)
-		replaceQueuedNodeAndUnqueueOldTree(state, binary, literal)
-		moveToNextRelevantPipe(state, literal, !(PIPE_INFER))
+		replacement = newLiteral(binary.parent, binary.token, literalType, n, typeInfo)
 	!end
 
 	elseif op == "/" then
 		!!(ASSERT_BOTH_OPERANDS_NUMERIC_LITERALS)
 
-		local literal = newLiteral(binary.parent, binary.token, !(LITERAL_FLOAT), l.value/r.value, typeInfo)
-		replaceQueuedNodeAndUnqueueOldTree(state, binary, literal)
-		moveToNextRelevantPipe(state, literal, !(PIPE_INFER))
+		replacement = newLiteral(binary.parent, binary.token, !(LITERAL_FLOAT), l.value/r.value, typeInfo)
 
 	elseif op == "//" then
 		!!(ASSERT_BOTH_OPERANDS_NUMERIC_LITERALS)
 
-		local literal = newLiteral(binary.parent, binary.token, !(LITERAL_INTEGER), math.floor(l.value/r.value), typeInfo)
-		replaceQueuedNodeAndUnqueueOldTree(state, binary, literal)
-		moveToNextRelevantPipe(state, literal, !(PIPE_INFER))
+		replacement = newLiteral(binary.parent, binary.token, !(LITERAL_INTEGER), math.floor(l.value/r.value), typeInfo)
 
 	!for _, opComparison in ipairs{"<",">","<=",">="} do
 	elseif op == !(opComparison) then
@@ -7205,9 +7199,7 @@ local function simplifyBinary(state, binary)
 			!ASSERT("lType == 'number' or lType == 'string'")
 		!end
 
-		local literal = newLiteral(binary.parent, binary.token, !(LITERAL_BOOLEAN), (l.value !!(opComparison) r.value), typeInfo)
-		replaceQueuedNodeAndUnqueueOldTree(state, binary, literal)
-		moveToNextRelevantPipe(state, literal, !(PIPE_INFER))
+		replacement = newLiteral(binary.parent, binary.token, !(LITERAL_BOOLEAN), (l.value !!(opComparison) r.value), typeInfo)
 	!end
 
 	!for _, opEquality in ipairs{"==","~="} do
@@ -7231,9 +7223,7 @@ local function simplifyBinary(state, binary)
 			!ASSERT("valueL.nodeType == valueR.nodeType")
 		end
 
-		local literal = newLiteral(binary.parent, binary.token, !(LITERAL_BOOLEAN), (valueL !!(opEquality) valueR), typeInfo)
-		replaceQueuedNodeAndUnqueueOldTree(state, binary, literal)
-		moveToNextRelevantPipe(state, literal, !(PIPE_INFER))
+		replacement = newLiteral(binary.parent, binary.token, !(LITERAL_BOOLEAN), (valueL !!(opEquality) valueR), typeInfo)
 	!end
 
 	!for _, opLogical in ipairs{"and","or"} do
@@ -7243,9 +7233,7 @@ local function simplifyBinary(state, binary)
 		!ASSERT("type(l.value) == 'boolean'")
 		!ASSERT("type(r.value) == 'boolean'")
 
-		local literal = newLiteral(binary.parent, binary.token, !(LITERAL_BOOLEAN), (l.value !!(opLogical) r.value), typeInfo)
-		replaceQueuedNodeAndUnqueueOldTree(state, binary, literal)
-		moveToNextRelevantPipe(state, literal, !(PIPE_INFER))
+		replacement = newLiteral(binary.parent, binary.token, !(LITERAL_BOOLEAN), (l.value !!(opLogical) r.value), typeInfo)
 	!end
 
 	elseif op == ".." then
@@ -7255,13 +7243,20 @@ local function simplifyBinary(state, binary)
 		!ASSERT("type(r.value) == 'string'")
 
 		-- @Speed: Concatinate more than two values at a time. (Maybe the parsing stage need an update.)
-		local literal = newLiteral(binary.parent, binary.token, !(LITERAL_STRING), l.value..r.value, typeInfo)
-		replaceQueuedNodeAndUnqueueOldTree(state, binary, literal)
-		moveToNextRelevantPipe(state, literal, !(PIPE_INFER))
+		replacement = newLiteral(binary.parent, binary.token, !(LITERAL_STRING), l.value..r.value, typeInfo)
 
 	else
 		errorUnhandledNodeType(state, binary)
 	end
+
+	!ASSERT `replacement`
+	replaceQueuedNodeAndUnqueueOldTree(state, binary, replacement)
+
+	if replacement.nodeType == !(AST_LITERAL) and replacement.literalType == !(LITERAL_INTEGER) then
+		validateIntegerRange(state, replacement.value, replacement)
+	end
+
+	moveToNextRelevantPipe(state, replacement, !(PIPE_INFER))
 end
 
 function _G.simplifyExpressionIfConstant(state, expr)
@@ -8046,6 +8041,19 @@ function _G.areMultipleValuesEnabledAtPosition(state, node)
 
 	else
 		return false
+	end
+end
+
+
+
+-- validateIntegerRange( state, number [, nodeForError ] )
+function _G.validateIntegerRange(state, n, nodeForError)
+	if n == math.floor(n) and n ~= n+1 and n ~= n-1 then -- Not perfect, but good enough for now. 2020-06-05
+		-- void
+	elseif nodeForError then
+		typeError(state, nodeForError, "Integer is out of range. (%s)", n)
+	else
+		errorLine(nil, "Integer is out of range. (%s)", n)
 	end
 end
 

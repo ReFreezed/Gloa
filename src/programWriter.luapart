@@ -2142,19 +2142,21 @@ function _G.writeForeignImportIfNew(state, writer, typeInfo, foreignSource, fore
 	end
 end
 
-local function writeNormalSimpleConstant(state, writer, tag, v, isEnum)
+-- writeNormalSimpleConstant( state, writer, tag, v, isEnum, nodeForError=nil )
+local function writeNormalSimpleConstant(state, writer, tag, v, isEnum, nodeForError)
 	local file = writer.file
 
 	if tag == !(TYPE_BOOL) then
 		file:write(v and "true" or "false")
 
 	elseif tag == !(TYPE_INT) then
+		validateIntegerRange(state, v, nodeForError)
 		if v == 0 then
 			file:write("0") -- Avoid writing '-0'.
 		else
-			local nStr = tostring(v)
+			local nStr = F("%.0f", v)
 			if not nStr:find"^%-?%d+$" then
-				errorLine("ProgramWriter", "Cannot write value as integer: %s", tostring(v))
+				errorLine("ProgramWriter", "Cannot write value as integer: %s (formatted as '%s')", tostring(v), nStr)
 			end
 			if nStr:byte(1) == !(getByte"-") then
 				file:write("(", nStr, ")") -- @Incomplete: Use shouldOperationHaveSurroundingParentheses().
@@ -2199,6 +2201,8 @@ local function writeNormalSimpleConstant(state, writer, tag, v, isEnum)
 			file:write(formatInfoComment(getFriendlyTypeInfoName(typeInfo)))
 		end
 
+	elseif nodeForError then
+		errorInternal(state, nodeForError, "Incomplete: Handle constant value of type '%s'.", (TYPE_NAMES[tag] or "?"))
 	else
 		errorInternal("Incomplete: Handle constant value of type '%s'.", (TYPE_NAMES[tag] or "?"))
 	end
@@ -2231,13 +2235,13 @@ local function writeTypeInfo(state, writer, typeInfo)
 		file:write("--[[TypeTag.", TYPE_NAMES_UPPER[tag], "]]")
 	end
 	file:write(",id=")
-	writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), typeInfo, false)
+	writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), typeInfo, false, nil)
 
 	if tag == !(TYPE_ARRAY) then
 		local arraySig = typeInfo
 
 		file:write(",itemType=")
-		writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), arraySig.itemType, false)
+		writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), arraySig.itemType, false, nil)
 
 		!!(END_OF_TYPE_INFO"TypeInfoArray")
 
@@ -2245,7 +2249,7 @@ local function writeTypeInfo(state, writer, typeInfo)
 		local varargSig = typeInfo
 
 		file:write(",itemType=")
-		writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), varargSig.itemType, false)
+		writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), varargSig.itemType, false, nil)
 
 		!!(END_OF_TYPE_INFO"TypeInfoVararg")
 
@@ -2256,7 +2260,7 @@ local function writeTypeInfo(state, writer, typeInfo)
 		for i, typeInfo in ipairs(funcSig.argumentTypesIn) do
 			if i > 1 then  file:write(",")  end
 			file:write("{argumentType=")
-			writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), typeInfo, false)
+			writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), typeInfo, false, nil)
 			file:write("}")
 		end
 		file:write("}")
@@ -2265,7 +2269,7 @@ local function writeTypeInfo(state, writer, typeInfo)
 		for i, typeInfo in ipairs(funcSig.argumentTypesOut) do
 			if i > 1 then  file:write(",")  end
 			file:write("{argumentType=")
-			writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), typeInfo, false)
+			writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), typeInfo, false, nil)
 			file:write("}")
 		end
 		file:write("}")
@@ -2282,10 +2286,10 @@ local function writeTypeInfo(state, writer, typeInfo)
 		file:write(",kind=", structInfo.kind)
 
 		file:write(",valueType=")
-		writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), (structInfo.valueType or voidType), false)
+		writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), (structInfo.valueType or voidType), false, nil)
 
 		file:write(",keyType=")
-		writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), (structInfo.keyType or voidType), false)
+		writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), (structInfo.keyType or voidType), false, nil)
 
 		file:write(",members={")
 		for i, member in ipairs(structInfo.members) do
@@ -2295,14 +2299,14 @@ local function writeTypeInfo(state, writer, typeInfo)
 			writeStringLiteral(writer, member.name)
 
 			file:write(",memberType=")
-			writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), member.typeInfo, false)
+			writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), member.typeInfo, false, nil)
 
 			local decl = findMemberDeclaration(state, structInfo.astNode, member.name) or errorInternal(state, structInfo.astNode, "%s", member.name)
 			file:write(",notes={")
 			for i, note in ipairs(decl.notes) do
 				if i > 1 then  file:write(",")  end
 				local typeInfo = requireTypeRepresentedByExpression(state, note)
-				writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), typeInfo, false)
+				writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), typeInfo, false, nil)
 			end
 			file:write("}")
 
@@ -2319,7 +2323,7 @@ local function writeTypeInfo(state, writer, typeInfo)
 		writeStringLiteral(writer, enumInfo.name)
 
 		file:write(",memberType=")
-		writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), enumInfo.memberTypeInfo, false)
+		writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), enumInfo.memberTypeInfo, false, nil)
 
 		file:write(",members={")
 		for i, member in ipairs(enumInfo.members) do
@@ -2333,7 +2337,7 @@ local function writeTypeInfo(state, writer, typeInfo)
 			for i, note in ipairs(decl.notes) do
 				if i > 1 then  file:write(",")  end
 				local typeInfo = requireTypeRepresentedByExpression(state, note)
-				writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), typeInfo, false)
+				writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), typeInfo, false, nil)
 			end
 			file:write("}")
 
@@ -2349,7 +2353,7 @@ local function writeTypeInfo(state, writer, typeInfo)
 		file:write(",types={")
 		for i, compoundItem in ipairs(compound) do
 			if i > 1 then  file:write(",")  end
-			writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), compoundItem, false)
+			writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), compoundItem, false, nil)
 		end
 		file:write("}")
 
@@ -2417,7 +2421,7 @@ function _G.writeConstantValue(state, writer, const, nodeForError)
 
 	elseif not const.isObject then
 		if tag ~= !(TYPE_ENUM) then
-			writeNormalSimpleConstant(state, writer, tag, const.value, false)
+			writeNormalSimpleConstant(state, writer, tag, const.value, false, nodeForError)
 			return
 		end
 
@@ -2441,11 +2445,11 @@ function _G.writeConstantValue(state, writer, const, nodeForError)
 		if enumInfo.memberTypeInfo.tag == !(TYPE_TYPE) then
 			local typeNode = valueExpr
 			!ASSERT("typeNode.nodeType == "..AST_TYPE)
-			writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), typeNode.representedType, true)
+			writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), typeNode.representedType, true, nodeForError)
 		else
 			local literal = valueExpr
 			!ASSERT("literal.nodeType == "..AST_LITERAL)
-			writeNormalSimpleConstant(state, writer, enumInfo.memberTypeInfo.tag, literal.value, true)
+			writeNormalSimpleConstant(state, writer, enumInfo.memberTypeInfo.tag, literal.value, true, nodeForError)
 		end
 
 		if outputDebugInfo then
