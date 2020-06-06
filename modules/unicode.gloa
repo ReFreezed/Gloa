@@ -1,0 +1,298 @@
+--[[============================================================
+--=
+--=  Unicode module
+--=
+--==============================================================
+
+	-- Types:
+	Codepoint
+
+	-- Functions:
+	utf8Encode,    utf8Decode
+	utf16EncodeLe, utf16DecodeLe
+	utf16EncodeBe, utf16DecodeBe
+
+--============================================================]]
+
+local RUN_TESTS :: 1==0
+
+!import "basic"
+!import "string"
+
+export Codepoint :: int
+
+
+
+local utf8CharLen :: (s:string, i=1) -> int--[[0 on failure]] {
+	--[[
+		Bits  Last codepoint  Range for byte 1  Bytes
+		7     U+00007F        0x00-0x7F         0xxxxxxx
+		11    U+0007FF        0xC0-0xDF         110xxxxx  10xxxxxx
+		16    U+00FFFF        0xE0-0xEF         1110xxxx  10xxxxxx  10xxxxxx
+		21    U+1FFFFF        0xF0-0xF7         11110xxx  10xxxxxx  10xxxxxx  10xxxxxx
+	]]
+
+	local c = cast(int) getByte(s, i)
+	if c == NULL  return 0
+
+	if c <= 0x7F {
+		return 1
+
+	} elseif c >= 0xC2 and c <= 0xDF {
+		local c2 = cast(int) getByte(s, i + 1)
+		if c2 == NULL  return 0
+
+		if c2 < 0x80 or c2 > 0xBF  return 0
+
+		return 2
+
+	} elseif c >= 0xE0 and c <= 0xEF {
+		local c2 = cast(int) getByte(s, i + 1)
+		local c3 = cast(int) getByte(s, i + 2)
+
+		if c2 == NULL or c3 == NULL  return 0
+
+		if c == 0xE0 and (c2 < 0xA0 or c2 > 0xBF)  return 0
+		if c == 0xED and (c2 < 0x80 or c2 > 0x9F)  return 0
+		if               (c2 < 0x80 or c2 > 0xBF)  return 0
+		if               (c3 < 0x80 or c3 > 0xBF)  return 0
+
+		return 3
+
+	} elseif c >= 0xF0 and c <= 0xF4 {
+		local c2 = cast(int) getByte(s, i + 1)
+		local c3 = cast(int) getByte(s, i + 2)
+		local c4 = cast(int) getByte(s, i + 3)
+
+		if c2 == NULL or c3 == NULL or c4 == NULL  return 0
+
+		if c == 0xF0 and (c2 < 0x90 or c2 > 0xBF)  return 0
+		if c == 0xF4 and (c2 < 0x80 or c2 > 0x8F)  return 0
+		if               (c2 < 0x80 or c2 > 0xBF)  return 0
+		if               (c3 < 0x80 or c3 > 0xBF)  return 0
+		if               (c4 < 0x80 or c4 > 0xBF)  return 0
+
+		return 4
+
+	} else {
+		return 0
+	}
+}
+
+-- https://en.wikipedia.org/wiki/UTF-8
+export utf8Encode :: (cps:[]Codepoint) -> (success:bool, s:string) {
+	local buffer: []string -- @Speed: Reuse table.
+
+	for cp: cps {
+		if cp < 0  return false, ""
+
+		if cp <= 0x7F {
+			insert(buffer, bytesToString(cp))
+		} elseif cp <= 0x7FF {
+			insert(buffer, bytesToString(0xC0 + ((cp // 0x40^1)       )))
+			insert(buffer, bytesToString(0x80 + ((cp          ) % 0x40)))
+		} elseif cp <= 0xFFFF {
+			insert(buffer, bytesToString(0xE0 + ((cp // 0x40^2)       )))
+			insert(buffer, bytesToString(0x80 + ((cp // 0x40^1) % 0x40)))
+			insert(buffer, bytesToString(0x80 + ((cp          ) % 0x40)))
+		} elseif cp <= 0x10FFFF {
+			insert(buffer, bytesToString(0xF0 + ((cp // 0x40^3) % 0x40)))
+			insert(buffer, bytesToString(0x80 + ((cp // 0x40^2) % 0x40)))
+			insert(buffer, bytesToString(0x80 + ((cp // 0x40^1) % 0x40)))
+			insert(buffer, bytesToString(0x80 + ((cp          )       )))
+		} else {
+			return false, "" -- Unicode cannot be greater than U+10FFFF!
+		}
+	}
+
+	return true, concatinate(buffer)
+}
+
+export utf8Decode :: (s:string) -> (success:bool, cps:[]Codepoint) {
+	local cps: []Codepoint
+	local ptr = 1
+
+	while ptr <= #s {
+		local charLen = utf8CharLen(s, ptr)
+		if charLen == 0  return false, NULL
+
+		if charLen == 1 {
+			local cp = cast(int) getByte(s, ptr)
+			insert(cps, cp)
+
+		} elseif charLen == 2 {
+			local b1, b2 = getByte(s, ptr, ptr+1)
+			local code1 = cast(int) b1 - 0xC0
+			local code2 = cast(int) b2 - 0x80
+			insert(cps, code1*2^6 + code2)
+
+		} elseif charLen == 3 {
+			local b1, b2, b3 = getByte(s, ptr, ptr+2)
+			local code1 = cast(int) b1 - 0xE0
+			local code2 = cast(int) b2 - 0x80
+			local code3 = cast(int) b3 - 0x80
+			insert(cps, code1*2^12 + code2*2^6 + code3)
+
+		} else {
+			local b1, b2, b3, b4 = getByte(s, ptr, ptr+3)
+			local code1 = cast(int) b1 - 0xF0
+			local code2 = cast(int) b2 - 0x80
+			local code3 = cast(int) b3 - 0x80
+			local code4 = cast(int) b4 - 0x80
+			insert(cps, code1*2^18 + code2*2^12 + code3*2^6 + code4)
+		}
+
+		ptr += charLen
+	}
+
+	return true, cps
+}
+
+
+
+-- https://golang.org/src/unicode/utf16/utf16.go
+local REPLACEMENT_CHAR :: 0xFFFD   -- Unicode replacement character.
+local MAX_CHAR         :: 0x10FFFF -- Maximum valid Unicode codepoint.
+
+-- 0xD800-0xDC00 encodes the high 10 bits of a pair.
+-- 0xDC00-0xE000 encodes the low 10 bits of a pair.
+-- The value is those 20 bits plus 0x10000.
+local SURR_1    :: 0xD800
+local SURR_2    :: 0xDC00
+local SURR_3    :: 0xE000
+local SURR_SELF :: 0x10000
+
+export utf16EncodeLe :: (cps:[]Codepoint) -> (success:bool, s:string) {
+	return utf16Encode(cps, le=true)
+}
+export utf16EncodeBe :: (cps:[]Codepoint) -> (success:bool, s:string) {
+	return utf16Encode(cps, le=false)
+}
+
+export utf16DecodeLe :: (s:string) -> (success:bool, cps:[]Codepoint) {
+	return utf16Decode(s, le=true)
+}
+export utf16DecodeBe :: (s:string) -> (success:bool, cps:[]Codepoint) {
+	return utf16Decode(s, le=false)
+}
+
+local utf16Encode :: (cps:[]Codepoint, le:bool) -> (success:bool, s:string) {
+	local utf16: []int -- @Speed: Reuse table.
+
+	for cp: cps {
+		-- Normal character.
+		if (cp >= 0 and cp < SURR_1) or (cp >= SURR_3 and cp < SURR_SELF) {
+			insert(utf16, cp)
+
+		-- Needs surrogate sequence.
+		} elseif SURR_SELF <= cp and cp <= MAX_CHAR {
+			if cp < SURR_SELF or cp > MAX_CHAR {
+				insert(utf16, REPLACEMENT_CHAR)
+				insert(utf16, REPLACEMENT_CHAR)
+			} else {
+				cp -= SURR_SELF
+				insert(utf16, SURR_1 + (cp//2^10) % 0x400)
+				insert(utf16, SURR_2 + (cp % 0x400))
+			}
+
+		} else {
+			insert(utf16, REPLACEMENT_CHAR)
+		}
+	}
+
+	local buffer: []string -- @Speed: Reuse table.
+	if le {
+		for utf16 {
+			insert(buffer, bytesToString(it %  256))
+			insert(buffer, bytesToString(it // 256))
+		}
+	} else {
+		for utf16 {
+			insert(buffer, bytesToString(it // 256))
+			insert(buffer, bytesToString(it %  256))
+		}
+	}
+
+	return true, concatinate(buffer)
+}
+
+local utf16Decode :: (s:string, le:bool) -> (success:bool, cps:[]Codepoint) {
+	if #s % 2 == 1  return false, NULL
+
+	local utf16: []int -- @Speed: Reuse table.
+	if le {
+		for 1, #s, 2  insert(utf16, 256*s[it+1] + s[it])
+	} else {
+		for 1, #s, 2  insert(utf16, 256*s[it] + s[it+1])
+	}
+
+	local cps: []Codepoint
+	local ptr = 1
+
+	while ptr <= #utf16 {
+		local c1 = utf16[ptr]
+		local c2 = utf16[ptr+1]
+		-- printf("%d %04X %04X", ptr, c1, (c2 ~= NULL ? c2 : 0))
+
+		-- Normal character.
+		if c1 < SURR_1 or c1 >= SURR_3 {
+			insert(cps, c1)
+			ptr += 1
+
+		-- Valid surrogate sequence.
+		} elseif c1 >= SURR_1 and c1 < SURR_2 and c2 ~= NULL and c2 >= SURR_2 and c2 < SURR_3 {
+			if c1 >= SURR_1 and c1 < SURR_2 and c2 >= SURR_2 and c2 < SURR_3
+				insert(cps, ((c1-SURR_1)*2^10) + ((c2-SURR_2)+SURR_SELF))
+			else
+				insert(cps, REPLACEMENT_CHAR)
+			ptr += 2
+
+		-- Invalid surrogate sequence.
+		} else {
+			insert(cps, REPLACEMENT_CHAR)
+			ptr += 1
+		}
+	}
+
+	return true, cps
+}
+
+
+
+!if RUN_TESTS  !run {
+	local testRoundtrip :: (name:string, decode:$T1, encode:$T2, s:string, cpsExpected:[]Codepoint) {
+		local ok, cps = decode(s)
+		if not ok  errorf("%s decode", name)
+
+		for cps  printf("%s %d %08X", name, itIndex, it)
+		if #cps ~= #cpsExpected  errorf("%s len %d", name, #cps)
+
+		for cpsExpected {
+			if cps[itIndex] ~= it  errorf("%s %d (want %d, got %d)", name, itIndex, it, cps[itIndex])
+		}
+
+		local ^ok, result = encode(cps)
+		if not ok       errorf("%s encode", name)
+		if result ~= s  errorf("%s roundtrip", name)
+	}
+
+	printf("REPLACEMENT_CHAR %08X", REPLACEMENT_CHAR)
+
+	testRoundtrip("utf8", utf8Decode, utf8Encode,
+		"aÖ日",
+		{ !char"a", !char"Ö", !char"日" }
+	)
+	testRoundtrip("utf16le", utf16DecodeLe, utf16EncodeLe,
+		"\x41\x00\x01\xD8\x37\xDC", -- "A" and a surrogate pair.
+		{ !char"A", 0x10437 }
+	)
+	testRoundtrip("utf16be", utf16DecodeBe, utf16EncodeBe,
+		"\x00\x41\xD8\x01\xDC\x37", -- "A" and a surrogate pair.
+		{ !char"A", 0x10437 }
+	)
+
+	print("All good!")
+	!import"os".exit(2)
+}
+
+
