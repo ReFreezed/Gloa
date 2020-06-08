@@ -1,0 +1,86 @@
+--[[============================================================
+--=
+--=  Apple Icon Image module
+--=  https://en.wikipedia.org/wiki/Apple_Icon_Image_format
+--=
+--==============================================================
+
+	-- Functions:
+	create
+
+----------------------------------------------------------------
+
+	-- Usage:
+	local icns :: !import "macos/icns"
+	icns.create("MyIcon.icns", {
+		{path="icon_32x32.png",     size=32},
+		{path="icon_1024x1024.png", size=1024},
+	})
+
+--============================================================]]
+
+!import "basic"
+local io :: !import "io"
+
+export ImageFile :: struct {
+	path: string, -- Images must be PNG or JPEG 2000.
+	size: int,    -- Supported sizes: 16, 32, 64, 128, 256, 512, 1024
+}
+
+local SIZEOF_SIGNATURE       :: 4
+local SIZEOF_TOTAL_SIZE      :: 4
+local SIZEOF_ICON_TYPE       :: 4
+local SIZEOF_IMAGE_FILE_SIZE :: 4
+
+local ICON_TYPE: Table(int, string) : {
+	[16]   = "icp4", -- Supported OS version: 10.7
+	[32]   = "icp5", -- Supported OS version: 10.7
+	[64]   = "icp6", -- Supported OS version: 10.7
+	[128]  = "ic07", -- Supported OS version: 10.7
+	[256]  = "ic08", -- Supported OS version: 10.5
+	[512]  = "ic09", -- Supported OS version: 10.5
+	[1024] = "ic10", -- Supported OS version: 10.7
+}
+
+export create :: (outputPath:string, imageFiles:[]ImageFile) -> (success:bool, err:string) {
+	if not imageFiles  return false, "File list is empty."
+
+	for imageFiles  if ICON_TYPE[it.size] == NULL {
+		return false, format("Unsupported image size '%d'.", it.size)
+	}
+
+	local fileDatas: []string
+	local totalSize = SIZEOF_SIGNATURE + SIZEOF_TOTAL_SIZE
+
+	for imageFiles {
+		local ok, contents, err = io.readEntireFile(it.path)
+		if not ok  return false, err
+
+		fileDatas[itIndex]  = contents
+		totalSize          += #contents
+	}
+
+	local buffer: []string
+
+	insert  (buffer, "icns")
+	writeInt(buffer, totalSize, SIZEOF_TOTAL_SIZE)
+
+	for imageFiles {
+		local iconType = ICON_TYPE[it.size]
+		insert  (buffer, iconType)
+		writeInt(buffer, #fileDatas[itIndex], SIZEOF_IMAGE_FILE_SIZE)
+		insert  (buffer, fileDatas[itIndex])
+	}
+
+	local ok, err = io.writeEntireFile(outputPath, concatinate(buffer))
+	return ok, err
+}
+
+local writeInt :: (buffer:[]string, n:int, bytes:int) {
+	local byteToString :: (byte:int) -> string !foreign lua "string.char"
+
+	for pow = bytes-1, 0, -1 {
+		local c = byteToString((n // 256^pow) % 256)
+		insert(buffer, c)
+	}
+}
