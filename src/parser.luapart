@@ -1136,6 +1136,8 @@ function _G.parseStruct(state, parent)
 		!ERROR_OR_RETURN `errorParsingAfterPrevious(state, "Expected '{'.")`
 	end
 
+	-- local takenNames = {} -- Doesn't work because of overloads!
+
 	-- Note: We allow a trailing comma/semicolon after the last member.
 	while true do
 		tokType, tokValue         = peekNextToken(state, 1)
@@ -1186,6 +1188,16 @@ function _G.parseStruct(state, parent)
 			local declType = !(DECLARATION_STRUCT)
 			!DO_OR_RETURN `parseDeclarationStatement(state, struct, false, declType)`
 			parsedDecl     = getLast(struct.declarations)
+
+			-- if takenNames[parsedDecl.name.name] then
+			-- 	!ERROR_OR_RETURN `
+			-- 		printerr()
+			-- 		parserMessage(io.stderr, state, parsedDecl.token,                       "Error", "Duplicate member '%s' in struct.", parsedDecl.name.name)
+			-- 		parserMessage(io.stderr, state, takenNames[parsedDecl.name.name].token, "Info",  "...previous declaration here.")
+			-- 		exitFailure()
+			-- 	`
+			-- end
+			-- takenNames[parsedDecl.name.name] = parsedDecl
 		end
 
 		local token
@@ -1230,6 +1242,8 @@ function _G.parseEnum(state, parent)
 		end
 	end
 
+	-- local takenNames = {} -- Doesn't work because of overloads!
+
 	-- Note: We allow a trailing comma/semicolon after the members.
 	while true do
 		local declType = !(DECLARATION_ENUM)
@@ -1241,6 +1255,16 @@ function _G.parseEnum(state, parent)
 
 		local parsedDecl = getLast(enum.declarations)
 		!DO_OR_RETURN_FALSE `parseNotes(state, parsedDecl)`
+
+		-- if takenNames[parsedDecl.name.name] then
+		-- 	!ERROR_OR_RETURN `
+		-- 		printerr()
+		-- 		parserMessage(io.stderr, state, parsedDecl.token,                       "Error", "Duplicate member '%s' in enum.", parsedDecl.name.name)
+		-- 		parserMessage(io.stderr, state, takenNames[parsedDecl.name.name].token, "Info",  "...previous declaration here.")
+		-- 		exitFailure()
+		-- 	`
+		-- end
+		-- takenNames[parsedDecl.name.name] = parsedDecl
 
 		if maybeMoreStatements then
 			-- Continue the loop.
@@ -1583,7 +1607,7 @@ function _G.parseDeclarationStatement(state, scope, imperative, declType)
 			errorParsing(state, nameListStartToken-1, "Declaration statement has no new declarations - only previous declarations are used.")
 		end
 	end
-	!ifDEBUG `declNames = nil`
+	!ifDEBUG `declNames = nil` -- We should only use 'declarations' after this point.
 
 	--
 	-- Everything's done! Now we can modify the scope.
@@ -3878,7 +3902,7 @@ do
 			local dependency = queued.waitingOn
 			if dependency then
 				write(" w:", DEPEND_TITLES[dependency.dependType])
-				if !!(CONST_SET{ DEPEND_NODE_INFERRED, DEPEND_NODE_PASSED_INFER, DEPEND_NODE_PASSED_EMIT })[dependency.dependType] then
+				if !!(CONST_SET{ DEPEND_HAS_DECLARATION, DEPEND_NODE_INFERRED, DEPEND_NODE_PASSED_INFER, DEPEND_NODE_PASSED_EMIT })[dependency.dependType] then
 					write(":", dependency.dependOn.node.s)
 				end
 			end
@@ -3943,6 +3967,7 @@ do
 				if decl.assignment       then  write(" (assignment ", decl.assignment.s, " i=", decl.assignmentIndex, ")")  end
 				write(" (", (DECL_KIND_TITLES[decl.kind] or "?"))
 				if decl.valueTypeInfo    then  write(", typeRepresented=", getFriendlyTypeInfoName(decl.valueTypeInfo))  end
+				if decl.overloads[1]     then  write(", overloads=", #decl.overloads)  end
 				write(")")
 
 				!!(CHILD_PRINT_START)

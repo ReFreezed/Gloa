@@ -938,10 +938,34 @@ local function getEarlyAndLateForRedeclarationError(state, identEarly, identLate
 	return identEarly, identLate, extraMessageEarly, extraMessageLate
 end
 
-local function checkRedeclaration(state, ident, decl, isMember, scope)
+-- okToContinue, encounteredIdentifierWithMissingDeclaration = makeSureConstantIdentifierChainHasAllDeclarationsSet( state, declaration, dependent )
+local function makeSureConstantIdentifierChainHasAllDeclarationsSet(state, decl0, dependent)
+	local decl = decl0
+
+	while true do
+		if not isDeclarationConstant(decl) then  return true, nil  end
+
+		local ident = decl.value
+		if not ident                           then  return true, nil  end -- Will trigger an error later. Constant declarations must have values.
+		if ident.nodeType ~= !(AST_IDENTIFIER) then  return true, nil  end
+
+		decl = ident.declaration
+		if not decl then
+			return true, ident -- Good? 2020-06-10
+			-- !DEPEND_AND_RETURN(`dependent`, DEPEND_HAS_DECLARATION, `ident`, nil, `false, ident`)
+		end
+
+		if decl == decl0 then
+			typeError(state, ident, "Constant name recursively refers to itself.") -- @UX: Better error explanation.
+		end
+	end
+end
+
+-- checkRedeclarationAndMaybeAddOverload( state, ident, decl, isMember, scope, declExisting=findDeclaration(...) )
+local function checkRedeclarationAndMaybeAddOverload(state, ident, decl, isMember, scope, declExisting)
 	decl.checkedRedeclaration = true
 
-	local declExisting = findDeclaration(state, ident, ident.name, decl)
+	declExisting = declExisting or findDeclaration(state, ident, ident.name, decl)
 	if not declExisting then  return  end
 	!ASSERT `declExisting ~= decl`
 
@@ -954,8 +978,8 @@ local function checkRedeclaration(state, ident, decl, isMember, scope)
 	-- Function overload. (Note: Overloads have to be registered before the identifier DEPEND_AND_RETURN on anything.)
 	elseif
 		isDeclarationConstant(decl) and isDeclarationConstant(declExisting)
-		and !!(CONST_SET{ AST_LAMBDA, AST_VARIANT_OF })[followIdentifiersToConstantValue(decl        .value).nodeType]
-		and !!(CONST_SET{ AST_LAMBDA, AST_VARIANT_OF })[followIdentifiersToConstantValue(declExisting.value).nodeType]
+		and !!(CONST_SET{ AST_LAMBDA, AST_VARIANT_OF })[followIdentifiersToConstantValue(state, decl        .value).nodeType]
+		and !!(CONST_SET{ AST_LAMBDA, AST_VARIANT_OF })[followIdentifiersToConstantValue(state, declExisting.value).nodeType]
 	then
 		declExisting = getOverloadBase(declExisting) or declExisting
 
@@ -981,19 +1005,28 @@ local function checkRedeclaration(state, ident, decl, isMember, scope)
 			)
 
 		else
+			if decl.kind ~= declExisting.kind then
+				typeError2(state,
+					decl,         F("Overloaded names must have the same visibility. This one is '%s'.", DECL_KIND_TITLES[decl.kind]),
+					declExisting, F("...and this one is '%s'.", DECL_KIND_TITLES[declExisting.kind])
+				)
+			end
+			if declExisting.name.inferredType then
+				typeError2(state,
+					decl,         F("Internal error: Trying to add overload to already inferred function '%s'. Currently all overloads have to be added during the same cycle. (This message is probably not very helpful. Sorry!)", ident.name),
+					declExisting, F("...here is the inferred function.")
+				)
+			end
+
 			decl.overloadOf = declExisting
 			table.insert(declExisting.overloads, decl)
 
-			local lambdaOrVariantOf         = followIdentifiersToConstantValue(decl.value)
-			local lambdaOrVariantOfExisting = followIdentifiersToConstantValue(declExisting.value)
-
-			assert(not lambdaOrVariantOfExisting.inferredType)
-
-			-- This dependency means lambdaOrVariantOfExisting won't get inferred until earliest next
-			-- cycle by which time all overloads should have been added (I think). This should work as
-			-- the first occurence of a name will make the second occurence wait before the second has
-			-- been able to do anything. (This is true even when we remove unordered from the queue.)
-			addDependency(state, lambdaOrVariantOfExisting, !(DEPEND_NODE_INFERRED), lambdaOrVariantOf)
+			-- This dependency means declExisting won't get inferred until earliest next
+			-- cycle by which time all overloads should have been added (I think). This
+			-- should work as the first occurence of a name will make the second occurence
+			-- wait before the second has been able to do anything. (This is true even
+			-- when we remove unordered from the queue.)
+			addDependency(state, declExisting.name, !(DEPEND_NODE_INFERRED), ident)
 		end
 
 	-- Non-shadow.
@@ -1043,7 +1076,10 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 	local container = identOrVararg.queued.container
 
 	-- 0. Things to ignore.  @Cleanup
-	if ident and parent.nodeType == !(AST_CALL) and container ~= parent and container ~= parent.arguments and identOrVararg.queued.key == "key" and indexOf(parent.argumentsNamed, container) then
+	if
+		-- Keys in named args in calls:
+		(ident and parent.nodeType == !(AST_CALL) and container ~= parent and container ~= parent.arguments and identOrVararg.queued.key == "key" and indexOf(parent.argumentsNamed, container))
+	then
 		moveToNextRelevantPipe(state, ident)
 		return
 	end
@@ -1060,6 +1096,7 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 
 			identOrVararg.declaration = decl
 			identOrVararg.fromUsing   = using
+			fulfillDependencies(state, identOrVararg, !(DEPEND_HAS_DECLARATION))
 		end
 
 		if
@@ -1130,7 +1167,7 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 			moveToNextRelevantPipe(state, identOrVararg)
 			if
 				ident
-				and isDeclarationConstant(decl) and followIdentifiersToConstantValue(ident).nodeType ~= !(AST_TABLE) -- Not sure how robust this is. @Robustness
+				and isDeclarationConstant(decl) and followIdentifiersToConstantValue(state, ident).nodeType ~= !(AST_TABLE) -- Not sure how robust this is. @Robustness
 			then
 				simplifyExpressionIfConstant(state, ident)
 			end
@@ -1166,8 +1203,33 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 	local isMember     = isEnumMember or scope.nodeType == !(AST_STRUCT)
 
 	-- Check for redeclaration/shadowing (before we DEPEND_AND_RETURN).
-	if not (decl.checkedRedeclaration or decl.isDocumentation or vararg) then
-		checkRedeclaration(state, ident, decl, isMember, scope)
+	if ident and not (decl.checkedRedeclaration or decl.isDocumentation) then
+		local okToContinue, identWithoutDecl = makeSureConstantIdentifierChainHasAllDeclarationsSet(state, decl, ident)
+		if not okToContinue then  return  end
+
+		if identWithoutDecl then
+			-- where(state, ident) ; where(state, identWithoutDecl) ; print("================")
+
+			-- !DEPEND_AND_RETURN(`ident`, DEPEND_HAS_DECLARATION, `identWithoutDecl`) -- Seemingly not needed.
+
+			-- void  Let the/some other identifier in the chain call checkRedeclarationAndMaybeAddOverload() instead. (Is this always working?)
+
+		else
+			local declExisting = findDeclaration(state, ident, ident.name, decl)
+
+			if declExisting and declExisting.value then
+				okToContinue, identWithoutDecl = makeSureConstantIdentifierChainHasAllDeclarationsSet(state, declExisting, ident)
+				if not okToContinue then  return  end
+
+				if identWithoutDecl then
+					!DEPEND_AND_RETURN(`ident`, DEPEND_HAS_DECLARATION, `identWithoutDecl`) -- Important for redeclaration stuff to work.
+				end
+			end
+
+			if declExisting then
+				checkRedeclarationAndMaybeAddOverload(state, ident, decl, isMember, scope, declExisting)
+			end
+		end
 	end
 
 	local typeExpr = decl.type
@@ -1201,14 +1263,14 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 	if decl.overloadOf == decl then
 		for i = 1, #decl.overloads-1 do
 			local decl1     = decl.overloads[i]
-			local lambda1   = followIdentifiersToConstantValue(decl1.value)
+			local lambda1   = followIdentifiersToConstantValue(state, decl1.value)
 			local args1     = lambda1.argumentsIn and lambda1.argumentsIn.arguments
 			local funcSig1  = lambda1.inferredType
 			local argTypes1 = funcSig1.argumentTypesIn
 
 			for i = i+1, #decl.overloads do
 				local decl2     = decl.overloads[i]
-				local lambda2   = followIdentifiersToConstantValue(decl2.value)
+				local lambda2   = followIdentifiersToConstantValue(state, decl2.value)
 				local args2     = lambda2.argumentsIn and lambda2.argumentsIn.arguments
 				local funcSig2  = lambda2.inferredType
 				local argTypes2 = funcSig2.argumentTypesIn
@@ -1595,6 +1657,7 @@ end
 	typeNode.representedType = typeInfoRepresented or errorInternal()
 	typeNode.inferredType    = typeInfo            or errorInternal()
 	typeNode.declaration     = decl
+	fulfillDependencies(state, typeNode, !(DEPEND_HAS_DECLARATION))
 
 	moveToNextRelevantPipe(state, typeNode)
 end
@@ -1639,7 +1702,7 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 		isCallingConstantName = isDeclarationConstant(calleeDecl)
 
 		if isCallingConstantName then
-			constLambda = followIdentifiersToConstantValue(calleeDecl.value)
+			constLambda = followIdentifiersToConstantValue(state, calleeDecl.value)
 			!ASSERT("constLambda.nodeType == "..AST_LAMBDA)
 			!ASSERT("constLambda.inferredType")
 		end
@@ -2837,7 +2900,7 @@ end
 	local constLambda = nil
 
 	if isCallingConstantNameOrDeclaredType then
-		constLambda = followIdentifiersToConstantValue(callee.declaration.value)
+		constLambda = followIdentifiersToConstantValue(state, callee.declaration.value)
 
 		if constLambda.nodeType ~= !(AST_LAMBDA) then
 			!ifDEBUG`
@@ -3568,7 +3631,7 @@ end
 			assert(indexLiteral.nodeType == !(AST_LITERAL))
 			local i = indexLiteral.value
 
-			local tableNode = followIdentifiersToConstantValue(access.object)
+			local tableNode = followIdentifiersToConstantValue(state, access.object)
 			assert(tableNode.nodeType == !(AST_TABLE))
 
 			local itemExpr = nil
@@ -4322,7 +4385,7 @@ end
 	end
 
 	local lambda = decl.value or errorInternal(state, decl)
-	lambda       = followIdentifiersToConstantValue(lambda)
+	lambda       = followIdentifiersToConstantValue(state, lambda)
 
 	!ASSERT("lambda.nodeType == "..AST_LAMBDA)
 
@@ -5037,7 +5100,8 @@ end
 	if branchToUse and branchToUse.declarations[1] then
 		for _, decl in ipairs(scope.declarations) do
 			if not newlyDeclared[decl] and newlyDeclared[decl.name.name] and decl.token > staticIf.token and decl.queued.pipe > !(PIPE_INFER) then
-				checkRedeclaration(state, decl.name, decl, false, scope)
+				-- @Robustness: Do we need to call makeSureConstantIdentifierChainHasAllDeclarationsSet() here?
+				checkRedeclarationAndMaybeAddOverload(state, decl.name, decl, false, scope, nil)
 			end
 		end
 	end
@@ -5327,7 +5391,7 @@ end
 						typeError(state, decl, "This declaration is overloaded which is currently not supported for default iterators.")
 					end
 
-					local iterLambda   = followIdentifiersToConstantValue(decl.value)
+					local iterLambda   = followIdentifiersToConstantValue(state, decl.value)
 					local iterTypeInfo = iterLambda.inferredType
 
 					if iterTypeInfo.tag ~= !(TYPE_FUNCTION) then
@@ -6959,7 +7023,7 @@ local function simplifyCast(state, cast)
 
 	-- array -> bool
 	elseif exprTypeInfo.tag == !(TYPE_ARRAY) and castTypeInfo.tag == !(TYPE_BOOL) then
-		local tableNode = followIdentifiersToConstantValue(cast.expression)
+		local tableNode = followIdentifiersToConstantValue(state, cast.expression)
 		assert(tableNode.nodeType == !(AST_TABLE))
 
 		local literal        = astNewNode(AstLiteral, cast.token, cast.parent)
@@ -6980,7 +7044,7 @@ local function simplifyCast(state, cast)
 		assert(ident.nodeType == !(AST_IDENTIFIER)) -- All enums should have been simplified to identifiers.
 
 		!ASSERT `isDeclarationConstant(ident.declaration)`
-		local valueExpr = followIdentifiersToConstantValue(ident)
+		local valueExpr = followIdentifiersToConstantValue(state, ident)
 
 		if BUILTIN_TYPE_TAG_TO_LITERAL_TYPE[castTypeInfo.tag] then
 			local literal = valueExpr
@@ -7102,7 +7166,7 @@ local function simplifyUnary(state, unary)
 		moveToNextRelevantPipe(state, literal, !(PIPE_INFER))
 
 	elseif unary.operation == "#" then
-		local valueExpr = followIdentifiersToConstantValue(unary.expression)
+		local valueExpr = followIdentifiersToConstantValue(state, unary.expression)
 		local length    = 0
 
 		if valueExpr.nodeType == !(AST_TABLE) then
@@ -7230,8 +7294,8 @@ local function simplifyBinary(state, binary)
 			valueR = r.value
 
 		else
-			valueL = followIdentifiersToConstantValue(l)
-			valueR = followIdentifiersToConstantValue(r)
+			valueL = followIdentifiersToConstantValue(state, l)
+			valueR = followIdentifiersToConstantValue(state, r)
 			!ASSERT("valueL.nodeType == valueR.nodeType")
 		end
 
@@ -7864,11 +7928,31 @@ end
 
 
 -- Note: The expression must be constant!
-function _G.followIdentifiersToConstantValue(constExpr)
+function _G.followIdentifiersToConstantValue(state, constExpr0)
+	local constExpr = constExpr0
+
 	while constExpr.nodeType == !(AST_IDENTIFIER) do
 		local decl = constExpr.declaration
-		constExpr  = decl.value or errorInternal()
+		if not decl then
+			typeError2(state,
+				constExpr,  F("Internal error: Missing declaration reference for '%s'.", constExpr.name),
+				-- constExpr,  F("Internal error: Missing declaration reference for '%s'. (There may possibly be an undeclared identifier involved or a circular dependency.)", constExpr.name),
+				constExpr0, F("...here is the initial identifier.")
+			)
+		end
+
+		constExpr = decl.value or errorInternal(state, decl, "Missing value for declaration which is expected to be constant.")
+
+		if constExpr == constExpr0 then
+			-- !ifDEBUG `astPrintTree(decl)`
+			-- !ifDEBUG `where(state, decl)`
+			typeError2(state,
+				constExpr, F("Recursive constant identifier."),
+				decl,      F("...here is the declaration.")
+			)
+		end
 	end
+
 	return constExpr
 end
 
@@ -7938,8 +8022,8 @@ end
 
 -- Note: The expressions must already be inferred!
 function _G.areConstantTreesEqual(state, expr1, expr2)
-	expr1 = followIdentifiersToConstantValue(expr1)
-	expr2 = followIdentifiersToConstantValue(expr2)
+	expr1 = followIdentifiersToConstantValue(state, expr1)
+	expr2 = followIdentifiersToConstantValue(state, expr2)
 
 	if expr1 == expr2 then
 		return true

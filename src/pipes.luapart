@@ -35,6 +35,7 @@ local !struct"Dependency"{ -- @Cleanup: Rename to something with "wait"?
 
 -- addDependency( state, dependent, DEPEND_DECLARATION,          name [, scope ] )
 -- addDependency( state, dependent, DEPEND_MEMBER_DECLARATION,   name, scope )
+-- addDependency( state, dependent, DEPEND_HAS_DECLARATION,      identifier )
 -- addDependency( state, dependent, DEPEND_NODE_INFERRED,        astNode )
 -- addDependency( state, dependent, DEPEND_NODE_PASSED_INFER,    astNode )
 -- addDependency( state, dependent, DEPEND_NODE_PASSED_EMIT,     astNode )
@@ -48,7 +49,7 @@ function _G.addDependency(state, dependent, dependType, dependOn, extraData)
 		elseif dependType == !(DEPEND_MEMBER_DECLARATION) then
 			!ASSERT `type(dependOn)  == "string"`
 			!ASSERT `type(extraData) == "table"`
-		elseif !!(CONST_SET{ DEPEND_NODE_INFERRED, DEPEND_NODE_PASSED_INFER, DEPEND_NODE_PASSED_EMIT, DEPEND_STRUCT_MEMBERS_READY, DEPEND_CONSTANT_READY })[dependType] then
+		elseif !!(CONST_SET{ DEPEND_HAS_DECLARATION, DEPEND_NODE_INFERRED, DEPEND_NODE_PASSED_INFER, DEPEND_NODE_PASSED_EMIT, DEPEND_STRUCT_MEMBERS_READY, DEPEND_CONSTANT_READY })[dependType] then
 			!ASSERT `type(dependOn)  == "table"`
 		else
 			errorInternal("%d", dependType)
@@ -65,7 +66,7 @@ function _G.addDependency(state, dependent, dependType, dependOn, extraData)
 			!ifDEBUG `astPrint(dependent)`
 			nodeMessage(io.stderr, state, dependent, "Error", "Pipes", "Internal compiler error: Trying to add dependency twice. (%s)", (DEPEND_TITLES[dependType] or "?"))
 
-			if !!(CONST_SET{ DEPEND_NODE_INFERRED, DEPEND_NODE_PASSED_INFER, DEPEND_NODE_PASSED_EMIT })[dependType] then
+			if !!(CONST_SET{ DEPEND_HAS_DECLARATION, DEPEND_NODE_INFERRED, DEPEND_NODE_PASSED_INFER, DEPEND_NODE_PASSED_EMIT })[dependType] then
 				!ifDEBUG `astPrint(dependOn)`
 				nodeMessage(io.stderr, state, dependOn, "Info", "Pipes", "...depending on this.")
 			end
@@ -80,7 +81,7 @@ function _G.addDependency(state, dependent, dependType, dependOn, extraData)
 	dependent        = dependent.queued
 	local dependency = Dependency()
 
-	if !!(CONST_SET{ DEPEND_NODE_INFERRED, DEPEND_NODE_PASSED_INFER, DEPEND_NODE_PASSED_EMIT })[dependType] then
+	if !!(CONST_SET{ DEPEND_HAS_DECLARATION, DEPEND_NODE_INFERRED, DEPEND_NODE_PASSED_INFER, DEPEND_NODE_PASSED_EMIT })[dependType] then
 		assert(dependent ~= dependOn.node)
 		dependOn = dependOn.queued or errorInternal(state, dependOn)
 		-- assert(not itemWith3(dependOn.waiters, "dependent",dependent, "dependType",dependType, "dependOn",dependOn))
@@ -122,6 +123,8 @@ function _G.addDependency(state, dependent, dependType, dependOn, extraData)
 				print(dependOn)
 			elseif dependType == !(DEPEND_MEMBER_DECLARATION) then
 				print(dependOn)
+			elseif dependType == !(DEPEND_HAS_DECLARATION) then
+				astPrint(dependOn.node)
 			elseif dependType == !(DEPEND_NODE_INFERRED) then
 				astPrint(dependOn.node)
 			elseif dependType == !(DEPEND_NODE_PASSED_INFER) then
@@ -157,7 +160,7 @@ end
 function _G.getExistingDependency(state, dependent, dependType, dependOn)
 	dependent = dependent.queued
 
-	if !!(CONST_SET{ DEPEND_NODE_INFERRED, DEPEND_NODE_PASSED_INFER, DEPEND_NODE_PASSED_EMIT })[dependType] then
+	if !!(CONST_SET{ DEPEND_HAS_DECLARATION, DEPEND_NODE_INFERRED, DEPEND_NODE_PASSED_INFER, DEPEND_NODE_PASSED_EMIT })[dependType] then
 		dependOn = dependOn.queued
 	end
 
@@ -844,7 +847,7 @@ function _G.errorPipesAreInfiniteLooping(state, finalPipe)
 				astPrint(queued.node)
 			!end
 
-			if dependency and !!(CONST_SET{ DEPEND_NODE_INFERRED, DEPEND_NODE_PASSED_INFER, DEPEND_NODE_PASSED_EMIT })[dependency.dependType] then
+			if dependency and !!(CONST_SET{ DEPEND_HAS_DECLARATION, DEPEND_NODE_INFERRED, DEPEND_NODE_PASSED_INFER, DEPEND_NODE_PASSED_EMIT })[dependency.dependType] then
 				!if INFINITE_LOOP_PRINT_CONTEXT then
 					astPrint(dependency.dependOn.node)
 					nodeMessage(io.stderr, state, dependency.dependOn.node, "Debug", nil, "...waiting on this.")
@@ -912,7 +915,7 @@ function _G.outputDependencyGraph(state)
 						local name = dependency.dependOn
 						file:write(" --|> (Name ", name, ")")
 
-					elseif !!(CONST_SET{ DEPEND_NODE_INFERRED, DEPEND_NODE_PASSED_INFER, DEPEND_NODE_PASSED_EMIT })[dependency.dependType] then
+					elseif !!(CONST_SET{ DEPEND_HAS_DECLARATION, DEPEND_NODE_INFERRED, DEPEND_NODE_PASSED_INFER, DEPEND_NODE_PASSED_EMIT })[dependency.dependType] then
 						local nodeOther = dependency.dependOn.node
 						file:write(" --|> ")
 						writeNode(nodeOther)

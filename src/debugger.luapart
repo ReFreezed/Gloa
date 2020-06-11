@@ -209,6 +209,7 @@ if not debug.gethook() then
 		if ln == -1 or (ln == lnLast) then  return  end
 
 		if runUntilLn > 0 and ln ~= runUntilLn then
+			lnLast = ln
 			return
 		else
 			runUntilLn = 0
@@ -220,6 +221,7 @@ if not debug.gethook() then
 		-- end
 
 		if #stack >= ignoreStackDepth then
+			lnLast = ln
 			return
 		else
 			ignoreStackDepth = math.huge
@@ -234,6 +236,7 @@ if not debug.gethook() then
 			io.stdout:write("\n(R)esume  (N)extLine Step(I)n Step(O)ut RunUntil(G)  (L)ocals (U)pvalues  (V)iewSource  (Q)uit\n")
 
 			local input = io.stdin:read"*l"
+			if not input then  errorLine("Debugger", "No stdin.")  end
 
 			if input == "" then
 				printLocation(stack, lines, event, ln, ln1, ln2, lnColumnWidth)
@@ -286,6 +289,16 @@ if not debug.gethook() then
 
 			elseif input == "q" then
 				os.exit(99)
+
+			elseif input:find"^>" then
+				local chunk, err = loadstring(input:sub(2))
+				if not chunk then
+					printerr(err)
+				else
+					setfenv(chunk, _G)
+					local ok, err = pcall(chunk)
+					if not ok then  printerr(err)  end
+				end
 
 			elseif input:find"^=" or #input >= 2 then
 				local targetPath = input:gsub("^=", "")
