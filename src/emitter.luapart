@@ -170,7 +170,7 @@ function _G.allocateConstantForExpressionIfNew(state, expr, dependent)
 	elseif nodeType == !(AST_LAMBDA) then
 		local lambda = expr
 		assert(lambda.body) -- We should never get here for lambdas without bodies as those would have been AstTypes.
-		assert(not lambda.isPolymorphic)
+		if lambda.isPolymorphic then  errorInternal(state, lambda, "Cannot allocate constant for polymorphic function.")  end
 
 		local isNew
 		lambda.valueConstant, isNew = allocateConstantIfNew(state, !(CONST_KIND_NORMAL), typeInfo, lambda, dependent)
@@ -385,9 +385,10 @@ function _G.emitDeclaration(state, decl)
 	-- @Robustness: We should probably use shouldDeclarationValueDefinitivelyBeConstant() here somewhere.
 
 	if isDeclarationConstant(decl) then
-		local valueExpr = decl.value or errorInternal(state, decl) -- Note: We don't call followIdentifiersToConstantValue() here!
+		local valueExpr      = decl.value or errorInternal(state, decl) -- Note: We don't call followIdentifiersToConstantValue() here! (Because of enums, I think. 2020-06-11)
+		local valueExprFinal = followIdentifiersToConstantValue(state, valueExpr) -- We do need to know of polymorphic functions though, at least currently. 2020-06-11
 
-		if valueExpr.nodeType == !(AST_LAMBDA) and valueExpr.isPolymorphic then
+		if valueExprFinal.nodeType == !(AST_LAMBDA) and valueExprFinal.isPolymorphic then
 			-- @Cleanup: moveToNextRelevantPipe() should prevent us from getting here.
 			moveToPipe(state, decl, !(PIPE_DONE))
 			return
@@ -483,7 +484,7 @@ function _G.emitNode(state, node)
 	elseif nodeType == !(AST_LAMBDA) then
 		local lambda = node
 		assert(lambda.body)
-		assert(not lambda.isPolymorphic)
+		if lambda.isPolymorphic then  errorInternal(state, lambda, "Cannot allocate constant for polymorphic function.")  end
 		emitLambda(state, lambda) -- Calls moveToPipe().
 
 	elseif nodeType == !(AST_DECLARATION) then
