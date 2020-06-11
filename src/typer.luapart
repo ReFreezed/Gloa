@@ -1105,7 +1105,7 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 			or (parent.nodeType == !(AST_LOCATION))
 			or (parent.nodeType == !(AST_CALL)        and ident == parent.callee)
 			or (parent.nodeType == !(AST_DEBUG)       and parent.action == "print")
-			or (parent.nodeType == !(AST_DECLARATION) and isDeclarationConstant(parent) and ident == parent.value)
+			or (parent.nodeType == !(AST_DECLARATION) and isDeclarationConstant(parent) and ident == parent.value) -- Note: Declarations do their own validation of the identifier in this case.
 		then
 			-- void
 
@@ -3186,6 +3186,17 @@ end
 			end
 		end
 
+		if isConst and valueExpr.nodeType == !(AST_IDENTIFIER) and not valueExpr.fromVariant then
+			local declNext = valueExpr.declaration
+
+			if declNext.overloadOf then
+				typeError2(state,
+					valueExpr, F("Cannot refer to overloaded names outside calls."),
+					declNext,  F("...here is one of the overloaded declarations.")
+				)
+			end
+		end
+
 	elseif not (
 		doesTypeHaveAnyDefaultValue(typeInfo)
 		-- Ignore missing values for arguments (which are then required arguments).
@@ -3694,7 +3705,7 @@ end
 			checkForStaticAccessThatUsesWhatLooksLikeRuntimeCode(state, access.object, access.member)
 		end
 
-		local valueExpr = constDecl.value
+		local valueExpr = followIdentifiersToConstantValue(state, constDecl.value)
 		local nodeType  = valueExpr.nodeType
 		local replacement
 
@@ -4404,9 +4415,11 @@ end
 		)
 	end
 
-	local replacement = astCopy(ident, variant.token, variant.parent)
-	replaceQueuedNodeAndUnqueueOldTree(state, variant, replacement)
-	moveToNextRelevantPipe(state, replacement)
+	local identCopy       = astCopy(ident, variant.token, variant.parent)
+	identCopy.fromVariant = true
+
+	replaceQueuedNodeAndUnqueueOldTree(state, variant, identCopy)
+	moveToNextRelevantPipe(state, identCopy)
 end
 
 !NODE_INFERRER `function nodeInferrers.AstTypeInfo(state, typeInfoNode)`
