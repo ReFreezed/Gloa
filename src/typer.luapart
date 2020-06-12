@@ -1018,7 +1018,7 @@ local function checkRedeclarationAndMaybeAddOverload(state, ident, decl, isMembe
 				)
 			end
 
-			decl.overloadOf = declExisting
+			decl.overloadOf = declExisting.overloadOf or declExisting
 			table.insert(declExisting.overloads, decl)
 
 			-- This dependency means declExisting won't get inferred until earliest next
@@ -3122,6 +3122,18 @@ end
 		end
 	end
 
+	if valueExpr and isConst and valueExpr.nodeType == !(AST_IDENTIFIER) and not valueExpr.fromVariant then
+		local declBase = getOverloadBase(valueExpr.declaration)
+
+		if declBase and not declBase.name.inferredType then
+			!DEPEND_AND_RETURN(`decl`, DEPEND_NODE_INFERRED, `declBase`)
+		end
+	end
+
+	--
+	-- No more dependencies for this declaration after this point!
+	--
+
 	if valueExpr then
 		if valueExpr.inferredType.tag == !(TYPE_NAMESPACE) and not isConst then
 			typeError(state, valueExpr, "References to namespaces must be constant.")
@@ -3187,13 +3199,17 @@ end
 		end
 
 		if isConst and valueExpr.nodeType == !(AST_IDENTIFIER) and not valueExpr.fromVariant then
-			local declNext = valueExpr.declaration
+			local ident    = valueExpr
+			local declBase = getOverloadBase(ident.declaration)
 
-			if declNext.overloadOf then
-				typeError2(state,
-					valueExpr, F("Cannot refer to overloaded names outside calls."),
-					declNext,  F("...here is one of the overloaded declarations.")
-				)
+			if declBase then
+				if decl.overloadOf then
+					typeError2(state,
+						decl,     F("Cannot overload aliases of already overloaded names."),
+						declBase, F("...here is one of the overloads for '%s'.", ident.name)
+					)
+				end
+				decl.overloadOf = declBase -- Note: We don't add decl as an overload itself.
 			end
 		end
 
@@ -8092,14 +8108,16 @@ end
 
 
 function _G.getOverloadBase(decl)
-	decl = decl.overloadOf
-	if not decl then  return nil  end
+	return decl.overloadOf -- We currently don't keep any chains. 2020-06-12
 
-	while decl.overloadOf and decl.overloadOf ~= decl do
-		decl = decl.overloadOf
-	end
+	-- decl = decl.overloadOf
+	-- if not decl then  return nil  end
 
-	return decl
+	-- while decl.overloadOf and decl.overloadOf ~= decl do
+	-- 	decl = decl.overloadOf
+	-- end
+
+	-- return decl
 end
 
 

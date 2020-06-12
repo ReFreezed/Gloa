@@ -754,12 +754,25 @@ local function concatNamesInArgumentGroupForError(argsInGroup)
 	return table.concat(names, "', '", 1, #names-1) .. "' and '" .. names[#names]
 end
 
-function _G.parseArguments(state, parent, isInput)
+function _G.parseArguments(state, parent, isInput, allowVoid)
+	-- Note: We assume the '(' has been eaten already.
+
 	local args            = astNewNode(AstArguments, state.nextToken, parent)
 	local takenNames      = {}
 	local gotVararg       = false
 	local gotDefaultValue = false
-	local tokType, tokValue, token
+
+	local tokType, tokValue = peekNextToken(state)
+
+	if isToken(tokType,tokValue, !(TOKEN_KEYWORD),"void") then
+		eatNextToken(state) -- 'void'
+
+		if not allowVoid then
+			!ERROR_OR_RETURN `errorParsingLast(state, "Cannot use 'void' here.")`
+		end
+
+		return args
+	end
 
 	for groupN = 1, math.huge do
 		-- Argument name(s).
@@ -866,9 +879,17 @@ function _G.parseArguments(state, parent, isInput)
 			end
 		end
 
+		local tokType2, tokValue2 = peekNextToken(state, 2)
+
 		-- Type(s).
-		if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),":") then
-			eatNextToken(state)
+		if not isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),":") then
+			-- void
+
+		elseif isToken(tokType2,tokValue2, !(TOKEN_PUNCTUATION),"=") then
+			eatNextToken(state) -- ':'
+
+		else
+			eatNextToken(state) -- ':'
 
 			local hasPlaceholders = false
 			token                 = state.nextToken
@@ -1091,8 +1112,13 @@ function _G.parseStruct(state, parent)
 	local tokType, tokValue = eatNextToken(state)
 
 	if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"(") then
+		tokType, tokValue = peekNextToken(state)
+		if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),")") or isToken(tokType,tokValue, !(TOKEN_KEYWORD),"void") then
+			!ERROR_OR_RETURN `errorParsingNext(state, "Polymorphic structs cannot have an empty argument list.")`
+		end
+
 		struct.isPolymorphic       = true
-		!SET_OR_RETURN `local args = parseArguments(state, struct, true)`
+		!SET_OR_RETURN `local args = parseArguments(state, struct, true, false)`
 
 		local gotError = false
 
@@ -2785,7 +2811,7 @@ function _G.parseLambda(state, parent)
 		eatNextToken(state)
 
 	else
-		!SET_OR_RETURN `local args = parseArguments(state, lambda, true)`
+		!SET_OR_RETURN `local args = parseArguments(state, lambda, true, true)`
 		lambda.argumentsIn         = args
 
 		local takenNames = {}
@@ -2889,7 +2915,7 @@ function _G.parseLambda(state, parent)
 	tokType, tokValue = peekNextToken(state)
 
 	if isToken(tokType,tokValue, !(TOKEN_PUNCTUATION),"->") then
-		eatNextToken(state)
+		eatNextToken(state) -- '->'
 
 		local argsOutStartToken = state.nextToken
 		local args              = nil
@@ -2900,7 +2926,7 @@ function _G.parseLambda(state, parent)
 
 		-- (...) -> void
 		if isToken(tokType,tokValue, !(TOKEN_KEYWORD),"void") then
-			eatNextToken(state)
+			eatNextToken(state) -- 'void'
 
 		-- (...) -> ()
 		elseif
@@ -2917,10 +2943,10 @@ function _G.parseLambda(state, parent)
 				or isToken(tokType2,tokValue2, !(TOKEN_PUNCTUATION),"...","_","$") -- '$' is just for a better error message. Output arguments cannot be baked.
 			)
 		then
-			eatNextToken(state)
+			eatNextToken(state) -- '('
 			tokType, tokValue = peekNextToken(state)
 
-			!SET_OR_RETURN `args = parseArguments(state, lambda, false)`
+			!SET_OR_RETURN `args = parseArguments(state, lambda, false, true)`
 			!ASSERT `args.arguments[1]`
 
 			tokType, tokValue = eatNextToken(state)
@@ -3175,7 +3201,7 @@ function _G.parseExpression(state, parent, prevOpPrecedence, expectLvalue)
 			and (
 				isToken(tokType2,tokValue2, !(TOKEN_PUNCTUATION),")")
 				or isToken(tokType2,tokValue2, !(TOKEN_PUNCTUATION),"$")
-				or isToken(tokType2,tokValue2, !(TOKEN_KEYWORD),"using")
+				or isToken(tokType2,tokValue2, !(TOKEN_KEYWORD),"using","void")
 				or (
 					(
 						isToken(tokType2,tokValue2, !(TOKEN_IDENTIFIER)) or
