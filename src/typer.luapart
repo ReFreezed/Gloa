@@ -506,13 +506,6 @@ function _G.findDeclaration(state, startNode, name, declToIgnore)
 			end
 		end
 
-		-- @Speed: Loop slow. Lookup fast. Make it happen!
-		for _, decl in ipairs(scope.declarationsInTree[name] or EMPTY_TABLE) do
-			if decl ~= declToIgnore and canNodeSeeDeclaration(state, startNode, decl) then
-				return decl, nil
-			end
-		end
-
 		-- Don't cross any module boundary!
 		if scope.nodeType == !(AST_FILE_SCOPE) and scope.isModule then
 			break
@@ -527,31 +520,20 @@ end
 function _G.findPublicDeclarationInScope(state, scope, name)
 	!ASSERT `name`
 	if scope.nodeType == !(AST_FILE_SCOPE) or scope.nodeType == !(AST_NAMESPACE) then
-		for _, decl in ipairs(scope.declarations) do
-			if isDeclarationExported(decl) and decl.name.name == name then  return decl  end
-		end
+		local decl = scope.declarationsByName[name]
+		return decl and isDeclarationExported(decl) and decl or nil
 	else
-		for _, decl in ipairs(scope.declarations) do
-			if decl.name.name == name then  return decl  end
-		end
+		return scope.declarationsByName[name]
 	end
-	return nil
 end
 function _G.findMemberDeclaration(state, scope, name)
 	!ASSERT `name`
-	for _, decl in ipairs(scope.declarations) do
-		if decl.name.name == name then  return decl  end
-	end
-	return nil
+	return scope.declarationsByName[name]
 end
 function _G.findDynamicMemberDeclaration(state, scope, name)
 	!ASSERT `name`
-	for _, decl in ipairs(scope.declarations) do
-		if decl.name.name == name then
-			return decl.kind == !(DECL_KIND_LOCAL_VAR) and decl or nil
-		end
-	end
-	return nil
+	local decl = scope.declarationsByName[name]
+	return decl and decl.kind == !(DECL_KIND_LOCAL_VAR) and decl or nil
 end
 
 function _G.findDeclarationInEnumForValue(state, enum, constValueExpr)
@@ -572,90 +554,98 @@ function _G.findDeclarationInEnumForValue(state, enum, constValueExpr)
 	return nil
 end
 
-function _G.canNodeSeeDeclaration(state, node, decl)
-	-- It doesn't matter if this is true and we're in a declarative scope because we check that in the loop below.
-	local canSeeImperativeVariables = (decl.kind == !(DECL_KIND_LOCAL_VAR) --[[or decl.kind == !(DECL_KIND_READ_ONLY)]])
+do
+	local indexOf            = indexOf
+	local itemWith1Remember  = itemWith1Remember
+	local astFindParentScope = astFindParentScope
+	local isScopeDeclarative = isScopeDeclarative
 
-	local name                     = decl.name.name
-	local nodeScope, nodeStatement = astFindParentScope(node)
-	local nodeScope0               = nodeScope
+	function _G.canNodeSeeDeclaration(state, node, decl)
+		-- It doesn't matter if this is true and we're in a declarative scope because we check that in the loop below.
+		local canSeeImperativeVariables = (decl.kind == !(DECL_KIND_LOCAL_VAR) --[[or decl.kind == !(DECL_KIND_READ_ONLY)]])
 
-	if nodeStatement.nodeType == !(AST_DECLARATION) then
-		nodeStatement = nodeStatement.assignment or nodeStatement -- Not sure if needed. See :DeclarationAssignment
-	elseif nodeStatement.nodeType == !(AST_ARGUMENTS) then
-		nodeStatement = astFindParent1(node, !(AST_ARGUMENT)) or errorInternal()
-	end
+		local name                     = decl.name.name
+		local nodeScope, nodeStatement = astFindParentScope(node)
+		local nodeScope0               = nodeScope
 
-	while true do
-		if not indexOfRemember(nodeScope.declarations, nodeScope.declarations, decl) then
-			-- void  (Keep looking through parent scopes and update canSeeImperativeVariables as we go.)
-
-		-- Non-static declarations are always visible.
-		elseif not (decl.kind == !(DECL_KIND_LOCAL_VAR) --[[or decl.kind == !(DECL_KIND_READ_ONLY)]]) then
-			return true
-
-		-- Everything in declarative scopes is always visible EXCEPT (variable) struct members
-		-- (and enum members but those don't matter as they're always constant).
-		elseif isScopeDeclarative(nodeScope) then
-			return not (
-				nodeScope.nodeType == !(AST_STRUCT)
-				and nodeScope ~= nodeScope0
-			)
-
-		elseif not canSeeImperativeVariables then
-			return false
-
-		-- Imperative scopes
-		----------------------------------------------------------------
-
-		elseif nodeScope.nodeType == !(AST_FOR) then
-			-- This is really a combination of a declarative scope and an imperative scope. (Not sure if this is good. 2020-03-19)
-			-- @Robustness: Give a makeover similar to AST_LAMBDA here below? 2020-04-27
-			return true
-
-		elseif nodeScope.nodeType == !(AST_LAMBDA) then
-			-- Lambdas act as imperative scopes for arguments, but declarative scopes otherwise. (Could maybe use some @Cleanup.)
-			local lambda = nodeScope
-			if lambda ~= nodeScope0 then  return true  end
-
-			-- We should only get here if both node and decl is inside arguments.
-			local arg = decl.parent
-			!ASSERT("arg.nodeType           == "..AST_ARGUMENT)
-			!ASSERT("nodeStatement.nodeType == "..AST_ARGUMENT)
-
-			!if DEBUG then
-				if state.tokens.file[arg.token] ~= state.tokens.file[node.token] then
-					typeError2(state, node, "Internal compiler error: node", arg, "arg")
-				end
-			!end
-
-			return (arg.token < nodeStatement.token)
-
-		elseif nodeScope.nodeType == !(AST_BLOCK) then
-			local block = nodeScope
-
-			-- Note: If the node is inside the initial assignment then we need to treat the declaration
-			-- and the assignment as if they were the same statement. Otherwise the assignment will be
-			-- able to see it's own declarations, which is illegal! :DeclarationAssignment
-			local declScope, declStatement = astFindParentScope(decl.assignment or decl)
-			assert(declScope == block)
-
-			return (declStatement.token < nodeStatement.token)
-
-		----------------------------------------------------------------
-
-		else
-			errorUnhandledNodeType(state, nodeScope)
+		if nodeStatement.nodeType == !(AST_DECLARATION) then
+			nodeStatement = nodeStatement.assignment or nodeStatement -- Not sure if needed. See :DeclarationAssignment
+		elseif nodeStatement.nodeType == !(AST_ARGUMENTS) then
+			nodeStatement = astFindParent1(node, !(AST_ARGUMENT)) or errorInternal()
 		end
 
-		if canSeeImperativeVariables and nodeScope.nodeType == !(AST_LAMBDA) and not itemWith1Remember(nodeScope.captures, nodeScope.captures, `name`, name) then
-			-- Lambdas act as the only boundary between imperative and declarative
-			-- scopes right now. Maybe this will change in the future? 2019-12-07
-			canSeeImperativeVariables = false
-		end
+		while true do
+			if not (nodeScope.declarationsByName[name] and indexOf(nodeScope.declarations, decl)) then
+			-- if not (nodeScope.declarationsByName[name] and indexOfRemember(nodeScope.declarations, nodeScope.declarations, decl)) then -- I don't think this works when !if adds declarations. 2020-06-20
+				-- void  (Keep looking through parent scopes and update canSeeImperativeVariables as we go.)
 
-		nodeScope, nodeStatement = astFindParentScope(nodeScope)
-		if not nodeScope then  return false  end -- This shouldn't happen I don't think, unless decl and node is not part of the same tree.
+			-- Non-static declarations are always visible.
+			elseif not (decl.kind == !(DECL_KIND_LOCAL_VAR) --[[or decl.kind == !(DECL_KIND_READ_ONLY)]]) then
+				return true
+
+			-- Everything in declarative scopes is always visible EXCEPT (variable) struct members
+			-- (and enum members but those don't matter as they're always constant).
+			elseif isScopeDeclarative(nodeScope) then
+				return not (
+					nodeScope.nodeType == !(AST_STRUCT)
+					and nodeScope ~= nodeScope0
+				)
+
+			elseif not canSeeImperativeVariables then
+				return false
+
+			-- Imperative scopes
+			----------------------------------------------------------------
+
+			elseif nodeScope.nodeType == !(AST_FOR) then
+				-- This is really a combination of a declarative scope and an imperative scope. (Not sure if this is good. 2020-03-19)
+				-- @Robustness: Give a makeover similar to AST_LAMBDA here below? 2020-04-27
+				return true
+
+			elseif nodeScope.nodeType == !(AST_LAMBDA) then
+				-- Lambdas act as imperative scopes for arguments, but declarative scopes otherwise. (Could maybe use some @Cleanup.)
+				local lambda = nodeScope
+				if lambda ~= nodeScope0 then  return true  end
+
+				-- We should only get here if both node and decl is inside arguments.
+				local arg = decl.parent
+				!ASSERT("arg.nodeType           == "..AST_ARGUMENT)
+				!ASSERT("nodeStatement.nodeType == "..AST_ARGUMENT)
+
+				!if DEBUG then
+					if state.tokens.file[arg.token] ~= state.tokens.file[node.token] then
+						typeError2(state, node, "Internal compiler error: node", arg, "arg")
+					end
+				!end
+
+				return (arg.token < nodeStatement.token)
+
+			elseif nodeScope.nodeType == !(AST_BLOCK) then
+				local block = nodeScope
+
+				-- Note: If the node is inside the initial assignment then we need to treat the declaration
+				-- and the assignment as if they were the same statement. Otherwise the assignment will be
+				-- able to see it's own declarations, which is illegal! :DeclarationAssignment
+				local declScope, declStatement = astFindParentScope(decl.assignment or decl)
+				assert(declScope == block)
+
+				return (declStatement.token < nodeStatement.token)
+
+			----------------------------------------------------------------
+
+			else
+				errorUnhandledNodeType(state, nodeScope)
+			end
+
+			if canSeeImperativeVariables and nodeScope.nodeType == !(AST_LAMBDA) and not itemWith1Remember(nodeScope.captures, nodeScope.captures, `name`, name) then
+				-- Lambdas act as the only boundary between imperative and declarative
+				-- scopes right now. Maybe this will change in the future? 2019-12-07
+				canSeeImperativeVariables = false
+			end
+
+			nodeScope, nodeStatement = astFindParentScope(nodeScope)
+			if not nodeScope then  return false  end -- This shouldn't happen I don't think, unless decl and node is not part of the same tree.
+		end
 	end
 end
 
@@ -1338,7 +1328,7 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 	end
 
 	-- Tell parents that this declaration exists so we can detect more cases of shadowing.
-	if not (decl.isDocumentation or decl.canShadow or vararg) then -- Should vararg do this? I think it's not needed.
+	if not (decl.isDocumentation or decl.canShadow or vararg or (isMember and decl.kind == !(DECL_KIND_LOCAL_VAR))) then
 		local parentScope = scope
 
 		repeat
@@ -5130,12 +5120,20 @@ end
 	moveToPipe(state, staticIf, !(PIPE_DONE)) -- Not sure if needed. @Cleanup
 	unqueue(staticIf) -- @Robustness: Check if the correct thing happens for things waiting on staticIf (i.e. the scope).
 
-	-- Re-check redeclarations for already-inferred things later in the scope.
+	-- Re-check redeclarations for already-inferred things later in the scope and in the tree.
 	if branchToUse and branchToUse.declarations[1] then
 		for _, decl in ipairs(scope.declarations) do
-			if not newlyDeclared[decl] and newlyDeclared[decl.name.name] and decl.token > staticIf.token and decl.queued.pipe > !(PIPE_INFER) then
-				-- @Robustness: Do we need to call makeSureConstantIdentifierChainHasAllDeclarationsSet() here?
-				checkRedeclarationAndMaybeAddOverload(state, decl.name, decl, false, scope, nil)
+			if newlyDeclared[decl] then
+				for _, declOther in ipairs(scope.declarationsInTree[decl.name.name] or EMPTY_TABLE) do
+					local scopeOther = astFindParentScope(declOther)
+					local isMember   = scopeOther.nodeType == !(AST_ENUM) or scopeOther.nodeType == !(AST_STRUCT)
+					checkRedeclarationAndMaybeAddOverload(state, declOther.name, declOther, isMember, scopeOther, nil)
+				end
+
+			-- The following is not needed anymore after adding the above, right? 2020-06-20
+			-- elseif newlyDeclared[decl.name.name] and decl.token > staticIf.token and decl.queued.pipe > !(PIPE_INFER) then
+			-- 	-- @Robustness: Do we need to call makeSureConstantIdentifierChainHasAllDeclarationsSet() here?
+			-- 	checkRedeclarationAndMaybeAddOverload(state, decl.name, decl, false, scope, nil)
 			end
 		end
 	end
