@@ -403,8 +403,8 @@ local function runCompiler()
 			-- print("cycle", state.pipeCycles)
 		!end
 
-		local didSomething    = false
-		local i               = 1
+		local didSomething = false
+		local i            = 1
 
 		local queueActive     = state.queueActive
 		local queueWaiting    = state.queueWaiting
@@ -412,9 +412,10 @@ local function runCompiler()
 		local nextQueueActive = {}
 		local gotPrioritized  = {}
 
-		local insert          = table.insert
-		local inferNode       = inferNode
-		local emitNode        = emitNode
+		local insert              = table.insert
+		local inferNode           = inferNode
+		local emitNode            = emitNode
+		local fulfillDependencies = fulfillDependencies
 
 		!if EXTRA_STATS then
 			local updatesThisCycle = {
@@ -471,15 +472,17 @@ local function runCompiler()
 					!!(DID_SOMETHING)
 					inferNode(state, queued.node)
 
-					if queued.pipe > !(PIPE_EMIT) then
-						fulfillDependencies(state, queued.node, !(DEPEND_NODE_INFERRED))
-						fulfillDependencies(state, queued.node, !(DEPEND_NODE_PASSED_INFER))
-						fulfillDependencies(state, queued.node, !(DEPEND_NODE_PASSED_EMIT))
+					if not queued.waiters[1] then
+						-- void
+					elseif queued.pipe > !(PIPE_EMIT) then
+						fulfillDependencies(state, queued, !(DEPEND_NODE_INFERRED))
+						fulfillDependencies(state, queued, !(DEPEND_NODE_PASSED_INFER))
+						fulfillDependencies(state, queued, !(DEPEND_NODE_PASSED_EMIT))
 					elseif queued.pipe > !(PIPE_INFER) then
-						fulfillDependencies(state, queued.node, !(DEPEND_NODE_INFERRED))
-						fulfillDependencies(state, queued.node, !(DEPEND_NODE_PASSED_INFER))
+						fulfillDependencies(state, queued, !(DEPEND_NODE_INFERRED))
+						fulfillDependencies(state, queued, !(DEPEND_NODE_PASSED_INFER))
 					elseif queued.node.inferredType then
-						fulfillDependencies(state, queued.node, !(DEPEND_NODE_INFERRED))
+						fulfillDependencies(state, queued, !(DEPEND_NODE_INFERRED))
 					end
 
 					--[[ This decreases node update count but somehow makes compilation slower. I dunno, man...
@@ -487,7 +490,7 @@ local function runCompiler()
 						!ifDEBUG`if not debug_onlyInferTypes then`
 							emitNode(state, queued.node)
 							if queued.pipe > !(PIPE_EMIT) then
-								fulfillDependencies(state, queued.node, !(DEPEND_NODE_PASSED_EMIT))
+								fulfillDependencies(state, queued, !(DEPEND_NODE_PASSED_EMIT))
 							end
 						!ifDEBUG`end`
 					end
@@ -498,7 +501,7 @@ local function runCompiler()
 					emitNode(state, queued.node)
 
 					if queued.pipe > !(PIPE_EMIT) then
-						fulfillDependencies(state, queued.node, !(DEPEND_NODE_PASSED_EMIT))
+						fulfillDependencies(state, queued, !(DEPEND_NODE_PASSED_EMIT))
 					end
 				end
 
@@ -543,11 +546,16 @@ local function runCompiler()
 		queueWaiting              = {}
 		state.queueWaiting        = queueWaiting
 
+		local findPublicDeclarationInScope = findPublicDeclarationInScope
+		local findDeclaration              = findDeclaration
+		local findMemberDeclaration        = findMemberDeclaration
+
 		for _, queued in ipairs(currentQueueWaiting) do
 			local dependencyCurrent = not queued.unqueued and queued.waitingOn
 
 			while dependencyCurrent do
 				local dependency  = dependencyCurrent
+				local dependType  = dependency.dependType
 				dependencyCurrent = nil
 
 				!local DEPENDENCY_FULFILLED = `
@@ -555,7 +563,7 @@ local function runCompiler()
 					queued.waitingOn  = dependencyCurrent
 				`
 
-				if dependency.dependType == !(DEPEND_DECLARATION) then
+				if dependType == !(DEPEND_DECLARATION) then
 					if dependency.extraData then
 						if findPublicDeclarationInScope(state, dependency.extraData, dependency.dependOn) then
 							!!(DEPENDENCY_FULFILLED)
@@ -566,43 +574,43 @@ local function runCompiler()
 							!!(DEPENDENCY_FULFILLED)
 						end
 					end
-				elseif dependency.dependType == !(DEPEND_MEMBER_DECLARATION) then
+				elseif dependType == !(DEPEND_MEMBER_DECLARATION) then
 					if findMemberDeclaration(state, dependency.extraData, dependency.dependOn) then
 						!!(DEPENDENCY_FULFILLED)
 					end
 
-				elseif dependency.dependType == !(DEPEND_HAS_DECLARATION) then
+				elseif dependType == !(DEPEND_HAS_DECLARATION) then
 					if dependency.dependOn.node.declaration then
 						!!(DEPENDENCY_FULFILLED)
 					end
 
-				elseif dependency.dependType == !(DEPEND_NODE_INFERRED) then
+				elseif dependType == !(DEPEND_NODE_INFERRED) then
 					-- Note: dependOn.node is not necessarily an expression which is why we also check the pipe.
 					if dependency.dependOn.node.inferredType or dependency.dependOn.pipe > !(PIPE_INFER) then
 						!!(DEPENDENCY_FULFILLED)
 					end
-				elseif dependency.dependType == !(DEPEND_NODE_PASSED_INFER) then
+				elseif dependType == !(DEPEND_NODE_PASSED_INFER) then
 					if dependency.dependOn.pipe > !(PIPE_INFER) then
 						!!(DEPENDENCY_FULFILLED)
 					end
 
-				elseif dependency.dependType == !(DEPEND_STRUCT_MEMBERS_READY) then
+				elseif dependType == !(DEPEND_STRUCT_MEMBERS_READY) then
 					if dependency.dependOn.hasMembers then
 						!!(DEPENDENCY_FULFILLED)
 					end
 
-				elseif dependency.dependType == !(DEPEND_NODE_PASSED_EMIT) then
+				elseif dependType == !(DEPEND_NODE_PASSED_EMIT) then
 					if dependency.dependOn.pipe > !(PIPE_EMIT) then
 						!!(DEPENDENCY_FULFILLED)
 					end
 
-				elseif dependency.dependType == !(DEPEND_CONSTANT_READY) then
+				elseif dependType == !(DEPEND_CONSTANT_READY) then
 					if dependency.dependOn.isReady then
 						!!(DEPENDENCY_FULFILLED)
 					end
 
 				else
-					errorInternal("%d", dependency.dependType)
+					errorInternal("%d", dependType)
 				end
 			end
 
