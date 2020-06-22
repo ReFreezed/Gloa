@@ -130,6 +130,11 @@ function pp.metaEnvironment.preprocessorOutputAtTopOfFile(lua)
 	table.insert(luaSegments, lua)
 end
 
+local postInserts = {}
+function pp.metaEnvironment.preprocessorOutputAtDuringPost(label, lua)
+	postInserts[label] = lua
+end
+
 pp.processFile{
 	pathIn          = DIR_HERE.."/main.lua2p",
 	pathOut         = pathGloaOut,
@@ -147,7 +152,13 @@ pp.processFile{
 
 	onAfterMeta = function(lua)
 		table.insert(luaSegments, lua)
-		return table.concat(luaSegments, "\n")
+		lua = table.concat(luaSegments, "\n")
+
+		lua = lua:gsub("%-%-%[%[INSERT:(%w+)%]%]", function(label)
+			return postInserts[label] or error(label)
+		end)
+
+		return lua
 	end,
 
 	onError = function(err)
