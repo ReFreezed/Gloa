@@ -1050,13 +1050,6 @@ local function checkRedeclarationAndMaybeAddOverload(state, ident, decl, isMembe
 	end
 end
 
-local function isPolymorphicLambda(node)
-	return node.nodeType == !(AST_LAMBDA) and node.isPolymorphic
-end
-local function isPolymorphicStruct(node)
-	return node.nodeType == !(AST_STRUCT) and node.isPolymorphic
-end
-
 local function inferIdentifierOrVararg(state, identOrVararg)
 	local vararg    = identOrVararg.nodeType == !(AST_VARARG) and identOrVararg or nil
 	local ident     = not vararg                              and identOrVararg or nil
@@ -1118,12 +1111,12 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 
 		-- Polymorphic functions also contain the polymorphed functions and are thus a collection of functions, so referring to them may be a bad idea!
 		-- (How does this work when calling a function from a module or a static struct member function? @Incomplete @Robustness)
-		elseif isPolymorphicLambda(getDeclarationValue(decl) or decl) then
+		elseif decl.value and decl.value.nodeType == !(AST_LAMBDA) and decl.value.isPolymorphic then
 			typeError(state, ident, "Cannot refer to polymorphic function '%s' outside calls.", ident.name)
 
 		-- Polymorphic structs are similar to polymorphed functions as they are collections of structs, so referring to them may be a bad idea too!
 		-- (Also, like with the functions, think about modules. @Incomplete @Robustness)
-		elseif isPolymorphicStruct(getDeclarationValue(decl) or decl) then
+		elseif decl.value and decl.value.nodeType == !(AST_STRUCT) and decl.value.isPolymorphic then
 			typeErrorAfter(state, ident, "Missing arguments for polymorphic struct '%s'.", ident.name)
 		end
 

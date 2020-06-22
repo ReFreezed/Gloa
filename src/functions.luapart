@@ -47,6 +47,7 @@ local PROFILE_CALLEES = 1==0
 local PROFILE_TIMES   = 1==0
 
 local PROFILER_TARGET_NAME = "indexOf" -- Used for PROFILE_CALLEES.
+local PROFILER_HIRES_TIMER = 1==1      -- Uses kernel32.dll in Windows.
 )
 
 
@@ -1167,6 +1168,52 @@ do
 	local times      = {}
 	local lastName   = nil
 
+	!if PROFILER_HIRES_TIMER then
+	local hiresTimer = nil
+
+	local function getHiresTimer()
+		if hiresTimer then  return hiresTimer  end
+
+		local alien    = require"alien"
+		local kernel32 = alien.load"kernel32.dll"
+		local ldexp    = math.ldexp
+
+		local QueryPerformanceCounter = kernel32.QueryPerformanceCounter
+		QueryPerformanceCounter:types{ ret="int", abi="stdcall", "pointer" }
+
+		local QueryPerformanceFrequency = kernel32.QueryPerformanceFrequency
+		QueryPerformanceFrequency:types{ ret="int", abi="stdcall", "pointer" }
+
+		local function longSignedToUnsigned(long)
+			return long < 0 and long + 0x80000000 + 0x80000000 or long
+		end
+
+		local twoLongs       = alien.array("long", 2)
+		local twoLongsBuffer = twoLongs.buffer
+
+		local function getPerformanceFrequency()
+			QueryPerformanceFrequency(twoLongsBuffer)
+			return ldexp(longSignedToUnsigned(twoLongs[1]), 0)
+			     + ldexp(longSignedToUnsigned(twoLongs[2]), 32)
+		end
+
+		local function getPerformanceCounter()
+			QueryPerformanceCounter(twoLongsBuffer)
+			return ldexp(longSignedToUnsigned(twoLongs[1]), 0)
+			     + ldexp(longSignedToUnsigned(twoLongs[2]), 32)
+		end
+
+		local freq   = getPerformanceFrequency()
+		local count0 = getPerformanceCounter()
+
+		hiresTimer = function()
+			return (getPerformanceCounter() - count0) / freq
+		end
+
+		return hiresTimer
+	end
+	!end
+
 	function _G.profilerStart()
 		!if PROFILE_CALLS or PROFILE_CALLEES or PROFILE_TIMES then
 			if isRunning then  return  end
@@ -1175,7 +1222,7 @@ do
 			pauseDepth    = 0
 
 			local getinfo = debug.getinfo
-			local clock   = os.clock
+			local clock   = !!(PROFILER_HIRES_TIMER and `(hiresTimer or getHiresTimer())` or `os.clock`)
 
 			!if PROFILE_CALLS then
 				debug.sethook(function()
@@ -1194,7 +1241,7 @@ do
 			!elseif PROFILE_TIMES then
 				n        = n+1
 				names[n] = "__PROFILER"
-				times[n] = os.clock()
+				times[n] = clock()
 				lastName = "__PROFILER"
 
 				collectgarbage()
@@ -1213,12 +1260,14 @@ do
 	end
 	function _G.profilerStop()
 		debug.sethook(nil)
+
 		!if PROFILE_TIMES then
 			n        = n+1
 			names[n] = "__PROFILER"
-			times[n] = os.clock()
+			times[n] = !!(PROFILER_HIRES_TIMER and `(hiresTimer or getHiresTimer())` or `os.clock`)()
 			lastName = "__PROFILER"
 		!end
+
 		pauseDepth = 0
 		isRunning  = false
 	end
@@ -1279,7 +1328,7 @@ do
 
 			print(os.date"times %Y-%m-%d %H:%M:%S")
 			for _, source in ipairs(sources) do
-				printf("%.3f  %s", runTimes[source], source)
+				printf(!(PROFILER_HIRES_TIMER and "%.7f  %s" or "%.3f  %s"), runTimes[source], source)
 			end
 		!end
 	end
