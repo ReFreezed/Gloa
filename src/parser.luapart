@@ -10,7 +10,7 @@
 --==============================================================
 
 	addDeclarationToNames
-	astCopy
+	astCopy, astCopyIdentifier
 	astFindParent*, astFindParentScope, astFindCommonParent, astHasParent, astFindInTree, astFindInUnit
 	astGetDepth
 	astGetExpressionVisuallyFurthestToThe*, astGetCalleeVisuallyFurthestToTheLeft
@@ -135,6 +135,7 @@ end end
 }
 _G.!structAst"AstIdentifier:_AstExpression"{
 	_overrides = {{`nodeType`,AST_IDENTIFIER}},
+	{`kind`,        IDENT_KIND_LOOSE},
 	{`name`,        ""},
 	-- Type phase:
 	{`declaration`, nil, astRef="node"}, -- AstDeclaration
@@ -781,15 +782,17 @@ end
 		local tokType2, tokValue2 = peekNextToken(state, 2)
 
 		if expectLvalues and !!(IS_TOKEN(TOKEN_PUNCTUATION, "_")) then
-			local expr = astNewNode(AstBlank, state.nextToken, parent)
+			local blank = astNewNode(AstBlank, state.nextToken, parent)
 			eatNextToken(state) -- '_'
-			table.insert(expressions, expr)
+			table.insert(expressions, blank)
 
 		elseif expressionsNamed and tokType == !(TOKEN_IDENTIFIER) and !!(IS_TOKEN(2, TOKEN_PUNCTUATION, "=")) then
-			local exprNamed                     = TableField()
-			!SET_OR_RETURN_FALSE `exprNamed.key = parseIdentifier(state, parent)`
+			local exprNamed                   = TableField()
+			!SET_OR_RETURN_FALSE `local ident = parseIdentifier(state, parent)`
+			ident.kind                        = !(IDENT_KIND_IGNORE)
+			exprNamed.key                     = ident
 
-			local name = exprNamed.key.name
+			local name = ident.name
 			if takenNames[name] then
 				!ERROR_OR_RETURN `
 					printerr()
@@ -798,7 +801,7 @@ end
 					exitFailure()
 				`
 			end
-			takenNames[name] = exprNamed.key
+			takenNames[name] = ident
 
 			eatNextToken(state) -- '='
 
@@ -914,6 +917,7 @@ end
 
 			if tokType == !(TOKEN_IDENTIFIER) then
 				local ident       = astNewNode(AstIdentifier, token, decl)
+				ident.kind        = !(IDENT_KIND_DECLARATION)
 				ident.name        = tokValue
 				ident.declaration = decl
 				decl.name         = ident
@@ -933,11 +937,14 @@ end
 				end
 
 				local vararg       = astNewNode(AstVararg, token, decl)
+				vararg.kind        = !(IDENT_KIND_DECLARATION)
 				vararg.declaration = decl
 				decl.name          = vararg
 
 			else
-				decl.name = astNewNode(AstBlank, token, decl)
+				local blank = astNewNode(AstBlank, token, decl)
+				blank.kind  = !(IDENT_KIND_DECLARATION)
+				decl.name   = blank
 
 				if arg.autobake ~= !(AUTOBAKE_DISABLED) then
 					errorParsing(state, state.nextToken-2, "Blank arguments cannot be auto-baked.")
@@ -1145,6 +1152,7 @@ end
 			eatNextToken(state)
 
 			local vararg       = astNewNode(AstVararg, decl.token, decl)
+			vararg.kind        = !(IDENT_KIND_DECLARATION)
 			vararg.declaration = decl
 			decl.name          = vararg
 
@@ -1154,6 +1162,7 @@ end
 			!SET_OR_RETURN `decl.type = parseExpression(state, decl)`
 
 			local ident       = astNewNode(AstIdentifier, decl.token, decl)
+			ident.kind        = !(IDENT_KIND_DECLARATION)
 			ident.declaration = decl
 			decl.name         = ident
 		end
@@ -1475,8 +1484,9 @@ end
 			local decl        = astNewNode(AstDeclaration, ident.token, scope)
 			declarations[i]   = decl
 
-			ident.parent      = decl
+			ident.kind        = !(IDENT_KIND_DECLARATION)
 			ident.declaration = decl
+			ident.parent      = decl
 
 			decl.name         = ident
 		end
@@ -1489,13 +1499,14 @@ end
 		local ident
 
 		if declType == !(DECLARATION_STRUCT) and !!(IS_TOKEN(TOKEN_DIRECTIVE, "call","iterator")) then
-			eatNextToken(state)
+			eatNextToken(state) -- '!...'
 			ident      = astNewNode(AstIdentifier, state.nextToken-1, decl)
 			ident.name = "!"..tokValue
 		else
 			!SET_OR_RETURN_FALSE `ident = parseIdentifier(state, decl)`
 		end
 
+		ident.kind        = !(IDENT_KIND_DECLARATION)
 		ident.declaration = decl
 		decl.token        = ident.token
 		decl.name         = ident
@@ -1577,8 +1588,10 @@ end
 
 				if declNamesFromBefore[identCopy.name] then
 					identCopy.declaration      = nil
-					assignment.declarations[i] = false -- So there are no gaps in the array as that would mess up astCopy().
+					identCopy.kind             = !(IDENT_KIND_ASSIGNMENT)
+					assignment.declarations[i] = false -- False instead of nil so there are no gaps in the array as that would mess up astCopy().
 				else
+					identCopy.kind             = !(IDENT_KIND_DECLARATION_ASSIGNMENT)
 					assignment.declarations[i] = decl
 				end
 			end
@@ -1737,6 +1750,7 @@ end
 			local using       = astNewNode(AstUsing, decl.token, scope)
 
 			local ident       = astNewNode(AstIdentifier, decl.token, using)
+			ident.kind        = !(IDENT_KIND_LOOSE)
 			ident.name        = decl.name.name
 			ident.declaration = decl
 			using.expression  = ident
@@ -1763,8 +1777,12 @@ end
 
 	!DO_OR_RETURN `parseExpressionList(state, assignment, assignment.targets, nil, true)`
 
-	for i, expr in ipairs(assignment.targets) do
-		if not !!(CONST_SET{ AST_IDENTIFIER, AST_ACCESS, AST_BLANK })[expr.nodeType] then
+	for _, expr in ipairs(assignment.targets) do
+		if expr.nodeType == !(AST_IDENTIFIER) or expr.nodeType == !(AST_VARARG) or expr.nodeType == !(AST_BLANK) then
+			expr.kind = !(IDENT_KIND_ASSIGNMENT)
+		elseif expr.nodeType == !(AST_ACCESS) then
+			-- void
+		else
 			!ERROR_OR_RETURN `errorParsing(state, expr.token, "Expected assignment target expression to resolve into a variable or namespace access.")`
 		end
 	end
@@ -2515,6 +2533,7 @@ end
 			arg.declaration   = decl
 
 			local ident       = astNewNode(AstIdentifier, token, decl)
+			ident.kind        = !(IDENT_KIND_DECLARATION)
 			ident.declaration = decl
 			decl.name         = ident
 
@@ -2930,7 +2949,7 @@ end
 
 				local decl        = astNewNode(AstDeclaration, bake.token, lambda)
 				ident.declaration = decl
-				decl.name         = astCopy(ident, nil, decl)
+				decl.name         = astCopyIdentifier(ident, nil, decl, !(IDENT_KIND_DECLARATION))
 				decl.kind         = !(DECL_KIND_LOCAL_CONST)
 
 				-- Note: We're not setting decl.type nor decl.value, leaving the declaration unfinished.
@@ -2969,6 +2988,7 @@ end
 				local using       = astNewNode(AstUsing, arg.token, lambda)
 
 				local ident       = astNewNode(AstIdentifier, arg.token, using)
+				ident.kind        = !(IDENT_KIND_LOOSE)
 				ident.name        = decl.name.name
 				ident.declaration = decl
 				using.expression  = ident
@@ -3123,7 +3143,7 @@ end
 			local decl           = astNewNode(AstDeclaration, token, arg)
 			arg.declaration      = decl
 
-			decl.name            = newIdentifier(decl, token, "", decl)
+			decl.name            = newIdentifier(decl, token, !(IDENT_KIND_DECLARATION), "", decl)
 
 			local typeNode       = astNewNode(AstType, token, decl)
 			typeNode.kind        = !(TYPE_KIND_SIMPLE_BUILTIN)
@@ -3179,6 +3199,7 @@ end
 	-- Identifier.
 	if tokType == !(TOKEN_IDENTIFIER) then
 		local ident = astNewNode(AstIdentifier, exprStartToken, parent)
+		ident.kind  = !(IDENT_KIND_LOOSE)
 		ident.name  = tokValue
 		expr        = ident
 
@@ -3359,8 +3380,11 @@ end
 
 	-- Vararg.
 	elseif !!(IS_TOKEN(TOKEN_PUNCTUATION, "...")) then
-		expr         = astNewNode(AstVararg, exprStartToken, parent)
-		local lambda = getLambda(expr)
+		local vararg = astNewNode(AstVararg, exprStartToken, parent)
+		vararg.kind  = !(IDENT_KIND_LOOSE)
+		expr         = vararg
+
+		local lambda = getLambda(vararg)
 		if not (lambda and lambda.takingVararg) then
 			!ERROR_OR_RETURN `errorParsing(state, exprStartToken, "This is not inside a vararg function.")`
 		end
@@ -3974,7 +3998,7 @@ do
 
 			if node.nodeType == !(AST_IDENTIFIER) then
 				local ident = node
-				write(" (", ident.name)
+				write(" (", ident.name, ", kind=", (IDENT_KIND_TITLES[ident.kind] or "?"))
 				if ident.inferredType then  write(", type=", getFriendlyTypeInfoName(ident.inferredType))  end
 				if ident.inferredType and getTypeRepresentedByExpression(ident) then  write(", typeRepresented=", getFriendlyTypeInfoName(getTypeRepresentedByExpression(ident)))  end
 				if ident.declaration  then  write(", decl=", ident.declaration.s)  end
@@ -4772,6 +4796,18 @@ do
 
 		return copy, copies
 	end
+
+	local DUMMY = {}
+
+	-- copy = astCopyIdentifier( identifier [, token=identifier.token, parent=identifier.parent, identKind=identifier.kind ] )
+	function _G.astCopyIdentifier(ident, token, parent, identKind)
+		local copy = COPIERS[!(AST_IDENTIFIER)](ident, token, (parent or ident.parent), DUMMY)
+
+		FIXERS[!(AST_IDENTIFIER)](copy, EMPTY_TABLE) -- Not sure if needed for identifiers. @Speed
+
+		if identKind then  copy.kind = identKind  end
+		return copy
+	end
 end
 
 
@@ -4861,13 +4897,14 @@ function _G.newLiteral(parent, token, literalType, value, typeInfo)
 	return literal
 end
 
--- literal = newIdentifier( parent, token, name [, declaration, typeInfo ] )
-function _G.newIdentifier(parent, token, name, decl, typeInfo)
-	local literal        = astNewNode(AstIdentifier, token, parent)
-	literal.name         = name
-	literal.declaration  = decl
-	literal.inferredType = typeInfo
-	return literal
+-- identifier = newIdentifier( parent, token, kind, name [, declaration, typeInfo ] )
+function _G.newIdentifier(parent, token, identKind, name, decl, typeInfo)
+	local ident        = astNewNode(AstIdentifier, token, parent)
+	ident.kind         = identKind
+	ident.name         = name
+	ident.declaration  = decl
+	ident.inferredType = typeInfo
+	return ident
 end
 
 

@@ -22,7 +22,6 @@
 	getLambda
 	inferNode, queueForReinfer
 	isExpressionConstant, isExpressionExactlyOneValue
-	isPartOfAnyDeclaration
 	isScope, isScopeDeclarative, isScopeImperative
 	isTypeSimple, isTypeNumeric, isTypeTableLike, isTypePublic, isTypeCompatibleWith, doesStructInherit, adjustTypeToOne, compareIdsOfTypes
 	newTypeInfo, markTypeAsReady, isTypeBuiltin, getTypeInfo*
@@ -865,25 +864,6 @@ local function NODE_INFERRER(funcHeaderCode)
 end
 )
 
-function _G.isPartOfAnyDeclaration(identOrVararg)
-	local parent = identOrVararg.parent
-
-	if parent.nodeType == !(AST_DECLARATION) then
-		local decl = parent
-		return identOrVararg == decl.name
-
-	elseif parent.nodeType == !(AST_ASSIGNMENT) then
-		local assignment = parent
-		if not assignment.forDeclaration then  return false  end
-
-		local i = indexOf(assignment.targets, identOrVararg) -- Nil if identOrVararg is a value.
-		return not not assignment.declarations[i] -- The resulting value from the lookup may be nil (if 'i' is nil) or false (if the name is declared "before").
-
-	else
-		return false
-	end
-end
-
 -- identifierEarly, identifierLate, extraShadowMessageEarly, extraShadowMessageLate = getEarlyAndLateForRedeclarationError( state, identifier1, identifier2 )
 local function getEarlyAndLateForRedeclarationError(state, identEarly, identLate)
 	local extraMessageEarly = ""
@@ -1057,17 +1037,17 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 	local decl      = identOrVararg.declaration
 	local container = identOrVararg.queued.container
 
-	-- 0. Things to ignore.  @Cleanup
+	-- 1. Things to ignore.
 	if
-		-- Keys in named args in calls:
-		(ident and parent.nodeType == !(AST_CALL) and container ~= parent and container ~= parent.arguments and identOrVararg.queued.key == "key" and indexOf(parent.argumentsNamed, container))
+		identOrVararg.kind == !(IDENT_KIND_IGNORE)
+		-- -- Keys in named args in calls:
+		-- (ident and parent.nodeType == !(AST_CALL) and container ~= parent and container ~= parent.arguments and identOrVararg.queued.key == "key" and indexOf(parent.argumentsNamed, container))
 	then
 		moveToNextRelevantPipe(state, ident)
 		return
-	end
 
-	-- 1. Loose identifier.
-	if not isPartOfAnyDeclaration(identOrVararg) then
+	-- 2. Loose identifier.
+	elseif identOrVararg.kind == !(IDENT_KIND_LOOSE) or identOrVararg.kind == !(IDENT_KIND_ASSIGNMENT) then
 		if not decl then
 			local using
 			decl, using = findDeclaration(state, identOrVararg, identOrVararg.name)
@@ -1159,11 +1139,12 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 		return
 	end
 
-	!ASSERT("decl")
-	!ASSERT("parent.nodeType == "..AST_DECLARATION.." or parent.nodeType == "..AST_ASSIGNMENT)
+	!ASSERT("decl",                                                                            nil, `identOrVararg`)
+	!ASSERT("parent.nodeType == "..AST_DECLARATION.." or parent.nodeType == "..AST_ASSIGNMENT, nil, `identOrVararg`)
 
-	-- 2. Assignment target in declaration (which is a copy of the identifier in the declaration).
-	if parent.nodeType == !(AST_ASSIGNMENT) then
+	-- 3. Assignment target in declaration (which is a copy of the identifier in the declaration).
+	if identOrVararg.kind == !(IDENT_KIND_DECLARATION_ASSIGNMENT) then
+		!ASSERT("parent.nodeType == "..AST_ASSIGNMENT)
 		local identInDecl = decl.name
 		if not identInDecl.inferredType then
 			!DEPEND_AND_RETURN(`identOrVararg`, DEPEND_NODE_INFERRED, `identInDecl`)
@@ -1174,7 +1155,10 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 		return
 	end
 
-	-- 3. At this point we're defining a declared identifier.
+	-- 4. At this point we're defining a declared identifier.
+	if identOrVararg.kind ~= !(IDENT_KIND_DECLARATION) then
+		errorInternal(state, identOrVararg, "Unexepected identifier kind '%s'.", (IDENT_KIND_TITLES[identOrVararg.kind] or "?"))
+	end
 
 	local scope = astFindParentScope(decl)
 
@@ -2269,12 +2253,8 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 	-- Create declaration for the morphed lambda.
 	local morphDecl            = astNewNode(AstDeclaration, lambda.token, lambda)
 	morphDecl.kind             = !(DECL_KIND_LOCAL_CONST)
+	morphDecl.name             = newIdentifier(morphDecl, morphDecl.token, !(IDENT_KIND_DECLARATION), F("%s_POLY%d", ident.name, #lambda.polymorphs+1), morphDecl)
 	morphDecl.addedByPolymorph = true
-
-	local morphIdent       = astNewNode(AstIdentifier, morphDecl.token, morphDecl)
-	morphIdent.name        = ident.name.."_POLY"..(#lambda.polymorphs+1)
-	morphIdent.declaration = morphDecl
-	morphDecl.name         = morphIdent
 
 	local morphLambda                 = astCopy(lambda, nil, morphDecl)
 	morphLambda.polymorphSourceLambda = lambda
@@ -2661,12 +2641,8 @@ local function handlePolymorphicStruct(state, call)
 	-- Create declaration for the morphed struct.
 	local morphDecl            = astNewNode(AstDeclaration, struct.token, struct)
 	morphDecl.kind             = !(DECL_KIND_LOCAL_CONST)
+	morphDecl.name             = newIdentifier(morphDecl, morphDecl.token, !(IDENT_KIND_DECLARATION), F("%s_POLY%d", typeNode.typeName, #struct.polymorphs+1), morphDecl)
 	morphDecl.addedByPolymorph = true
-
-	local morphIdent       = astNewNode(AstIdentifier, morphDecl.token, morphDecl)
-	morphIdent.name        = typeNode.typeName.."_POLY"..(#struct.polymorphs+1)
-	morphIdent.declaration = morphDecl
-	morphDecl.name         = morphIdent
 
 	local morphStruct                 = astCopy(struct, nil, morphDecl)
 	morphStruct.inferredType          = nil
@@ -2844,7 +2820,7 @@ end
 			typeError(state, call, "%s has no !call declaration and thus cannot be called.", getFriendlyTypeInfoName(structInfo))
 		end
 
-		local ident = astCopy(decl.name, callee.token, call)
+		local ident = astCopyIdentifier(decl.name, callee.token, call, !(IDENT_KIND_LOOSE))
 		replaceQueuedNodeAndUnqueueOldTree(state, callee, ident)
 
 		return inferNode(state, call)
@@ -3750,10 +3726,7 @@ end
 				end
 
 				-- Update callee using access. (Note: access==callee)
-				local ident        = astNewNode(AstIdentifier, access.member.token, call)
-				ident.name         = constDecl.name.name
-				ident.declaration  = constDecl
-				ident.inferredType = constDecl.name.inferredType
+				local ident = newIdentifier(call, access.member.token, !(IDENT_KIND_LOOSE), constDecl.name.name, constDecl, constDecl.name.inferredType)
 				replaceQueuedNode(state, access, ident)
 				moveToNextRelevantPipe(state, ident)
 
@@ -3766,11 +3739,7 @@ end
 				return
 			end
 
-			local ident        = astNewNode(AstIdentifier, access.member.token, access.parent)
-			ident.name         = constDecl.name.name
-			ident.declaration  = constDecl
-			ident.inferredType = constDecl.name.inferredType
-			replacement        = ident
+			replacement = newIdentifier(access.parent, access.member.token, !(IDENT_KIND_LOOSE), constDecl.name.name, constDecl, constDecl.name.inferredType)
 
 		else
 			!ifDEBUG `where(state, access)`
@@ -3797,7 +3766,7 @@ end
 
 		!ASSERT `isDeclarationConstant(decl)`
 
-		local ident = astCopy(decl.name, access.token, access.parent)
+		local ident = astCopyIdentifier(decl.name, access.token, access.parent, !(IDENT_KIND_LOOSE))
 		replaceQueuedNodeAndUnqueueOldTree(state, access, ident)
 
 		-- Stay in the current pipe so we get simplified. (Needed? Or maybe we can @Speed things up here?)
@@ -3822,7 +3791,7 @@ end
 			!DEPEND_AND_RETURN(`access`, DEPEND_NODE_INFERRED, `decl.name`)
 		end
 
-		local ident = astCopy(decl.name, access.token, access.parent)
+		local ident = astCopyIdentifier(decl.name, access.token, access.parent, !(IDENT_KIND_LOOSE))
 		replaceQueuedNodeAndUnqueueOldTree(state, access, ident)
 
 		-- Stay in the current pipe so we get simplified. (Needed? Or maybe we can @Speed things up here?)
@@ -5245,12 +5214,8 @@ end
 end
 
 local function addDeclarationInForLoop(state, forLoop, name, token, isImplicit, typeInfo)
-	local decl         = astNewNode(AstDeclaration, token, forLoop)
-	local ident        = astNewNode(AstIdentifier,  token, decl)
-	ident.name         = name
-	ident.declaration  = decl
-	ident.inferredType = typeInfo
-	decl.name          = ident
+	local decl = astNewNode(AstDeclaration, token, forLoop)
+	decl.name  = newIdentifier(decl, token, !(IDENT_KIND_DECLARATION), name, decl, typeInfo)
 
 	table.insert(forLoop.statementsDynamic, decl)
 	table.insert(forLoop.declarations,      decl)
@@ -5270,7 +5235,7 @@ local function addDeclarationInForLoop(state, forLoop, name, token, isImplicit, 
 		local declExisting = findDeclaration(state, forLoop, name)
 		if declExisting then
 			typeError2(state,
-				ident,             F("'%s' has already been declared.", name),
+				decl.name,         F("'%s' has already been declared.", name),
 				declExisting.name, F("...it was declared here.")
 			)
 		end
@@ -5466,11 +5431,11 @@ end
 					if names[3] then
 						typeError(state, names[3], "For loop: Too many names for short-form struct loop. (Expected at most a value name and a control value name.)")
 					end
-					names[1] = names[1] or newIdentifier(forLoop, forLoop.token, "itIndex")
-					names[2] = names[2] or newIdentifier(forLoop, forLoop.token, "it")
+					names[1] = names[1] or newIdentifier(forLoop, forLoop.token, !(IDENT_KIND_LOOSE), "itIndex")
+					names[2] = names[2] or newIdentifier(forLoop, forLoop.token, !(IDENT_KIND_LOOSE), "it")
 
 					-- Convert FOR_SHORT into FOR_ITERATOR.
-					values[1] = astCopy(decl.name, nil, forLoop)
+					values[1] = astCopyIdentifier(decl.name, nil, forLoop, !(IDENT_KIND_LOOSE))
 					values[2] = objExpr
 					values[3] = newLiteral(forLoop, forLoop.token, !(LITERAL_INTEGER), 0, intType)
 					objExpr.queued.key = 2
@@ -6373,6 +6338,7 @@ local function createRunReplacementFromTypeAndLuaValue(state, runNode, parent, t
 	elseif tag == !(TYPE_ENUM) then
 		local enumInfo     = typeInfo
 		local ident        = astNewNode(AstIdentifier, runNode.token, parent)
+		ident.kind         = !(IDENT_KIND_LOOSE)
 		ident.inferredType = enumInfo
 
 		if !!(CONST_SET{ TYPE_INT, TYPE_STRING, TYPE_BOOL, TYPE_FLOAT })[enumInfo.memberTypeInfo.tag] then
@@ -6426,7 +6392,7 @@ local function createRunReplacementFromTypeAndLuaValue(state, runNode, parent, t
 
 		if lambda.parent.nodeType == !(AST_DECLARATION) then
 			local decl  = lambda.parent
-			local ident = astCopy(decl.name, runNode.token, parent)
+			local ident = astCopyIdentifier(decl.name, runNode.token, parent, !(IDENT_KIND_LOOSE))
 			return ident
 		else
 			local copy = astCopy(lambda, nil, parent)
@@ -7118,7 +7084,7 @@ local function simplifyCast(state, cast)
 	elseif castTypeInfo.tag == !(TYPE_ENUM) and exprTypeInfo == castTypeInfo.memberTypeInfo then
 		local enumInfo = castTypeInfo
 		local decl     = findDeclarationInEnumForValue(state, enumInfo.astNode, cast.expression) or errorInternal(state, cast.expression)
-		local ident    = astCopy(decl.name, cast.token, cast.parent)
+		local ident    = astCopyIdentifier(decl.name, cast.token, cast.parent, !(IDENT_KIND_LOOSE))
 
 		replaceQueuedNodeAndUnqueueOldTree(state, cast, ident)
 		moveToNextRelevantPipe(state, ident, !(PIPE_INFER))
@@ -7386,7 +7352,7 @@ function _G.simplifyExpressionIfConstant(state, expr)
 		if typeInfo.tag == !(TYPE_ENUM) then
 			if ident.name ~= decl.name.name then
 				-- @Cleanup: Is this necessary? Can't we just do ident.name=decl.name.name?
-				local copy = astCopy(decl.name, ident.token, ident.parent)
+				local copy = astCopyIdentifier(decl.name, ident.token, ident.parent, !(IDENT_KIND_LOOSE))
 				replaceQueuedNodeAndUnqueueOldTree(state, ident, copy)
 				moveToNextRelevantPipe(state, copy, !(PIPE_INFER))
 			end
