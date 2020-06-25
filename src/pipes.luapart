@@ -12,7 +12,7 @@
 	addDependency, getExistingDependency, fulfillDependencies
 	addToQueueRecursively, pokeAndQueueUnqueuedNodeIntoTree, unqueue, unqueueChildrenRecursively, replaceQueuedNode, replaceQueuedNodeAndUnqueueOldTree, cutOutPartOfNodeTree
 	errorPipesAreStuck, errorPipesAreInfiniteLooping
-	moveToPipe, moveToNextRelevantPipe, moveTreeToNextRelevantPipe, moveChildrenToNextRelevantPipe
+	moveToNextRelevantPipe, moveTreeToNextRelevantPipe, moveChildrenToNextRelevantPipe
 	outputDependencyGraph
 
 --============================================================]]
@@ -446,61 +446,57 @@ end
 
 
 
-function _G.moveToPipe(state, node, targetPipe)
-	local queued = node.queued
-	queued.pipe  = targetPipe
-end
-
 -- moveToNextRelevantPipe( state, node [, fromPipe=current ] )
 function _G.moveToNextRelevantPipe(state, node, fromPipe)
-	fromPipe = fromPipe or node.queued.pipe
+	local queued = node.queued
+	fromPipe     = fromPipe or queued.pipe
 
 	if fromPipe == !(PIPE_INFER) then
 		local nodeType = node.nodeType
 
-		if !!(CONST_SET{ AST_LITERAL, AST_FOREIGN, AST_TYPE_INFO })[nodeType] then
-			moveToPipe(state, node, !(PIPE_EMIT))
+		if nodeType == !(AST_LITERAL) or nodeType == !(AST_FOREIGN) or nodeType == !(AST_TYPE_INFO) then
+			queued.pipe = !(PIPE_EMIT)
 
 		elseif nodeType == !(AST_DECLARATION) then
 			local decl = node
-			if decl.name.inferredType.tag == !(TYPE_NAMESPACE) then
-				moveToPipe(state, decl, !(PIPE_DONE))
+			if decl.inferredType.tag == !(TYPE_NAMESPACE) then
+				queued.pipe = !(PIPE_DONE)
 			else
-				moveToPipe(state, decl, !(PIPE_EMIT))
+				queued.pipe = !(PIPE_EMIT)
 			end
 
 		elseif nodeType == !(AST_LAMBDA) then
 			local lambda = node
 			if lambda.isPolymorphic or lambda.captures[1] then
-				moveToPipe(state, lambda, !(PIPE_DONE))
+				queued.pipe = !(PIPE_DONE)
 			elseif lambda.body then
-				moveToPipe(state, lambda, !(PIPE_EMIT))
+				queued.pipe = !(PIPE_EMIT)
 			else
-				moveToPipe(state, lambda, !(PIPE_DONE))
-			end
-
-		elseif nodeType == !(AST_LOCATION) then
-			local loc = node
-			if loc.ofCaller then
-				moveToPipe(state, loc, !(PIPE_DONE)) -- The constants are generated at the calling sites instead.
-			else
-				moveToPipe(state, loc, !(PIPE_EMIT))
+				queued.pipe = !(PIPE_DONE)
 			end
 
 		elseif nodeType == !(AST_CALL) then
 			local call = node
 			if call.wantLocation then
-				moveToPipe(state, call, !(PIPE_EMIT))
+				queued.pipe = !(PIPE_EMIT)
 			else
-				moveToPipe(state, call, !(PIPE_DONE))
+				queued.pipe = !(PIPE_DONE)
+			end
+
+		elseif nodeType == !(AST_LOCATION) then
+			local loc = node
+			if loc.ofCaller then
+				queued.pipe = !(PIPE_DONE) -- The constants are generated at the calling sites instead.
+			else
+				queued.pipe = !(PIPE_EMIT)
 			end
 
 		else
-			moveToPipe(state, node, !(PIPE_DONE))
+			queued.pipe = !(PIPE_DONE)
 		end
 
 	elseif fromPipe == !(PIPE_EMIT) then
-		moveToPipe(state, node, !(PIPE_DONE))
+		queued.pipe = !(PIPE_DONE)
 
 	elseif fromPipe == !(PIPE_DONE) then
 		printerr("Warning: Trying to move nodes past PIPE_DONE!")

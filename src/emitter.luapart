@@ -362,7 +362,7 @@ function _G.emitLambda(state, lambda)
 
 	if lambda.bodyIsForeign then
 		lambda.valueConstant.isReady = true -- @Cleanup: We can probably set this in allocateConstantIfNew(). (Should we though? Maybe.)
-		moveToPipe(state, lambda, !(PIPE_DONE))
+		lambda.queued.pipe = !(PIPE_DONE)
 		return
 	end
 
@@ -378,7 +378,7 @@ function _G.emitLambda(state, lambda)
 	end
 
 	lambda.valueConstant.isReady = true
-	moveToPipe(state, lambda, !(PIPE_DONE))
+	lambda.queued.pipe           = !(PIPE_DONE)
 end
 
 function _G.emitDeclaration(state, decl)
@@ -390,13 +390,13 @@ function _G.emitDeclaration(state, decl)
 
 		if valueExprFinal.nodeType == !(AST_LAMBDA) and valueExprFinal.isPolymorphic then
 			-- @Cleanup: moveToNextRelevantPipe() should prevent us from getting here.
-			moveToPipe(state, decl, !(PIPE_DONE))
+			decl.queued.pipe = !(PIPE_DONE)
 			return
 		end
 
 		local const
-		if decl.name.inferredType.tag == !(TYPE_ENUM) then
-			local enumInfo = decl.name.inferredType
+		if decl.inferredType.tag == !(TYPE_ENUM) then
+			local enumInfo = decl.inferredType
 			local name     = valueExpr.nodeType == !(AST_IDENTIFIER) and valueExpr.name or decl.name.name
 			const          = allocateConstantIfNew(state, !(CONST_KIND_NORMAL), enumInfo, name, decl)
 		else
@@ -470,56 +470,56 @@ function _G.emitDeclaration(state, decl)
 		end
 	end
 
-	moveToPipe(state, decl, !(PIPE_DONE))
+	decl.queued.pipe = !(PIPE_DONE)
 end
 
 function _G.emitNode(state, node)
 	local nodeType = node.nodeType
 
 	if nodeType == !(AST_LITERAL) then
-		local literal         = node
-		literal.valueConstant = allocateConstantIfNew(state, !(CONST_KIND_NORMAL), literal.inferredType, literal.value, literal)
-		moveToPipe(state, literal, !(PIPE_DONE))
+		local literal              = node
+		literal.valueConstant      = allocateConstantIfNew(state, !(CONST_KIND_NORMAL), literal.inferredType, literal.value, literal)
+		literal.queued.pipe        = !(PIPE_DONE)
+
+	elseif nodeType == !(AST_DECLARATION) then
+		local decl = node
+		emitDeclaration(state, decl) -- Updates pipe.
 
 	elseif nodeType == !(AST_LAMBDA) then
 		local lambda = node
 		assert(lambda.body)
 		if lambda.isPolymorphic then  errorInternal(state, lambda, "Cannot allocate constant for polymorphic function.")  end
-		emitLambda(state, lambda) -- Calls moveToPipe().
-
-	elseif nodeType == !(AST_DECLARATION) then
-		local decl = node
-		emitDeclaration(state, decl) -- Calls moveToPipe().
-
-	elseif nodeType == !(AST_FOREIGN) then
-		local foreign              = node
-		local dummyType            = getTypeInfoForBuiltinType(state, "void")
-		foreign.valueConstant      = allocateConstantIfNew(state, !(CONST_KIND_FOREIGN), dummyType, foreign, foreign)
-		moveToPipe(state, foreign, !(PIPE_DONE))
-
-	elseif nodeType == !(AST_TYPE_INFO) then
-		local typeInfoNode         = node
-		local dummyType            = getTypeInfoForBuiltinType(state, "void")
-		typeInfoNode.valueConstant = allocateConstantIfNew(state, !(CONST_KIND_TYPE_INFO), dummyType, typeInfoNode.valueTypeInfo, typeInfoNode)
-		moveToPipe(state, typeInfoNode, !(PIPE_DONE))
-
-	elseif nodeType == !(AST_LOCATION) then
-		local loc                  = node
-		local dummyType            = getTypeInfoForBuiltinType(state, "void")
-		loc.valueConstant          = allocateConstantIfNew(state, !(CONST_KIND_LOCATION), dummyType, loc.target, loc)
-		moveToPipe(state, loc, !(PIPE_DONE))
-
-	elseif nodeType == !(AST_CALL) then -- The called function should have a !caller_location.
-		local call                 = node
-		local dummyType            = getTypeInfoForBuiltinType(state, "void")
-		call.locationConstant      = allocateConstantIfNew(state, !(CONST_KIND_LOCATION), dummyType, call.callee, call)
-		moveToPipe(state, call, !(PIPE_DONE))
+		emitLambda(state, lambda) -- Updates pipe.
 
 	elseif nodeType == !(AST_NULL) then
 		local null                 = node
 		local dummyType            = getTypeInfoForBuiltinType(state, "void")
 		null.valueConstant         = allocateConstantIfNew(state, !(CONST_KIND_NULL), dummyType, nil, null)
-		moveToPipe(state, null, !(PIPE_DONE))
+		null.queued.pipe           = !(PIPE_DONE)
+
+	elseif nodeType == !(AST_FOREIGN) then
+		local foreign              = node
+		local dummyType            = getTypeInfoForBuiltinType(state, "void")
+		foreign.valueConstant      = allocateConstantIfNew(state, !(CONST_KIND_FOREIGN), dummyType, foreign, foreign)
+		foreign.queued.pipe        = !(PIPE_DONE)
+
+	elseif nodeType == !(AST_TYPE_INFO) then
+		local typeInfoNode         = node
+		local dummyType            = getTypeInfoForBuiltinType(state, "void")
+		typeInfoNode.valueConstant = allocateConstantIfNew(state, !(CONST_KIND_TYPE_INFO), dummyType, typeInfoNode.valueTypeInfo, typeInfoNode)
+		typeInfoNode.queued.pipe   = !(PIPE_DONE)
+
+	elseif nodeType == !(AST_LOCATION) then
+		local loc                  = node
+		local dummyType            = getTypeInfoForBuiltinType(state, "void")
+		loc.valueConstant          = allocateConstantIfNew(state, !(CONST_KIND_LOCATION), dummyType, loc.target, loc)
+		loc.queued.pipe            = !(PIPE_DONE)
+
+	elseif nodeType == !(AST_CALL) then -- The called function should have a !caller_location.
+		local call                 = node
+		local dummyType            = getTypeInfoForBuiltinType(state, "void")
+		call.locationConstant      = allocateConstantIfNew(state, !(CONST_KIND_LOCATION), dummyType, call.callee, call)
+		call.queued.pipe           = !(PIPE_DONE)
 
 	else
 		errorUnhandledNodeType(state, node)

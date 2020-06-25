@@ -217,12 +217,12 @@ local function doesLambdaHaveSignature(lambda, funcSig)
 
 	if argsIn then
 		for i, arg in ipairs(argsIn.arguments) do
-			if arg.declaration.name.inferredType ~= argTypesIn[i] then  return false  end
+			if arg.declaration.inferredType ~= argTypesIn[i] then  return false  end
 		end
 	end
 	if argsOut then
 		for i, arg in ipairs(argsOut.arguments) do
-			if arg.declaration.name.inferredType ~= argTypesOut[i] then  return false  end
+			if arg.declaration.inferredType ~= argTypesOut[i] then  return false  end
 		end
 	end
 
@@ -242,14 +242,14 @@ function _G.getTypeInfoForLambda(state, lambda)
 	else
 		if argsIn then
 			for argIndex, arg in ipairs(argsIn.arguments) do
-				local argType = arg.declaration.name.inferredType
+				local argType = arg.declaration.inferredType
 				if not argType then  return nil  end
 				dumbHash = dumbHash+argType.id*argIndex*argIndex
 			end
 		end
 		if argsOut then
 			for argIndex, arg in ipairs(argsOut.arguments) do
-				local argType = arg.declaration.name.inferredType
+				local argType = arg.declaration.inferredType
 				if not argType then  return nil  end
 				dumbHash = dumbHash+argType.id*argIndex*argIndex*0x1000
 			end
@@ -277,7 +277,7 @@ function _G.getTypeInfoForLambda(state, lambda)
 			funcSig.argumentTypesIn[i]
 				=   placeholderType
 				and (arg.declaration.name.nodeType == !(AST_VARARG) and placeholderTypeVararg or placeholderType)
-				or  arg.declaration.name.inferredType
+				or  arg.declaration.inferredType
 				or  errorInternal(state, arg)
 		end
 	end
@@ -286,7 +286,7 @@ function _G.getTypeInfoForLambda(state, lambda)
 			funcSig.argumentTypesOut[i]
 				=   placeholderType
 				and (arg.declaration.name.nodeType == !(AST_VARARG) and placeholderTypeVararg or placeholderType)
-				or  arg.declaration.name.inferredType
+				or  arg.declaration.inferredType
 				or  errorInternal(state, arg)
 		end
 	end
@@ -448,6 +448,12 @@ end
 
 -- declaration, fromUsing = findDeclaration( compilationState, startNode, name [, declarationToIgnore ] )
 function _G.findDeclaration(state, startNode, name, declToIgnore)
+	local ipairs                = ipairs
+	local astFindParentScope    = astFindParentScope
+	local canNodeSeeDeclaration = canNodeSeeDeclaration
+	local isDeclarationConstant = isDeclarationConstant
+	local isDeclarationExported = isDeclarationExported
+
 	local scope = isScope(startNode) and startNode or astFindParentScope(startNode)
 
 	while scope do
@@ -455,7 +461,7 @@ function _G.findDeclaration(state, startNode, name, declToIgnore)
 		-- existing directly in the scope? (Baked values in functions probably set decl.checkedRedeclaration.)
 		while scope.nodeType == !(AST_STRUCT) and scope.isPolymorphic do
 			scope = astFindParentScope(scope)
-			if not scope then  return  end
+			if not scope then  return nil, nil  end
 		end
 
 		do
@@ -464,7 +470,8 @@ function _G.findDeclaration(state, startNode, name, declToIgnore)
 				and scope.declarationsByName[name]
 				or  scope.declarationsByName2[name]
 			)
-			if decl and decl ~= declToIgnore and canNodeSeeDeclaration(state, startNode, decl) then
+			if decl and canNodeSeeDeclaration(state, startNode, decl) then
+				-- assert(decl ~= declToIgnore)
 				return decl, nil
 			end
 		end
@@ -476,7 +483,8 @@ function _G.findDeclaration(state, startNode, name, declToIgnore)
 				and fileScope.declarationsByName[name]
 				or  fileScope.declarationsByName2[name]
 			)
-			if decl and decl ~= declToIgnore and isDeclarationExported(decl) then
+			if decl and isDeclarationExported(decl) then
+				-- assert(decl ~= declToIgnore)
 				return decl, nil
 			end
 		end
@@ -488,9 +496,10 @@ function _G.findDeclaration(state, startNode, name, declToIgnore)
 				and usingScope.declarationsByName[name]
 				or  usingScope.declarationsByName2[name]
 			)
-			if decl and decl ~= declToIgnore
+			local nodeType = decl and usingScope.nodeType
+			if nodeType
 				and (
-					not !!(CONST_SET{ AST_FILE_SCOPE, AST_GLOBAL_SCOPE, AST_NAMESPACE })[usingScope.nodeType] -- Look for only exports in these scopes.
+					not (nodeType == !(AST_FILE_SCOPE) or nodeType == !(AST_GLOBAL_SCOPE) or nodeType == !(AST_NAMESPACE)) -- Look for only exports in these scopes.
 					or isDeclarationExported(decl)
 				)
 				and (
@@ -501,6 +510,7 @@ function _G.findDeclaration(state, startNode, name, declToIgnore)
 					)
 				)
 			then
+				-- assert(decl ~= declToIgnore)
 				return decl, using
 			end
 		end
@@ -688,7 +698,7 @@ function _G.findInferredPreloadDeclaration(state, dependent, name, tag)
 	local decl = findPublicDeclarationInScope(state, module, name)
 		or errorInternal(2, state, dependent, "No declaration '%s' in 'preload' module.", name)
 
-	if not decl.name.inferredType then
+	if not decl.inferredType then
 		!DEPEND_AND_RETURN(`dependent`, DEPEND_NODE_INFERRED, `decl`, `nil`)
 	end
 
@@ -950,7 +960,7 @@ local function checkRedeclarationAndMaybeAddOverload(state, ident, decl, isMembe
 		and !!(CONST_SET{ AST_LAMBDA, AST_VARIANT_OF })[followIdentifiersToConstantValue(state, decl        .value).nodeType]
 		and !!(CONST_SET{ AST_LAMBDA, AST_VARIANT_OF })[followIdentifiersToConstantValue(state, declExisting.value).nodeType]
 	then
-		declExisting = getOverloadBase(declExisting) or declExisting
+		declExisting = declExisting.overloadOf or declExisting
 
 		if declExisting == decl then
 			-- This simplifies finding an overload later.
@@ -979,15 +989,15 @@ local function checkRedeclarationAndMaybeAddOverload(state, ident, decl, isMembe
 					decl,         F("Overloaded names must have the same visibility. This one is '%s'.", DECL_KIND_TITLES[decl.kind]),
 					declExisting, F("...and this one is '%s'.", DECL_KIND_TITLES[declExisting.kind])
 				)
-			end
-			if declExisting.name.inferredType then
+			elseif declExisting.name.inferredType then
+			-- if declExisting.inferredType then
 				typeError2(state,
 					decl,         F("Internal error: Trying to add overload to already inferred function '%s'. Currently all overloads have to be added during the same cycle. (This message is probably not very helpful. Sorry!)", ident.name),
 					declExisting, F("...here is the inferred function.")
 				)
 			end
 
-			decl.overloadOf = declExisting.overloadOf or declExisting
+			decl.overloadOf = declExisting
 			table.insert(declExisting.overloads, decl)
 
 			-- This dependency means declExisting won't get inferred until earliest next
@@ -995,7 +1005,8 @@ local function checkRedeclarationAndMaybeAddOverload(state, ident, decl, isMembe
 			-- should work as the first occurence of a name will make the second occurence
 			-- wait before the second has been able to do anything. (This is true even
 			-- when we remove unordered from the queue.)
-			addDependency(state, declExisting.name, !(DEPEND_NODE_INFERRED), ident)
+			addDependency(state, declExisting.name, !(DEPEND_NODE_INFERRED), decl)
+			-- addDependency(state, declExisting, !(DEPEND_NODE_INFERRED), decl) -- Doesn't work as it's currently the name that sets overloadsLocked! 2020-06-25 @Cleanup
 		end
 
 	-- Non-shadow.
@@ -1031,23 +1042,20 @@ local function checkRedeclarationAndMaybeAddOverload(state, ident, decl, isMembe
 end
 
 local function inferIdentifierOrVararg(state, identOrVararg)
-	local vararg    = identOrVararg.nodeType == !(AST_VARARG) and identOrVararg or nil
-	local ident     = not vararg                              and identOrVararg or nil
-	local parent    = identOrVararg.parent
-	local decl      = identOrVararg.declaration
-	local container = identOrVararg.queued.container
-
 	-- 1. Things to ignore.
-	if
-		identOrVararg.kind == !(IDENT_KIND_IGNORE)
-		-- -- Keys in named args in calls:
-		-- (ident and parent.nodeType == !(AST_CALL) and container ~= parent and container ~= parent.arguments and identOrVararg.queued.key == "key" and indexOf(parent.argumentsNamed, container))
-	then
-		moveToNextRelevantPipe(state, ident)
+	if identOrVararg.kind == !(IDENT_KIND_IGNORE) then
+		moveToNextRelevantPipe(state, identOrVararg)
 		return
+	end
+
+	local vararg         = identOrVararg.nodeType == !(AST_VARARG) and identOrVararg or nil
+	local ident          = not vararg                              and identOrVararg or nil
+	local decl           = identOrVararg.declaration
+	local parent         = identOrVararg.parent
+	local parentNodeType = parent.nodeType
 
 	-- 2. Loose identifier.
-	elseif identOrVararg.kind == !(IDENT_KIND_LOOSE) or identOrVararg.kind == !(IDENT_KIND_ASSIGNMENT) then
+	if identOrVararg.kind == !(IDENT_KIND_LOOSE) or identOrVararg.kind == !(IDENT_KIND_ASSIGNMENT) then
 		if not decl then
 			local using
 			decl, using = findDeclaration(state, identOrVararg, identOrVararg.name)
@@ -1061,46 +1069,54 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 			fulfillDependencies(state, identOrVararg.queued, !(DEPEND_HAS_DECLARATION))
 		end
 
-		if
-			-- Don't care about polymorphism/overloads in these contexts.
+		if not (
+			-- We don't care about polymorphism/overloads in these contexts:
 			vararg
-			or (parent.nodeType == !(AST_LOCATION))
-			or (parent.nodeType == !(AST_CALL)        and ident == parent.callee)
-			or (parent.nodeType == !(AST_DEBUG)       and parent.action == "print")
-			or (parent.nodeType == !(AST_DECLARATION) and isDeclarationConstant(parent) and ident == parent.value) -- Note: Declarations do their own validation of the identifier in this case.
-		then
-			-- void
-
-		-- Overloaded names refer to multiple things, so that's an error!
-		elseif decl.overloadOf then
-			local declBase = ident.declaration
-			declBase       = getOverloadBase(declBase) or declBase
-
-			if not declBase.name.inferredType then
-				-- This is just so we get a better overload list in the error message.
-				!DEPEND_AND_RETURN(`ident`, DEPEND_NODE_INFERRED, `declBase.name`)
+			or not decl.value
+			or (parentNodeType == !(AST_LOCATION))
+			or (parentNodeType == !(AST_CALL)        and ident == parent.callee)
+			or (parentNodeType == !(AST_DEBUG)       and parent.action == "print")
+			or (parentNodeType == !(AST_DECLARATION) and isDeclarationConstant(parent) and ident == parent.value) -- Note: Declarations do their own validation of the identifier in this case.
+		) then
+			if isDeclarationConstant(decl) then
+				if not decl.inferredType then
+					!DEPEND_AND_RETURN(`identOrVararg`, DEPEND_NODE_INFERRED, `decl`) -- Needed for decl.overloadOf to be valid.
+				elseif not decl.overloadsLocked then
+					errorInternal(state, decl, "Overloads are not locked when they should.")
+				end
 			end
 
-			!TRACE()
-			printerr()
-			typeMessage(io.stderr, state, ident, "Error", "'%s' has multiple overloads and we don't know which one this is referring to.", ident.name)
-			for i, declOverload in ipairs(declBase.overloads) do
-				typeMessage(io.stderr, state, declOverload.name, "Info", "...overload #%d.", i)
+			-- Overloaded names refer to multiple things, so that's an error!
+			if decl.overloadOf then
+				local declBase = ident.declaration
+				declBase       = declBase.overloadOf or declBase
+
+				if not declBase.inferredType then
+					-- This is just so we get a better overload list in the error message.
+					!DEPEND_AND_RETURN(`ident`, DEPEND_NODE_INFERRED, `declBase`)
+				end
+
+				!TRACE()
+				printerr()
+				typeMessage(io.stderr, state, ident, "Error", "'%s' has multiple overloads and we don't know which one this is referring to.", ident.name)
+				for i, declOverload in ipairs(declBase.overloads) do
+					typeMessage(io.stderr, state, declOverload.name, "Info", "...overload #%d.", i)
+				end
+				exitFailure()
+
+			-- Polymorphic functions also contain the polymorphed functions and are thus a collection of functions, so referring to them may be a bad idea!
+			-- (How does this work when calling a function from a module or a static struct member function? @Incomplete @Robustness)
+			elseif decl.value.nodeType == !(AST_LAMBDA) and decl.value.isPolymorphic then
+				typeError(state, ident, "Cannot refer to polymorphic function '%s' outside calls.", ident.name)
+
+			-- Polymorphic structs are similar to polymorphed functions as they are collections of structs, so referring to them may be a bad idea too!
+			-- (Also, like with the functions, think about modules. @Incomplete @Robustness)
+			elseif decl.value.nodeType == !(AST_STRUCT) and decl.value.isPolymorphic then
+				typeErrorAfter(state, ident, "Missing arguments for polymorphic struct '%s'.", ident.name)
 			end
-			exitFailure()
-
-		-- Polymorphic functions also contain the polymorphed functions and are thus a collection of functions, so referring to them may be a bad idea!
-		-- (How does this work when calling a function from a module or a static struct member function? @Incomplete @Robustness)
-		elseif decl.value and decl.value.nodeType == !(AST_LAMBDA) and decl.value.isPolymorphic then
-			typeError(state, ident, "Cannot refer to polymorphic function '%s' outside calls.", ident.name)
-
-		-- Polymorphic structs are similar to polymorphed functions as they are collections of structs, so referring to them may be a bad idea too!
-		-- (Also, like with the functions, think about modules. @Incomplete @Robustness)
-		elseif decl.value and decl.value.nodeType == !(AST_STRUCT) and decl.value.isPolymorphic then
-			typeErrorAfter(state, ident, "Missing arguments for polymorphic struct '%s'.", ident.name)
 		end
 
-		local typeInfo = decl.name.inferredType
+		local typeInfo = decl.inferredType
 		if not typeInfo then
 			!DEPEND_AND_RETURN(`identOrVararg`, DEPEND_NODE_INFERRED, `decl`)
 		end
@@ -1124,7 +1140,7 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 
 			addUnqueuedChildrenToQueueRecursively(state, access)
 			replaceQueuedNodeAndUnqueueOldTree(state, ident, access)
-			-- Stay in the current pipe.
+			-- Stay in PIPE_INFER.
 
 		else
 			moveToNextRelevantPipe(state, identOrVararg)
@@ -1139,18 +1155,18 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 		return
 	end
 
-	!ASSERT("decl",                                                                            nil, `identOrVararg`)
-	!ASSERT("parent.nodeType == "..AST_DECLARATION.." or parent.nodeType == "..AST_ASSIGNMENT, nil, `identOrVararg`)
+	!ASSERT("decl",                                                                          nil, `identOrVararg`)
+	!ASSERT("parentNodeType == "..AST_DECLARATION.." or parentNodeType == "..AST_ASSIGNMENT, nil, `identOrVararg`)
 
 	-- 3. Assignment target in declaration (which is a copy of the identifier in the declaration).
 	if identOrVararg.kind == !(IDENT_KIND_DECLARATION_ASSIGNMENT) then
-		!ASSERT("parent.nodeType == "..AST_ASSIGNMENT)
-		local identInDecl = decl.name
-		if not identInDecl.inferredType then
-			!DEPEND_AND_RETURN(`identOrVararg`, DEPEND_NODE_INFERRED, `identInDecl`)
-		end
-		identOrVararg.inferredType = identInDecl.inferredType
+		!ASSERT("parentNodeType == "..AST_ASSIGNMENT)
 
+		if not decl.inferredType then
+			!DEPEND_AND_RETURN(`identOrVararg`, DEPEND_NODE_INFERRED, `decl`)
+		end
+
+		identOrVararg.inferredType = decl.inferredType
 		moveToNextRelevantPipe(state, identOrVararg)
 		return
 	end
@@ -1160,12 +1176,7 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 		errorInternal(state, identOrVararg, "Unexepected identifier kind '%s'.", (IDENT_KIND_TITLES[identOrVararg.kind] or "?"))
 	end
 
-	local scope = astFindParentScope(decl)
-
-	if not scope then
-		typeError(state, identOrVararg, "Internal compiler error: Could not find what scope '%s' is in.", identOrVararg.name)
-	end
-
+	local scope        = astFindParentScope(decl) or errorInternal(state, identOrVararg, "Could not find what scope '%s' is in.", identOrVararg.name)
 	local isEnumMember = scope.nodeType == !(AST_ENUM)
 	local isMember     = isEnumMember or scope.nodeType == !(AST_STRUCT)
 
@@ -1184,16 +1195,16 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 		else
 			local declExisting = findDeclaration(state, ident, ident.name, decl)
 
-			if declExisting and declExisting.value then
-				okToContinue, identWithoutDecl = makeSureConstantIdentifierChainHasAllDeclarationsSet(state, declExisting, ident)
-				if not okToContinue then  return  end
-
-				if identWithoutDecl then
-					!DEPEND_AND_RETURN(`ident`, DEPEND_HAS_DECLARATION, `identWithoutDecl`) -- Important for redeclaration stuff to work.
-				end
-			end
-
 			if declExisting then
+				if declExisting.value then
+					okToContinue, identWithoutDecl = makeSureConstantIdentifierChainHasAllDeclarationsSet(state, declExisting, ident)
+					if not okToContinue then  return  end
+
+					if identWithoutDecl then
+						!DEPEND_AND_RETURN(`ident`, DEPEND_HAS_DECLARATION, `identWithoutDecl`) -- Important for redeclaration stuff to work.
+					end
+				end
+
 				checkRedeclarationAndMaybeAddOverload(state, ident, decl, isMember, scope, declExisting)
 			end
 		end
@@ -1218,7 +1229,7 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 	end
 
 	--
-	-- No more dependencies for this identifier after this point!
+	-- No more dependencies for this identifier/vararg after this point!
 	--
 
 	decl.overloadsLocked = true
@@ -1250,9 +1261,6 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 					)
 				end
 
-				-- local requiredCount1 = 0
-				-- local requiredCount2 = 0
-
 				-- @Incomplete @Robustness: Check that vararg works.
 				for argIndex = 1, math.min(#argTypes1, #argTypes2)+1 do
 					local argTypeInfo1 = argTypes1[argIndex]
@@ -1262,9 +1270,6 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 
 					local isRequired1  = argTypeInfo1 ~= nil and args1[argIndex].isRequired
 					local isRequired2  = argTypeInfo2 ~= nil and args2[argIndex].isRequired
-
-					-- if isRequired1 then  requiredCount1 = requiredCount1+1  end
-					-- if isRequired2 then  requiredCount2 = requiredCount2+1  end
 
 					if not (isRequired1 or isRequired2) then
 						local identEarly, identLate = getEarlyAndLateForRedeclarationError(state, decl1.name, decl2.name)
@@ -1276,30 +1281,6 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 
 					if not (argTypeInfo1 and argTypeInfo1 == argTypeInfo2) then  break  end
 				end
-
-				--[[ This is a bit too restrictive!
-				if requiredCount1 == requiredCount2 then
-					for argIndex = 1, requiredCount1 do
-						local argTypeInfo1 = adjustTypeToOne(state, decl1.name, argTypes1[argIndex])
-						local argTypeInfo2 = adjustTypeToOne(state, decl2.name, argTypes2[argIndex])
-						if
-							isTypeCompatibleWith(argTypeInfo1, argTypeInfo2) or
-							isTypeCompatibleWith(argTypeInfo2, argTypeInfo1)
-						then
-							local identEarly, identLate = getEarlyAndLateForRedeclarationError(state, decl1.name, decl2.name)
-							typeError2(state,
-								identEarly, F("Call signatures for function overloads (%s) are too similar. (Argument #%d, %s vs. %s)",
-									ident.name,
-									argIndex,
-									getFriendlyTypeInfoName(argTypeInfo1),
-									getFriendlyTypeInfoName(argTypeInfo2)
-								)
-								identLate, F("...here is the other function.")
-							)
-						end
-					end
-				end
-				--]]
 			end
 		end
 	end
@@ -1363,15 +1344,17 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 			end
 		end
 
-		if typeInfo.tag == !(TYPE_TYPE) then
+		local tag = typeInfo.tag
+
+		if tag == !(TYPE_TYPE) then
 			if not typeInfoForDecl then
 				errorInternal(state, valueExpr, "Missing what type this constant expression represents.")
 			end
 
-		elseif typeInfo.tag == !(TYPE_ENUM) then -- @Robustness: Actually detect whether we have a type enum and include it here above.
+		elseif tag == !(TYPE_ENUM) then -- @Robustness: Actually detect whether we have a type enum and include it here above.
 			-- void  For now we may or may not have a type enum and typeInfoForDecl.
 
-		elseif typeInfo.tag == !(TYPE_PLACEHOLDER) then
+		elseif tag == !(TYPE_PLACEHOLDER) then
 			-- void  Just ignore this for now. We get here when placeholders are combined with auto-baking (which produces constants).
 
 		elseif typeInfoForDecl then
@@ -1565,13 +1548,13 @@ end
 			decl = findDeclaration(state, typeNode, typeNode.typeName)
 			if not decl then
 				!DEPEND_AND_RETURN(`typeNode`, DEPEND_DECLARATION, `typeNode.typeName`)
-			elseif not decl.name.inferredType then
-				!DEPEND_AND_RETURN(`typeNode`, DEPEND_NODE_INFERRED, `decl.name`)
+			elseif not decl.inferredType then
+				!DEPEND_AND_RETURN(`typeNode`, DEPEND_NODE_INFERRED, `decl`)
 			end
 		end
 
 		typeInfoRepresented = decl.valueTypeInfo -- May be nil, in which case we'll get an error here below.
-		typeInfo            = decl.name.inferredType or errorInternal()
+		typeInfo            = decl.inferredType or errorInternal()
 
 		-- Type enum members can be used as types, as a special case.
 		if isDeclarationConstant(decl) and typeInfo.tag == !(TYPE_ENUM) then
@@ -2060,11 +2043,12 @@ local function ensureNamedArgumentsHaveAssignedIndicies(state, call, lambdaOrStr
 	end
 end
 
+-- matchesOrNil = getMatchingFunctions( state, call, realArguments, realArgumentTypes, declarations )
 local function getMatchingFunctions(state, call, realArguments, realArgumentTypes, declarations)
 	local matches = nil
 
 	for _, decl in ipairs(declarations) do
-		local funcSig = decl.name.inferredType
+		local funcSig = decl.inferredType or errorInternal(state, decl, "Declaration should be inferred but isn't.")
 		!ASSERT("funcSig.tag == "..TYPE_FUNCTION)
 
 		local doesMatch, compatibilityScore = checkIfValuesMatchArgumentTypes(
@@ -2094,10 +2078,17 @@ local function getBestMatchOrTriggerError(state, call, matches, matchTerm, error
 	!TRACE()
 	printerr()
 	typeMessage(io.stderr, state, call.callee, "Error", errorTextOnDraw)
+
 	for i, matchData in ipairs(matches) do
 		if matchData.score < highscore then  break  end
-		typeMessage(io.stderr, state, matchData.declaration.name, "Info", "...%s #%d: %s", matchTerm, i, getFriendlyTypeInfoName(matchData.declaration.name.inferredType))
+
+		typeMessage(
+			io.stderr, state, matchData.declaration.name,
+			"Info", "...%s #%d: %s",
+			matchTerm, i, getFriendlyTypeInfoName(matchData.declaration.inferredType)
+		)
 	end
+
 	exitFailure()
 end
 
@@ -2147,8 +2138,8 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 	end
 
 	for _, morphDecl in ipairs(lambda.polymorphs) do
-		if not morphDecl.name.inferredType then
-			!DEPEND_AND_RETURN(`call`, DEPEND_NODE_INFERRED, `morphDecl.name`)
+		if not morphDecl.inferredType then
+			!DEPEND_AND_RETURN(`call`, DEPEND_NODE_INFERRED, `morphDecl`)
 		end
 	end
 
@@ -2508,7 +2499,7 @@ end
 
 local function handleOverloadedCall(state, call, realArguments, realArgumentTypes)
 	local ident    = call.callee
-	local declBase = getOverloadBase(ident.declaration)
+	local declBase = ident.declaration.overloadOf
 
 	local matchingOverloads = getMatchingFunctions(state, call, realArguments, realArgumentTypes, declBase.overloads)
 
@@ -2517,7 +2508,7 @@ local function handleOverloadedCall(state, call, realArguments, realArgumentType
 		printerr()
 		typeMessage(io.stderr, state, ident, "Error", "Did not find any matching overload to call.") -- @UX: Show expected signature.
 		for i, declOverload in ipairs(declBase.overloads) do
-			typeMessage(io.stderr, state, declOverload.name, "Info", "...overload #%d: %s", i, getFriendlyTypeInfoName(declOverload.name.inferredType))
+			typeMessage(io.stderr, state, declOverload.name, "Info", "...overload #%d: %s", i, getFriendlyTypeInfoName(declOverload.inferredType))
 		end
 		exitFailure()
 	end
@@ -2526,7 +2517,7 @@ local function handleOverloadedCall(state, call, realArguments, realArgumentType
 		state, call, matchingOverloads, "overload",
 		"There are several matching overloads."
 	)
-	local calleeTypeInfo = decl.name.inferredType
+	local calleeTypeInfo = decl.inferredType
 
 	-- Update the callee to represent the correct overload.
 	-- @Robustness: Is this safe? I don't think anything except the calls itself depends directly on, and uses values from, any callee.
@@ -2555,7 +2546,7 @@ local function handlePolymorphicStruct(state, call)
 	local struct = structInfo.astNode
 
 	for _, morphDecl in ipairs(struct.polymorphs) do
-		if not morphDecl.name.inferredType then
+		if not morphDecl.inferredType then
 			!DEPEND_AND_RETURN(`call`, DEPEND_NODE_INFERRED, `morphDecl`)
 		end
 	end
@@ -2739,17 +2730,17 @@ end
 	--
 	-- (Needed anymore since :WaitForCalleeToPassInfer?)
 	--
-	if isCallingConstantNameOrDeclaredType and callee.declaration.queued.pipe <= !(PIPE_INFER) then
-		!DEPEND_AND_RETURN(`call`, DEPEND_NODE_PASSED_INFER, `callee.declaration`)
+	if isCallingConstantNameOrDeclaredType and not callee.declaration.inferredType then
+		!DEPEND_AND_RETURN(`call`, DEPEND_NODE_INFERRED, `callee.declaration`)
 	end
 
 	-- Wait for overloads.
 	if isCallingConstantNameOrDeclaredType and callee.declaration.overloadOf then
 		local ident = callee
 		!ASSERT("callee.nodeType == "..AST_IDENTIFIER) -- Only functions can be overloaded in which case 'callee' should not be a type here.
-		local declBase = getOverloadBase(ident.declaration)
+		local declBase = ident.declaration.overloadOf
 
-		calleeType = declBase.name.inferredType
+		calleeType = declBase.inferredType
 		if not calleeType then
 			!DEPEND_AND_RETURN(`call`, DEPEND_NODE_INFERRED, `declBase`) -- If the base is overloaded then all others should be too.
 		end
@@ -2853,6 +2844,11 @@ end
 	end
 
 	-- Overloaded call.
+	!if DEBUG then
+		if callee.nodeType == !(AST_IDENTIFIER) and not callee.declaration.overloadsLocked then
+			errorInternal(state, callee)
+		end
+	!end
 	if isCallingConstantNameOrDeclaredType and callee.declaration.overloadOf then
 		funcSig = handleOverloadedCall(state, call, realArguments, realArgumentTypes) or errorInternal(state, call)
 	end
@@ -3081,9 +3077,9 @@ end
 	end
 
 	if valueExpr and isConst and valueExpr.nodeType == !(AST_IDENTIFIER) and not valueExpr.fromVariant then
-		local declBase = getOverloadBase(valueExpr.declaration)
+		local declBase = valueExpr.declaration.overloadOf
 
-		if declBase and not declBase.name.inferredType then
+		if declBase and not declBase.inferredType then
 			!DEPEND_AND_RETURN(`decl`, DEPEND_NODE_INFERRED, `declBase`)
 		end
 	end
@@ -3091,6 +3087,12 @@ end
 	--
 	-- No more dependencies for this declaration after this point!
 	--
+
+	decl.inferredType = typeInfo -- @Speed: We probably want to set this as soon as possible as many things may wait for the declaration to get inferred.
+
+	if valueExpr and valueExpr.nodeType == !(AST_IDENTIFIER) and not valueExpr.declaration.overloadsLocked then
+		errorInternal(state, valueExpr)
+	end
 
 	if valueExpr then
 		if valueExpr.inferredType.tag == !(TYPE_NAMESPACE) and not isConst then
@@ -3158,7 +3160,7 @@ end
 
 		if isConst and valueExpr.nodeType == !(AST_IDENTIFIER) and not valueExpr.fromVariant then
 			local ident    = valueExpr
-			local declBase = getOverloadBase(ident.declaration)
+			local declBase = ident.declaration.overloadOf
 
 			if declBase then
 				if decl.overloadOf then
@@ -3516,9 +3518,9 @@ function _G.validateStructKey(state, dependent, keyExpr, structInfo, isLvalue)
 			typeError(state, memberLiteral, "Cannot assign value to constant member %s.%s", getFriendlyTypeInfoName(structInfo), memberName)
 		end
 
-		memberValueType = decl.name.inferredType
+		memberValueType = decl.inferredType
 		if not memberValueType then
-			!DEPEND_AND_RETURN(`dependent`, DEPEND_NODE_INFERRED, `decl.name`, nil, `nil`)
+			!DEPEND_AND_RETURN(`dependent`, DEPEND_NODE_INFERRED, `decl`, nil, `nil`)
 		end
 
 		if isDeclarationConstant(decl) then  constDecl = decl  end
@@ -3726,7 +3728,7 @@ end
 				end
 
 				-- Update callee using access. (Note: access==callee)
-				local ident = newIdentifier(call, access.member.token, !(IDENT_KIND_LOOSE), constDecl.name.name, constDecl, constDecl.name.inferredType)
+				local ident = newIdentifier(call, access.member.token, !(IDENT_KIND_LOOSE), constDecl.name.name, constDecl, constDecl.inferredType)
 				replaceQueuedNode(state, access, ident)
 				moveToNextRelevantPipe(state, ident)
 
@@ -3739,7 +3741,7 @@ end
 				return
 			end
 
-			replacement = newIdentifier(access.parent, access.member.token, !(IDENT_KIND_LOOSE), constDecl.name.name, constDecl, constDecl.name.inferredType)
+			replacement = newIdentifier(access.parent, access.member.token, !(IDENT_KIND_LOOSE), constDecl.name.name, constDecl, constDecl.inferredType)
 
 		else
 			!ifDEBUG `where(state, access)`
@@ -3787,8 +3789,8 @@ end
 
 		if not decl then
 			!DEPEND_AND_RETURN(`access`, DEPEND_DECLARATION, `memberName`, `namespaceInfo.scope`)
-		elseif not decl.name.inferredType then
-			!DEPEND_AND_RETURN(`access`, DEPEND_NODE_INFERRED, `decl.name`)
+		elseif not decl.inferredType then
+			!DEPEND_AND_RETURN(`access`, DEPEND_NODE_INFERRED, `decl`)
 		end
 
 		local ident = astCopyIdentifier(decl.name, access.token, access.parent, !(IDENT_KIND_LOOSE))
@@ -4169,7 +4171,7 @@ end
 end
 
 !NODE_INFERRER `function nodeInferrers.AstArgument(state, arg)`
-	if arg.declaration.queued.pipe <= !(PIPE_INFER) then
+	if not arg.declaration.inferredType then
 		!DEPEND_AND_RETURN(`arg`, DEPEND_NODE_INFERRED, `arg.declaration`)
 	end
 	moveToNextRelevantPipe(state, arg)
@@ -4207,7 +4209,7 @@ end
 	if lambda.bodyIsForeign and lambda.foreignSource == "method" then
 		-- Validate method.
 		local argIn1   = argsIn and argsIn.arguments[1]
-		local argType1 = argIn1 and argIn1.declaration.name.inferredType
+		local argType1 = argIn1 and argIn1.declaration.inferredType
 
 		if not argIn1 then
 			typeError(state, lambda, "Expected a struct as first argument for foreign method.")
@@ -4516,7 +4518,7 @@ end
 			-- nodes somewhere safe?
 			moveToNextRelevantPipe(state, cast)
 		else
-			moveToPipe(state, cast, expr.queued.pipe) -- @Cleanup: Maybe cutOutPartOfNodeTree()/replaceQueuedNode() should do this (or maybe we just keep the wrong queued in cutOutPartOfNodeTree()).
+			cast.queued.pipe = expr.queued.pipe -- @Cleanup: Maybe cutOutPartOfNodeTree()/replaceQueuedNode() should do this (or maybe we just keep the wrong queued in cutOutPartOfNodeTree()).
 			cutOutPartOfNodeTree(state, cast, expr)
 		end
 		return
@@ -5079,7 +5081,7 @@ end
 		statement.queued.key       = iNew
 	end
 
-	moveToPipe(state, staticIf, !(PIPE_DONE)) -- Not sure if needed. @Cleanup
+	staticIf.queued.pipe = !(PIPE_DONE) -- Not sure if needed. @Cleanup
 	unqueue(staticIf) -- @Robustness: Check if the correct thing happens for things waiting on staticIf (i.e. the scope).
 
 	-- Re-check redeclarations for already-inferred things later in the scope and in the tree.
@@ -5214,8 +5216,9 @@ end
 end
 
 local function addDeclarationInForLoop(state, forLoop, name, token, isImplicit, typeInfo)
-	local decl = astNewNode(AstDeclaration, token, forLoop)
-	decl.name  = newIdentifier(decl, token, !(IDENT_KIND_DECLARATION), name, decl, typeInfo)
+	local decl        = astNewNode(AstDeclaration, token, forLoop)
+	decl.inferredType = typeInfo
+	decl.name         = newIdentifier(decl, token, !(IDENT_KIND_DECLARATION), name, decl, typeInfo)
 
 	table.insert(forLoop.statementsDynamic, decl)
 	table.insert(forLoop.declarations,      decl)
@@ -5856,7 +5859,7 @@ end
 	for _, decl in ipairs(struct.statementsStatic) do
 		if decl.nodeType == !(AST_DECLARATION) then
 			local memberName = decl.name.name
-			local memberType = decl.name.inferredType or errorInternal()
+			local memberType = decl.inferredType or errorInternal(state, decl)
 			-- ifDEBUG `print(memberName, getFriendlyTypeInfoName(memberType))`
 			checkForRecursiveStruct(state, decl, {memberName},memberName,memberType, structInfo, structInfo)
 		end
@@ -5866,7 +5869,7 @@ end
 	for _, decl in ipairs(struct.declarations) do
 		if not isDeclarationConstant(decl) then
 			local memberName = decl.name.name
-			local memberType = decl.name.inferredType or errorInternal()
+			local memberType = decl.inferredType or errorInternal(state, decl)
 
 			local member    = TypeInfoStructMember()
 			member.name     = memberName
@@ -6150,7 +6153,7 @@ function _G.crawl(state, unit, crawled, forMeta, cb)
 			end
 
 			-- This check seem a bit out of place maybe. @Cleanup
-			if decl.name.inferredType.tag == !(TYPE_NAMESPACE) then
+			if decl.inferredType.tag == !(TYPE_NAMESPACE) then
 				!MARK_CRAWLED(`decl`, CRAWL_NODE)
 				return
 			end
@@ -6581,7 +6584,7 @@ end
 
 function _G.queueForReinfer(state, node)
 	!ASSERT `node.queued`
-	moveToPipe(state, node, !(PIPE_INFER))
+	node.queued.pipe = !(PIPE_INFER)
 	table.insert(state.queueActive, node.queued)
 end
 
@@ -7608,8 +7611,8 @@ function _G.getExpectedTypeInfo(state, node, strict, expectantTerm, nodeForError
 		local decl = (assignment.forDeclaration and assignment.declarations[i] or nil)
 
 		if decl then
-			if decl.name.inferredType then
-				return decl.name.inferredType
+			if decl.inferredType then
+				return decl.inferredType
 			elseif not decl.type then
 				return (getExpectedTypeInfoUsingContents(state, node, strict, expectantTerm, nodeForError))
 			elseif not decl.type.inferredType then
@@ -7634,8 +7637,8 @@ function _G.getExpectedTypeInfo(state, node, strict, expectantTerm, nodeForError
 		local decl = (assignment.forDeclaration and assignment.declarations[i] or nil)
 
 		if decl then
-			if decl.name.inferredType then
-				return decl.name.inferredType
+			if decl.inferredType then
+				return decl.inferredType
 
 			elseif decl.parent.nodeType == !(AST_ENUM) then
 				local enum     = decl.parent
@@ -7670,8 +7673,8 @@ function _G.getExpectedTypeInfo(state, node, strict, expectantTerm, nodeForError
 		local decl = node.parent
 		if node ~= decl.value then  return (getExpectedTypeInfoUsingContents(state, node, strict, expectantTerm, nodeForError))  end
 
-		if decl.name.inferredType then
-			return decl.name.inferredType
+		if decl.inferredType then
+			return decl.inferredType
 
 		elseif decl.parent.nodeType == !(AST_ENUM) then
 			local enum     = decl.parent
@@ -8067,6 +8070,7 @@ end
 
 
 
+--[[
 function _G.getOverloadBase(decl)
 	return decl.overloadOf -- We currently don't keep any chains. 2020-06-12
 
@@ -8079,6 +8083,7 @@ function _G.getOverloadBase(decl)
 
 	-- return decl
 end
+--]]
 
 
 
