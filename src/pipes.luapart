@@ -24,7 +24,7 @@ local MAX_ERRORS_MESSAGES          = !(DEBUG and 20 or 4) -- @Incomplete: Make t
 
 
 
-local !struct"Dependency"{ -- @Cleanup: Rename to something with "wait"?
+!struct"_Dependency"{ -- @Cleanup: Rename to something with "wait"?
 	{`dependent`,  nil}, -- Queued
 	{`dependType`, 0},   -- See addDependency().
 	{`dependOn`,   nil}, -- string|Queued  The value depends on what dependType is.
@@ -43,6 +43,7 @@ local !struct"Dependency"{ -- @Cleanup: Rename to something with "wait"?
 -- addDependency( state, dependent, DEPEND_CONSTANT_READY,       constant )
 function _G.addDependency(state, dependent, dependType, dependOn, extraData)
 	!if DEBUG then
+		--[[
 		if dependType == !(DEPEND_DECLARATION) then
 			!ASSERT `type(dependOn)  == "string"`
 			!ASSERT `extraData == nil or type(extraData) == "table"`
@@ -54,10 +55,13 @@ function _G.addDependency(state, dependent, dependType, dependOn, extraData)
 		else
 			errorInternal("%d", dependType)
 		end
+		--]]
 	!end
 
+	local dependOnIsNode = !!(CONST_SET{ DEPEND_HAS_DECLARATION, DEPEND_NODE_INFERRED, DEPEND_NODE_PASSED_INFER, DEPEND_NODE_PASSED_EMIT })[dependType]
+
 	!if CHECK_DUPLICATE_DEPENDENCY then
-		-- WARNING: getExistingDependency() takes a lot of time to call here! @Robustness: @Optimize this into O(1) and uncomment.
+		-- WARNING: getExistingDependency() takes a lot of time to call here!  @Robustness: @Optimize this into O(1) and run always.
 		local dependency = getExistingDependency(state, dependent, dependType, dependOn)
 
 		if dependency then
@@ -66,7 +70,7 @@ function _G.addDependency(state, dependent, dependType, dependOn, extraData)
 			!ifDEBUG `astPrint(dependent)`
 			nodeMessage(io.stderr, state, dependent, "Error", "Pipes", "Internal compiler error: Trying to add dependency twice. (%s)", (DEPEND_TITLES[dependType] or "?"))
 
-			if !!(CONST_SET{ DEPEND_HAS_DECLARATION, DEPEND_NODE_INFERRED, DEPEND_NODE_PASSED_INFER, DEPEND_NODE_PASSED_EMIT })[dependType] then
+			if dependOnIsNode then
 				!ifDEBUG `astPrint(dependOn)`
 				nodeMessage(io.stderr, state, dependOn, "Info", "Pipes", "...depending on this.")
 			end
@@ -78,23 +82,20 @@ function _G.addDependency(state, dependent, dependType, dependOn, extraData)
 		end
 	!end
 
-	dependent        = dependent.queued
-	local dependency = Dependency()
+	dependent = dependent.queued
 
-	if !!(CONST_SET{ DEPEND_HAS_DECLARATION, DEPEND_NODE_INFERRED, DEPEND_NODE_PASSED_INFER, DEPEND_NODE_PASSED_EMIT })[dependType] then
+	if dependOnIsNode then
 		assert(dependent ~= dependOn.node)
 		dependOn = dependOn.queued or errorInternal(state, dependOn)
 		-- assert(not itemWith3(dependOn.waiters, "dependent",dependent, "dependType",dependType, "dependOn",dependOn))
-		table.insert(dependOn.waiters, dependency)
-
-	elseif dependType == !(DEPEND_STRUCT_MEMBERS_READY) then
-		table.insert(dependOn.astNode.queued.waiters, dependency)
 	end
 
-	dependency.dependent  = dependent
-	dependency.dependType = dependType
-	dependency.dependOn   = dependOn
-	dependency.extraData  = extraData
+	local dependency = !new"_Dependency"{
+		`dependent`,  `dependent`,
+		`dependType`, `dependType`,
+		`dependOn`,   `dependOn`,
+		`extraData`,  `extraData`,
+	}
 
 	!if CHECK_DUPLICATE_DEPENDENCY then
 		dependency.traceback = debug.traceback("", 2)
@@ -108,6 +109,12 @@ function _G.addDependency(state, dependent, dependType, dependOn, extraData)
 		waitingOn.next = dependency
 	else
 		dependent.waitingOn = dependency
+	end
+
+	if dependOnIsNode then
+		table.insert(dependOn.waiters, dependency)
+	elseif dependType == !(DEPEND_STRUCT_MEMBERS_READY) then
+		table.insert(dependOn.astNode.queued.waiters, dependency)
 	end
 
 	table.insert(state.allDependencies, dependency)
@@ -192,7 +199,7 @@ end
 
 
 
-local !struct"Queued"{
+!struct"_Queued"{
 	{`node`,      nil}, -- AstNode
 	{`container`, nil}, -- Any table.
 	{`key`,       nil}, -- String or integer.
@@ -207,11 +214,12 @@ function _G.addToQueue(state, node, container, key, pipe)
 	-- astPrint(node)
 	!ASSERT `not node.queued`
 
-	local queued     = Queued()
-	queued.node      = node
-	queued.container = container
-	queued.key       = key
-	queued.pipe      = pipe or errorInternal()
+	local queued = !new"_Queued"{
+		`node`,      `node`,
+		`container`, `container`,
+		`key`,       `key`,
+		`pipe`,      `pipe or errorInternal()`,
+	}
 
 	node.queued = queued
 	table.insert(state.queueActive, queued)

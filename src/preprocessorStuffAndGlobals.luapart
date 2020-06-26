@@ -18,7 +18,7 @@
 -- preprocessorOutputAtTopOfFile, preprocessorOutputAtDuringPost
 -- Set
 -- CONST, CONST_SET
--- struct
+-- struct, new
 -- trimTemplate, templateToLua
 
 
@@ -115,19 +115,17 @@ local DEPEND_TITLES = {
 
 _G.TYPE_KIND_UNSET          = 0
 _G.TYPE_KIND_SIMPLE_BUILTIN = 1
-_G.TYPE_KIND_SIMPLE_USER    = 2
+_G.TYPE_KIND_USER           = 2
 _G.TYPE_KIND_FUNCTION       = 3 -- Extra data: Function signature.
 _G.TYPE_KIND_ARRAY          = 4 -- Extra data: Item type.
-_G.TYPE_KIND_POLY_STRUCT    = 5 -- Extra data: Parameters.
-_G.TYPE_KIND_COMPOUND       = 6 -- Extra data: Types.
+_G.TYPE_KIND_COMPOUND       = 5 -- Extra data: Types.
 
 local TYPE_KIND_TITLES = {
 	[TYPE_KIND_UNSET]          = "**unset type kind**",
 	[TYPE_KIND_SIMPLE_BUILTIN] = "built-in type",
-	[TYPE_KIND_SIMPLE_USER]    = "user type",
+	[TYPE_KIND_USER]           = "user type", -- Struct or enum (I think).
 	[TYPE_KIND_FUNCTION]       = "function signature",
 	[TYPE_KIND_ARRAY]          = "array type",
-	[TYPE_KIND_POLY_STRUCT]    = "polymorphic struct type",
 	[TYPE_KIND_COMPOUND]       = "compound type",
 }
 
@@ -369,13 +367,13 @@ _G.getByte = string.byte
 
 
 
--- !struct       "_Name[:Parent]" { {[1]=field1, [2]=fieldValue, option1=optionValue, ...}, ... }
--- local !struct "Name[:Parent]"  { {[1]=field1, [2]=fieldValue, option1=optionValue, ...}, ... }
--- _G.!struct    "Name[:Parent]"  { {[1]=field1, [2]=fieldValue, option1=optionValue, ...}, ... }
 do
 	_G.structs         = {}
 	local structNumber = 0
 
+	-- !struct       "_Name[:Parent]" { {[1]=field1, [2]=fieldValue, option1=optionValue, ...}, ... }
+	-- local !struct "Name[:Parent]"  { {[1]=field1, [2]=fieldValue, option1=optionValue, ...}, ... }
+	-- _G.!struct    "Name[:Parent]"  { {[1]=field1, [2]=fieldValue, option1=optionValue, ...}, ... }
 	function _G.struct(nameAndMaybeParent) return function(fields)
 		local name, nameParent = nameAndMaybeParent:match"^([%w_]+):([%w_]+)()$"
 		name                   = name or nameAndMaybeParent
@@ -438,6 +436,39 @@ do
 				__LUA("return")__VAL(fieldsToOutput)
 			__LUA("end")
 		end
+	end end
+
+	-- local t = !new "Name" { field1, valueCode1, ... }
+	function _G.new(name) return function(kvPairs)
+		local fields      = structs[name] or error(F("No struct '%s'.", name))
+		local writtenKeys = {}
+		local first       = true
+
+		__LUA("{")
+
+		for i = 1, #kvPairs, 2 do
+			assert(not writtenKeys[kvPairs[i]])
+			writtenKeys[kvPairs[i]] = true
+
+			if kvPairs[i+1] ~= "nil" then
+				if not first then  __LUA(",")  end
+				first = false
+
+				__LUA(kvPairs[i], "=", kvPairs[i+1])
+			end
+		end
+
+		for _, field in ipairs(fields) do
+			if field[2] ~= nil and not writtenKeys[field[1]] then
+				if not first then  __LUA(",")  end
+				first = false
+
+				__LUA(field[1], "=")
+				__VAL(field[2])
+			end
+		end
+
+		__LUA("}")
 	end end
 end
 

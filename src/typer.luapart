@@ -373,36 +373,21 @@ end
 -- Note: The expression must already be inferred!
 function _G.getTypeRepresentedByExpression(expr)
 	!ASSERT `expr.inferredType`
+	local nodeType = expr.nodeType
 
-	if expr.nodeType == !(AST_TYPE) then
-		local typeNode = expr
-		return typeNode.representedType
-	elseif expr.nodeType == !(AST_STRUCT) then
-		local struct = expr
-		return struct.representedType
-	elseif expr.nodeType == !(AST_ENUM) then
-		local enum = expr
-		return enum.representedType
-	elseif expr.nodeType == !(AST_TYPE_OF) then
-		local typeOf = expr
-		return typeOf.representedType
-	elseif expr.nodeType == !(AST_ACCESS) then -- Not sure if this is needed. @Cleanup
-		local access = expr
-		return access.representedType -- May be nil.
+	if nodeType == !(AST_TYPE) or nodeType == !(AST_STRUCT) or nodeType == !(AST_ENUM) or nodeType == !(AST_TYPE_OF) then
+		return expr.representedType
 
-	elseif expr.nodeType == !(AST_CAST) then
-		local cast = expr
+	elseif nodeType == !(AST_CAST) then
 		return
-			cast.inferredType.tag == !(TYPE_TYPE) -- Is this check needed?
-			and getTypeRepresentedByExpression(cast.expression)
+			expr.inferredType.tag == !(TYPE_TYPE) -- Is this check needed? @Speed
+			and getTypeRepresentedByExpression(expr.expression)
 			or  nil
 
-	elseif expr.nodeType == !(AST_IDENTIFIER) then
-		local ident = expr
-		return ident.declaration.valueTypeInfo -- May be nil.
-	elseif expr.nodeType == !(AST_BAKE) then
-		local bake = expr
-		return bake.name.declaration.valueTypeInfo -- May be nil.
+	elseif nodeType == !(AST_IDENTIFIER) then
+		return expr.declaration.valueTypeInfo -- May be nil.
+	elseif nodeType == !(AST_BAKE) then
+		return expr.name.declaration.valueTypeInfo -- May be nil.
 
 	elseif expr.inferredType.tag == !(TYPE_TYPE) then
 		errorInternal("Incomplete: Unhandled node type: %s", getFriendlyTypeInfoName(expr.inferredType))
@@ -1562,7 +1547,7 @@ end
 			local enumInfo = enum.representedType or errorInternal()
 
 			if enumInfo.memberTypeInfo.tag == !(TYPE_TYPE) then
-				typeInfo = getTypeInfoForBuiltinType(state, "Type")
+				typeInfo = enumInfo.memberTypeInfo
 			end
 		end
 
@@ -1572,35 +1557,6 @@ end
 			typeMessage(io.stderr, state, typeNode, "Error", "'%s' is not a type. (It is %s)", typeNode.typeName, getFriendlyTypeInfoName(typeInfo))
 			printDeclarationChain(io.stderr, state, decl, typeNode.typeName)
 			exitFailure()
-		end
-
-		for _, expr in ipairs(typeNode.arguments or EMPTY_TABLE) do
-			if not expr.inferredType then
-				!DEPEND_AND_RETURN(`typeNode`, DEPEND_NODE_INFERRED, `expr`)
-			end
-		end
-
-		-- @Incomplete: Proper error messages here:
-
-		if SIMPLE_TYPES[typeInfo.tag] then
-			assert(not typeNode.arguments) -- This should have been caught during parsing, e.g. int(a,b).
-
-		elseif typeInfo.tag == !(TYPE_STRUCT) then
-			local structInfo = typeInfo
-			if structInfo.arguments[1] then
-				errorInternal("@Incomplete: Struct arguments.")
-			elseif typeNode.arguments then
-				typeError(state, astGetExpressionVisuallyFurthestToTheLeft(typeNode.arguments[1]), "Parameters for structs are not supported yet.")
-			end
-
-		elseif typeInfo.tag == !(TYPE_ENUM) then
-			assert(not typeNode.arguments)
-
-		elseif typeInfo.tag == !(TYPE_FUNCTION) then
-			assert(not typeNode.arguments) -- This should not be possible I think. The node should have been parsed as an AstCall - not an AstType without functionHeader... right? I may be wrong.
-
-		else
-			errorInternal("Incomplete: Handle type group '%s'.", TYPE_NAMES[typeInfo.tag])
 		end
 	end
 
@@ -2618,7 +2574,7 @@ local function handlePolymorphicStruct(state, call)
 		if isMatch then
 			-- Change the call into a type node.
 			local morphTypeNode       = astNewNode(AstType, typeNode.token, call.parent)
-			morphTypeNode.kind        = !(TYPE_KIND_SIMPLE_USER)
+			morphTypeNode.kind        = !(TYPE_KIND_USER)
 			morphTypeNode.typeName    = morphDecl.name.name
 			morphTypeNode.declaration = morphDecl
 
@@ -2678,7 +2634,7 @@ local function handlePolymorphicStruct(state, call)
 
 	-- Change the call into a type node.
 	local morphTypeNode       = astNewNode(AstType, typeNode.token, call.parent)
-	morphTypeNode.kind        = !(TYPE_KIND_SIMPLE_USER)
+	morphTypeNode.kind        = !(TYPE_KIND_USER)
 	morphTypeNode.typeName    = morphDecl.name.name
 	morphTypeNode.declaration = morphDecl
 
@@ -3090,11 +3046,11 @@ end
 
 	decl.inferredType = typeInfo -- @Speed: We probably want to set this as soon as possible as many things may wait for the declaration to get inferred.
 
-	if valueExpr and valueExpr.nodeType == !(AST_IDENTIFIER) and not valueExpr.declaration.overloadsLocked then
-		errorInternal(state, valueExpr)
-	end
-
 	if valueExpr then
+		if valueExpr.nodeType == !(AST_IDENTIFIER) and not valueExpr.declaration.overloadsLocked then
+			errorInternal(state, valueExpr)
+		end
+
 		if valueExpr.inferredType.tag == !(TYPE_NAMESPACE) and not isConst then
 			typeError(state, valueExpr, "References to namespaces must be constant.")
 		end
@@ -3110,13 +3066,13 @@ end
 			if decl.assignment then
 				getAssignmentValue(state, ident, decl.assignment.values, decl.assignmentIndex, ident.inferredType, nil, nil)
 
-			elseif not isTypeCompatibleWith(decl.value.inferredType, ident.inferredType) then -- Note: No need to call adjustTypeToOne() for decl.value.
+			elseif not isTypeCompatibleWith(valueExpr.inferredType, ident.inferredType) then -- Note: No need to call adjustTypeToOne() for valueExpr.
 				-- @UX: Use the same error message as getAssignmentValue().
 				typeError(
 					state, valueExpr, "Value type mismatch for assignment target #%d. (Wanted %s, got %s)",
 					decl.assignmentIndex,
 					getFriendlyTypeInfoName(ident.inferredType),
-					getFriendlyTypeInfoName(decl.value.inferredType)
+					getFriendlyTypeInfoName(valueExpr.inferredType)
 				)
 			end
 		end
@@ -6590,15 +6546,14 @@ end
 
 
 
--- Note: It's assumed that the expression tree has all types figured out.
 local ALWAYS_CONST = !(Set{
 	AST_BAKE,
-	AST_IMPORT, -- Imports refer to namespaces which are always constant.
+	AST_IMPORT,     -- Imports refer to namespaces which are always constant.
 	AST_LITERAL,
 	AST_NAMESPACE,
 	AST_NULL,
 	AST_VARIANT_OF, -- The resulting reference will always be constant.
-	AST_STRUCT, AST_ENUM,   -- Structs and enums are types (which are constant).
+	AST_STRUCT, AST_ENUM,    -- Structs and enums are types (which are constant).
 	AST_TYPE,   AST_TYPE_OF, -- All types are constant, just like literals.
 })
 local NEVER_CONST = !(Set{
@@ -6606,6 +6561,8 @@ local NEVER_CONST = !(Set{
 	AST_TYPE_INFO, -- @Incomplete: Make type_info() a constant expression.
 	AST_VARARG,
 })
+
+-- Note: It's assumed that the expression tree has all types figured out.
 -- isConstant, firstDynamicExpression = isExpressionConstant( state, expr, foreignIsConst )
 function _G.isExpressionConstant(state, expr, foreignIsConst)
 	if not expr.inferredType then
@@ -6626,13 +6583,9 @@ function _G.isExpressionConstant(state, expr, foreignIsConst)
 
 		return isExpressionConstant(state, decl.value, foreignIsConst)
 
-	elseif nodeType == !(AST_CAST) then
-		local cast = expr
-		return isExpressionConstant(state, cast.expression, foreignIsConst)
-
-	elseif nodeType == !(AST_UNARY) then
-		local unary = expr
-		return isExpressionConstant(state, unary.expression, foreignIsConst)
+	elseif nodeType == !(AST_CAST) or nodeType == !(AST_UNARY) then
+		local castOrUnary = expr
+		return isExpressionConstant(state, castOrUnary.expression, foreignIsConst)
 
 	elseif nodeType == !(AST_BINARY) then
 		local binary = expr
@@ -6856,44 +6809,41 @@ end
 
 -- inferredTypeNode = createTypeNodeFromInfo( state, typeRepresented, token, parent )
 function _G.createTypeNodeFromInfo(state, typeRepresented, token, parent)
-	local typeNode            = astNewNode(AstType, token, parent)
-	local isBuiltin, typeName = isTypeBuiltin(typeRepresented)
-
+	local typeNode           = astNewNode(AstType, token, parent)
 	typeNode.inferredType    = getTypeInfoForBuiltinType(state, "Type")
 	typeNode.representedType = typeRepresented
 
+	local isBuiltin, typeName = isTypeBuiltin(typeRepresented)
+
 	if isBuiltin then
-		typeNode.kind              = !(TYPE_KIND_SIMPLE_BUILTIN)
-		typeNode.typeName          = typeName
+		typeNode.kind     = !(TYPE_KIND_SIMPLE_BUILTIN)
+		typeNode.typeName = typeName
+		return typeNode
+	end
 
-	elseif typeRepresented.tag == !(TYPE_STRUCT) then
-		local structInfo           = typeRepresented
-		typeNode.kind              = structInfo.isPolymorphic and !(TYPE_KIND_POLY_STRUCT) or !(TYPE_KIND_SIMPLE_USER)
-		typeNode.typeName          = structInfo.name
+	local tag = typeRepresented.tag
 
-	elseif typeRepresented.tag == !(TYPE_ENUM) then
-		local enumInfo             = typeRepresented
-		typeNode.kind              = !(TYPE_KIND_SIMPLE_USER)
-		typeNode.typeName          = enumInfo.name
+	if tag == !(TYPE_STRUCT) or tag == !(TYPE_ENUM) then
+		local structOrEnumInfo     = typeRepresented -- If struct, may be polymorphic.
+		typeNode.kind              = !(TYPE_KIND_USER)
+		typeNode.typeName          = structOrEnumInfo.name
 
-	elseif typeRepresented.tag == !(TYPE_FUNCTION) then
-		local funcSig              = typeRepresented
-		typeNode.kind              = !(TYPE_KIND_FUNCTION)
-		-- typeNode.functionHeader = ? -- This is not needed.
-
-	elseif typeRepresented.tag == !(TYPE_COMPOUND) then
+	elseif tag == !(TYPE_COMPOUND) then
 		typeNode.kind              = !(TYPE_KIND_COMPOUND)
 
-	elseif typeRepresented.tag == !(TYPE_ARRAY) then
+	elseif tag == !(TYPE_ARRAY) then
 		local arraySig             = typeRepresented
 		typeNode.kind              = !(TYPE_KIND_ARRAY)
 		typeNode.arrayItemType     = createTypeNodeFromInfo(state, arraySig.itemType, token, typeNode)
 
-	elseif typeRepresented.tag == !(TYPE_VARARG) then
-		errorInternal(state, typeNode) -- When do we get here?
+	elseif tag == !(TYPE_FUNCTION) then
+		local funcSig              = typeRepresented
+		typeNode.kind              = !(TYPE_KIND_FUNCTION)
+		-- typeNode.functionHeader = ? -- This is not needed.
+
 	else
 		!ifDEBUG `print(getFriendlyTypeInfoName(typeRepresented))`
-		errorInternal("Incomplete: Handle type group '%s'.", TYPE_NAMES[typeRepresented.tag])
+		errorInternal(state, typeNode, "Incomplete: Handle type group '%s'.", (TYPE_NAMES[tag] or "?"))
 	end
 
 	return typeNode
@@ -7524,29 +7474,34 @@ end
 -- singleTypeInfo = adjustTypeToOne( state, expressionForError, typeInfo [, adjustVarargToIncludeNil=false ] )
 -- Types that aren't single: TypeInfoVararg and TypeInfoList.
 do
+	local twoTypes = {}
+
 	local function adjustVarargItemTypeToOneAndToIncludeNil(state, itemType)
-		if !!(CONST_SET{ TYPE_NONE, TYPE_ANY })[itemType.tag] then
-			return itemType
-		end
+		local tag = itemType.tag
+		if tag == !(TYPE_ANY) or tag == !(TYPE_NONE) then  return itemType  end
 
-		local nilTypeInfo = getTypeInfoForBuiltinType(state, "none")
+		local nilType = getTypeInfoForBuiltinType(state, "none")
 
-		if itemType.tag ~= !(TYPE_COMPOUND) then
-			return getTypeInfoForCompoundType(state, {itemType, nilTypeInfo}, true)
+		if tag ~= !(TYPE_COMPOUND) then
+			if itemType.id < nilType.id then
+				twoTypes[1] = itemType
+				twoTypes[2] = nilType
+			else
+				twoTypes[1] = nilType
+				twoTypes[2] = itemType
+			end
+			return getTypeInfoForCompoundType(state, twoTypes, false)
 		end
 
 		local compound = itemType
-		if indexOf(compound, nilTypeInfo) then  return compound  end
+		if indexOf(compound, nilType) then  return compound  end
 
-		return getTypeInfoForCompoundType(state, {nilTypeInfo, unpack(compound)}, true)
+		return getTypeInfoForCompoundType(state, {nilType, unpack(compound)}, true)
 	end
 
 	function _G.adjustTypeToOne(state, exprForError, typeInfo, adjustVarargToIncludeNil)
 		if typeInfo.tag == !(TYPE_LIST) then
-			typeInfo = typeInfo[1]
-			if not typeInfo then
-				typeError(state, exprForError, "Function call returns nothing. (Expected at least one value.)") -- Note: "Nothing" is not the same as vararg of zero length.
-			end
+			typeInfo = typeInfo[1] or typeError(state, exprForError, "Function call returns nothing. (Expected at least one value.)") -- Note: "Nothing" is not the same as vararg of zero length.
 		end
 
 		if typeInfo.tag == !(TYPE_VARARG) then
