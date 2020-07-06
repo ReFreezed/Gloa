@@ -25,6 +25,8 @@ exec lua "$0" "$@"
 
 --============================================================]]
 
+local STATIC_PROFILER = 1==0
+
 local COMPILER_HEADER =
 [====[
 #!/bin/sh
@@ -118,6 +120,7 @@ local pp = chunk()
 
 pp.metaEnvironment.DEBUG                = debugMode
 pp.metaEnvironment.DEBUGGER             = debugMode and debugger
+pp.metaEnvironment.STATIC_PROFILER      = debugMode and STATIC_PROFILER
 
 pp.metaEnvironment.GLOA_DIR             = dirGloa
 pp.metaEnvironment.PLANTUML_PATH        = pathPlantuml
@@ -125,7 +128,7 @@ pp.metaEnvironment.GRAPHVIZ_PATH        = pathGraphviz
 
 pp.metaEnvironment.RUNTIME_ERROR_PREFIX = debugMode and runtimeErrorPrefix or ""
 
-local luaSegments = {COMPILER_HEADER}
+local luaSegments = {}
 function pp.metaEnvironment.preprocessorOutputAtTopOfFile(lua)
 	table.insert(luaSegments, lua)
 end
@@ -133,6 +136,90 @@ end
 local postInserts = {}
 function pp.metaEnvironment.preprocessorOutputAtDuringPost(label, lua)
 	postInserts[label] = lua
+end
+
+local function profilerMaybeModifyFunction(func, name)
+	if not func.body.statements[1]              then  return  end
+	if func.body.statements[1].type == "return" then  return  end
+	if name == "runCompiler"                    then  return  end
+	if name:find"^_"                            then  return  end
+	if name:find"[Pp]rofiler"                   then  return  end
+	if name:find"[Pp]rint"                      then  return  end
+	if name:find"[Ee]rror"                      then  return  end
+	if name:find"[Aa]ssert"                     then  return  end
+
+	local parser = require"lib.dumbParser"
+
+	do
+		local blockToInsert                      = parser.newNode("block")
+		blockToInsert.statements[1]              = parser.newNode("call")
+		blockToInsert.statements[1].callee       = parser.newNode("identifier", "staticProfilerPush")
+		blockToInsert.statements[1].arguments[1] = parser.newNode("literal", name)
+		table.insert(func.body.statements, 1, blockToInsert)
+	end
+
+	if func.body.statements[#func.body.statements].type ~= "return" then
+		table.insert(func.body.statements, parser.newNode("return"))
+	end
+
+	parser.traverseTree(func.body, function(node, container, k)
+		if node.type == "function" then  return "ignorechildren"  end
+		if node.type ~= "return"   then  return nil               end
+
+		local returnNode = node
+
+		local replacementBlock                      = parser.newNode("block")
+		replacementBlock.statements[1]              = parser.newNode("call")
+		replacementBlock.statements[1].callee       = parser.newNode("identifier", "staticProfilerPop")
+		replacementBlock.statements[1].arguments[1] = parser.newNode("literal", name)
+		replacementBlock.statements[2]              = returnNode
+
+		container[k] = replacementBlock
+		return "ignorechildren"
+	end)
+end
+
+local function maybeAddProfilerStuff(lua)
+	if not STATIC_PROFILER then  return lua  end
+	if not debugMode       then  return lua  end
+
+	local parser = require"lib.dumbParser"
+
+	local time = os.clock()
+	local ast  = assert(parser.parse(lua, "@lua"))
+	print("Profiler: parse", os.clock()-time)
+
+	local time = os.clock()
+	parser.traverseTree(ast, function(block, container, k)
+		if block.type ~= "block" then  return  end
+
+		for _, statement in ipairs(block.statements) do
+			if (statement.type == "declaration" or statement.type == "assignment") and #statement.values == 1 and statement.values[1].type == "function" then
+				local func = statement.values[1]
+				local name
+
+				if statement.type == "declaration" then
+					name = statement.names[1].name
+				else
+					local target = statement.targets[1]
+					name
+						=  target.type == "identifier" and target.name
+						or target.type == "lookup"     and target.member.type == "literal"    and type(target.member.value) == "string"  and target.member.value
+						or target.type == "lookup"     and target.object.type == "identifier" and target.member.type        == "literal" and target.object.name..tostring(target.member.value)
+						or tostring(func):gsub("^table: (%x+)", "func%1")
+				end
+
+				profilerMaybeModifyFunction(func, name)
+			end
+		end
+	end)
+	print("Profiler: modif", os.clock()-time)
+
+	local time = os.clock()
+	lua        = assert(parser.toLua(ast, true))
+	print("Profiler: toLua", os.clock()-time)
+
+	return lua
 end
 
 pp.processFile{
@@ -158,7 +245,9 @@ pp.processFile{
 			return postInserts[label] or error(label)
 		end)
 
-		return lua
+		lua = maybeAddProfilerStuff(lua)
+
+		return COMPILER_HEADER.."\n"..lua
 	end,
 
 	onError = function(err)
