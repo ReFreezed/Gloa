@@ -19,7 +19,6 @@
 
 !local INFINITE_LOOP_PRINT_CONTEXT = 1==0
 !local OUTPUT_DEPENDENCY_GRAPH     = 1==0
-!local CHECK_DUPLICATE_DEPENDENCY  = 1==0 -- WARNING: Currently takes a lot of time!
 local MAX_ERRORS_MESSAGES          = !(DEBUG and 20 or 4) -- @Incomplete: Make this a compiler option.
 
 
@@ -59,28 +58,26 @@ function _G.addDependency(state, dependent, dependType, dependOn, extraData)
 	!end
 
 	local dependOnIsNode = !!(CONST_SET{ DEPEND_HAS_DECLARATION, DEPEND_NODE_INFERRED, DEPEND_NODE_PASSED_INFER, DEPEND_NODE_PASSED_EMIT })[dependType]
+	local dependency     = getExistingDependency(state, dependent, dependType, dependOn)
 
-	!if CHECK_DUPLICATE_DEPENDENCY then
-		-- WARNING: getExistingDependency() takes a lot of time to call here!  @Robustness: @Optimize this into O(1) and run always.
-		local dependency = getExistingDependency(state, dependent, dependType, dependOn)
+	if dependency then
+		!TRACE()
 
-		if dependency then
-			!TRACE()
+		!ifDEBUG `astPrint(dependent)`
+		nodeMessage(io.stderr, state, dependent, "Error", "Pipes", "Internal compiler error: Trying to add dependency twice. (%s)", (DEPEND_TITLES[dependType] or "?"))
 
-			!ifDEBUG `astPrint(dependent)`
-			nodeMessage(io.stderr, state, dependent, "Error", "Pipes", "Internal compiler error: Trying to add dependency twice. (%s)", (DEPEND_TITLES[dependType] or "?"))
+		if dependOnIsNode then
+			!ifDEBUG `astPrint(dependOn)`
+			nodeMessage(io.stderr, state, dependOn, "Info", "Pipes", "...depending on this.")
+		end
 
-			if dependOnIsNode then
-				!ifDEBUG `astPrint(dependOn)`
-				nodeMessage(io.stderr, state, dependOn, "Info", "Pipes", "...depending on this.")
-			end
-
+		if dependency.traceback then
 			io.write("Previous ")
 			print(dependency.traceback)
-
-			exitFailure()
 		end
-	!end
+
+		exitFailure()
+	end
 
 	dependent = dependent.queued
 
@@ -90,16 +87,14 @@ function _G.addDependency(state, dependent, dependType, dependOn, extraData)
 		-- assert(not itemWith3(dependOn.waiters, "dependent",dependent, "dependType",dependType, "dependOn",dependOn))
 	end
 
-	local dependency = !new"_Dependency"{
+	dependency = !new"_Dependency"{
 		`dependent`,  `dependent`,
 		`dependType`, `dependType`,
 		`dependOn`,   `dependOn`,
 		`extraData`,  `extraData`,
 	}
 
-	!if CHECK_DUPLICATE_DEPENDENCY then
-		dependency.traceback = debug.traceback("", 2)
-	!end
+	-- !ifDEBUG `dependency.traceback = debug.traceback("", 2)`
 
 	local waitingOn = dependent.waitingOn
 	if waitingOn then
@@ -118,6 +113,10 @@ function _G.addDependency(state, dependent, dependType, dependOn, extraData)
 	end
 
 	table.insert(state.allDependencies, dependency)
+
+	local depsForLookup = state.dependenciesForLookup[dependType]
+	if not depsForLookup[dependOn] then  depsForLookup[dependOn] = {}  end
+	depsForLookup[dependOn][dependent] = dependency
 
 	!if DEBUG then
 		--[[
@@ -151,16 +150,18 @@ function _G.addDependency(state, dependent, dependType, dependOn, extraData)
 end
 
 !(
+-- DEPEND           ( dependentCode, dependType, dependOnCode [, extraDataCode ] )
 -- DEPEND_AND_RETURN( dependentCode, dependType, dependOnCode [, extraDataCode, valueToReturnCode ] )
+function _G.DEPEND(dependentCode, dependType, dependOnCode, extraDataCode)
+	__LUA("addDependency(state, ",dependentCode,", ",toLua(dependType),", ",dependOnCode)
+	if extraDataCode then  __LUA(", ",extraDataCode)  end
+	__LUA(")")
+end
 function _G.DEPEND_AND_RETURN(dependentCode, dependType, dependOnCode, extraDataCode, valueToReturnCode)
 	__LUA("addDependency(state, ",dependentCode,", ",toLua(dependType),", ",dependOnCode)
-	if extraDataCode then
-		__LUA(", ",extraDataCode)
-	end
+	if extraDataCode then  __LUA(", ",extraDataCode)  end
 	__LUA(") ; return")
-	if valueToReturnCode then
-		__LUA(" ", valueToReturnCode)
-	end
+	if valueToReturnCode then  __LUA(" ",valueToReturnCode)  end
 end
 )
 
@@ -171,7 +172,8 @@ function _G.getExistingDependency(state, dependent, dependType, dependOn)
 		dependOn = dependOn.queued
 	end
 
-	return itemWith3(state.allDependencies, "dependent",dependent, "dependType",dependType, "dependOn",dependOn)
+	local depsForLookup = state.dependenciesForLookup[dependType][dependOn]
+	return depsForLookup and depsForLookup[dependent]
 end
 
 function _G.fulfillDependencies(state, queued, dependType)
@@ -181,11 +183,14 @@ function _G.fulfillDependencies(state, queued, dependType)
 	for _, dependency in ipairs(waiters) do
 		if dependency.dependType == dependType then
 			local dependent = dependency.dependent
+
 			if dependent.waitingOn == dependency then
-				dependent.waitingOn = dependency.next
-			end
-			if not dependent.waitingOn then
-				table.insert(state.priorityStack, dependent)
+				local dependencyNext = dependency.next
+				dependent.waitingOn  = dependencyNext
+
+				if not dependencyNext then
+					table.insert(state.priorityStack, dependent)
+				end
 			end
 		end
 	end

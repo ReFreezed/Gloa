@@ -990,8 +990,8 @@ local function checkRedeclarationAndMaybeAddOverload(state, ident, decl, isMembe
 			-- should work as the first occurence of a name will make the second occurence
 			-- wait before the second has been able to do anything. (This is true even
 			-- when we remove unordered from the queue.)
-			addDependency(state, declExisting.name, !(DEPEND_NODE_INFERRED), decl)
-			-- addDependency(state, declExisting, !(DEPEND_NODE_INFERRED), decl) -- Doesn't work as it's currently the name that sets overloadsLocked! 2020-06-25 @Cleanup
+			!DEPEND(`declExisting.name`, DEPEND_NODE_INFERRED, `decl`)
+			-- !DEPEND(`declExisting`, DEPEND_NODE_INFERRED, `decl`) -- Doesn't work as it's currently the name that sets overloadsLocked! 2020-06-25 @Cleanup
 		end
 
 	-- Non-shadow.
@@ -2099,6 +2099,10 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 		end
 	end
 
+	--
+	-- No more dependencies for the call after this point (except when we're done)!
+	--
+
 	checkIfValuesMatchArgumentTypes( -- Basically checks everything but placeholders.
 		state, call, realArguments, realArgumentTypes, calleeTypeInfo.argumentTypesIn,
 		false, nil, call.argumentsNamed
@@ -2188,7 +2192,7 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 
 		queueForReinfer(state, ident) -- Re-infer callee.
 
-		local dependency = getExistingDependency(state, call, !(DEPEND_NODE_INFERRED), ident)
+		local dependency = getExistingDependency(state, call, !(DEPEND_NODE_INFERRED), ident) -- I think this may always be nil currently?! 2020-07-07
 		if dependency then
 			call.queued.waitingOn = dependency
 			return
@@ -2226,7 +2230,7 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 
 	table.insert(lambda.polymorphs, morphDecl)
 
-	astVisitAllNodes(morphLambda, function(node, container, key)
+	local function cleanUpMorphedLambda(node, container, key)
 		if node == morphLambda.body then  return !(VISIT_IGNORE_CHILDREN)  end
 
 		-- @Robustness @Robustness @Robustness: So much @Hack!
@@ -2241,7 +2245,8 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 			bake.name.parent = bake.parent
 			return !(VISIT_IGNORE_CHILDREN)
 		end
-	end)
+	end
+	astVisitAllNodes(morphLambda, cleanUpMorphedLambda)
 
 	-- Fill in baked values in morphed lambda.
 	!ASSERT `lambda.argumentsIn`
@@ -2254,7 +2259,7 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 			local nodeContainers = {}
 			local nodeKeys       = {}
 
-			astVisitAllNodes(declTypeExpr, function(node, container, key)
+			local function fillInBakedValues(node, container, key)
 				nodeContainers[node] = container or arg.declaration
 				nodeKeys      [node] = key       or "type"
 
@@ -2379,7 +2384,8 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 				end
 
 				return !(VISIT_IGNORE_CHILDREN) -- There should only be an identifier inside AstBake.
-			end)
+			end
+			astVisitAllNodes(declTypeExpr, fillInBakedValues)
 		end
 	end
 	!ASSERT `bakeIndex == #lambda.bakeDeclarations`
@@ -2444,7 +2450,7 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 
 	queueForReinfer(state, ident) -- Re-infer callee.
 
-	local dependency = getExistingDependency(state, call, !(DEPEND_NODE_INFERRED), ident)
+	local dependency = getExistingDependency(state, call, !(DEPEND_NODE_INFERRED), ident) -- I think this may always be nil currently?! 2020-07-07
 	if dependency then
 		call.queued.waitingOn = dependency
 		return
@@ -2506,6 +2512,10 @@ local function handlePolymorphicStruct(state, call)
 			!DEPEND_AND_RETURN(`call`, DEPEND_NODE_INFERRED, `morphDecl`)
 		end
 	end
+
+	--
+	-- No more dependencies for the struct call after this point (except when we're done)!
+	--
 
 	ensureNamedArgumentsHaveAssignedIndicies(state, call, struct, call.arguments)
 
@@ -2581,7 +2591,12 @@ local function handlePolymorphicStruct(state, call)
 			replaceQueuedNodeAndUnqueueOldTree(state, call, morphTypeNode)
 
 			-- Stay in PIPE_INFER. Also, the next line is needed.
-			!DEPEND_AND_RETURN(`morphTypeNode`, DEPEND_NODE_INFERRED, `morphDecl`)
+			--
+			-- @Robustness: Waiting for morphDecl instead of the name seem to result in an error here.
+			-- Why is the reverse true for the DEPEND_AND_RETURN at the end of this function?
+			-- Also, should we use getExistingDependency() like in handlePolymorphicCall()?
+			--
+			!DEPEND_AND_RETURN(`morphTypeNode`, DEPEND_NODE_INFERRED, `morphDecl.name`)
 		end
 	end
 
