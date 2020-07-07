@@ -304,13 +304,14 @@ end
 local function doesLoopBreak(state, loop)
 	local doesBreak = false
 
-	astVisitAllNodesInUnit(loop.body, false, function(node)
+	local function doesLoopBreak_onVisit(node)
 		if node.nodeType == !(AST_BREAK) then
 			doesBreak = true -- @Incomplete: Check what loop this breaks.
 			return !(VISIT_BREAK)
 		end
-	end)
+	end
 
+	astVisitAllNodesInUnit(loop.body, false, doesLoopBreak_onVisit)
 	return doesBreak
 end
 
@@ -366,11 +367,13 @@ function _G.emitLambda(state, lambda)
 		return
 	end
 
-	astVisitAllNodesInUnit(lambda, false, function(node)
+	local function emitLambda_onVisit(node)
 		if not node.queued                  then  return !(VISIT_IGNORE_CHILDREN)  end
 		if node.queued.pipe > !(PIPE_INFER) then  return                           end
 		!DEPEND_AND_RETURN(`lambda`, DEPEND_NODE_PASSED_EMIT, `node`, nil, toLua(VISIT_BREAK))
-	end)
+	end
+
+	astVisitAllNodesInUnit(lambda, false, emitLambda_onVisit)
 	if lambda.queued.waitingOn then  return  end
 
 	if lambda.inferredType.argumentTypesOut[1] and not doesScopeReturn(state, lambda.body) then

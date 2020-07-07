@@ -27,6 +27,16 @@ exec lua "$0" "$@"
 
 local STATIC_PROFILER = 1==0
 
+local STATIC_PROFILER_NAMES_TO_IGNORE = {
+	runCompiler     = true,
+	eatNextToken    = true,
+	peekNextToken   = true,
+	inferNode       = true,
+	indexOf         = true,
+	iprev           = true,
+	removeUnordered = true,
+}
+
 local COMPILER_HEADER =
 [====[
 #!/bin/sh
@@ -141,7 +151,7 @@ end
 local function profilerMaybeModifyFunction(func, name)
 	if not func.body.statements[1]              then  return  end
 	if func.body.statements[1].type == "return" then  return  end
-	if name == "runCompiler"                    then  return  end
+	if STATIC_PROFILER_NAMES_TO_IGNORE[name]    then  return  end
 	if name:find"^_"                            then  return  end
 	if name:find"[Pp]rofiler"                   then  return  end
 	if name:find"[Pp]rint"                      then  return  end
@@ -207,9 +217,10 @@ local function maybeAddProfilerStuff(lua)
 						or target.type == "lookup"     and target.member.type == "literal"    and type(target.member.value) == "string"  and target.member.value
 						or target.type == "lookup"     and target.object.type == "identifier" and target.member.type        == "literal" and target.object.name..tostring(target.member.value)
 						or tostring(func):gsub("^table: (%x+)", "func%1")
+						or nil
 				end
 
-				profilerMaybeModifyFunction(func, name)
+				if name then  profilerMaybeModifyFunction(func, name)  end
 			end
 		end
 	end)

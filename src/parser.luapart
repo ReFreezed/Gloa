@@ -19,7 +19,7 @@
 	astMoveRelevantThingsFromFileScopeToGlobalScope
 	astNewNode
 	astPrint, astPrintTree
-	astVisitAllNodes, astVisitAllNodesLeavesFirst
+	astVisitAllNodes, astVisitAllNodesLeavesFirst, astVisitAllNodesInUnit
 	eatNextToken, peekNextToken, eatTrailingSemicolon
 	errorParsing*, parserMessage*
 	errorUnhandledNodeType, errorUnhandledType
@@ -30,6 +30,8 @@
 	parse*
 
 --============================================================]]
+
+!local CHECK_FOR_VISITED_NODES = 1==0
 
 
 
@@ -613,18 +615,14 @@ end
 	local i         = state.nextToken
 	state.nextToken = i + 1
 	local tokens    = state.tokens
-	local tokType   = tokens.type[i]
-	local tokValue  = tokens.value[i]
-	return tokType, tokValue, i
+	return tokens.type[i], tokens.value[i], i
 end
 
 -- tokenType, tokenValue, tokenIndex = peekNextToken( compilationState, steps )
 !EXPORT_LOCAL `function _G.peekNextToken(state, steps)`
-	local i        = state.nextToken + steps - 1
-	local tokens   = state.tokens
-	local tokType  = tokens.type[i]
-	local tokValue = tokens.value[i]
-	return tokType, tokValue, i
+	local i      = state.nextToken + steps - 1
+	local tokens = state.tokens
+	return tokens.type[i], tokens.value[i], i
 end
 
 function _G.eatTrailingSemicolon(state)
@@ -4411,13 +4409,14 @@ end
 function _G.astFindInUnit(topNode, nodeTypeSet)
 	local nodeToReturn = nil
 
-	astVisitAllNodesInUnit(topNode, true, function(node)
+	local function astFindInUnit_onVisit(node)
 		if nodeTypeSet[node.nodeType] then
 			nodeToReturn = node
 			return !(VISIT_BREAK)
 		end
-	end)
+	end
 
+	astVisitAllNodesInUnit(topNode, true, astFindInUnit_onVisit)
 	return nodeToReturn
 end
 
@@ -4437,7 +4436,7 @@ end
 -- controlValue = VISIT_CONTINUE|VISIT_BREAK|VISIT_IGNORE_CHILDREN
 -- Note: VISIT_IGNORE_CHILDREN triggers an error in astVisitAllNodesLeavesFirst().
 do
-	local visit -- Forward declaraion.
+	local visit -- Forward declaration.
 
 	local VISITORS = {
 		!(
@@ -4477,36 +4476,60 @@ do
 			end
 		`
 
-		for nodeType, name in ipairs(astTypeToStructName) do
-			local fields = structs[name] or error(name)
+		local first = true
 
-			__LUA(templateToLua(TEMPLATE_FUNCTION_HEADER, {nodeType=nodeType, name=name}, (nodeType == 1 and -3 or -1)))
+		for nodeType, name in ipairs(astTypeToStructName) do
+			local fields       = structs[name] or error(name)
+			local luaForFields = {}
 
 			for _, field in ipairs(fields) do
 				local k = field[1]
 
 				if field.ast == "node" then
-					__LUA(templateToLua(TEMPLATE_TRAVERSE_NODE_IF_SET, {field=k}))
+					table.insert(luaForFields, templateToLua(TEMPLATE_TRAVERSE_NODE_IF_SET, {field=k}))
 
 				elseif field.ast == "array" then
 					if field[2] then
-						__LUA(templateToLua(TEMPLATE_TRAVERSE_ARRAY, {field=k}))
+						table.insert(luaForFields, templateToLua(TEMPLATE_TRAVERSE_ARRAY, {field=k}))
 					else
-						__LUA(templateToLua(TEMPLATE_TRAVERSE_ARRAY_IF_SET, {field=k}))
+						table.insert(luaForFields, templateToLua(TEMPLATE_TRAVERSE_ARRAY_IF_SET, {field=k}))
 					end
 
 				elseif field.ast == "fields" then
-					__LUA(templateToLua(TEMPLATE_TRAVERSE_FIELDS, {field=k}))
+					table.insert(luaForFields, templateToLua(TEMPLATE_TRAVERSE_FIELDS, {field=k}))
 
 				elseif field.ast == "cases" then
-					__LUA(templateToLua(TEMPLATE_TRAVERSE_CASES, {field=k}))
+					table.insert(luaForFields, templateToLua(TEMPLATE_TRAVERSE_CASES, {field=k}))
 
 				elseif field.ast then
 					error(field.ast)
 				end
 			end
 
-			__LUA(templateToLua(TEMPLATE_FUNCTION_FOOTER, {}, -1))
+			if luaForFields[1] then
+				__LUA(templateToLua(TEMPLATE_FUNCTION_HEADER, {nodeType=nodeType, name=name}, (first and -3 or -1)))
+				first = false
+
+				if STATIC_PROFILER then
+					__LUA(templateToLua(
+						`staticProfilerPush($name)
+						`,
+						{name=toLua("VISITOR_"..name)}
+					))
+				end
+
+				__LUA(unpack(luaForFields))
+
+				if STATIC_PROFILER then
+					__LUA(templateToLua(
+						`staticProfilerPop($name)
+						`,
+						{name=toLua("VISITOR_"..name)}
+					))
+				end
+
+				__LUA(templateToLua(TEMPLATE_FUNCTION_FOOTER, {}, -1))
+			end
 		end
 		)
 	}
@@ -4514,14 +4537,19 @@ do
 	function visit(visited, cb, leavesFirst, container, key, node)
 		-- Note: We return true from this function if we want to break.
 
-		if visited[node] then
-			!ifDEBUG `astPrintTree(node)`
-			errorInternal("Node already visited.")
-		end
-		visited[node] = true
+		!if CHECK_FOR_VISITED_NODES then
+			if visited[node] then
+				!ifDEBUG `astPrintTree(node)`
+				errorInternal("Node already visited.")
+			end
+			visited[node] = true
+		!end
 
 		if not leavesFirst then
+			-- !if STATIC_PROFILER then  __LUA `staticProfilerPush("visit_cb")`  end
 			local controlValue = cb(node, container, key) or !(VISIT_CONTINUE)
+			-- !if STATIC_PROFILER then  __LUA `staticProfilerPop("visit_cb")`  end
+
 			if controlValue == !(VISIT_CONTINUE) then
 				-- void
 			elseif controlValue == !(VISIT_BREAK) then
@@ -4531,11 +4559,14 @@ do
 			end
 		end
 
-		local visitor = VISITORS[node.nodeType] or errorInternal(state, node)
-		if visitor(visited, cb, leavesFirst, node) then  return true  end
+		local visitor = VISITORS[node.nodeType]
+		if visitor and visitor(visited, cb, leavesFirst, node) then  return true  end
 
 		if leavesFirst then
+			-- !if STATIC_PROFILER then  __LUA `staticProfilerPush("visit_cb")`  end
 			local controlValue = cb(node, container, key) or !(VISIT_CONTINUE)
+			-- !if STATIC_PROFILER then  __LUA `staticProfilerPop("visit_cb")`  end
+
 			if controlValue == !(VISIT_CONTINUE) then
 				-- void
 			elseif controlValue == !(VISIT_BREAK) then
@@ -4549,15 +4580,15 @@ do
 	end
 
 	function _G.astVisitAllNodes(node, cb, container, key)
-		visit({}, cb, false, container, key, node)
+		visit(!!(CHECK_FOR_VISITED_NODES and `{}` or `nil`), cb, false, container, key, node)
 	end
 
 	function _G.astVisitAllNodesLeavesFirst(node, cb, container, key)
-		visit({}, cb, true,  container, key, node)
+		visit(!!(CHECK_FOR_VISITED_NODES and `{}` or `nil`), cb, true,  container, key, node)
 	end
 
 	function _G.astVisitAllNodesInUnit(topNode, visitLambdas, cb)
-		astVisitAllNodes(topNode, function(node, container, key)
+		local function astVisitAllNodesInUnit_onVisit(node, container, key)
 			local visitNode     = true
 			local visitChildren = true
 
@@ -4578,14 +4609,15 @@ do
 			else
 				return controlValue == !(VISIT_BREAK) and !(VISIT_BREAK) or !(VISIT_IGNORE_CHILDREN)
 			end
-		end)
+		end
+		astVisitAllNodes(topNode, astVisitAllNodesInUnit_onVisit)
 	end
 end
 
 
 
 do
-	local copyTree -- Forward declaraion.
+	local copyTree -- Forward declaration.
 
 	local COPIERS = {
 		!(
@@ -4637,7 +4669,6 @@ do
 		`
 		local TEMPLATE_COPY_FIELDS = `
 			local fieldsCopy = copy.$field
-
 			for i, tableField in ipairs(node.$field) do
 				local tableFieldCopy          = TableField()
 				tableFieldCopy.key            = tableField.key   and copyTree(tableField.key,   token, copy, copies)
@@ -4649,7 +4680,6 @@ do
 		`
 		local TEMPLATE_COPY_CASES = `
 			local casesCopy = copy.$field
-
 			for i, case in ipairs(node.$field) do
 				local caseCopy       = SwitchCase()
 				caseCopy.value       = case.value and copyTree(case.value, token, copy, copies)
@@ -4756,10 +4786,11 @@ do
 			end
 		`
 
-		for nodeType, name in ipairs(astTypeToStructName) do
-			local fields = structs[name] or error(name)
+		local first = true
 
-			__LUA(templateToLua(TEMPLATE_FUNCTION_HEADER, {nodeType=nodeType, name=name}, (nodeType == 1 and -3 or -1), -1))
+		for nodeType, name in ipairs(astTypeToStructName) do
+			local fields       = structs[name] or error(name)
+			local luaForFields = {}
 
 			for _, field in ipairs(fields) do
 				local k = field[1]
@@ -4767,21 +4798,44 @@ do
 				if not field.astRef then
 					-- void
 				elseif field.astRef == "node" then
-					__LUA(templateToLua(TEMPLATE_FIX_NODE, {field=k}))
+					table.insert(luaForFields, templateToLua(TEMPLATE_FIX_NODE, {field=k}))
 				elseif field.astRef == "array" then
 					if field[2] then
-						__LUA(templateToLua(TEMPLATE_FIX_ARRAY, {field=k}))
+						table.insert(luaForFields, templateToLua(TEMPLATE_FIX_ARRAY, {field=k}))
 					else
-						__LUA(templateToLua(TEMPLATE_FIX_ARRAY_IF_SET, {field=k}))
+						table.insert(luaForFields, templateToLua(TEMPLATE_FIX_ARRAY_IF_SET, {field=k}))
 					end
 				elseif field.astRef == "names" then
-					__LUA(templateToLua(TEMPLATE_FIX_NAMES, {field=k}))
+					table.insert(luaForFields, templateToLua(TEMPLATE_FIX_NAMES, {field=k}))
 				else
 					error(field.astRef)
 				end
 			end
 
-			__LUA(templateToLua(TEMPLATE_FUNCTION_FOOTER, {}, -1, -1))
+			if luaForFields[1] then
+				__LUA(templateToLua(TEMPLATE_FUNCTION_HEADER, {nodeType=nodeType, name=name}, (first and -3 or -1), -1))
+				first = false
+
+				if STATIC_PROFILER then
+					__LUA(templateToLua(
+						`staticProfilerPush($name)
+						`,
+						{name=toLua("FIXER_"..name)}
+					))
+				end
+
+				__LUA(unpack(luaForFields))
+
+				if STATIC_PROFILER then
+					__LUA(templateToLua(
+						`staticProfilerPop($name)
+						`,
+						{name=toLua("FIXER_"..name)}
+					))
+				end
+
+				__LUA(templateToLua(TEMPLATE_FUNCTION_FOOTER, {}, -1, -1))
+			end
 		end
 		)
 	}
@@ -4793,11 +4847,12 @@ do
 		local copies = {}
 		local copy   = copyTree(node, token, parent, copies)
 
-		astVisitAllNodes(copy, function(copy)
-			local fixer = FIXERS[copy.nodeType] or errorInternal(state, copy)
-			fixer(copy, copies)
-		end)
+		local function astCopy_onVisit(copy)
+			local fixer = FIXERS[copy.nodeType]
+			if fixer then  fixer(copy, copies)  end
+		end
 
+		astVisitAllNodes(copy, astCopy_onVisit)
 		return copy, copies
 	end
 

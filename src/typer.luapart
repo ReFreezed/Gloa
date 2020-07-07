@@ -3501,7 +3501,7 @@ function _G.validateStructKey(state, dependent, keyExpr, structInfo, isLvalue)
 end
 
 local function checkForStaticAccessThatUsesWhatLooksLikeRuntimeCode(state, topNodeToCheck, staticObjectNode)
-	astVisitAllNodes(topNodeToCheck, function(node)
+	local function checkForStaticAccessThatUsesWhatLooksLikeRuntimeCode_onVisit(node)
 		if
 			node.nodeType == !(AST_ACCESS)
 			or (
@@ -3523,7 +3523,8 @@ local function checkForStaticAccessThatUsesWhatLooksLikeRuntimeCode(state, topNo
 				node,             F("...this looks like a runtime expression.")
 			)
 		end
-	end)
+	end
+	astVisitAllNodes(topNodeToCheck, checkForStaticAccessThatUsesWhatLooksLikeRuntimeCode_onVisit)
 end
 
 !NODE_INFERRER `function nodeInferrers.AstAccess(state, access)`
@@ -6023,7 +6024,7 @@ end
 
 -- @Robustness @Cleanup: Join visitNodesForRunning() and crawl().
 local function visitNodesForRunning(state, dependent, unit, visited, deepTopScopeDeclarations)
-	astVisitAllNodes(unit, function(node)
+	local function visitNodesForRunning_onVisit(node)
 		visited[node] = true
 
 		if not node.queued then
@@ -6063,11 +6064,12 @@ local function visitNodesForRunning(state, dependent, unit, visited, deepTopScop
 		elseif !!(CONST_SET{ AST_LITERAL, AST_FOREIGN, AST_TYPE_INFO })[node.nodeType] then
 			return !(VISIT_IGNORE_CHILDREN)
 		end
-	end)
+	end
+	astVisitAllNodes(unit, visitNodesForRunning_onVisit)
 end
 
 function _G.crawl(state, unit, crawled, forMeta, cb)
-	astVisitAllNodes(unit, function(node)
+	local function crawl_onVisit(node)
 		!(
 		local function MARK_CRAWLED(objCode, crawlObjKind)
 			__LUA(templateToLua(
@@ -6091,13 +6093,15 @@ function _G.crawl(state, unit, crawled, forMeta, cb)
 		end
 		)
 
+		local nodeType = node.nodeType
+
 		-- Also see visitNodesForRunning():
 
 		if not node.queued then
 			!MARK_CRAWLED(`node`, CRAWL_NODE)
 			return !(VISIT_IGNORE_CHILDREN)
 
-		elseif node.nodeType == !(AST_IDENTIFIER) then
+		elseif nodeType == !(AST_IDENTIFIER) then
 			local ident = node
 			!MARK_CRAWLED(`ident`, CRAWL_NODE)
 
@@ -6115,7 +6119,7 @@ function _G.crawl(state, unit, crawled, forMeta, cb)
 				crawl(state, valueExpr, crawled, forMeta, cb)
 			end
 
-		elseif node.nodeType == !(AST_DECLARATION) then
+		elseif nodeType == !(AST_DECLARATION) then
 			local decl = node
 
 			if not decl.valueConstant then
@@ -6134,10 +6138,10 @@ function _G.crawl(state, unit, crawled, forMeta, cb)
 				return !(VISIT_IGNORE_CHILDREN)
 			end
 
-			!MARK_CRAWLED(`decl`, CRAWL_NODE)
+			!MARK_CRAWLED       (`decl`,               CRAWL_NODE    )
 			!MARK_CRAWLED_IF_NEW(`decl.valueConstant`, CRAWL_CONSTANT)
 
-		elseif node.nodeType == !(AST_LOCATION) then
+		elseif nodeType == !(AST_LOCATION) then
 			local loc = node
 			!MARK_CRAWLED(`loc`, CRAWL_NODE)
 
@@ -6147,14 +6151,14 @@ function _G.crawl(state, unit, crawled, forMeta, cb)
 
 			return !(VISIT_IGNORE_CHILDREN)
 
-		elseif !!(CONST_SET{ AST_LITERAL, AST_FOREIGN, AST_TYPE_INFO })[node.nodeType] then
-			!MARK_CRAWLED(`node`, CRAWL_NODE)
+		elseif nodeType == !(AST_LITERAL) or nodeType == !(AST_FOREIGN) or nodeType == !(AST_TYPE_INFO) then
+			!MARK_CRAWLED       (`node`,               CRAWL_NODE    )
 			!MARK_CRAWLED_IF_NEW(`node.valueConstant`, CRAWL_CONSTANT)
 			return !(VISIT_IGNORE_CHILDREN)
 
 		--
 
-		elseif node.nodeType == !(AST_LAMBDA) then
+		elseif nodeType == !(AST_LAMBDA) then
 			local lambda = node
 			!MARK_CRAWLED(`lambda`, CRAWL_NODE)
 
@@ -6166,7 +6170,7 @@ function _G.crawl(state, unit, crawled, forMeta, cb)
 				!MARK_CRAWLED_IF_NEW(`lambda.valueConstant`, CRAWL_CONSTANT)
 			end
 
-		elseif node.nodeType == !(AST_CALL) then
+		elseif nodeType == !(AST_CALL) then
 			local call = node
 			!MARK_CRAWLED(`call`, CRAWL_NODE)
 
@@ -6174,7 +6178,7 @@ function _G.crawl(state, unit, crawled, forMeta, cb)
 				!MARK_CRAWLED_IF_NEW(`call.locationConstant`, CRAWL_CONSTANT)
 			end
 
-		elseif node.nodeType == !(AST_BLOCK) then
+		elseif nodeType == !(AST_BLOCK) then
 			local block = node
 			!MARK_CRAWLED(`block`, CRAWL_NODE)
 
@@ -6187,7 +6191,8 @@ function _G.crawl(state, unit, crawled, forMeta, cb)
 		else
 			!MARK_CRAWLED(`node`, CRAWL_NODE)
 		end
-	end)
+	end
+	astVisitAllNodes(unit, crawl_onVisit)
 end
 
 local function createRunReplacementFromTypeAndLuaValue(state, runNode, parent, typeInfo, v)

@@ -248,7 +248,7 @@ end
 -- Note: Skips AstStaticIf branches and most polymorphic nodes.
 do
 	local function registerNodesToAddToQueue(state, topNode, nodesToAdd)
-		astVisitAllNodes(topNode, function(node)
+		local function registerNodesToAddToQueue_onVisit(node)
 			nodesToAdd[node] = true
 
 			-- :SelectiveQueuing
@@ -276,7 +276,9 @@ do
 				end
 				return !(VISIT_IGNORE_CHILDREN)
 			end
-		end)
+		end
+
+		astVisitAllNodes(topNode, registerNodesToAddToQueue_onVisit)
 	end
 
 	function _G.addToQueueRecursively(state, topNode, container0, key0, pipe)
@@ -308,7 +310,7 @@ end
 -- Note: Skips AstStaticIf branches and most polymorphic nodes.
 do
 	local function registerNodesToAddToQueue(state, topNode, nodesToAdd)
-		astVisitAllNodes(topNode, function(node)
+		local function registerNodesToAddToQueue_onVisit(node)
 			if node == topNode then
 				-- void
 
@@ -352,7 +354,9 @@ do
 					return !(VISIT_IGNORE_CHILDREN)
 				end
 			end
-		end)
+		end
+
+		astVisitAllNodes(topNode, registerNodesToAddToQueue_onVisit)
 	end
 
 	function _G.addUnqueuedChildrenToQueueRecursively(state, topNode, pipe)
@@ -402,11 +406,12 @@ function _G.unqueue(node)
 end
 
 function _G.unqueueChildrenRecursively(state, topNode) -- @Cleanup: Remove state argument.
-	astVisitAllNodes(topNode, function(node)
+	local function unqueueChildrenRecursively_onVisit(node)
 		if node ~= topNode then
 			node.queued.unqueued = true
 		end
-	end)
+	end
+	astVisitAllNodes(topNode, unqueueChildrenRecursively_onVisit)
 end
 
 -- Note: nodeOld doesn't have to be queued right now - it just needs a Queued object.
@@ -446,10 +451,11 @@ end
 
 -- Note: We update the parent of childTreeNodeToHookIn here.
 function _G.cutOutPartOfNodeTree(state, nodeToRemove, childTreeNodeToHookIn)
-	astVisitAllNodes(nodeToRemove, function(node)
+	local function cutOutPartOfNodeTree_onVisit(node)
 		if node ~= nodeToRemove          then  node.queued.unqueued = true      end
 		if node == childTreeNodeToHookIn then  return !(VISIT_IGNORE_CHILDREN)  end
-	end)
+	end
+	astVisitAllNodes(nodeToRemove, cutOutPartOfNodeTree_onVisit)
 
 	childTreeNodeToHookIn.queued = nil -- This will be replaced with nodeToRemove.queued in replaceQueuedNode().
 	childTreeNodeToHookIn.parent = nodeToRemove.parent
@@ -512,18 +518,19 @@ end
 function _G.moveTreeToNextRelevantPipe(state, topNode)
 	local currentPipe = topNode.queued.pipe
 
-	astVisitAllNodes(topNode, function(node)
+	local function moveTreeToNextRelevantPipe_onVisit(node)
 		if node.queued.pipe ~= currentPipe then
 			errorInternal("A child node is in an unexpected pipe. (Expected %d, was %d)", currentPipe, node.queued.pipe)
 		end
 		moveToNextRelevantPipe(state, node)
-	end)
+	end
+	astVisitAllNodes(topNode, moveTreeToNextRelevantPipe_onVisit)
 end
 
 function _G.moveChildrenToNextRelevantPipe(state, topNode)
 	local currentPipe = nil
 
-	astVisitAllNodes(topNode, function(node)
+	local function moveChildrenToNextRelevantPipe_onVisit(node)
 		if node == topNode then  return  end
 
 		currentPipe = currentPipe or node.queued.pipe
@@ -532,7 +539,8 @@ function _G.moveChildrenToNextRelevantPipe(state, topNode)
 			errorInternal("A child node is in an unexpected pipe. (Expected %d, was %d)", currentPipe, node.queued.pipe)
 		end
 		moveToNextRelevantPipe(state, node)
-	end)
+	end
+	astVisitAllNodes(topNode, moveChildrenToNextRelevantPipe_onVisit)
 end
 
 
