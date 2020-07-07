@@ -160,14 +160,24 @@ function _G.tokenize(s, path, tokens, increaseTotalLineCount, lnStart)
 
 	local forceIdentifier = false
 
-	local function updateLineNumber()
-		while lnPtr < ptr do
-			if getByte(s, lnPtr) == !(BYTE_NL) then
-				ln = ln+1
+	!local UPDATE_LINE_NUMBER = `
+		while true do
+			local lnPos = find(s, "\n", lnPtr, true)
+
+			if not lnPos then
+				lnPtr = HUGE
+				break
 			end
-			lnPtr = lnPtr+1
+
+			if lnPos >= ptr then
+				lnPtr = ptr-1
+				break
+			end
+
+			ln    = ln+1
+			lnPtr = lnPos+1
 		end
-	end
+	`
 
 	while true do
 		local byte = getByte(s, ptr)
@@ -177,7 +187,7 @@ function _G.tokenize(s, path, tokens, increaseTotalLineCount, lnStart)
 			local i1, i2 = find(s, "^%s+", ptr)
 			ptr          = i2+1
 			byte         = getByte(s, ptr)
-			updateLineNumber()
+			!!(UPDATE_LINE_NUMBER)
 		end
 
 		if ptr > #s then  break  end -- EOF
@@ -549,7 +559,7 @@ function _G.tokenize(s, path, tokens, increaseTotalLineCount, lnStart)
 			tokLines1[count]     = ln
 		end
 
-		updateLineNumber()
+		!!(UPDATE_LINE_NUMBER)
 
 		if tokType then
 			tokLines2[count] = ln

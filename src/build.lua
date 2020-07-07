@@ -35,6 +35,7 @@ local STATIC_PROFILER_NAMES_TO_IGNORE = {
 	indexOf         = true,
 	iprev           = true,
 	removeUnordered = true,
+	areArraysEqual  = true,
 }
 
 local COMPILER_HEADER =
