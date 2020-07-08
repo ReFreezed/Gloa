@@ -4244,7 +4244,7 @@ end
 		end
 
 		-- @Incomplete: Include these times in the compilation stats.
-		local timeStartLexing, timeEndLexing = readAndTokenizeString(state, pathDummy, true, bodyText, 1)
+		local timeLexingStart, timeLexingEnd = readAndTokenizeString(state, pathDummy, true, bodyText, 1)
 
 		insertToken(tokens, !(TOKEN_PUNCTUATION),"}", bodyText,pathDummy) -- So we can parse the block.
 		tokens.position1[tokens.count] = #bodyText
@@ -4688,13 +4688,18 @@ end
 
 		local startToken = tokens.count+1
 
-		local timeStart          = os.clock()
-		readAndTokenizeFile(state, path, (not isPreload))
+		local timeLexingStart, timeLexingEnd = readAndTokenizeFile(state, path, (not isPreload))
+		local timeLexing                     = timeLexingEnd - timeLexingStart
 		!ASSERT(`state.fileBuffers[path]`, `path`)
-		local fileScope          = parseFileScope(state, globalScope, path, (not import.isLoad), importName)
-		local timeParsing        = os.clock()  - timeStart
-		state.timeParsing        = timeParsing + state.timeParsing
-		state.timeParsingInPipes = timeParsing + state.timeParsingInPipes
+
+		local timeStart   = os.clock()
+		local fileScope   = parseFileScope(state, globalScope, path, (not import.isLoad), importName)
+		local timeParsing = os.clock()  - timeStart
+
+		state.timeLexing         = state.timeLexing         + timeLexing
+		state.timeLexingInPipes  = state.timeLexingInPipes  + timeLexing
+		state.timeParsing        = state.timeParsing        + timeParsing
+		state.timeParsingInPipes = state.timeParsingInPipes + timeParsing
 
 		if peekNextToken(state, 1) then
 			errorParsingNext(state, "Expected the end of the file.")
