@@ -155,6 +155,7 @@ local function profilerMaybeModifyFunction(func, name)
 	if STATIC_PROFILER_NAMES_TO_IGNORE[name]    then  return  end
 	if name:find"^_"                            then  return  end
 	if name:find"[Pp]rofiler"                   then  return  end
+	if name:find"[Tt]imer"                      then  return  end
 	if name:find"[Pp]rint"                      then  return  end
 	if name:find"[Ee]rror"                      then  return  end
 	if name:find"[Aa]ssert"                     then  return  end

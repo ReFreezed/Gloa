@@ -343,38 +343,45 @@ function _G.tokenize(s, path, tokens, increaseTotalLineCount, lnStart)
 		elseif byte == !(getByte'"') or byte == !(getByte"'") then
 			local reprStart = ptr
 			local quoteByte = getByte(s, ptr)
-			local stringLen = 0
+			local segCount  = 0
+			local pattern   = quoteByte == !(getByte'"') and '["\\]' or "['\\]"
+
+			ptr = ptr + 1 -- The starting quote.
 
 			!(
-			preprocessorOutputAtTopOfFile `local stringBytes = {}` -- Reuse the same table for all strings.
+			preprocessorOutputAtTopOfFile `local substrings = {}` -- Reuse the same table for all strings.
 
-			local function ADD_BYTE(byteCode)
+			local function ADD(substrCode)
 				__LUA(templateToLua(
 					trimTemplate`
-						stringLen              = stringLen+1
-						stringBytes[stringLen] = $byte
+						segCount                 = segCount + 1
+						substrings[segCount] = $substr
 					`,
-					{byte=byteCode}
+					{substr=substrCode}
 				))
 			end
 			)
 
-			ptr = ptr+1
-
 			while true do
-				byte = getByte(s, ptr)
-
-				if not byte then
+				local i = find(s, pattern, ptr)
+				if not i then
 					errorInFile(s, path, reprStart, "Tokenizer", "Unfinished string.")
+				end
+
+				if i > ptr then
+					!ADD `sub(s, ptr, i-1)`
+				end
+				ptr = i
+
+				local byte = getByte(s, ptr)
+				ptr        = ptr + 1 -- The matching special character.
 
 				-- End of string.
-				elseif byte == quoteByte then
-					ptr = ptr+1
+				if byte == quoteByte then
 					break
 
 				-- Escape sequence.
-				elseif byte == !(BYTE_BACKSLASH) then
-					ptr  = ptr+1
+				else--if byte == !(BYTE_BACKSLASH) then
 					byte = getByte(s, ptr)
 
 					if not byte then
@@ -386,21 +393,24 @@ function _G.tokenize(s, path, tokens, increaseTotalLineCount, lnStart)
 					-- \\ inserts a backslash.
 					-- \" inserts a quotation mark.
 					-- \' inserts an apostrophe.
-					elseif byte == !(getByte"n") then
-						byte = !(BYTE_NL)
-						ptr  = ptr+1
+					elseif byte == !(getByte"n") or byte == !(getByte"\n") then
+						!ADD `"\n"`
+						ptr = ptr + 1
 					elseif byte == !(getByte"r") then
-						byte = !(BYTE_CR)
-						ptr  = ptr+1
+						!ADD `"\r"`
+						ptr = ptr + 1
 					elseif byte == !(getByte"t") then
-						byte = !(BYTE_TAB)
-						ptr  = ptr+1
-					elseif
-						byte == !(BYTE_BACKSLASH) or byte == !(BYTE_NL) or
-						byte == !(getByte'"')     or byte == !(getByte"'")
-					then
-						-- Keep value of 'byte'.
-						ptr = ptr+1
+						!ADD `"\t"`
+						ptr = ptr + 1
+					elseif byte == !(getByte"\\") then
+						!ADD `"\\"`
+						ptr = ptr + 1
+					elseif byte == !(getByte'"') then
+						!ADD `'"'`
+						ptr = ptr + 1
+					elseif byte == !(getByte"'") then
+						!ADD `"'"`
+						ptr = ptr + 1
 
 					-- \ddd specifies a byte denoted by one to three decimal digits.
 					elseif find(s, "^%d", ptr) then
@@ -414,12 +424,14 @@ function _G.tokenize(s, path, tokens, increaseTotalLineCount, lnStart)
 							)
 						end
 						ptr = ptr + #numStr
+						!ADD `bytesToString(byte)`
 
 					-- \xXX specifies a byte denoted by two hexadecimal digits.
 					elseif find(s, "^x[%dA-Fa-f][%dA-Fa-f]", ptr) then
 						local hex = sub(s, ptr+1, ptr+2)
 						byte      = tonumber(hex, 16)
-						ptr       = ptr+3
+						ptr       = ptr + 3
+						!ADD `bytesToString(byte)`
 
 					-- \u{XXX} inserts the UTF-8 encoding of a Unicode codepoint denoted by a sequence of hexadecimal digits.
 					elseif find(s, "^u{[%dA-Fa-f]+}", ptr) then
@@ -428,39 +440,21 @@ function _G.tokenize(s, path, tokens, increaseTotalLineCount, lnStart)
 						local cp  = tonumber(hex, 16)
 						byte      = nil
 						ptr       = ptr + 3 + #hex
-
-						local cpStr = utf8Char(cp)
-						for i = 1, #cpStr do
-							!ADD_BYTE `getByte(cpStr, i)`
-						end
+						!ADD `utf8Char(cp)`
 
 					-- \z skips the following span of whitespace characters.
 					elseif byte == !(getByte"z") then
 						local i1, i2 = find(s, "^%s*", ptr+1)
-						byte = nil
-						ptr  = i2+1
+						ptr          = i2 + 1
 
 					else
 						errorInFile(s, path, ptr-1, "Tokenizer", "Invalid escape sequence.")
 					end
-
-					if byte then
-						!ADD_BYTE `byte`
-					end
-
-				-- Illegal characters.
-				elseif byte == !(BYTE_NL) then
-					errorInFile(s, path, ptr, "Tokenizer", "Invalid string. (Line breaks must be escaped inside strings.)")
-
-				-- Any other character.
-				else
-					!ADD_BYTE `byte`
-					ptr = ptr+1
 				end
 			end
 
 			tokType  = !(TOKEN_STRING)
-			tokValue = bytesToString(unpack(stringBytes, 1, stringLen)) -- @Robustness: Make sure this works for very long strings.
+			tokValue = table.concat(substrings, "", 1, segCount)
 			tokExtra = false--trimmedInitialNewline
 
 		-- String (long-form).
@@ -626,9 +620,9 @@ do
 		local tokens     = state.tokens
 		local startToken = tokens.count+1
 
-		local startTime = os.clock()
+		local startTime = timerGetCurrentInSeconds()
 		tokenize(s, path, tokens, increaseTotalLineCount, lnStart)
-		local endTime = os.clock()
+		local endTime = timerGetCurrentInSeconds()
 
 		!if DEBUG then
 			--[[

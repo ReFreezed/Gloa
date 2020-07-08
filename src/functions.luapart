@@ -47,8 +47,78 @@ local PROFILE_CALLEES = 1==0
 local PROFILE_TIMES   = 1==0
 
 local PROFILER_TARGET_NAME = "indexOf" -- Used for PROFILE_CALLEES.
-local PROFILER_HIRES_TIMER = 1==1      -- Uses kernel32.dll in Windows.
+
+local HIRES_TIMER = DEBUG and 1==1 -- Uses Alien FFI library and kernel32.dll in Windows.
 )
+
+
+
+!if HIRES_TIMER then
+do
+	local alien    = require"alien"
+	local kernel32 = alien.load"kernel32.dll"
+	local ldexp    = math.ldexp
+
+	local QueryPerformanceCounter = kernel32.QueryPerformanceCounter
+	QueryPerformanceCounter:types{ ret="int", abi="stdcall", "pointer" }
+
+	local QueryPerformanceFrequency = kernel32.QueryPerformanceFrequency
+	QueryPerformanceFrequency:types{ ret="int", abi="stdcall", "pointer" }
+
+	!(
+	local _LONG_SIGNED_TO_UNSIGNED = `($var < 0 and $var + 0x80000000 + 0x80000000 or $var)`
+	local function LONG_SIGNED_TO_UNSIGNED(var)
+		return templateToLua(_LONG_SIGNED_TO_UNSIGNED, {var=var})
+	end
+	)
+
+	local twoLongs       = alien.array("long", 2)
+	local twoLongsBuffer = twoLongs.buffer
+
+	local function timerQueryPerformanceFrequency()
+		QueryPerformanceFrequency(twoLongsBuffer)
+		local lo = twoLongs[1] ; local hi = twoLongs[2]
+		return ldexp(!!(LONG_SIGNED_TO_UNSIGNED`lo`), 0)
+		     + ldexp(!!(LONG_SIGNED_TO_UNSIGNED`hi`), 32)
+	end
+
+	local function timerQueryPerformanceCounter()
+		QueryPerformanceCounter(twoLongsBuffer)
+		local lo = twoLongs[1] ; local hi = twoLongs[2]
+		return ldexp(!!(LONG_SIGNED_TO_UNSIGNED`lo`), 0)
+		     + ldexp(!!(LONG_SIGNED_TO_UNSIGNED`hi`), 32)
+	end
+
+	local freq   = timerQueryPerformanceFrequency() -- This shouldn't change while the program is running according to the documentation.
+	local count0 = timerQueryPerformanceCounter()   -- Is this needed?
+
+	_G.timerGetCurrent = timerQueryPerformanceCounter
+	function _G.timerGetCurrentInSeconds()
+		return (timerQueryPerformanceCounter() - count0) / freq
+	end
+
+	function _G.timerAbsoluteToSeconds(count)
+		return (count - count0) / freq
+	end
+	function _G.timerRelativeToSeconds(count)
+		return count / freq
+	end
+
+	function _G.timerGetDiffInSeconds(count1, count2)
+		return (count2 - count1) / freq
+	end
+end
+!else
+	_G.timerGetCurrent          = os.clock
+	_G.timerGetCurrentInSeconds = timerGetCurrent
+
+	function _G.timerAbsoluteToSeconds(time)  return time  end
+	_G.timerRelativeToSeconds = timerAbsoluteToSeconds
+
+	function _G.timerGetDiffInSeconds(time1, time2)
+		return time2 - time1
+	end
+!end
 
 
 
@@ -946,11 +1016,14 @@ end
 
 function _G.timeIt(f, count, ...)
 	collectgarbage()
-	local time = os.clock()
+
+	local timeDataStart = timerGetCurrent()
 	for i = 1, count do
 		f(...)
 	end
-	print(os.clock()-time)
+	local timeDataEnd = timerGetCurrent()
+
+	print(timerGetDiffInSeconds(timeDataStart, timeDataEnd))
 end
 
 function _G.stall(duration)
@@ -1177,50 +1250,8 @@ do
 	local times      = {}
 	local lastName   = nil
 
-	!if PROFILER_HIRES_TIMER then
-	local profilerHiresTimer = nil
-
-	local function profilerGetHiresTimer()
-		if profilerHiresTimer then  return profilerHiresTimer  end
-
-		local alien    = require"alien"
-		local kernel32 = alien.load"kernel32.dll"
-		local ldexp    = math.ldexp
-
-		local QueryPerformanceCounter = kernel32.QueryPerformanceCounter
-		QueryPerformanceCounter:types{ ret="int", abi="stdcall", "pointer" }
-
-		local QueryPerformanceFrequency = kernel32.QueryPerformanceFrequency
-		QueryPerformanceFrequency:types{ ret="int", abi="stdcall", "pointer" }
-
-		local function profilerLongSignedToUnsigned(long)
-			return long < 0 and long + 0x80000000 + 0x80000000 or long
-		end
-
-		local twoLongs       = alien.array("long", 2)
-		local twoLongsBuffer = twoLongs.buffer
-
-		local function profilerGetPerformanceFrequency()
-			QueryPerformanceFrequency(twoLongsBuffer)
-			return ldexp(profilerLongSignedToUnsigned(twoLongs[1]), 0)
-			     + ldexp(profilerLongSignedToUnsigned(twoLongs[2]), 32)
-		end
-
-		local function profilerGetPerformanceCounter()
-			QueryPerformanceCounter(twoLongsBuffer)
-			return ldexp(profilerLongSignedToUnsigned(twoLongs[1]), 0)
-			     + ldexp(profilerLongSignedToUnsigned(twoLongs[2]), 32)
-		end
-
-		local freq   = profilerGetPerformanceFrequency()
-		local count0 = profilerGetPerformanceCounter()
-
-		profilerHiresTimer = function()
-			return (profilerGetPerformanceCounter() - count0) / freq
-		end
-
-		return profilerHiresTimer
-	end
+	!if HIRES_TIMER then
+	local timerGetCurrent = timerGetCurrent
 	!end
 
 	do
@@ -1229,17 +1260,15 @@ do
 		local timeSubcalls = {[0]=0}
 		local timeStarts   = {}
 		local depth        = 0
-		local clock        = nil
 
 		function _G.staticProfilerPush(name)
-			clock               = clock or !!(PROFILER_HIRES_TIMER and `(profilerHiresTimer or profilerGetHiresTimer())` or `os.clock`)
 			countCalls[name]    = (countCalls[name] or 0) + 1
 			depth               = depth + 1
-			timeStarts[depth]   = clock()
+			timeStarts[depth]   = timerGetCurrent()
 			timeSubcalls[depth] = 0
 		end
 		function _G.staticProfilerPop(name)
-			local time          = clock() - timeStarts[depth]
+			local time          = timerGetCurrent() - timeStarts[depth]
 			timeCalls[name]     = (timeCalls[name] or 0) + time - timeSubcalls[depth]
 			depth               = depth - 1
 			timeSubcalls[depth] = timeSubcalls[depth] + time
@@ -1262,7 +1291,7 @@ do
 				print(os.date("all %Y-%m-%d %H:%M:%S", time))
 
 				for _, name in ipairs(names) do
-					printf(!(PROFILER_HIRES_TIMER and "%.7f  %8.0f  %s" or "%.3f  %8.0f  %s"), timeCalls[name], countCalls[name], name)
+					printf(!(HIRES_TIMER and "%.7f  %8.0f  %s" or "%.3f  %8.0f  %s"), timerRelativeToSeconds(timeCalls[name]), countCalls[name], name)
 				end
 			!end
 		end
@@ -1276,7 +1305,6 @@ do
 			pauseDepth    = 0
 
 			local getinfo = debug.getinfo
-			local clock   = !!(PROFILER_HIRES_TIMER and `(profilerHiresTimer or profilerGetHiresTimer())` or `os.clock`)
 
 			!if PROFILE_CALLS then
 				debug.sethook(function()
@@ -1295,7 +1323,7 @@ do
 			!elseif PROFILE_TIMES then
 				n        = n+1
 				names[n] = "__PROFILER"
-				times[n] = clock()
+				times[n] = timerGetCurrent()
 				lastName = "__PROFILER"
 
 				collectgarbage()
@@ -1306,7 +1334,7 @@ do
 
 					n        = n+1
 					names[n] = name
-					times[n] = clock()
+					times[n] = timerGetCurrent()
 					lastName = name
 				end, "l")
 			!end
@@ -1318,7 +1346,7 @@ do
 		!if PROFILE_TIMES then
 			n        = n+1
 			names[n] = "__PROFILER"
-			times[n] = !!(PROFILER_HIRES_TIMER and `(profilerHiresTimer or profilerGetHiresTimer())` or `os.clock`)()
+			times[n] = timerGetCurrent()
 			lastName = "__PROFILER"
 		!end
 
@@ -1390,7 +1418,7 @@ do
 			print(os.date("times %Y-%m-%d %H:%M:%S", time))
 
 			for _, source in ipairs(sources) do
-				printf(!(PROFILER_HIRES_TIMER and "%.7f  %s" or "%.3f  %s"), runTimes[source], source)
+				printf(!(HIRES_TIMER and "%.7f  %s" or "%.3f  %s"), timerRelativeToSeconds(runTimes[source]), source)
 			end
 		!end
 	end

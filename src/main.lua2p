@@ -84,8 +84,6 @@ local loaders = {
 }
 
 local function runCompiler()
-	local timeStartInitial = os.clock()
-
 	!if DISABLE_STDOUT_BUFFER then
 		io.stdout:setvbuf("no")
 		io.stderr:setvbuf("no")
@@ -94,6 +92,8 @@ local function runCompiler()
 	for _, loader in ipairs(loaders) do
 		loader()
 	end
+
+	local timeStartInitial = timerGetCurrentInSeconds()
 
 
 
@@ -273,13 +273,13 @@ local function runCompiler()
 		{`projectDirectory`,   ""},
 		{`mainFileBasename`,   ""},
 
-		{`timeLexing`,         0.0},
-		{`timeLexingInPipes`,  0.0},
-		{`timeParsing`,        0.0},
-		{`timeParsingInPipes`, 0.0},
-		{`timePipesStart`,     0.0},
-		{`timePipes`,          0.0},
-		{`timeOutput`,         0.0},
+		{`timeLexing`,         0.00},
+		{`timeLexingInPipes`,  0.00},
+		{`timeParsing`,        0.00},
+		{`timeParsingInPipes`, 0.00},
+		{`timePipesStart`,     0.00},
+		{`timePipes`,          0.00},
+		{`timeOutput`,         0.00},
 
 		{`sendMessages`,       false},
 		{`phase`,              0},
@@ -390,9 +390,9 @@ local function runCompiler()
 		local timeLexingStart, timeLexingEnd = readAndTokenizeFile(state, pathToFirstFile, true)
 		state.timeLexing                     = timeLexingEnd - timeLexingStart
 
-		local timeStart = os.clock()
+		local timeStart = timerGetCurrentInSeconds()
 		parseGlobalScope(state, pathToFirstFile)
-		state.timeParsing = os.clock() - timeStart
+		state.timeParsing = timerGetCurrentInSeconds() - timeStart
 
 		if peekNextToken(state, 1) then
 			errorParsingNext(state, "Expected the end of the file.")
@@ -648,17 +648,17 @@ local function runCompiler()
 			errorLine("Compiler", "The output path is the same as the input path. (%s)", pathToFirstFile)
 		end
 
-		local timeStart = os.clock()
+		local timeStart = timerGetCurrentInSeconds()
 
 		local writer         = WriterState()
 		writer.outputRuntime = true
 		writeProgram(state, writer)
 
-		state.timeOutput = os.clock()-timeStart
+		state.timeOutput = timerGetCurrentInSeconds() - timeStart
 	end
 
 	function _G.compileProgram(pathToFirstFile)
-		local timeCompilingStart            = os.clock()
+		local timeCompilingStart            = timerGetCurrentInSeconds()
 		local timeDoingSubCompilationsStart = timeDoingSubCompilations
 
 		local state = compilationInitState(pathToFirstFile)
@@ -666,7 +666,7 @@ local function runCompiler()
 
 		-- Pipes.
 		!ifDEBUG `profilerStart()`
-		state.timePipesStart = os.clock()
+		state.timePipesStart = timerGetCurrentInSeconds()
 
 		!ifDEBUG`if not debug_onlyParse then`
 			addToQueueRecursively(state, state.globalScope)
@@ -676,13 +676,13 @@ local function runCompiler()
 			end
 		!ifDEBUG`end`
 
-		state.timePipes = os.clock() - state.timePipesStart - state.timeLexingInPipes - state.timeParsingInPipes
+		state.timePipes = timerGetCurrentInSeconds() - state.timePipesStart - state.timeLexingInPipes - state.timeParsingInPipes
 		!ifDEBUG `profilerStop()`
 		--
 
 		maybeWriteProgram(state)
 
-		local timeCompilation = os.clock()-timeCompilingStart
+		local timeCompilation = timerGetCurrentInSeconds() - timeCompilingStart
 
 		!ifNotDEBUG`if not silent then`
 			!ifDEBUG `if debug_onlyParse then  astPrintTree(state.globalScope)  end`
@@ -806,7 +806,7 @@ local function runCompiler()
 		local callTime      = 0.00
 		local callTimeStart = 0.00
 		local getinfo       = debug.getinfo
-		local clock         = os.clock
+		local clock         = timerGetCurrentInSeconds
 		local funcToMeasure = !!(FUNCTION_TO_MEASURE_CALLS_ON) or errorInternal!(FUNCTION_TO_MEASURE_CALLS_ON)
 
 		debug.sethook(function(event)
@@ -834,7 +834,7 @@ local function runCompiler()
 		local printedAnything = false
 
 		if pathsToCompile[2] then
-			printf("Compiled all %d programs in %.3f sec", #pathsToCompile, os.clock()-timeStartInitial)
+			printf("Compiled all %d programs in %.3f sec", #pathsToCompile, clock()-timeStartInitial)
 			printedAnything = true
 		end
 		!ifNotDEBUG`if disableGc then`
