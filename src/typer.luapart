@@ -34,7 +34,12 @@
 
 
 
-!local structTypeInfo = struct
+!(
+local structTypeInfo = struct
+-- local function structTypeInfo(nameAndMaybeParent) return function(fields)
+-- 	struct(nameAndMaybeParent)(fields)
+-- end end
+)
 
 !struct"_TypeInfo"{
 	{`tag`,     0}, -- This is like the "type of type" or the "type group". The word "type" is used in so many places so we call it "tag" here to make it less confusing.
@@ -157,6 +162,18 @@ function _G.markTypeAsReady(state, typeInfo)
 end
 
 do
+	local BUILTIN_TYPE_NAMES = {
+		"any",
+		"bool",
+		"int",
+		"none",
+		"float",
+		"string",
+		"table",
+		"Type",
+		"void",
+		"placeholder",
+	}
 	local BUILTIN_TYPE_STRUCTS = {
 		["any"]         = TypeInfoAny,
 		["bool"]        = TypeInfoBool,
@@ -178,23 +195,19 @@ do
 		[!(TYPE_STRING)]      = "string",
 		[!(TYPE_TABLE)]       = "table",
 		[!(TYPE_TYPE)]        = "Type",
+		[!(TYPE_VOID)]        = "void",
 		[!(TYPE_PLACEHOLDER)] = "placeholder",
 	}
 
-	function _G.getTypeInfoForBuiltinType(state, typeName)
-		local typeInfo = state.builtinTypeInfos[typeName]
+	function _G.addTypeInfosForBuiltinTypes(state)
+		for _, typeName in ipairs(BUILTIN_TYPE_NAMES) do
+			local typeInfo   = newTypeInfo(state, BUILTIN_TYPE_STRUCTS[typeName])
+			typeInfo.isReady = true
 
-		if not typeInfo then
-			local TypeInfoCreator            = BUILTIN_TYPE_STRUCTS[typeName] or errorInternal(tostring(typeName))
-			typeInfo                         = newTypeInfo(state, TypeInfoCreator)
 			state.builtinTypeInfos[typeName] = typeInfo
-
 			table.insert(state.allTypeInfos,                    typeInfo)
 			table.insert(state.allTypeInfosByTag[typeInfo.tag], typeInfo)
-			markTypeAsReady(state, typeInfo)
 		end
-
-		return typeInfo
 	end
 
 	-- bool, typeName = isTypeBuiltin( typeInfo )
@@ -269,8 +282,8 @@ function _G.getTypeInfoForLambda(state, lambda)
 	local funcSig         = newTypeInfo(state, TypeInfoFunction)
 	funcSig.isPolymorphic = lambda.isPolymorphic
 
-	local placeholderType       = lambda.isPolymorphic and getTypeInfoForBuiltinType(state, "placeholder"  ) or nil
-	local placeholderTypeVararg = placeholderType      and getTypeInfoForVararg     (state, placeholderType) or nil
+	local placeholderType       = lambda.isPolymorphic and state.builtinTypeInfos.placeholder           or nil
+	local placeholderTypeVararg = placeholderType      and getTypeInfoForVararg(state, placeholderType) or nil
 
 	if argsIn then
 		for i, arg in ipairs(argsIn.arguments) do
@@ -1401,7 +1414,7 @@ end
 		errorUnhandledNodeType(state, blank)
 	end
 
-	blank.inferredType = getTypeInfoForBuiltinType(state, "any")
+	blank.inferredType = state.builtinTypeInfos.any
 	moveToNextRelevantPipe(state, blank)
 end
 
@@ -1421,8 +1434,8 @@ end
 	!end
 
 	if typeNode.kind == !(TYPE_KIND_SIMPLE_BUILTIN) then
-		typeInfoRepresented = getTypeInfoForBuiltinType(state, typeNode.typeName)
-		typeInfo            = getTypeInfoForBuiltinType(state, "Type")
+		typeInfoRepresented = state.builtinTypeInfos[typeNode.typeName]
+		typeInfo            = state.builtinTypeInfos.Type
 
 	elseif typeNode.kind == !(TYPE_KIND_FUNCTION) then
 		local lambda = typeNode.functionHeader or errorInternal()
@@ -1434,7 +1447,7 @@ end
 
 		local funcSig       = getTypeInfoForLambda(state, lambda)
 		typeInfoRepresented = funcSig
-		typeInfo            = getTypeInfoForBuiltinType(state, "Type")
+		typeInfo            = state.builtinTypeInfos.Type
 
 	elseif typeNode.kind == !(TYPE_KIND_ARRAY) then
 		local itemTypeNode = typeNode.arrayItemType or errorInternal(state, typeNode)
@@ -1452,7 +1465,7 @@ end
 
 		local arraySig      = getTypeInfoForArray(state, itemTypeInfo)
 		typeInfoRepresented = arraySig
-		typeInfo            = getTypeInfoForBuiltinType(state, "Type")
+		typeInfo            = state.builtinTypeInfos.Type
 
 	elseif typeNode.kind == !(TYPE_KIND_COMPOUND) then
 		for _, typeExpr in ipairs(typeNode.components) do
@@ -1522,7 +1535,7 @@ end
 		table.sort(typeNode.components, function(a, b)  return typeIds[a] < typeIds[b]  end) -- @Cleanup @Speed: This is probably unnecessary.
 
 		typeInfoRepresented = getTypeInfoForCompoundType(state, typeInfos, true)
-		typeInfo            = getTypeInfoForBuiltinType(state, "Type")
+		typeInfo            = state.builtinTypeInfos.Type
 
 	else
 		decl = typeNode.declaration
@@ -3171,7 +3184,7 @@ end
 		local typeInfoForPublic
 			=   isTypePublic(typeInfo)
 			and typeInfo
-			or  getTypeInfoForBuiltinType(state, "void")
+			or  state.builtinTypeInfos.void
 
 		local codeDecl          = CodeDeclaration()
 		codeDecl.serial         = decl.s
@@ -3209,10 +3222,8 @@ _G.!(local )!!BUILTIN_TYPE_TAG_TO_LITERAL_TYPE = {
 }
 
 !NODE_INFERRER `function nodeInferrers.AstLiteral(state, literal)`
-	local typeName = LITERAL_TYPE_TO_BUILTIN_TYPE_NAME[literal.literalType] or errorUnhandledNodeType(state, literal)
-
-	literal.inferredType = getTypeInfoForBuiltinType(state, typeName)
-
+	local typeName       = LITERAL_TYPE_TO_BUILTIN_TYPE_NAME[literal.literalType] or errorUnhandledNodeType(state, literal)
+	literal.inferredType = state.builtinTypeInfos[typeName]
 	moveToNextRelevantPipe(state, literal)
 end
 
@@ -3239,7 +3250,7 @@ end
 
 	elseif unary.operation == "not" then
 		if typeInfo.tag ~= !(TYPE_BOOL) then
-			wrapInImplicitCast(state, unary.expression, getTypeInfoForBuiltinType(state, "bool"), true)
+			wrapInImplicitCast(state, unary.expression, state.builtinTypeInfos.bool, true)
 			return
 		end
 
@@ -3255,7 +3266,7 @@ end
 			)
 		end
 
-		typeInfo = getTypeInfoForBuiltinType(state, "int")
+		typeInfo = state.builtinTypeInfos.int
 
 	else
 		errorUnhandledNodeType(state, unary)
@@ -3326,7 +3337,7 @@ function _G.checkBinaryOperation(state, exprForError, exprMain,exprL,exprR, binO
 		if intExpr.nodeType == !(AST_LITERAL) and intExpr.value < 0 then
 			typeError(state, intExpr, "String repetition: Integer is negative. (%d)", intExpr.value)
 		end
-		return getTypeInfoForBuiltinType(state, "string")
+		return state.builtinTypeInfos.string
 
 	-- Numeric operation.
 	elseif !!(CONST_SET{"+","-","*","^","%","/","//"})[binOp] then
@@ -3341,13 +3352,13 @@ function _G.checkBinaryOperation(state, exprForError, exprMain,exprL,exprR, binO
 		end
 
 		if binOp == "/" then
-			return getTypeInfoForBuiltinType(state, "float")
+			return state.builtinTypeInfos.float
 		elseif binOp == "//" then
-			return getTypeInfoForBuiltinType(state, "int")
+			return state.builtinTypeInfos.int
 		elseif typeInfoL.tag == !(TYPE_FLOAT) or typeInfoR.tag == !(TYPE_FLOAT) then
-			return getTypeInfoForBuiltinType(state, "float")
+			return state.builtinTypeInfos.float
 		else
-			return getTypeInfoForBuiltinType(state, "int")
+			return state.builtinTypeInfos.int
 		end
 
 	-- Comparison.
@@ -3363,19 +3374,19 @@ function _G.checkBinaryOperation(state, exprForError, exprMain,exprL,exprR, binO
 			)
 		end
 
-		return getTypeInfoForBuiltinType(state, "bool")
+		return state.builtinTypeInfos.bool
 
 	-- Equality.
 	elseif !!(CONST_SET{"==","~="})[binOp] then
 		if not isValidEqualityCheck(state, exprForError, typeInfoL, typeInfoR) then
 			!!(TYPE_MISMATCH)
 		end
-		return getTypeInfoForBuiltinType(state, "bool")
+		return state.builtinTypeInfos.bool
 
 	-- Boolean operation.
 	elseif !!(CONST_SET{"and","or"})[binOp] then
 		local bothAreBool = true
-		local typeInfo    = getTypeInfoForBuiltinType(state, "bool")
+		local typeInfo    = state.builtinTypeInfos.bool
 
 		if typeInfoL.tag ~= !(TYPE_BOOL) then
 			!ASSERT `not inAssignment`
@@ -3397,7 +3408,7 @@ function _G.checkBinaryOperation(state, exprForError, exprMain,exprL,exprR, binO
 		elseif typeInfoR.tag ~= !(TYPE_STRING) then
 			typeError(state, exprR, "String concatenation expected a string. (Got %s)", getFriendlyTypeInfoName(typeInfoR))
 		end
-		return getTypeInfoForBuiltinType(state, "string")
+		return state.builtinTypeInfos.string
 
 	else
 		errorUnhandledNodeType(state, exprForError)
@@ -3553,7 +3564,7 @@ end
 		if typeMember.tag == !(TYPE_NONE) then
 			typeError(state, access.member, "Table keys cannot be nil.")
 
-		elseif typeMember.tag == !(TYPE_COMPOUND) and indexOf(typeMember, getTypeInfoForBuiltinType(state, "none")) then
+		elseif typeMember.tag == !(TYPE_COMPOUND) and indexOf(typeMember, state.builtinTypeInfos.none) then
 			typeError(state, access.member, "Table keys cannot be nil. (Type is %s)", getFriendlyTypeInfoName(typeMember))
 
 		--[[ This warning message may be too noisy in some programs.
@@ -3566,7 +3577,7 @@ end
 		--]]
 		end
 
-		access.inferredType = getTypeInfoForBuiltinType(state, "any")
+		access.inferredType = state.builtinTypeInfos.any
 		moveToNextRelevantPipe(state, access)
 
 	elseif typeObject.tag == !(TYPE_ARRAY) then
@@ -4067,7 +4078,7 @@ end
 	if not typeExpected then  return  end
 
 	if typeExpected.tag == !(TYPE_ANY) and tableNode.parent.nodeType == !(AST_TABLE) then
-		typeExpected = getTypeInfoForBuiltinType(state, "table")
+		typeExpected = state.builtinTypeInfos.table
 	end
 
 	local trailingExpr   = tableNode.trailingExpression
@@ -4305,7 +4316,7 @@ end
 		typeError(state, astGetExpressionVisuallyFurthestToTheLeft(typeOf.expression), "Cannot get the type of function calls.")
 	end
 
-	typeOf.inferredType    = getTypeInfoForBuiltinType(state, "Type")
+	typeOf.inferredType    = state.builtinTypeInfos.Type
 	typeOf.representedType = exprTypeInfo
 
 	if typeOf.representedType.tag == !(TYPE_VARARG) then
@@ -4866,7 +4877,7 @@ end
 
 	if debugNode.action == "assert" then
 		if typeInfo.tag ~= !(TYPE_BOOL) then
-			wrapInImplicitCast(state, expr, getTypeInfoForBuiltinType(state, "bool"), true)
+			wrapInImplicitCast(state, expr, state.builtinTypeInfos.bool, true)
 			return
 		end
 
@@ -4946,7 +4957,7 @@ local function inferIfOrWhile(state, ifOrWhile)
 	typeInfo = adjustTypeToOne(state, cond, typeInfo, true)
 
 	if typeInfo.tag ~= !(TYPE_BOOL) then
-		wrapInImplicitCast(state, cond, getTypeInfoForBuiltinType(state, "bool"), true)
+		wrapInImplicitCast(state, cond, state.builtinTypeInfos.bool, true)
 		return
 	end
 
@@ -4973,7 +4984,7 @@ end
 	typeInfo = adjustTypeToOne(state, cond, typeInfo, true)
 
 	if typeInfo.tag ~= !(TYPE_BOOL) then
-		wrapInImplicitCast(state, cond, getTypeInfoForBuiltinType(state, "bool"), true)
+		wrapInImplicitCast(state, cond, state.builtinTypeInfos.bool, true)
 		return
 	end
 
@@ -5099,7 +5110,7 @@ end
 
 	if typeInfo.tag ~= !(TYPE_BOOL) then
 		-- Note: This wrap will not affect conditional.conditionAndBranchTrue which is the actual expression we use in the output.
-		wrapInImplicitCast(state, cond, getTypeInfoForBuiltinType(state, "bool"), true)
+		wrapInImplicitCast(state, cond, state.builtinTypeInfos.bool, true)
 		return
 	end
 
@@ -5112,7 +5123,7 @@ end
 	if typeTrue == typeFalse then
 		conditional.inferredType = typeTrue
 	elseif isTypeNumeric(typeTrue) and isTypeNumeric(typeFalse) then
-		conditional.inferredType = getTypeInfoForBuiltinType(state, "float")
+		conditional.inferredType = state.builtinTypeInfos.float
 	else
 		typeError(
 			state, conditional,
@@ -5294,7 +5305,7 @@ end
 				(names[1] and names[1].name  or "it"),
 				(names[1] and names[1].token or forLoop.token),
 				(names[1] == nil),
-				getTypeInfoForBuiltinType(state, (anyFloat and "float" or "int"))
+				state.builtinTypeInfos[anyFloat and "float" or "int"]
 			)
 
 		----------------------------------------------------------------
@@ -5320,7 +5331,7 @@ end
 				local name2  = (names[2] and names[2].name ) or "itIndex"
 				local token1 = (names[1] and names[1].token) or forLoop.token
 				local token2 = (names[2] and names[2].token) or forLoop.token
-				addDeclarationInForLoop(state, forLoop, name2, token2, names[2]==nil, getTypeInfoForBuiltinType(state, "int"))
+				addDeclarationInForLoop(state, forLoop, name2, token2, names[2]==nil, state.builtinTypeInfos.int)
 				addDeclarationInForLoop(state, forLoop, name1, token1, names[1]==nil, arraySig.itemType)
 
 			elseif objType.tag == !(TYPE_VARARG) then
@@ -5332,7 +5343,7 @@ end
 				local name2  = (names[2] and names[2].name ) or "itIndex"
 				local token1 = (names[1] and names[1].token) or forLoop.token
 				local token2 = (names[2] and names[2].token) or forLoop.token
-				addDeclarationInForLoop(state, forLoop, name2, token2, names[2]==nil, getTypeInfoForBuiltinType(state, "int"))
+				addDeclarationInForLoop(state, forLoop, name2, token2, names[2]==nil, state.builtinTypeInfos.int)
 				addDeclarationInForLoop(state, forLoop, name1, token1, names[1]==nil, varargSig.itemType)
 
 			elseif objType.tag == !(TYPE_TABLE) then
@@ -5343,7 +5354,7 @@ end
 				local name2    = (names[2] and names[2].name ) or "itIndex"
 				local token1   = (names[1] and names[1].token) or forLoop.token
 				local token2   = (names[2] and names[2].token) or forLoop.token
-				local typeInfo = getTypeInfoForBuiltinType(state, "any")
+				local typeInfo = state.builtinTypeInfos.any
 				addDeclarationInForLoop(state, forLoop, name2, token2, names[2]==nil, typeInfo)
 				addDeclarationInForLoop(state, forLoop, name1, token1, names[1]==nil, typeInfo)
 
@@ -5369,7 +5380,7 @@ end
 						typeError(state, decl.value, "The !iterator value must be a function. (This is %s)", getFriendlyTypeInfoName(iterTypeInfo))
 					end
 
-					local intType = getTypeInfoForBuiltinType(state, "int")
+					local intType = state.builtinTypeInfos.int
 
 					if #iterTypeInfo.argumentTypesIn ~= 2 then
 						typeError(
@@ -5392,7 +5403,7 @@ end
 						)
 					end
 
-					local intOrNoneType = getTypeInfoForCompoundType(state, {intType, getTypeInfoForBuiltinType(state, "none")}, true)
+					local intOrNoneType = getTypeInfoForCompoundType(state, {intType, state.builtinTypeInfos.none}, true)
 
 					if #iterTypeInfo.argumentTypesOut ~= 2 then
 						typeError(
@@ -5434,7 +5445,7 @@ end
 					local name2  = (names[2] and names[2].name ) or "itIndex"
 					local token1 = (names[1] and names[1].token) or forLoop.token
 					local token2 = (names[2] and names[2].token) or forLoop.token
-					addDeclarationInForLoop(state, forLoop, name2, token2, names[2]==nil, getTypeInfoForBuiltinType(state, "int"))
+					addDeclarationInForLoop(state, forLoop, name2, token2, names[2]==nil, state.builtinTypeInfos.int)
 					addDeclarationInForLoop(state, forLoop, name1, token1, names[1]==nil, structInfo.valueType)
 
 				else
@@ -5552,7 +5563,7 @@ end
 				-- Strip nil from the compound type for the first value (unless it's 'any').
 				elseif #typeInfo > 2 then
 					local typeInfos = {unpack(typeInfo)}
-					removeItem(typeInfos, getTypeInfoForBuiltinType(state, "none"))
+					removeItem(typeInfos, state.builtinTypeInfos.none)
 					typeInfo = getTypeInfoForCompoundType(state, typeInfos, false)
 				else
 					typeInfo = typeInfo[2].tag == !(TYPE_NONE) and typeInfo[1] or typeInfo[2] or errorInternal()
@@ -5675,7 +5686,7 @@ end
 		markTypeAsReady(state, structInfo)
 
 		struct.representedType = structInfo
-		struct.inferredType    = getTypeInfoForBuiltinType(state, "Type")
+		struct.inferredType    = state.builtinTypeInfos.Type
 
 		moveToNextRelevantPipe(state, struct)
 		return
@@ -5700,7 +5711,7 @@ end
 		table.insert(state.allTypeInfosByTag[!(TYPE_STRUCT)], structInfo)
 
 		struct.representedType = structInfo
-		struct.inferredType    = getTypeInfoForBuiltinType(state, "Type")
+		struct.inferredType    = state.builtinTypeInfos.Type
 	end
 
 	-- Wait for explicit contents to infer.
@@ -5933,7 +5944,7 @@ end
 
 	if enum.memberType then
 		!ASSERT `enum.memberType.typeName`
-		enumMemberInfo = getTypeInfoForBuiltinType(state, enum.memberType.typeName)
+		enumMemberInfo = state.builtinTypeInfos[enum.memberType.typeName]
 	else
 		-- Just use the type of the first member as the wanted type for the enum.
 		enumMemberInfo = enum.declarations[1].value.inferredType
@@ -5976,7 +5987,7 @@ end
 	markTypeAsReady(state, enumInfo)
 
 	enum.representedType = enumInfo
-	enum.inferredType    = getTypeInfoForBuiltinType(state, "Type")
+	enum.inferredType    = state.builtinTypeInfos.Type
 
 	moveToNextRelevantPipe(state, enum)
 end
@@ -6210,7 +6221,7 @@ local function createRunReplacementFromTypeAndLuaValue(state, runNode, parent, t
 		local literal        = astNewNode(AstLiteral, runNode.token, parent)
 		literal.literalType  = !(LITERAL_INTEGER)
 		literal.value        = n
-		literal.inferredType = getTypeInfoForBuiltinType(state, "int")
+		literal.inferredType = state.builtinTypeInfos.int
 		return literal
 
 	elseif tag == !(TYPE_FLOAT) or (tag == !(TYPE_ANY) and type(v) == "number") then
@@ -6219,7 +6230,7 @@ local function createRunReplacementFromTypeAndLuaValue(state, runNode, parent, t
 		local literal        = astNewNode(AstLiteral, runNode.token, parent)
 		literal.literalType  = !(LITERAL_FLOAT)
 		literal.value        = n
-		literal.inferredType = getTypeInfoForBuiltinType(state, "float")
+		literal.inferredType = state.builtinTypeInfos.float
 		return literal
 
 	elseif tag == !(TYPE_STRING) or (tag == !(TYPE_ANY) and type(v) == "string") then
@@ -6228,7 +6239,7 @@ local function createRunReplacementFromTypeAndLuaValue(state, runNode, parent, t
 		local literal        = astNewNode(AstLiteral, runNode.token, parent)
 		literal.literalType  = !(LITERAL_STRING)
 		literal.value        = s
-		literal.inferredType = getTypeInfoForBuiltinType(state, "string")
+		literal.inferredType = state.builtinTypeInfos.string
 		return literal
 
 	elseif tag == !(TYPE_BOOL) or (tag == !(TYPE_ANY) and type(v) == "boolean") then
@@ -6237,7 +6248,7 @@ local function createRunReplacementFromTypeAndLuaValue(state, runNode, parent, t
 		local literal        = astNewNode(AstLiteral, runNode.token, parent)
 		literal.literalType  = !(LITERAL_BOOLEAN)
 		literal.value        = flag
-		literal.inferredType = getTypeInfoForBuiltinType(state, "bool")
+		literal.inferredType = state.builtinTypeInfos.bool
 		return literal
 
 	elseif tag == !(TYPE_NONE) or (tag == !(TYPE_ANY) and v == nil) then
@@ -6245,14 +6256,14 @@ local function createRunReplacementFromTypeAndLuaValue(state, runNode, parent, t
 		local literal        = astNewNode(AstLiteral, runNode.token, parent)
 		literal.literalType  = !(LITERAL_NIL)
 		literal.value        = nil
-		literal.inferredType = getTypeInfoForBuiltinType(state, "none")
+		literal.inferredType = state.builtinTypeInfos.none
 		return literal
 
 	elseif tag == !(TYPE_TABLE) or (tag == !(TYPE_ANY) and type(v) == "table") then
 		local t = v
 		assert(type(t) == "table")
 		local tableNode = astNewNode(AstTable, runNode.token, parent)
-		local anyType   = getTypeInfoForBuiltinType(state, "any")
+		local anyType   = state.builtinTypeInfos.any
 
 		for k, v in pairsSorted(t, naturalCompare) do
 			local tableField    = TableField()
@@ -6261,7 +6272,7 @@ local function createRunReplacementFromTypeAndLuaValue(state, runNode, parent, t
 			table.insert(tableNode.fields, tableField)
 		end
 
-		tableNode.inferredType = getTypeInfoForBuiltinType(state, "table")
+		tableNode.inferredType = state.builtinTypeInfos.table
 		return tableNode
 
 	elseif tag == !(TYPE_ARRAY) then
@@ -6269,7 +6280,7 @@ local function createRunReplacementFromTypeAndLuaValue(state, runNode, parent, t
 		assert(type(t) == "table")
 		local arraySig  = typeInfo
 		local tableNode = astNewNode(AstTable, runNode.token, parent)
-		local intType   = getTypeInfoForBuiltinType(state, "int")
+		local intType   = state.builtinTypeInfos.int
 
 		-- @Robustness: Check that all keys in 't' are valid.
 		for i, v in ipairs(t) do
@@ -6294,7 +6305,7 @@ local function createRunReplacementFromTypeAndLuaValue(state, runNode, parent, t
 		assert(type(t) == "table")
 		local structInfo = typeInfo
 		local tableNode  = astNewNode(AstTable, runNode.token, parent)
-		local stringType = getTypeInfoForBuiltinType(state, "string")
+		local stringType = state.builtinTypeInfos.string
 		assert(structInfo.hasMembers)
 
 		-- @Incomplete @Incomplete @Incomplete!!!!!!!!!
@@ -6506,7 +6517,7 @@ end
 	end
 
 	if not isAnExpressionExpected(state, runNode) then
-		runNode.inferredType = getTypeInfoForBuiltinType(state, "void")
+		runNode.inferredType = state.builtinTypeInfos.void
 		moveToNextRelevantPipe(state, runNode)
 		return
 	end
@@ -6836,7 +6847,7 @@ end
 -- inferredTypeNode = createTypeNodeFromInfo( state, typeRepresented, token, parent )
 function _G.createTypeNodeFromInfo(state, typeRepresented, token, parent)
 	local typeNode           = astNewNode(AstType, token, parent)
-	typeNode.inferredType    = getTypeInfoForBuiltinType(state, "Type")
+	typeNode.inferredType    = state.builtinTypeInfos.Type
 	typeNode.representedType = typeRepresented
 
 	local isBuiltin, typeName = isTypeBuiltin(typeRepresented)
@@ -7506,7 +7517,7 @@ do
 		local tag = itemType.tag
 		if tag == !(TYPE_ANY) or tag == !(TYPE_NONE) then  return itemType  end
 
-		local nilType = getTypeInfoForBuiltinType(state, "none")
+		local nilType = state.builtinTypeInfos.none
 
 		if tag ~= !(TYPE_COMPOUND) then
 			if itemType.id < nilType.id then
@@ -7727,16 +7738,16 @@ function _G.getExpectedTypeInfo(state, node, strict, expectantTerm, nodeForError
 		!ASSERT `tableField`
 
 		if tableNode.inferredType.tag == !(TYPE_TABLE) then
-			return getTypeInfoForBuiltinType(state, "any")
+			return state.builtinTypeInfos.any
 
 		elseif tableNode.inferredType.tag == !(TYPE_ARRAY) then
-			if isKey then  return getTypeInfoForBuiltinType(state, "int")  end
+			if isKey then  return state.builtinTypeInfos.int  end
 
 			local arraySig = tableNode.inferredType
 			return arraySig.itemType
 
 		elseif tableNode.inferredType.tag == !(TYPE_STRUCT) then
-			if isKey then  return getTypeInfoForBuiltinType(state, "string")  end
+			if isKey then  return state.builtinTypeInfos.string  end
 
 			local structInfo = tableNode.inferredType
 			if not structInfo.hasMembers then
