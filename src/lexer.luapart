@@ -157,16 +157,19 @@ function _G.tokenize(s, path, tokens, increaseTotalLineCount, lnStart)
 	local ptr   = 1
 	local ln    = lnStart
 	local lnPtr = 1
+	local lnPos = nil
 
 	local forceIdentifier = false
 
 	!local UPDATE_LINE_NUMBER = `
 		while true do
-			local lnPos = find(s, "\n", lnPtr, true)
-
 			if not lnPos then
-				lnPtr = HUGE
-				break
+				lnPos = find(s, "\n", lnPtr, true)
+
+				if not lnPos then
+					lnPtr = HUGE
+					break
+				end
 			end
 
 			if lnPos >= ptr then
@@ -176,6 +179,7 @@ function _G.tokenize(s, path, tokens, increaseTotalLineCount, lnStart)
 
 			ln    = ln+1
 			lnPtr = lnPos+1
+			lnPos = nil
 		end
 	`
 
@@ -183,10 +187,11 @@ function _G.tokenize(s, path, tokens, increaseTotalLineCount, lnStart)
 		local byte = getByte(s, ptr)
 
 		-- Ignore whitespace.
-		if byte == !(BYTE_SPACE) or byte == !(BYTE_NL) or byte == !(BYTE_TAB) then
-			local i1, i2 = find(s, "^%s+", ptr)
-			ptr          = i2+1
-			byte         = getByte(s, ptr)
+		if (byte == !(BYTE_SPACE) or byte == !(BYTE_NL) or byte == !(BYTE_TAB)) and not forceIdentifier then
+			local _, i2 = find(s, "^%s*", ptr+1)
+			ptr         = i2+1
+			byte        = getByte(s, ptr)
+
 			!!(UPDATE_LINE_NUMBER)
 		end
 
@@ -196,11 +201,16 @@ function _G.tokenize(s, path, tokens, increaseTotalLineCount, lnStart)
 		local tokType, tokValue, tokExtra = nil
 
 		-- Identifier/keyword/blank.
-		if (byte >= !(getByte"A") and byte <= !(getByte"Z")) or (byte >= !(getByte"a") and byte <= !(getByte"z")) or (byte == !(getByte"_")) or (byte >= 194 and byte <= 244) then
-			local i1 = ptr
-			local i2, _
+		!(
+		local bytes = {getByte"_"}
+		for byte = getByte"A", getByte"Z" do  table.insert(bytes, byte)  end
+		for byte = getByte"a", getByte"z" do  table.insert(bytes, byte)  end
+		for byte = 194,        244        do  table.insert(bytes, byte)  end
+		)
+		if !!(CONST_SET(bytes))[byte] then
+			local i2
 
-			for i = 1, HUGE do
+			for _ = 1, HUGE do
 				byte = getByte(s, ptr)
 				if not byte then
 					break -- EOF
@@ -217,7 +227,7 @@ function _G.tokenize(s, path, tokens, increaseTotalLineCount, lnStart)
 				end
 			end
 
-			local word = sub(s, i1, ptr-1)
+			local word = sub(s, tokenPos, ptr-1)
 
 			if forceIdentifier then
 				forceIdentifier = false
@@ -238,25 +248,6 @@ function _G.tokenize(s, path, tokens, increaseTotalLineCount, lnStart)
 
 		elseif forceIdentifier then
 			errorInFile(s, path, ptr, "Tokenizer", "Expected a word after '\\'.")
-
-		-- Escaped identifier.
-		elseif byte == !(getByte"\\") then
-			ptr             = ptr+1
-			forceIdentifier = true
-			tokType         = nil
-
-		-- Directive.
-		elseif byte == !(getByte"!") and find(s, "^%a", ptr+1) then
-			ptr = ptr+1
-
-			local i1, i2, word = find(s, "^(%a[%w_]+)", ptr)
-			if not DIRECTIVE_WORDS[word] then
-				errorInFile(s, path, ptr, "Tokenizer", "Unknown directive '%s'.", word)
-			end
-			ptr = i2+1
-
-			tokType  = !(TOKEN_DIRECTIVE)
-			tokValue = word
 
 		-- Number (hexadecimal, int/float).
 		elseif byte == !(getByte"0") and find(s, "^[Xx]", ptr+1) then
@@ -319,16 +310,17 @@ function _G.tokenize(s, path, tokens, increaseTotalLineCount, lnStart)
 			local NUM_DEC_EXP        = ("^( %d[%d_]*             [Ee][-+]?%d[%d_]* )"):gsub(" +", "") -- float
 			local NUM_DEC            = ("^( %d[%d_]*                               )"):gsub(" +", "") -- int
 			)
-			local           isInt, i1, i2, numStr = false, find(s, !(NUM_DEC_FRAC_EXP_1), ptr)
-			if not i1 then  isInt, i1, i2, numStr = false, find(s, !(NUM_DEC_FRAC_EXP_2), ptr)
-			if not i1 then  isInt, i1, i2, numStr = false, find(s, !(NUM_DEC_FRAC_1),     ptr)
-			if not i1 then  isInt, i1, i2, numStr = false, find(s, !(NUM_DEC_FRAC_2),     ptr)
-			if not i1 then  isInt, i1, i2, numStr = false, find(s, !(NUM_DEC_EXP),        ptr)
-			if not i1 then  isInt, i1, i2, numStr = true,  find(s, !(NUM_DEC),            ptr)
+			local isInt = false
+			local           i1, i2, numStr = find(s, !(NUM_DEC_FRAC_EXP_1), ptr)
+			if not i1 then  i1, i2, numStr = find(s, !(NUM_DEC_FRAC_EXP_2), ptr)
+			if not i1 then  i1, i2, numStr = find(s, !(NUM_DEC_FRAC_1),     ptr)
+			if not i1 then  i1, i2, numStr = find(s, !(NUM_DEC_FRAC_2),     ptr)
+			if not i1 then  i1, i2, numStr = find(s, !(NUM_DEC_EXP),        ptr)
+			if not i1 then  i1, i2, numStr = find(s, !(NUM_DEC),            ptr) ; isInt = true
 			if not i1 then  errorInFile(s, path, ptr, "Tokenizer", "Malformed decimal number.")
 			end end end end end end
 
-			if find(numStr, "_", 1, true) then  numStr = gsub(numStr, "_+", "")  end
+			if find(numStr, "_", 2, true) then  numStr = gsub(numStr, "_+", "")  end
 			local n = tonumber(numStr)
 
 			if not n then
@@ -429,18 +421,15 @@ function _G.tokenize(s, path, tokens, increaseTotalLineCount, lnStart)
 					-- \xXX specifies a byte denoted by two hexadecimal digits.
 					elseif find(s, "^x[%dA-Fa-f][%dA-Fa-f]", ptr) then
 						local hex = sub(s, ptr+1, ptr+2)
-						byte      = tonumber(hex, 16)
 						ptr       = ptr + 3
-						!ADD `bytesToString(byte)`
+						!ADD `bytesToString(tonumber(hex, 16))`
 
 					-- \u{XXX} inserts the UTF-8 encoding of a Unicode codepoint denoted by a sequence of hexadecimal digits.
 					elseif find(s, "^u{[%dA-Fa-f]+}", ptr) then
 						-- @Robustness: Validate integer range.
 						local hex = match(s, "^[%dA-Fa-f]+", ptr+2)
-						local cp  = tonumber(hex, 16)
-						byte      = nil
 						ptr       = ptr + 3 + #hex
-						!ADD `utf8Char(cp)`
+						!ADD `utf8Char(tonumber(hex, 16))`
 
 					-- \z skips the following span of whitespace characters.
 					elseif byte == !(getByte"z") then
@@ -509,6 +498,19 @@ function _G.tokenize(s, path, tokens, increaseTotalLineCount, lnStart)
 
 			-- Don't set tokType - just ignore the comment!
 
+		-- Directive.
+		elseif byte == !(getByte"!") and find(s, "^%a", ptr+1) then
+			ptr = ptr+1
+
+			local i1, i2, word = find(s, "^(%a[%w_]+)", ptr)
+			if not DIRECTIVE_WORDS[word] then
+				errorInFile(s, path, ptr, "Tokenizer", "Unknown directive '%s'.", word)
+			end
+			ptr = i2+1
+
+			tokType  = !(TOKEN_DIRECTIVE)
+			tokValue = word
+
 		-- Punctuation.
 		!local BYTES_EQ = {
 			getByte"+", getByte"-", getByte"*", getByte"/", getByte"%", getByte"^",
@@ -536,21 +538,28 @@ function _G.tokenize(s, path, tokens, increaseTotalLineCount, lnStart)
 				errorInFile(s, path, ptr, "Tokenizer", "Expected name after '@'.")
 			end
 
+		-- Escaped identifier.
+		elseif byte == !(getByte"\\") then
+			ptr             = ptr+1
+			forceIdentifier = true
+			-- Don't set tokType - just proceed to the next token!
+
 		else
 			errorInFile(s, path, ptr, "Tokenizer", "Unknown character. (Byte: %d)", byte)
 		end
 
 		if tokType then
-			count = count+1
+			count = count + 1
 
 			tokTypes[count]      = tokType
 			tokValues[count]     = tokValue
-			tokExtras[count]     = tokExtra
 			tokFiles[count]      = path
 			tokBuffers[count]    = s
 			tokPositions1[count] = tokenPos
 			tokPositions2[count] = ptr-1
 			tokLines1[count]     = ln
+
+			if tokExtra ~= nil then  tokExtras[count] = tokExtra  end -- The if is needed for speed!
 		end
 
 		!!(UPDATE_LINE_NUMBER)
@@ -567,10 +576,14 @@ function _G.tokenize(s, path, tokens, increaseTotalLineCount, lnStart)
 		end
 	end
 
+	if forceIdentifier then
+		errorInFile(s, path, ptr, "Tokenizer", "Expected a word after '\\'.")
+	end
+
 	tokens.count = count
 
 	if increaseTotalLineCount then
-		tokens.lineCount = tokens.lineCount+ln-lnStart+1
+		tokens.lineCount = tokens.lineCount + ln - lnStart + 1
 	end
 end
 
