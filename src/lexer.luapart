@@ -139,7 +139,6 @@ function _G.tokenize(s, path, tokens, increaseTotalLineCount, lnStart)
 	local match         = string.match
 	local sub           = string.sub
 	local tonumber      = tonumber
-	local unpack        = unpack
 	local utf8Char      = utf8Char
 
 	local tokTypes      = tokens.type
@@ -159,7 +158,7 @@ function _G.tokenize(s, path, tokens, increaseTotalLineCount, lnStart)
 	local lnPtr = 1
 	local lnPos = nil
 
-	local forceIdentifier = false
+	local expectWordAfterEscape = false
 
 	!local UPDATE_LINE_NUMBER = `
 		while true do
@@ -187,7 +186,7 @@ function _G.tokenize(s, path, tokens, increaseTotalLineCount, lnStart)
 		local byte = getByte(s, ptr)
 
 		-- Ignore whitespace.
-		if (byte == !(BYTE_SPACE) or byte == !(BYTE_NL) or byte == !(BYTE_TAB)) and not forceIdentifier then
+		if (byte == !(BYTE_SPACE) or byte == !(BYTE_NL) or byte == !(BYTE_TAB)) and not expectWordAfterEscape then
 			local _, i2 = find(s, "^%s*", ptr+1)
 			ptr         = i2+1
 			byte        = getByte(s, ptr)
@@ -229,8 +228,8 @@ function _G.tokenize(s, path, tokens, increaseTotalLineCount, lnStart)
 
 			local word = sub(s, tokenPos, ptr-1)
 
-			if forceIdentifier then
-				forceIdentifier = false
+			if expectWordAfterEscape then
+				expectWordAfterEscape = false
 				tokType  = !(TOKEN_IDENTIFIER)
 				tokValue = word
 			elseif word == "_" then
@@ -246,7 +245,7 @@ function _G.tokenize(s, path, tokens, increaseTotalLineCount, lnStart)
 				tokValue = word
 			end
 
-		elseif forceIdentifier then
+		elseif expectWordAfterEscape then
 			errorInFile(s, path, ptr, "Tokenizer", "Expected a word after '\\'.")
 
 		-- Number (hexadecimal, int/float).
@@ -540,8 +539,8 @@ function _G.tokenize(s, path, tokens, increaseTotalLineCount, lnStart)
 
 		-- Escaped identifier.
 		elseif byte == !(getByte"\\") then
-			ptr             = ptr+1
-			forceIdentifier = true
+			ptr                   = ptr+1
+			expectWordAfterEscape = true
 			-- Don't set tokType - just proceed to the next token!
 
 		else
@@ -576,7 +575,7 @@ function _G.tokenize(s, path, tokens, increaseTotalLineCount, lnStart)
 		end
 	end
 
-	if forceIdentifier then
+	if expectWordAfterEscape then
 		errorInFile(s, path, ptr, "Tokenizer", "Expected a word after '\\'.")
 	end
 
