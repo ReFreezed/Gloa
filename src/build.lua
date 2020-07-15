@@ -217,7 +217,7 @@ local function maybeAddProfilerStuff(lua)
 					name
 						=  target.type == "identifier" and target.name
 						or target.type == "lookup"     and target.member.type == "literal"    and type(target.member.value) == "string"  and target.member.value
-						or target.type == "lookup"     and target.object.type == "identifier" and target.member.type        == "literal" and target.object.name..tostring(target.member.value)
+						-- or target.type == "lookup"     and target.object.type == "identifier" and target.member.type        == "literal" and target.object.name..tostring(target.member.value)
 						or tostring(func):gsub("^table: (%x+)", "func%1")
 						or nil
 				end

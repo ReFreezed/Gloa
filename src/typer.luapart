@@ -852,6 +852,8 @@ local nodeInferrers = {}
 
 !(
 local nodeNames = {}
+local nodeNameLast
+local nodeTypeLast
 
 local function NODE_INFERRER(funcHeaderCode)
 	local replacements
@@ -863,12 +865,33 @@ local function NODE_INFERRER(funcHeaderCode)
 		nodeNames[nodeName] = true
 
 		local nodeType = astStructNameToType[nodeName] or error(nodeName)
-		return "nodeInferrers[--[["..nodeName.."]]"..nodeType.."] = function"
+		local lua
+
+		if STATIC_PROFILER then
+			local inferrerName = "nodeInferrer_"..nodeName
+			lua = "local function "..inferrerName
+		else
+			lua = "nodeInferrers["..nodeType.."--[["..nodeName.."]]] = function"
+		end
+
+		nodeNameLast = nodeName
+		nodeTypeLast = nodeType
+
+		return lua
 	end)
 
 	assert(replacements == 1, funcHeaderCode)
 
 	__LUA(funcHeaderCode)
+end
+
+local function NODE_INFERRER_END(endCode)
+	__LUA(endCode)
+
+	if STATIC_PROFILER then
+		local inferrerName = "nodeInferrer_"..nodeNameLast
+		__LUA("\nnodeInferrers[",toLua(nodeTypeLast),"] = ",inferrerName)
+	end
 end
 )
 
@@ -1402,10 +1425,10 @@ end
 
 !NODE_INFERRER `function nodeInferrers.AstIdentifier(state, ident)`
 	return (inferIdentifierOrVararg(state, ident))
-end
+!NODE_INFERRER_END `end`
 !NODE_INFERRER `function nodeInferrers.AstVararg(state, vararg)`
 	return (inferIdentifierOrVararg(state, vararg))
-end
+!NODE_INFERRER_END `end`
 
 !NODE_INFERRER `function nodeInferrers.AstBlank(state, blank)`
 	if blank.parent.nodeType == !(AST_DECLARATION) then
@@ -1429,7 +1452,7 @@ end
 
 	blank.inferredType = state.builtinTypeInfos.any
 	moveToNextRelevantPipe(state, blank)
-end
+!NODE_INFERRER_END `end`
 
 !NODE_INFERRER `function nodeInferrers.AstType(state, typeNode)`
 	-- Note: typeNode.declaration may already be filled for generated type nodes.
@@ -1592,7 +1615,7 @@ end
 	fulfillDependencies(state, typeNode.queued, !(DEPEND_HAS_DECLARATION))
 
 	moveToNextRelevantPipe(state, typeNode)
-end
+!NODE_INFERRER_END `end`
 
 local function getArgumentNodeForError(callOrReturnNode, valueIndex, valueExpr)
 	return
@@ -2965,7 +2988,7 @@ end
 
 	call.inferredType = typeInfo
 	moveToNextRelevantPipe(state, call)
-end
+!NODE_INFERRER_END `end`
 
 !NODE_INFERRER `function nodeInferrers.AstReturn(state, returnNode)`
 	for _, valueExpr in ipairs(returnNode.values) do
@@ -3001,18 +3024,18 @@ end
 		false, nil, nil
 	)
 	moveToNextRelevantPipe(state, returnNode)
-end
+!NODE_INFERRER_END `end`
 
 !NODE_INFERRER `function nodeInferrers.AstDeclaration(state, decl)`
-	local valueExpr = getDeclarationValue(decl, true)
-	local isConst   = isDeclarationConstant(decl)
+	local valueExpr     = getDeclarationValue(decl, true)
+	local isConst       = isDeclarationConstant(decl)
+	local identOrVararg = decl.name
 
 	if valueExpr then
 		if valueExpr.nodeType == !(AST_TABLE) then
 			local tableNode = valueExpr
-
 			if tableNode.queued.pipe <= !(PIPE_INFER) then
-				!DEPEND_AND_RETURN(`decl`, DEPEND_NODE_PASSED_INFER, `tableNode`, nil, toLua(VISIT_BREAK))
+				!DEPEND_AND_RETURN(`decl`, DEPEND_NODE_PASSED_INFER, `tableNode`)
 			end
 
 		elseif not valueExpr.inferredType then
@@ -3020,13 +3043,11 @@ end
 		end
 
 		if isConst and valueExpr.nodeType == !(AST_STRUCT) or valueExpr.nodeType == !(AST_ENUM) then
-			valueExpr.representedType.name = decl.name.name
+			valueExpr.representedType.name = identOrVararg.name
 		end
 	end
 
-	local identOrVararg = decl.name
-	local typeInfo      = identOrVararg.inferredType
-
+	local typeInfo = identOrVararg.inferredType
 	if not typeInfo then
 		!DEPEND_AND_RETURN(`decl`, DEPEND_NODE_INFERRED, `identOrVararg`)
 	end
@@ -3055,7 +3076,7 @@ end
 			-- void  Only compound types have a higher requirement on the value at the moment.
 		elseif isConst then
 			typeError(
-				state, decl.name,
+				state, identOrVararg,
 				"Constants cannot be compound types. (Type is %s)",
 				getFriendlyTypeInfoName(typeInfoRepresented)
 			)
@@ -3063,7 +3084,7 @@ end
 			-- void  These never need a value.
 		elseif not valueExpr then
 			typeError(
-				state, decl.name,
+				state, identOrVararg,
 				"An initial value is required for compound types. (Type is %s)",
 				getFriendlyTypeInfoName(typeInfoRepresented)
 			)
@@ -3089,7 +3110,8 @@ end
 			errorInternal(state, valueExpr)
 		end
 
-		if valueExpr.inferredType.tag == !(TYPE_NAMESPACE) and not isConst then
+		local valueType = valueExpr.inferredType
+		if valueType.tag == !(TYPE_NAMESPACE) and not isConst then
 			typeError(state, valueExpr, "References to namespaces must be constant.")
 		end
 
@@ -3099,18 +3121,16 @@ end
 		-- Also, this doesn't run for enum members as those declarations never have any specified types.)
 		--
 		if typeExpr and identOrVararg.nodeType ~= !(AST_VARARG) then
-			local ident = identOrVararg
-
 			if decl.assignment then
-				getAssignmentValue(state, ident, decl.assignment.values, decl.assignmentIndex, ident.inferredType, nil, nil)
+				getAssignmentValue(state, identOrVararg, decl.assignment.values, decl.assignmentIndex, typeInfo, nil, nil)
 
-			elseif not isTypeCompatibleWith(valueExpr.inferredType, ident.inferredType) then -- Note: No need to call adjustTypeToOne() for valueExpr.
+			elseif not isTypeCompatibleWith(valueType, typeInfo) then -- Note: No need to call adjustTypeToOne() for valueExpr.
 				-- @UX: Use the same error message as getAssignmentValue().
 				typeError(
 					state, valueExpr, "Value type mismatch for assignment target #%d. (Wanted %s, got %s)",
 					decl.assignmentIndex,
-					getFriendlyTypeInfoName(ident.inferredType),
-					getFriendlyTypeInfoName(valueExpr.inferredType)
+					getFriendlyTypeInfoName(typeInfo),
+					getFriendlyTypeInfoName(valueType)
 				)
 			end
 		end
@@ -3128,7 +3148,7 @@ end
 
 			elseif dynExpr.nodeType == !(AST_LAMBDA) then
 				local lambda = dynExpr
-				!assert `lambda.captures[1]`
+				!ASSERT `lambda.captures[1]`
 				typeError(
 					state, lambda,
 					"Value for declared %s '%s' is not a constant expression. (Functions with captures are not constant.)",
@@ -3136,16 +3156,16 @@ end
 					identOrVararg.name
 				)
 
-			elseif astFindInUnit(dynExpr, !!(CONST_SET{ AST_FOREIGN })) then
-				local foreign = astFindInUnit(dynExpr, !!(CONST_SET{ AST_FOREIGN }))
+			elseif astFindInUnit1(dynExpr, !(AST_FOREIGN)) then
+				local foreign = astFindInUnit1(dynExpr, !(AST_FOREIGN))
 				typeError(state, foreign, "Cannot evaluate foreign values during compile time.")
 
 			else
 				typeError(
 					state, dynExpr,
 					"%s for declared %s '%s' is not a constant expression.%s",
-					(dynExpr == valueExpr and "Value" or "Sub-expression inside the value"),
-					(isConst and "constant" or "variable"),
+					(dynExpr == valueExpr and "Value"    or "Sub-expression inside the value"),
+					(isConst              and "constant" or "variable"),
 					identOrVararg.name,
 					(not isConst and isScopeDeclarative(scope) and " (All values in declarative scopes must be constant.)" or "")
 				)
@@ -3214,7 +3234,7 @@ end
 
 		message.declaration = codeDecl
 	end
-end
+!NODE_INFERRER_END `end`
 
 !!local LITERAL_TYPE_TO_BUILTIN_TYPE_NAME = {
 	[LITERAL_BOOLEAN] = "bool",
@@ -3235,7 +3255,7 @@ _G.!(local )!!BUILTIN_TYPE_TAG_TO_LITERAL_TYPE = {
 	local typeName       = LITERAL_TYPE_TO_BUILTIN_TYPE_NAME[literal.literalType] or errorUnhandledNodeType(state, literal)
 	literal.inferredType = state.builtinTypeInfos[typeName]
 	moveToNextRelevantPipe(state, literal)
-end
+!NODE_INFERRER_END `end`
 
 !NODE_INFERRER `function nodeInferrers.AstUnary(state, unary)`
 	local typeInfo = unary.expression.inferredType
@@ -3286,7 +3306,7 @@ end
 
 	moveToNextRelevantPipe(state, unary)
 	simplifyExpressionIfConstant(state, unary)
-end
+!NODE_INFERRER_END `end`
 
 local function isCompoundCompare(state, binary, typeInfoL, typeInfoR)
 	-- Detect situations like these: local v:int|string = 0 ; if v == ""
@@ -3446,7 +3466,7 @@ end
 
 	moveToNextRelevantPipe(state, binary)
 	simplifyExpressionIfConstant(state, binary)
-end
+!NODE_INFERRER_END `end`
 
 function _G.getConstantNameOrTriggerError(state, node)
 	if not (node.nodeType == !(AST_LITERAL) and node.literalType == !(LITERAL_STRING)) then
@@ -3839,7 +3859,7 @@ end
 	else
 		typeError(state, access, "Values of type '%s' do not have members.", getFriendlyTypeInfoName(typeObject))
 	end
-end
+!NODE_INFERRER_END `end`
 
 local function validateIndiciesInArrayLikeConstructor(state, tableNode, itemType)
 	for _, tableField in ipairs(tableNode.fields) do
@@ -4161,14 +4181,14 @@ end
 	end
 
 	moveToNextRelevantPipe(state, tableNode)
-end
+!NODE_INFERRER_END `end`
 
 !NODE_INFERRER `function nodeInferrers.AstArgument(state, arg)`
 	if not arg.declaration.inferredType then
 		!DEPEND_AND_RETURN(`arg`, DEPEND_NODE_INFERRED, `arg.declaration`)
 	end
 	moveToNextRelevantPipe(state, arg)
-end
+!NODE_INFERRER_END `end`
 
 !NODE_INFERRER `function nodeInferrers.AstArguments(state, args)`
 	for _, arg in ipairs(args.arguments) do
@@ -4177,7 +4197,7 @@ end
 		end
 	end
 	moveToNextRelevantPipe(state, args)
-end
+!NODE_INFERRER_END `end`
 
 !NODE_INFERRER `function nodeInferrers.AstLambda(state, lambda)`
 	if lambda.isPolymorphic then
@@ -4310,7 +4330,7 @@ end
 	end
 
 	moveToNextRelevantPipe(state, lambda)
-end
+!NODE_INFERRER_END `end`
 
 !NODE_INFERRER `function nodeInferrers.AstTypeOf(state, typeOf)`
 	-- @Robustness: Check that the expression doesn't have code that looks like it's going to be executed, because it's not!
@@ -4336,7 +4356,7 @@ end
 
 	moveToNextRelevantPipe(state, typeOf)
 	simplifyTypeExpression(state, typeOf, typeOf.representedType)
-end
+!NODE_INFERRER_END `end`
 
 !NODE_INFERRER `function nodeInferrers.AstVariantOf(state, variant)`
 	if not variant.call.inferredType then
@@ -4386,7 +4406,7 @@ end
 
 	replaceQueuedNodeAndUnqueueOldTree(state, variant, identCopy)
 	moveToNextRelevantPipe(state, identCopy)
-end
+!NODE_INFERRER_END `end`
 
 !NODE_INFERRER `function nodeInferrers.AstTypeInfo(state, typeInfoNode)`
 	-- @Robustness: Check that the expression doesn't have code that looks like it's going to be executed, because it's not!
@@ -4438,7 +4458,7 @@ end
 	typeInfoNode.valueTypeInfo = typeRepresented
 	typeInfoNode.inferredType  = decl.valueTypeInfo
 	moveToNextRelevantPipe(state, typeInfoNode)
-end
+!NODE_INFERRER_END `end`
 
 !NODE_INFERRER `function nodeInferrers.AstLocation(state, loc)`
 	local target = loc.expression
@@ -4473,7 +4493,7 @@ end
 	loc.inferredType = decl.valueTypeInfo
 	loc.target       = target
 	moveToNextRelevantPipe(state, loc)
-end
+!NODE_INFERRER_END `end`
 
 !NODE_INFERRER `function nodeInferrers.AstCast(state, cast)`
 	-- Note: For convenience, cast.targetType may be nil here for generated casts. cast.inferredType must be set in those cases.
@@ -4573,7 +4593,7 @@ end
 
 	moveToNextRelevantPipe(state, cast)
 	simplifyExpressionIfConstant(state, cast)
-end
+!NODE_INFERRER_END `end`
 
 !NODE_INFERRER `function nodeInferrers.AstAssignment(state, assignment)`
 	for _, targetExpr in ipairs(assignment.targets) do
@@ -4609,14 +4629,14 @@ end
 	-- @Incomplete: Check that !must args from functions have an assignment target.
 
 	moveToNextRelevantPipe(state, assignment)
-end
+!NODE_INFERRER_END `end`
 
 !NODE_INFERRER `function nodeInferrers.AstBreak(state, breakNode)`
 	moveToNextRelevantPipe(state, breakNode)
-end
+!NODE_INFERRER_END `end`
 !NODE_INFERRER `function nodeInferrers.AstContinue(state, continue)`
 	moveToNextRelevantPipe(state, continue)
-end
+!NODE_INFERRER_END `end`
 
 !NODE_INFERRER `function nodeInferrers.AstDefer(state, defer)`
 	if defer.body.queued.pipe <= !(PIPE_INFER) then
@@ -4642,7 +4662,7 @@ end
 	end)
 
 	moveToNextRelevantPipe(state, defer)
-end
+!NODE_INFERRER_END `end`
 
 !NODE_INFERRER `function nodeInferrers.AstImport(state, import)`
 	if import.fileScope then
@@ -4750,7 +4770,7 @@ end
 
 	import.inferredType = getTypeInfoForNamespace(state, import.fileScope)
 	moveToNextRelevantPipe(state, import)
-end
+!NODE_INFERRER_END `end`
 
 !NODE_INFERRER `function nodeInferrers.AstUsing(state, using)`
 	local expr     = using.expression
@@ -4834,7 +4854,7 @@ end
 	using.scope = usingScope
 
 	moveToNextRelevantPipe(state, using)
-end
+!NODE_INFERRER_END `end`
 
 !NODE_INFERRER `function nodeInferrers.AstForeign(state, foreign)`
 	-- @Cleanup: Make AstLambda use AstForeign?
@@ -4856,7 +4876,7 @@ end
 	foreign.sourceId = foreign.source.." "..foreign.sourceName.value
 
 	moveToNextRelevantPipe(state, foreign)
-end
+!NODE_INFERRER_END `end`
 
 !NODE_INFERRER `function nodeInferrers.AstBake(state, bake)`
 	local scope, statement = astFindParentScope(bake)
@@ -4875,7 +4895,7 @@ end
 
 	bake.inferredType = bake.name.inferredType
 	moveToNextRelevantPipe(state, bake)
-end
+!NODE_INFERRER_END `end`
 
 !NODE_INFERRER `function nodeInferrers.AstDebug(state, debugNode)`
 	local expr     = debugNode.expression
@@ -4954,7 +4974,7 @@ end
 	end
 
 	moveToNextRelevantPipe(state, debugNode)
-end
+!NODE_INFERRER_END `end`
 
 local function inferIfOrWhile(state, ifOrWhile)
 	local cond     = ifOrWhile.condition
@@ -4978,10 +4998,10 @@ end
 
 !NODE_INFERRER `function nodeInferrers.AstIf(state, ifBranch)`
 	inferIfOrWhile(state, ifBranch)
-end
+!NODE_INFERRER_END `end`
 !NODE_INFERRER `function nodeInferrers.AstWhile(state, whileLoop)`
 	inferIfOrWhile(state, whileLoop)
-end
+!NODE_INFERRER_END `end`
 
 !NODE_INFERRER `function nodeInferrers.AstStaticIf(state, staticIf)`
 	local cond     = staticIf.condition
@@ -5100,7 +5120,7 @@ end
 			end
 		end
 	end
-end
+!NODE_INFERRER_END `end`
 
 !NODE_INFERRER `function nodeInferrers.AstConditional(state, conditional)`
 	local cond     = conditional.condition
@@ -5146,7 +5166,7 @@ end
 	moveToNextRelevantPipe(state, conditional)
 
 	-- @Optimize: Remove/replace the branch if the condition is statically known.
-end
+!NODE_INFERRER_END `end`
 
 !NODE_INFERRER `function nodeInferrers.AstSwitch(state, switch)`
 	local typeInfo = switch.value.inferredType
@@ -5212,7 +5232,7 @@ end
 
 	moveToNextRelevantPipe(state, switch)
 	-- @Incomplete: Simplify AstSwitch.
-end
+!NODE_INFERRER_END `end`
 
 local function addDeclarationInForLoop(state, forLoop, name, token, isImplicit, typeInfo)
 	local decl        = astNewNode(AstDeclaration, token, forLoop)
@@ -5604,7 +5624,7 @@ end
 	end
 
 	moveToNextRelevantPipe(state, forLoop)
-end
+!NODE_INFERRER_END `end`
 
 local function checkForRecursiveStruct(state, declThatWeAreChecking, memberPath,memberName,memberType, structInfo, parentStructInfo)
 	local structInfoInner
@@ -5932,7 +5952,7 @@ end
 	end
 
 	moveToNextRelevantPipe(state, struct)
-end
+!NODE_INFERRER_END `end`
 
 !NODE_INFERRER `function nodeInferrers.AstEnum(state, enum)`
 	for _, statement in ipairs(enum.statementsStatic) do
@@ -6000,7 +6020,7 @@ end
 	enum.inferredType    = state.builtinTypeInfos.Type
 
 	moveToNextRelevantPipe(state, enum)
-end
+!NODE_INFERRER_END `end`
 
 !NODE_INFERRER `function nodeInferrers.AstFileScope(state, fileScope)`
 	local valueExpr = fileScope.valueToExport
@@ -6022,7 +6042,7 @@ end
 	end
 
 	moveToNextRelevantPipe(state, fileScope)
-end
+!NODE_INFERRER_END `end`
 
 !NODE_INFERRER `function nodeInferrers.AstGlobalScope(state, globalScope)`
 	for _, statement in ipairs(globalScope.statementsStatic) do
@@ -6032,7 +6052,7 @@ end
 	end
 
 	moveToNextRelevantPipe(state, globalScope)
-end
+!NODE_INFERRER_END `end`
 
 !NODE_INFERRER `function nodeInferrers.AstBlock(state, block)`
 	for _, statement in ipairs(block.statementsStatic) do
@@ -6047,7 +6067,7 @@ end
 	end
 
 	moveToNextRelevantPipe(state, block)
-end
+!NODE_INFERRER_END `end`
 
 -- @Robustness @Cleanup: Join visitNodesForRunning() and crawl().
 local function visitNodesForRunning(state, dependent, unit, visited, deepTopScopeDeclarations)
@@ -6550,7 +6570,7 @@ end
 
 	moveChildrenToNextRelevantPipe(state, replacement)
 	moveToNextRelevantPipe(state, replacement)
-end
+!NODE_INFERRER_END `end`
 
 !NODE_INFERRER `function nodeInferrers.AstNull(state, null)`
 	local typeInfoExpected = getExpectedTypeInfo(state, null, false, "NULL value", null)
@@ -6558,14 +6578,14 @@ end
 
 	null.inferredType = typeInfoExpected
 	moveToNextRelevantPipe(state, null)
-end
+!NODE_INFERRER_END `end`
 
 !NODE_INFERRER `function nodeInferrers.AstNamespace(state, namespace)`
 	namespace.inferredType = getTypeInfoForNamespace(state, namespace)
 	moveToNextRelevantPipe(state, namespace)
-end
+!NODE_INFERRER_END `end`
 
-!if DEBUG then
+!if DEBUG and not STATIC_PROFILER then
 	!for nodeType, nodeName in ipairs(AST_NAMES) do
 		!local inferrerName    = "nodeInferrer_"..nodeName
 		local !!(inferrerName) = nodeInferrers[!(nodeType)]
