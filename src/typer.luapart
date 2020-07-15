@@ -582,7 +582,7 @@ do
 		end
 
 		while true do
-			if not (nodeScope.declarationsByName[name] and indexOf(nodeScope.declarations, decl)) then
+			if not (nodeScope.declarationsByName[name] and indexOf(nodeScope.declarations, decl)) then -- @Speed: Don't call indexOf()! Also, indexOfRemember() doesn't seem to be faster here. 2020-07-15
 			-- if not (nodeScope.declarationsByName[name] and indexOfRemember(nodeScope.declarations, nodeScope.declarations, decl)) then -- I don't think this works when !if adds declarations. 2020-06-20
 				-- void  (Keep looking through parent scopes and update canSeeImperativeVariables as we go.)
 
@@ -604,10 +604,16 @@ do
 			-- Imperative scopes
 			----------------------------------------------------------------
 
-			elseif nodeScope.nodeType == !(AST_FOR) then
-				-- This is really a combination of a declarative scope and an imperative scope. (Not sure if this is good. 2020-03-19)
-				-- @Robustness: Give a makeover similar to AST_LAMBDA here below? 2020-04-27
-				return true
+			elseif nodeScope.nodeType == !(AST_BLOCK) then
+				local block = nodeScope
+
+				-- Note: If the node is inside the initial assignment then we need to treat the declaration
+				-- and the assignment as if they were the same statement. Otherwise the assignment will be
+				-- able to see it's own declarations, which is illegal! :DeclarationAssignment
+				local declScope, declStatement = astFindParentScope(decl.assignment or decl)
+				assert(declScope == block)
+
+				return (declStatement.token < nodeStatement.token)
 
 			elseif nodeScope.nodeType == !(AST_LAMBDA) then
 				-- Lambdas act as imperative scopes for arguments, but declarative scopes otherwise. (Could maybe use some @Cleanup.)
@@ -627,16 +633,10 @@ do
 
 				return (arg.token < nodeStatement.token)
 
-			elseif nodeScope.nodeType == !(AST_BLOCK) then
-				local block = nodeScope
-
-				-- Note: If the node is inside the initial assignment then we need to treat the declaration
-				-- and the assignment as if they were the same statement. Otherwise the assignment will be
-				-- able to see it's own declarations, which is illegal! :DeclarationAssignment
-				local declScope, declStatement = astFindParentScope(decl.assignment or decl)
-				assert(declScope == block)
-
-				return (declStatement.token < nodeStatement.token)
+			elseif nodeScope.nodeType == !(AST_FOR) then
+				-- This is really a combination of a declarative scope and an imperative scope. (Not sure if this is good. 2020-03-19)
+				-- @Robustness: Give a makeover similar to AST_LAMBDA here below? 2020-04-27
+				return true
 
 			----------------------------------------------------------------
 
@@ -644,14 +644,14 @@ do
 				errorUnhandledNodeType(state, nodeScope)
 			end
 
-			if canSeeImperativeVariables and nodeScope.nodeType == !(AST_LAMBDA) and not itemWith1Remember(nodeScope.captures, nodeScope.captures, `name`, name) then
+			if canSeeImperativeVariables and nodeScope.nodeType == !(AST_LAMBDA) and not (nodeScope.captures[1] and itemWith1Remember(nodeScope.captures, nodeScope.captures, `name`, name)) then
 				-- Lambdas act as the only boundary between imperative and declarative
 				-- scopes right now. Maybe this will change in the future? 2019-12-07
 				canSeeImperativeVariables = false
 			end
 
 			nodeScope, nodeStatement = astFindParentScope(nodeScope)
-			if not nodeScope then  return false  end -- This shouldn't happen I don't think, unless decl and node is not part of the same tree.
+			if not nodeScope then  return false  end
 		end
 	end
 end
@@ -915,8 +915,8 @@ local function getEarlyAndLateForRedeclarationError(state, identEarly, identLate
 	return identEarly, identLate, extraMessageEarly, extraMessageLate
 end
 
--- okToContinue, encounteredIdentifierWithMissingDeclaration = makeSureConstantIdentifierChainHasAllDeclarationsSet( state, declaration, dependent )
-local function makeSureConstantIdentifierChainHasAllDeclarationsSet(state, decl0, dependent)
+-- okToContinue, encounteredIdentifierWithMissingDeclaration = ensureConstantIdentifierChainHasAllDeclarationsSet( state, declaration, dependent )
+local function ensureConstantIdentifierChainHasAllDeclarationsSet(state, decl0, dependent)
 	local decl = decl0
 
 	while true do
@@ -1082,34 +1082,37 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 				elseif not decl.overloadsLocked then
 					errorInternal(state, decl, "Overloads are not locked when they should.")
 				end
+
+				-- Overloaded names refer to multiple things, so that's an error!
+				if decl.overloadOf then
+					local declBase = ident.declaration
+					declBase       = declBase.overloadOf or declBase
+
+					-- This is just so we get a better overload list in the error message.
+					if not declBase.inferredType then
+						!DEPEND_AND_RETURN(`ident`, DEPEND_NODE_INFERRED, `declBase`)
+					end
+
+					!TRACE()
+					printerr()
+					typeMessage(io.stderr, state, ident, "Error", "'%s' has multiple overloads and we don't know which one this is referring to.", ident.name)
+					for i, declOverload in ipairs(declBase.overloads) do
+						typeMessage(io.stderr, state, declOverload.name, "Info", "...overload #%d.", i)
+					end
+					exitFailure()
+				end
 			end
 
-			-- Overloaded names refer to multiple things, so that's an error!
-			if decl.overloadOf then
-				local declBase = ident.declaration
-				declBase       = declBase.overloadOf or declBase
-
-				if not declBase.inferredType then
-					-- This is just so we get a better overload list in the error message.
-					!DEPEND_AND_RETURN(`ident`, DEPEND_NODE_INFERRED, `declBase`)
-				end
-
-				!TRACE()
-				printerr()
-				typeMessage(io.stderr, state, ident, "Error", "'%s' has multiple overloads and we don't know which one this is referring to.", ident.name)
-				for i, declOverload in ipairs(declBase.overloads) do
-					typeMessage(io.stderr, state, declOverload.name, "Info", "...overload #%d.", i)
-				end
-				exitFailure()
+			local valueExpr = decl.value
 
 			-- Polymorphic functions also contain the polymorphed functions and are thus a collection of functions, so referring to them may be a bad idea!
 			-- (How does this work when calling a function from a module or a static struct member function? @Incomplete @Robustness)
-			elseif decl.value.nodeType == !(AST_LAMBDA) and decl.value.isPolymorphic then
+			if valueExpr.nodeType == !(AST_LAMBDA) and valueExpr.isPolymorphic then
 				typeError(state, ident, "Cannot refer to polymorphic function '%s' outside calls.", ident.name)
 
 			-- Polymorphic structs are similar to polymorphed functions as they are collections of structs, so referring to them may be a bad idea too!
 			-- (Also, like with the functions, think about modules. @Incomplete @Robustness)
-			elseif decl.value.nodeType == !(AST_STRUCT) and decl.value.isPolymorphic then
+			elseif valueExpr.nodeType == !(AST_STRUCT) and valueExpr.isPolymorphic then
 				typeErrorAfter(state, ident, "Missing arguments for polymorphic struct '%s'.", ident.name)
 			end
 		end
@@ -1180,7 +1183,7 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 
 	-- Check for redeclaration/shadowing (before we DEPEND_AND_RETURN).
 	if ident and not (decl.checkedRedeclaration or decl.isDocumentation) then
-		local okToContinue, identWithoutDecl = makeSureConstantIdentifierChainHasAllDeclarationsSet(state, decl, ident)
+		local okToContinue, identWithoutDecl = ensureConstantIdentifierChainHasAllDeclarationsSet(state, decl, ident)
 		if not okToContinue then  return  end
 
 		if identWithoutDecl then
@@ -1195,7 +1198,7 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 
 			if declExisting then
 				if declExisting.value then
-					okToContinue, identWithoutDecl = makeSureConstantIdentifierChainHasAllDeclarationsSet(state, declExisting, ident)
+					okToContinue, identWithoutDecl = ensureConstantIdentifierChainHasAllDeclarationsSet(state, declExisting, ident)
 					if not okToContinue then  return  end
 
 					if identWithoutDecl then
@@ -1223,6 +1226,15 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 
 	local valueExpr = getDeclarationValue(decl, true)
 	if (not typeExpr or isDeclarationConstant(decl)) and not valueExpr.inferredType then
+		--[[ DEBUG
+		if valueExpr.nodeType == !(AST_LITERAL) then
+			print("====================")
+			astPrintTree(identOrVararg.parent)
+			where(state, identOrVararg)
+			astPrint(valueExpr)
+			where(state, valueExpr)
+		end
+		--]]
 		!DEPEND_AND_RETURN(`identOrVararg`, DEPEND_NODE_INFERRED, `valueExpr`)
 	end
 
@@ -1286,13 +1298,14 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 	-- Tell parents that this declaration exists so we can detect more cases of shadowing.
 	if not (decl.isDocumentation or decl.canShadow or vararg or (isMember and decl.kind == !(DECL_KIND_LOCAL_VAR))) then
 		local parentScope = scope
+		local name        = ident.name
 
 		repeat
-			local declarationsInTree = parentScope.declarationsInTree[ident.name]
+			local declarationsInTree = parentScope.declarationsInTree[name]
 
 			if not declarationsInTree then
 				declarationsInTree = {}
-				parentScope.declarationsInTree[ident.name] = declarationsInTree
+				parentScope.declarationsInTree[name] = declarationsInTree
 			end
 
 			table.insert(declarationsInTree, decl)
@@ -1311,7 +1324,7 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 
 	-- Infer type from value.
 	else
-		!ASSERT(`valueExpr`, toLua("Missing both type and value from declaration."))
+		!ASSERT(`valueExpr`, `"Missing both type and value from declaration."`)
 		!ASSERT(`not vararg`)
 
 		if decl.value then
@@ -1337,7 +1350,7 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 			typeInfo       = enumInfo -- Kind of a @Hack, but maybe it's fine for enum members!
 
 			if enumInfo.memberTypeInfo.tag == !(TYPE_TYPE) then
-				-- This means you can for example say: local myVar:MyEnum.MY_TYPE
+				-- This means you can for example say: local myVar: MyEnum.MY_TYPE
 				assert(typeInfoForDecl)
 			end
 		end
@@ -1377,9 +1390,9 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 
 	!if DEBUG then
 		if debug_onlyInferTypes then
-			io.stdout:write("DEFINE ", identOrVararg.name ,":", getFriendlyTypeInfoName(typeInfo), " (", DECL_KIND_TITLES[decl.kind], ")")
-			if typeInfoForDecl then  io.stdout:write(" (VALUE ", getFriendlyTypeInfoName(typeInfoForDecl), ")")  end
-			io.stdout:write(" IN ")
+			io.write("DEFINE ", identOrVararg.name ,":", getFriendlyTypeInfoName(typeInfo), " (", DECL_KIND_TITLES[decl.kind], ")")
+			if typeInfoForDecl then  io.write(" (VALUE ", getFriendlyTypeInfoName(typeInfoForDecl), ")")  end
+			io.write(" IN ")
 			astPrint(astFindParentScope(decl))
 		end
 	!end
@@ -1388,10 +1401,10 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 end
 
 !NODE_INFERRER `function nodeInferrers.AstIdentifier(state, ident)`
-	inferIdentifierOrVararg(state, ident)
+	return (inferIdentifierOrVararg(state, ident))
 end
 !NODE_INFERRER `function nodeInferrers.AstVararg(state, vararg)`
-	inferIdentifierOrVararg(state, vararg)
+	return (inferIdentifierOrVararg(state, vararg))
 end
 
 !NODE_INFERRER `function nodeInferrers.AstBlank(state, blank)`
@@ -1642,19 +1655,17 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 			errorInternal()
 		end
 
+		local argsIn = constLambda.argumentsIn and constLambda.argumentsIn.arguments
 		for i = acceptedMin, 1, -1 do
-			local arg = constLambda.argumentsIn.arguments[i]
-			if arg.isRequired then
-				break
-			else
-				acceptedMin = acceptedMin-1
-			end
+			local arg = argsIn[i]
+			if arg.isRequired then  break  end
+			acceptedMin = acceptedMin-1
 		end
 	end
 
 	-- Get requested count.
-	local valueExprLast = getLast(values)
 	local valueCount    = #values
+	local valueExprLast = values[valueCount]
 	local requestedMin  = valueCount
 	local requestedMax  = valueCount
 	local slotsToCheck  = valueCount -- Assuming the requested count is accepted.
@@ -1669,8 +1680,7 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 			local calleeTypeInfo = valueCall.callee.inferredType
 
 			if calleeTypeInfo.tag == !(TYPE_LIST) then
-				local listSig  = calleeTypeInfo
-				calleeTypeInfo = listSig[1] or errorInternal() -- The error should have happened when inferring AstCall.
+				calleeTypeInfo = calleeTypeInfo[1] or errorInternal() -- The error should have happened when inferring AstCall.
 			end
 
 			assert(calleeTypeInfo.tag == !(TYPE_FUNCTION))
@@ -1687,9 +1697,9 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 			local returnsMin    = returnsVararg and argCount-1 or argCount
 			local returnsMax    = returnsVararg and math.huge  or argCount
 
-			requestedMin = valueCount-1+returnsMin
-			requestedMax = valueCount-1+returnsMax
-			slotsToCheck = valueCount-1+argCount
+			requestedMin = valueCount - 1 + returnsMin
+			requestedMax = valueCount - 1 + returnsMax
+			slotsToCheck = valueCount - 1 + argCount
 		end
 
 	elseif valueExprLast.nodeType == !(AST_VARARG) then
@@ -1802,8 +1812,9 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 			trimTemplate`
 				if constLambda and constLambda.polymorphSourceLambda then
 					local argsIn    = constLambda.polymorphSourceLambda.argumentsIn
-					local arg       = argsIn.arguments and (argsIn.arguments[$argIndex] or getLast(argsIn.arguments)) or errorInternal(state, valueExpr)
-					strictTypeMatch = (arg.hasPlaceholders or arg.autobake ~= $AUTOBAKE_DISABLED)
+					argsIn          = argsIn and argsIn.arguments
+					local arg       = argsIn and (argsIn[$argIndex] or argsIn[#argsIn]) or errorInternal(state, valueExpr)
+					strictTypeMatch = arg.hasPlaceholders or arg.autobake ~= $AUTOBAKE_DISABLED
 				end
 			`,
 			{AUTOBAKE_DISABLED=AUTOBAKE_DISABLED, argIndex=argIndexCode}
@@ -1823,9 +1834,8 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 
 		-- Function call (0..inf values).
 		if valueTypeInfo.tag == !(TYPE_LIST) then
-			local listSig         = valueTypeInfo
-			local callOutArgIndex = slot-valueIndex+1
-			valueTypeInfo         = listSig[callOutArgIndex]
+			local callOutArgIndex = slot - valueIndex + 1
+			valueTypeInfo         = valueTypeInfo[callOutArgIndex]
 
 			if not valueTypeInfo then
 				if softCheck then  return false, 0  end
@@ -1884,7 +1894,7 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 		compatibilityScoreSum = compatibilityScoreSum + compatibilityScore
 	end
 
-	for _, argNamed in ipairs(argsNamed or EMPTY_TABLE) do
+	if argsNamed then  for _, argNamed in ipairs(argsNamed) do
 		local argIndex = argNamed.argumentIndex
 
 		if argIndex == 0 then
@@ -1932,7 +1942,7 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 		end
 
 		compatibilityScoreSum = compatibilityScoreSum + compatibilityScore
-	end
+	end end
 
 	-- @Incomplete: Decrease compatibilityScoreSum as optional arguments are left out?
 
@@ -5085,7 +5095,7 @@ end
 
 			-- The following is not needed anymore after adding the above, right? 2020-06-20
 			-- elseif newlyDeclared[decl.name.name] and decl.token > staticIf.token and decl.queued.pipe > !(PIPE_INFER) then
-			-- 	-- @Robustness: Do we need to call makeSureConstantIdentifierChainHasAllDeclarationsSet() here?
+			-- 	-- @Robustness: Do we need to call ensureConstantIdentifierChainHasAllDeclarationsSet() here?
 			-- 	checkRedeclarationAndMaybeAddOverload(state, decl.name, decl, false, scope, nil)
 			end
 		end
@@ -6561,7 +6571,7 @@ end
 		local !!(inferrerName) = nodeInferrers[!(nodeType)]
 
 		nodeInferrers[!(nodeType)] = function(state, node)
-			!!(inferrerName)(state, node) -- Better traceback in DEBUG mode.
+			return (!!(inferrerName)(state, node)) -- Better traceback in DEBUG mode.
 		end
 	!end
 !end

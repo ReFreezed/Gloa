@@ -41,8 +41,7 @@ local MAX_ERRORS_MESSAGES          = !(DEBUG and 20 or 4) -- @Incomplete: Make t
 -- addDependency( state, dependent, DEPEND_STRUCT_MEMBERS_READY, structInfo )
 -- addDependency( state, dependent, DEPEND_CONSTANT_READY,       constant )
 function _G.addDependency(state, dependent, dependType, dependOn, extraData)
-	!if DEBUG then
-		--[[
+	!if DEBUG and 1==0 then
 		if dependType == !(DEPEND_DECLARATION) then
 			!ASSERT `type(dependOn)  == "string"`
 			!ASSERT `extraData == nil or type(extraData) == "table"`
@@ -54,7 +53,6 @@ function _G.addDependency(state, dependent, dependType, dependOn, extraData)
 		else
 			errorInternal("%d", dependType)
 		end
-		--]]
 	!end
 
 	local dependOnIsNode = !!(CONST_SET{ DEPEND_HAS_DECLARATION, DEPEND_NODE_INFERRED, DEPEND_NODE_PASSED_INFER, DEPEND_NODE_PASSED_EMIT })[dependType]
@@ -79,10 +77,12 @@ function _G.addDependency(state, dependent, dependType, dependOn, extraData)
 		exitFailure()
 	end
 
-	dependent = dependent.queued
+	dependent = dependent.queued or errorInternal(state, dependent, "addDependency: Dependent node is not queued.")
 
 	if dependOnIsNode then
-		assert(dependent ~= dependOn.node)
+		if dependent == dependOn.node then
+			errorInternal(state, dependent, "addDependency: Node trying to depend on itself for some reason.")
+		end
 		dependOn = dependOn.queued or errorInternal(state, dependOn, "addDependency: Missing queued.")
 		-- assert(not itemWith3(dependOn.waiters, "dependent",dependent, "dependType",dependType, "dependOn",dependOn))
 	end
@@ -118,13 +118,12 @@ function _G.addDependency(state, dependent, dependType, dependOn, extraData)
 	if not depsForLookup[dependOn] then  depsForLookup[dependOn] = {}  end
 	depsForLookup[dependOn][dependent] = dependency
 
-	!if DEBUG then
-		--[[
+	!if DEBUG and 1==0 then
 		if debug_onlyInferTypes then
-			io.stdout:write("DEPEND ")
+			io.write("DEPEND ")
 			astPrint(dependent)
 
-			io.stdout:write("    ON ", DEPEND_TITLES[dependType], " ")
+			io.write("    ON ", DEPEND_TITLES[dependType], " ")
 			if dependType == !(DEPEND_DECLARATION) then
 				print(dependOn)
 			elseif dependType == !(DEPEND_MEMBER_DECLARATION) then
@@ -145,7 +144,6 @@ function _G.addDependency(state, dependent, dependType, dependOn, extraData)
 				print("? ("..tostring(dependOn)..")")
 			end
 		end
-		--]]
 	!end
 end
 
@@ -230,13 +228,29 @@ function _G.addToQueue(state, node, container, key, pipe)
 	table.insert(state.queueActive, queued)
 	table.insert(state.allQueueds,  queued)
 
+	-- Make imperative declarations wait for their assigned value (from the assigned value's perspective).
+	-- @Cleanup: This doesn't really seem to speed things up, even though declarations no longer wait for literals etc.
+	local parent = node.parent
+	if
+		parent
+		and parent.nodeType == !(AST_ASSIGNMENT)
+		and parent.forDeclaration
+		and container == parent.values
+	then
+		local decl = parent.declarations[key]
+		if decl then
+			-- @Robustness: Should we check that decl.name is in PIPE_INFER? (Probably not necessary.)
+			addDependency(state, decl.name, !(DEPEND_NODE_INFERRED), node)
+		end
+	end
+
 	--[[ Make assignment targets in declaration assignment statements wait for their declaration.
 	if
 		node.nodeType == !(AST_IDENTIFIER)
 		and node.declaration
-		and node.parent.nodeType == !(AST_ASSIGNMENT)
-		and node.parent.forDeclaration
-		and node.parent.declarations[indexOf(node.parent.targets, node)]
+		and parent.nodeType == !(AST_ASSIGNMENT)
+		and parent.forDeclaration
+		and parent.declarations[indexOf(parent.targets, node)]
 	then
 		local ident = node
 		addDependency(state, ident, !(DEPEND_NODE_INFERRED), ident.declaration.name)
@@ -252,16 +266,17 @@ do
 			nodesToAdd[node] = true
 
 			-- :SelectiveQueuing
+			local nodeType = node.nodeType
 
-			if node.nodeType == !(AST_STATIC_IF) then
+			if nodeType == !(AST_STATIC_IF) then
 				local staticIf = node
 				registerNodesToAddToQueue(state, staticIf.condition, nodesToAdd)
 				return !(VISIT_IGNORE_CHILDREN)
 
-			elseif !!(CONST_SET{ AST_LAMBDA, AST_STRUCT })[node.nodeType] and node.isPolymorphic then
+			elseif (nodeType == !(AST_LAMBDA) or nodeType == !(AST_STRUCT)) and node.isPolymorphic then
 				return !(VISIT_IGNORE_CHILDREN) -- We don't need to queue anything inside polymorphic functions or structs (I think).
 
-			elseif node.nodeType == !(AST_FOR) then
+			elseif nodeType == !(AST_FOR) then
 				local forLoop = node
 				for _, expr in ipairs(forLoop.expressions) do
 					registerNodesToAddToQueue(state, expr, nodesToAdd)
@@ -292,8 +307,9 @@ do
 
 			if node.nodeType == !(AST_DECLARATION) and node.assignment then
 				local assignment = node.assignment
-				for i, valueExpr in ipairs(assignment.values) do
-					astVisitAllNodesLeavesFirst(valueExpr, add, assignment.values, i)
+				local valueExpr  = assignment.values[node.assignmentIndex]
+				if valueExpr then
+					astVisitAllNodesLeavesFirst(valueExpr, add, assignment.values, node.assignmentIndex)
 				end
 			end
 
@@ -321,8 +337,9 @@ do
 				nodesToAdd[node] = true
 
 				-- :SelectiveQueuing
+				local nodeType = node.nodeType
 
-				if node.nodeType == !(AST_STATIC_IF) then
+				if nodeType == !(AST_STATIC_IF) then
 					local staticIf = node
 					if not staticIf.condition.queued then
 						nodesToAdd[staticIf.condition] = true
@@ -330,10 +347,10 @@ do
 					end
 					return !(VISIT_IGNORE_CHILDREN)
 
-				elseif !!(CONST_SET{ AST_LAMBDA, AST_STRUCT })[node.nodeType] and node.isPolymorphic then
+				elseif (nodeType == !(AST_LAMBDA) or nodeType == !(AST_STRUCT)) and node.isPolymorphic then
 					return !(VISIT_IGNORE_CHILDREN) -- We don't need to queue anything inside polymorphic functions or structs (I think).
 
-				elseif node.nodeType == !(AST_FOR) then
+				elseif nodeType == !(AST_FOR) then
 					local forLoop = node
 					for _, expr in ipairs(forLoop.expressions) do
 						if not expr.queued then
@@ -370,8 +387,9 @@ do
 
 			if node.nodeType == !(AST_DECLARATION) and node.assignment then
 				local assignment = node.assignment
-				for i, valueExpr in ipairs(assignment.values) do
-					astVisitAllNodesLeavesFirst(valueExpr, add, assignment.values, i)
+				local valueExpr  = assignment.values[node.assignmentIndex]
+				if valueExpr then
+					astVisitAllNodesLeavesFirst(valueExpr, add, assignment.values, node.assignmentIndex)
 				end
 			end
 
@@ -435,8 +453,8 @@ function _G.replaceQueuedNode(state, nodeOld, nodeNew)
 	!if DEBUG then
 		-- [[
 		if debug_onlyInferTypes then
-			io.stdout:write("replace: ") ; astPrint(nodeOld)
-			io.stdout:write("   with: ") ; astPrint(nodeNew)
+			io.write("replace: ") ; astPrint(nodeOld)
+			io.write("   with: ") ; astPrint(nodeNew)
 			-- where(state, nodeOld)
 			-- where(state, nodeOld.parent)
 		end

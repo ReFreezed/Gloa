@@ -57,7 +57,6 @@ local HIRES_TIMER = DEBUG and 1==1 -- Uses Alien FFI library and kernel32.dll in
 do
 	local alien    = require"alien"
 	local kernel32 = alien.load"kernel32.dll"
-	local ldexp    = math.ldexp
 
 	local QueryPerformanceCounter = kernel32.QueryPerformanceCounter
 	QueryPerformanceCounter:types{ ret="int", abi="stdcall", "pointer" }
@@ -66,7 +65,7 @@ do
 	QueryPerformanceFrequency:types{ ret="int", abi="stdcall", "pointer" }
 
 	!(
-	local _LONG_SIGNED_TO_UNSIGNED = `($var < 0 and $var + 0x80000000 + 0x80000000 or $var)`
+	local _LONG_SIGNED_TO_UNSIGNED = `($var < 0 and 0x100000000+$var or $var)`
 	local function LONG_SIGNED_TO_UNSIGNED(var)
 		return templateToLua(_LONG_SIGNED_TO_UNSIGNED, {var=var})
 	end
@@ -78,15 +77,13 @@ do
 	local function timerQueryPerformanceFrequency()
 		QueryPerformanceFrequency(twoLongsBuffer)
 		local lo = twoLongs[1] ; local hi = twoLongs[2]
-		return ldexp(!!(LONG_SIGNED_TO_UNSIGNED`lo`), 0)
-		     + ldexp(!!(LONG_SIGNED_TO_UNSIGNED`hi`), 32)
+		return !!(LONG_SIGNED_TO_UNSIGNED`lo`) + !!(LONG_SIGNED_TO_UNSIGNED`hi`) * !(2^32)
 	end
 
 	local function timerQueryPerformanceCounter()
 		QueryPerformanceCounter(twoLongsBuffer)
 		local lo = twoLongs[1] ; local hi = twoLongs[2]
-		return ldexp(!!(LONG_SIGNED_TO_UNSIGNED`lo`), 0)
-		     + ldexp(!!(LONG_SIGNED_TO_UNSIGNED`hi`), 32)
+		return !!(LONG_SIGNED_TO_UNSIGNED`lo`) + !!(LONG_SIGNED_TO_UNSIGNED`hi`) * !(2^32)
 	end
 
 	local freq   = timerQueryPerformanceFrequency() -- This shouldn't change while the program is running according to the documentation.
@@ -1262,16 +1259,20 @@ do
 		local depth        = 0
 
 		function _G.staticProfilerPush(name)
-			countCalls[name]    = (countCalls[name] or 0) + 1
-			depth               = depth + 1
-			timeStarts[depth]   = timerGetCurrent()
-			timeSubcalls[depth] = 0
+			!if STATIC_PROFILER then
+				countCalls[name]    = (countCalls[name] or 0) + 1
+				depth               = depth + 1
+				timeStarts[depth]   = timerGetCurrent()
+				timeSubcalls[depth] = 0
+			!end
 		end
 		function _G.staticProfilerPop(name)
-			local time          = timerGetCurrent() - timeStarts[depth]
-			timeCalls[name]     = (timeCalls[name] or 0) + time - timeSubcalls[depth]
-			depth               = depth - 1
-			timeSubcalls[depth] = timeSubcalls[depth] + time
+			!if STATIC_PROFILER then
+				local time          = timerGetCurrent() - timeStarts[depth]
+				timeCalls[name]     = (timeCalls[name] or 0) + time - timeSubcalls[depth]
+				depth               = depth - 1
+				timeSubcalls[depth] = timeSubcalls[depth] + time
+			!end
 		end
 
 		function _G.staticProfilerPrint()
