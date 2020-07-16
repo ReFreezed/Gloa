@@ -1217,7 +1217,7 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 		!ASSERT("parentNodeType == "..AST_ASSIGNMENT)
 
 		if not decl.inferredType then
-			!DEPEND_AND_RETURN(`identOrVararg`, DEPEND_NODE_INFERRED, `decl`)
+			!DEPEND_AND_RETURN_INTERNAL(`identOrVararg`, DEPEND_NODE_INFERRED, `decl`)
 		end
 
 		identOrVararg.inferredType = decl.inferredType
@@ -4033,7 +4033,7 @@ local function inferTableArray(state, tableNode, arraySig)
 
 	validateIndiciesInArrayLikeConstructor(state, tableNode, arraySig.itemType)
 
-	tableNode.inferredType = arraySig
+	-- tableNode.inferredType = arraySig -- Moved to earlier in nodeInferrers.AstTable().
 end
 
 local function inferTableStruct(state, tableNode, structInfo)
@@ -4129,7 +4129,7 @@ local function inferTableStruct(state, tableNode, structInfo)
 		end
 	end
 
-	tableNode.inferredType = structInfo
+	-- tableNode.inferredType = structInfo -- Moved to earlier in nodeInferrers.AstTable().
 end
 
 !NODE_INFERRER `function nodeInferrers.AstTable(state, tableNode)`
@@ -4140,6 +4140,8 @@ end
 	if typeExpected.tag == !(TYPE_ANY) and tableNode.parent.nodeType == !(AST_TABLE) then
 		typeExpected = state.builtinTypeInfos.table
 	end
+
+	tableNode.inferredType = typeExpected
 
 	local trailingExpr   = tableNode.trailingExpression
 	local lastTableField = not trailingExpr and getLast(tableNode.fields) or nil
@@ -4175,7 +4177,9 @@ end
 	if typeExpected.tag == !(TYPE_TABLE) then
 		-- @Incomplete: Check for duplicate fields (among constant keys).
 		-- @Incomplete: Check for nil keys.
-		tableNode.inferredType = typeExpected
+
+		-- tableNode.inferredType = typeExpected -- Moved to earlier in nodeInferrers.AstTable().
+
 		-- Note: We don't need to validate any types or anything (including tableNode.trailingExpression) as generic tables accept anything.
 
 	elseif typeExpected.tag == !(TYPE_ARRAY) then
@@ -4195,7 +4199,7 @@ end
 		)
 	end
 
-	!ASSERT `tableNode.inferredType`
+	-- !ASSERT `tableNode.inferredType`
 
 	-- Make sure all children (including table-likes) are fully(!) inferred before we advance to the next pipe.
 	for _, tableField in ipairs(tableNode.fields) do
@@ -7811,12 +7815,12 @@ function _G.getExpectedTypeInfo(state, node, strict, expectantTerm, nodeForError
 
 			local structInfo = tableNode.inferredType
 			if not structInfo.hasMembers then
-				!DEPEND_AND_RETURN(`node`, DEPEND_STRUCT_MEMBERS_READY, `structInfo`)
+				!DEPEND_AND_RETURN(`node`, DEPEND_STRUCT_MEMBERS_READY, `structInfo`, nil, `nil`)
 			end
 
 			local memberLiteral = tableField.key
 			if not memberLiteral.inferredType then
-				!DEPEND_AND_RETURN(`node`, DEPEND_NODE_INFERRED, `memberLiteral`)
+				!DEPEND_AND_RETURN(`node`, DEPEND_NODE_INFERRED, `memberLiteral`, nil, `nil`)
 			end
 
 			local memberName = memberLiteral.value
@@ -7893,6 +7897,69 @@ function _G.getExpectedTypeInfo(state, node, strict, expectantTerm, nodeForError
 
 		return typeInfo
 
+	elseif parentNodeType == !(AST_SWITCH) then
+		local switch = node.parent
+		if node == switch.value then
+			return (getExpectedTypeInfoUsingContents(state, node, strict, expectantTerm, nodeForError))
+		end
+
+		typeInfo = switch.value.inferredType
+		if not typeInfo then
+			!DEPEND_AND_RETURN(`node`, DEPEND_NODE_INFERRED, `switch.value`, nil, `nil`)
+		end
+
+		return typeInfo
+
+	elseif parentNodeType == !(AST_ACCESS) then
+		local access = node.parent
+		if node == access.object then
+			return (getExpectedTypeInfoUsingContents(state, node, strict, expectantTerm, nodeForError))
+		end
+
+		local objType = access.object.inferredType
+		if not objType then
+			!DEPEND_AND_RETURN(`node`, DEPEND_NODE_INFERRED, `access.object`, nil, `nil`)
+		end
+
+		if objType.tag == !(TYPE_TABLE) then
+			return state.builtinTypeInfos.any
+
+		elseif objType.tag == !(TYPE_ENUM) then
+			return objType
+
+		elseif objType.tag == !(TYPE_STRUCT) then
+			local structInfo = objType
+			if not structInfo.hasMembers then
+				!DEPEND_AND_RETURN(`node`, DEPEND_STRUCT_MEMBERS_READY, `structInfo`, nil, `nil`)
+			end
+
+			if structInfo.kind == !(STRUCT_KIND_ARRAY) then
+				if not structInfo.members[1] then
+					return state.builtinTypeInfos.int
+				else
+					-- void  We actually expect int|string, but we don't want to generate a compound type here - we always want a specific type to be expected!
+				end
+
+			elseif structInfo.kind == !(STRUCT_KIND_TABLE) then
+				if not structInfo.members[1] then
+					return structInfo.keyType
+				elseif structInfo.keyType.tag == !(TYPE_STRING) then
+					return state.builtinTypeInfos.string -- We shouldn't get here as you cannot combine having members and having !key be string.
+				else
+					-- void  We actually expect structInfo.keyType|string, but we don't want to generate a compound type here - we always want a specific type to be expected!
+				end
+
+			elseif structInfo.kind == !(STRUCT_KIND_NORMAL) then
+				return state.builtinTypeInfos.string
+			end
+
+			return (getExpectedTypeInfoUsingContents(state, node, strict, expectantTerm, nodeForError))
+
+		else
+			-- !ifDEBUG `print(getFriendlyTypeInfoName(objType))`
+			return (getExpectedTypeInfoUsingContents(state, node, strict, expectantTerm, nodeForError))
+		end
+
 	elseif strict then
 		return (getExpectedTypeInfoUsingContents(state, node, strict, expectantTerm, nodeForError))
 
@@ -7902,7 +7969,6 @@ function _G.getExpectedTypeInfo(state, node, strict, expectantTerm, nodeForError
 		if not i then  return (getExpectedTypeInfoUsingContents(state, node, strict, expectantTerm, nodeForError))  end
 
 		local calleeTypeInfo = call.callee.inferredType
-
 		if not calleeTypeInfo then
 			!DEPEND_AND_RETURN(`node`, DEPEND_NODE_INFERRED, `call.callee`, nil, `nil`)
 		end

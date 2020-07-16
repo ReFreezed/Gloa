@@ -24,23 +24,24 @@ local MAX_ERRORS_MESSAGES          = !(DEBUG and 20 or 4) -- @Incomplete: Make t
 
 
 !struct"_Dependency"{ -- @Cleanup: Rename to something with "wait"?
-	{`dependent`,  nil}, -- Queued
-	{`dependType`, 0},   -- See addDependency().
-	{`dependOn`,   nil}, -- string|Queued  The value depends on what dependType is.
-	{`extraData`,  nil}, -- AstScope|nil
-	{`next`,       nil}, -- Dependency  This is for chaining multiple dependencies.
-	{`traceback`,  nil}, -- For debugging.
+	{`dependent`,  nil},   -- Queued
+	{`dependType`, 0},     -- See addDependency().
+	{`dependOn`,   nil},   -- string|Queued  The value depends on what dependType is.
+	{`extraData`,  nil},   -- AstScope|nil
+	{`next`,       nil},   -- Dependency  This is for chaining multiple dependencies.
+	{`internal`,   false}, -- Internal dependencies are (preferably) never reported to users during errors.
+	{`traceback`,  nil},   -- For debugging.
 }
 
--- addDependency( state, dependent, DEPEND_DECLARATION,          name [, scope ] )
--- addDependency( state, dependent, DEPEND_MEMBER_DECLARATION,   name, scope )
--- addDependency( state, dependent, DEPEND_HAS_DECLARATION,      identifier )
--- addDependency( state, dependent, DEPEND_NODE_INFERRED,        astNode )
--- addDependency( state, dependent, DEPEND_NODE_PASSED_INFER,    astNode )
--- addDependency( state, dependent, DEPEND_NODE_PASSED_EMIT,     astNode )
--- addDependency( state, dependent, DEPEND_STRUCT_MEMBERS_READY, structInfo )
--- addDependency( state, dependent, DEPEND_CONSTANT_READY,       constant )
-function _G.addDependency(state, dependent, dependType, dependOn, extraData)
+-- addDependency( state, dependent, isInternal, DEPEND_DECLARATION,          name [, scope ] )
+-- addDependency( state, dependent, isInternal, DEPEND_MEMBER_DECLARATION,   name, scope )
+-- addDependency( state, dependent, isInternal, DEPEND_HAS_DECLARATION,      identifier )
+-- addDependency( state, dependent, isInternal, DEPEND_NODE_INFERRED,        astNode )
+-- addDependency( state, dependent, isInternal, DEPEND_NODE_PASSED_INFER,    astNode )
+-- addDependency( state, dependent, isInternal, DEPEND_NODE_PASSED_EMIT,     astNode )
+-- addDependency( state, dependent, isInternal, DEPEND_STRUCT_MEMBERS_READY, structInfo )
+-- addDependency( state, dependent, isInternal, DEPEND_CONSTANT_READY,       constant )
+function _G.addDependency(state, dependent, isInternal, dependType, dependOn, extraData)
 	!if DEBUG and 1==0 then
 		if dependType == !(DEPEND_DECLARATION) then
 			!ASSERT `type(dependOn)  == "string"`
@@ -92,6 +93,7 @@ function _G.addDependency(state, dependent, dependType, dependOn, extraData)
 		`dependType`, `dependType`,
 		`dependOn`,   `dependOn`,
 		`extraData`,  `extraData`,
+		`internal`,   `isInternal`,
 	}
 
 	-- !ifDEBUG `dependency.traceback = debug.traceback("", 2)`
@@ -148,18 +150,32 @@ function _G.addDependency(state, dependent, dependType, dependOn, extraData)
 end
 
 !(
--- DEPEND           ( dependentCode, dependType, dependOnCode [, extraDataCode ] )
--- DEPEND_AND_RETURN( dependentCode, dependType, dependOnCode [, extraDataCode, valueToReturnCode ] )
-function _G.DEPEND(dependentCode, dependType, dependOnCode, extraDataCode)
-	__LUA("addDependency(state, ",dependentCode,", ",toLua(dependType),", ",dependOnCode)
+-- DEPEND                    ( dependentCode, dependType, dependOnCode [, extraDataCode ] )
+-- DEPEND_INTERNAL           ( dependentCode, dependType, dependOnCode [, extraDataCode ] )
+-- DEPEND_AND_RETURN         ( dependentCode, dependType, dependOnCode [, extraDataCode, valueToReturnCode ] )
+-- DEPEND_AND_RETURN_INTERNAL( dependentCode, dependType, dependOnCode [, extraDataCode, valueToReturnCode ] )
+local function depend(dependentCode, isInternal, dependType, dependOnCode, extraDataCode)
+	__LUA("addDependency(state, ",dependentCode,", ",toLua(isInternal),", ",toLua(dependType),", ",dependOnCode)
 	if extraDataCode then  __LUA(", ",extraDataCode)  end
 	__LUA(")")
 end
-function _G.DEPEND_AND_RETURN(dependentCode, dependType, dependOnCode, extraDataCode, valueToReturnCode)
-	__LUA("addDependency(state, ",dependentCode,", ",toLua(dependType),", ",dependOnCode)
+local function dependAndReturn(dependentCode, isInternal, dependType, dependOnCode, extraDataCode, valueToReturnCode)
+	__LUA("addDependency(state, ",dependentCode,", ",toLua(isInternal),", ",toLua(dependType),", ",dependOnCode)
 	if extraDataCode then  __LUA(", ",extraDataCode)  end
 	__LUA(") ; return")
 	if valueToReturnCode then  __LUA(" ",valueToReturnCode)  end
+end
+function _G.DEPEND(dependentCode, dependType, dependOnCode, extraDataCode)
+	depend(dependentCode, false, dependType, dependOnCode, extraDataCode)
+end
+function _G.DEPEND_INTERNAL(dependentCode, dependType, dependOnCode, extraDataCode)
+	depend(dependentCode, true,  dependType, dependOnCode, extraDataCode)
+end
+function _G.DEPEND_AND_RETURN(dependentCode, dependType, dependOnCode, extraDataCode, valueToReturnCode)
+	dependAndReturn(dependentCode, false, dependType, dependOnCode, extraDataCode, valueToReturnCode)
+end
+function _G.DEPEND_AND_RETURN_INTERNAL(dependentCode, dependType, dependOnCode, extraDataCode, valueToReturnCode)
+	dependAndReturn(dependentCode, true,  dependType, dependOnCode, extraDataCode, valueToReturnCode)
 end
 )
 
@@ -240,7 +256,7 @@ function _G.addToQueue(state, node, container, key, pipe)
 		local decl = parent.declarations[key]
 		if decl then
 			-- @Robustness: Should we check that decl.name is in PIPE_INFER? (Probably not necessary.)
-			addDependency(state, decl.name, !(DEPEND_NODE_INFERRED), node)
+			addDependency(state, decl.name, false, !(DEPEND_NODE_INFERRED), node)
 		end
 	end
 
@@ -253,7 +269,7 @@ function _G.addToQueue(state, node, container, key, pipe)
 		and parent.declarations[indexOf(parent.targets, node)]
 	then
 		local ident = node
-		addDependency(state, ident, !(DEPEND_NODE_INFERRED), ident.declaration.name)
+		addDependency(state, ident, false, !(DEPEND_NODE_INFERRED), ident.declaration.name)
 	end
 	--]]
 end
@@ -584,10 +600,17 @@ function _G.errorPipesAreStuck(state)
 		if reportCount > 0 then  exitFailure()  end
 	`
 
+	local relevantQueueds = {}
+	for _, queued in ipairs(state.allQueueds) do
+		local dependency = not queued.unqueued and queued.waitingOn
+		if dependency and not dependency.internal then  table.insert(relevantQueueds, queued)  end
+	end
+	relevantQueueds = relevantQueueds[1] and relevantQueueds or state.allQueueds
+
 	-- queueds = findQueueds( callback [, queueds={} ] )
 	local function findQueueds(cb, queueds)
 		queueds = queueds or {}
-		for _, queued in ipairs(state.allQueueds) do
+		for _, queued in ipairs(relevantQueueds) do
 			local dependency = not queued.unqueued and queued.waitingOn
 			if dependency and cb(queued, queued.node, dependency, dependency.dependOn) then
 				table.insert(queueds, queued)
