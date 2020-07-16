@@ -1219,6 +1219,7 @@ end
 
 			elseif node.nodeType == !(AST_ARGUMENT) then
 				if node.autobake ~= !(AUTOBAKE_DISABLED) and not state.soft then
+					state.warnings = state.warnings+1
 					parserMessageLine(io.stderr, state, node.token, "Warning", "Struct arguments are always auto-baked and thus don't need any $.")
 				end
 
@@ -2420,7 +2421,10 @@ end
 
 			-- We allow empty statement like Lua 5.2+ does (so things like ';(x and func1 or func2)()'
 			-- always work, no matter what comes previously). :EmptyStatement
-			if not state.soft then  parserMessageLine(io.stderr, state, token, "Warning", "Empty statement.")  end
+			if not state.soft then
+				state.warnings = state.warnings+1
+				parserMessageLine(io.stderr, state, token, "Warning", "Empty statement.")
+			end
 
 		else
 			if !!(CONST_SET{ AST_RETURN, AST_BREAK, AST_CONTINUE })[lastNodeType] then
@@ -2735,7 +2739,10 @@ end
 
 		elseif !!(IS_TOKEN(TOKEN_PUNCTUATION, ";")) then
 			!!(EAT_NEXT_TOKEN)
-			if not state.soft then  parserMessageLine(io.stderr, state, token, "Warning", "Empty statement.")  end -- :EmptyStatement
+			if not state.soft then
+				state.warnings = state.warnings+1
+				parserMessageLine(io.stderr, state, token, "Warning", "Empty statement.") -- :EmptyStatement
+			end
 
 		elseif not (isTopLevel or singleStatement) and !!(IS_TOKEN(TOKEN_PUNCTUATION, "}")) then
 			!!(EAT_NEXT_TOKEN)
@@ -3010,6 +3017,19 @@ end
 		tokType, tokValue = eatNextToken(state)
 		if not !!(IS_TOKEN(TOKEN_PUNCTUATION, ")")) then
 			!ERROR_OR_RETURN `errorParsingAfterPrevious(state, "Expected ')'.")`
+		end
+	end
+
+	if lambda.captures[1] and lambda.argumentsIn and not state.soft then
+		for _, arg in ipairs(lambda.argumentsIn.arguments) do
+			if arg.declaration.value then
+				state.warnings = state.warnings+1
+				parserMessageLine(
+					io.stderr, state,
+					astGetExpressionVisuallyFurthestToTheLeft(arg.declaration.value).token,
+					"Warning", "Default values do not work on functions with captures."
+				)
+			end
 		end
 	end
 
