@@ -1177,6 +1177,36 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 		end
 
 		return
+
+	elseif identOrVararg.kind == !(IDENT_KIND_RELATIVE) then
+		!ASSERT `ident`
+
+		local typeInfo = getExpectedTypeInfo(state, ident, false, "identifier", ident)
+		if not typeInfo then
+			-- @UX: Improve the error message if two relative identifiers wait for each other.
+			-- (We probably need getExpectedTypeInfo() to return the target node along with the type.)
+			return
+		end
+
+		if typeInfo.tag ~= !(TYPE_ENUM) then
+			typeError(state, ident, "Relative identifiers only support enum types. (This is %s)", getFriendlyTypeInfoName(typeInfo))
+		end
+
+		local enumInfo = typeInfo
+		local decl     = findMemberDeclaration(state, enumInfo.astNode, ident.name)
+
+		if not decl then
+			typeError2(state,
+				ident,            F("%s has no member '%s'.", getFriendlyTypeInfoName(enumInfo), ident.name),
+				enumInfo.astNode, F("...here is the accessed enum.")
+			)
+		end
+
+		ident.declaration  = decl
+		ident.inferredType = enumInfo
+
+		moveToNextRelevantPipe(state, ident)
+		return
 	end
 
 	!ASSERT("decl",                                                                          nil, `identOrVararg`)
