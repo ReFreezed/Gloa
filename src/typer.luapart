@@ -1499,7 +1499,16 @@ end
 		--]]
 	!end
 
-	if typeNode.kind == !(TYPE_KIND_SIMPLE_BUILTIN) then
+	if typeNode.typeReferenceNode then
+		local typeRef = typeNode.typeReferenceNode
+		if not typeRef.inferredType then
+			!DEPEND_AND_RETURN(`typeNode`, DEPEND_NODE_INFERRED, `typeRef`)
+		end
+
+		typeInfoRepresented = requireTypeRepresentedByExpression(state, typeRef)
+		typeInfo            = state.builtinTypeInfos.Type
+
+	elseif typeNode.kind == !(TYPE_KIND_SIMPLE_BUILTIN) then
 		typeInfoRepresented = state.builtinTypeInfos[typeNode.typeName]
 		typeInfo            = state.builtinTypeInfos.Type
 
@@ -6616,7 +6625,7 @@ end
 !NODE_INFERRER_END `end`
 
 !NODE_INFERRER `function nodeInferrers.AstNamespace(state, namespace)`
-	namespace.inferredType = getTypeInfoForNamespace(state, namespace)
+	namespace.inferredType = getTypeInfoForNamespace(state, (namespace.namespaceReferenceNode or namespace))
 	moveToNextRelevantPipe(state, namespace)
 !NODE_INFERRER_END `end`
 
@@ -7333,6 +7342,11 @@ local function simplifyBinary(state, binary)
 			valueL = getTypeRepresentedByExpression(l) or errorInternal(state, l)
 			valueR = getTypeRepresentedByExpression(r) or errorInternal(state, r)
 
+		elseif l.inferredType.tag == !(TYPE_NAMESPACE) then
+			!ASSERT("l.inferredType.tag == "..TYPE_NAMESPACE)
+			valueL = l.inferredType.scope or errorInternal(state, l, "L")
+			valueR = r.inferredType.scope or errorInternal(state, r, "R")
+
 		elseif l.nodeType == !(AST_LITERAL) then
 			!ASSERT("r.nodeType == "..AST_LITERAL)
 			!ASSERT("type(l.value) == type(r.value)")
@@ -7340,6 +7354,7 @@ local function simplifyBinary(state, binary)
 			valueR = r.value
 
 		else
+			-- @Robustness: This is probably not fool proof as fallback here.
 			valueL = followIdentifiersToConstantValue(state, l)
 			valueR = followIdentifiersToConstantValue(state, r)
 			!ASSERT("valueL.nodeType == valueR.nodeType")

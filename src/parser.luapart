@@ -160,15 +160,16 @@ _G.!structAst"AstLiteral:_AstExpression"{
 }
 _G.!structAst"AstType:_AstExpression"{
 	_overrides = {{`nodeType`,AST_TYPE}},
-	{`functionHeader`,  nil, ast="node"},    -- AstLambda without a body. This is used to create the actual function type.
-	{`arrayItemType`,   nil, ast="node"},    -- AstType
-	{`arguments`,       nil, ast="array"},   -- []AstExpression  (Is set for parameterized structs.)
-	{`components`,      {},  ast="array"},   -- []AstExpression  (Used if kind is TYPE_KIND_COMPOUND.)
-	{`kind`,            TYPE_KIND_UNSET},    -- TYPE_KIND_SIMPLE_BUILTIN|TYPE_KIND_USER|TYPE_KIND_FUNCTION|TYPE_KIND_ARRAY|TYPE_KIND_COMPOUND
-	{`typeName`,        ""},
+	{`functionHeader`,    nil, ast="node"},    -- AstLambda without a body. This is used to create the actual function type.
+	{`arrayItemType`,     nil, ast="node"},    -- AstType
+	{`arguments`,         nil, ast="array"},   -- []AstExpression  (Is set for parameterized structs.)
+	{`components`,        {},  ast="array"},   -- []AstExpression  (Used if kind is TYPE_KIND_COMPOUND.)
+	{`kind`,              TYPE_KIND_UNSET},    -- TYPE_KIND_SIMPLE_BUILTIN|TYPE_KIND_USER|TYPE_KIND_FUNCTION|TYPE_KIND_ARRAY|TYPE_KIND_COMPOUND
+	{`typeName`,          ""},
+	{`typeReferenceNode`, nil, astRef="node"}, -- AstExpression  Node that represents the type. (This is kind of a hack for !self.)
 	-- Type phase:
-	{`representedType`, nil},                -- TypeInfo
-	{`declaration`,     nil, astRef="node"}, -- AstDeclaration
+	{`representedType`,   nil},                -- TypeInfo
+	{`declaration`,       nil, astRef="node"}, -- AstDeclaration
 }
 _G.!structAst"AstUnary:_AstExpression"{
 	_overrides = {{`nodeType`,AST_UNARY}},
@@ -479,6 +480,7 @@ _G.!structAst"AstLambda:_AstScopeExpression"{
 _G.!structAst"AstNamespace:_AstScopeExpression"{
 	_overrides = {{`nodeType`,AST_NAMESPACE}},
 	_scopeType="declarative",
+	{`namespaceReferenceNode`, nil, astRef="node"}, -- AstNamespace  (This is kind of a hack for !self.)
 }
 
 _G.!structAst"AstIf:_AstNode"{
@@ -3504,14 +3506,30 @@ end
 
 		expr = literal
 
-	-- Self (parent file scope).
+	-- Self (parent namespace).
 	elseif !!(IS_TOKEN(TOKEN_DIRECTIVE, "self")) then
-		local import      = astNewNode(AstImport, exprStartToken, parent)
-		local fileScope   = astFindParent1(import, !(AST_FILE_SCOPE)) or errorInternal()
-		import.isLoad     = not fileScope.isModule
-		import.importName = fileScope.moduleName
-		import.fileScope  = fileScope
-		expr              = import
+		!local NAMESPACE_SCOPE_SET = CONST_SET{ AST_FILE_SCOPE, AST_NAMESPACE, AST_STRUCT--[[, AST_ENUM]] }
+		local scope = !!(NAMESPACE_SCOPE_SET)[parent.nodeType] and parent or astFindParent(parent, !!(NAMESPACE_SCOPE_SET)) or errorInternal()
+
+		if scope.nodeType == !(AST_FILE_SCOPE) then
+			local fileScope   = scope
+			local import      = astNewNode(AstImport, exprStartToken, parent)
+			import.isLoad     = not fileScope.isModule
+			import.importName = fileScope.moduleName
+			import.fileScope  = fileScope
+			expr              = import
+
+		elseif scope.nodeType == !(AST_NAMESPACE) then
+			local namespace                  = astNewNode(AstNamespace, exprStartToken, parent)
+			namespace.namespaceReferenceNode = scope
+			expr                             = namespace
+
+		else
+			local typeNode             = astNewNode(AstType, exprStartToken, parent)
+			typeNode.kind              = !(TYPE_KIND_USER)
+			typeNode.typeReferenceNode = scope
+			expr                       = typeNode
+		end
 
 	-- Namespace.
 	elseif !!(IS_TOKEN(TOKEN_KEYWORD, "namespace")) then
@@ -4332,6 +4350,14 @@ do
 				elseif node.nodeType == !(AST_FILE_SCOPE) then
 					local fileScope = node
 					write(" (", fileScope.path, ")")
+
+				elseif node.nodeType == !(AST_NAMESPACE) then
+					local namespace = node
+					if namespace.inferredType then
+						write(" (typeRepresented=", getFriendlyTypeInfoName(namespace.inferredType), ")")
+					elseif namespace.namespaceReferenceNode then
+						write(" (reference=", namespace.namespaceReferenceNode.s, ")")
+					end
 
 				elseif !!(CONST_SET{ AST_STRUCT, AST_ENUM })[node.nodeType] then
 					local structOrEnum = node
