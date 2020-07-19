@@ -1656,18 +1656,18 @@ end
 	moveToNextRelevantPipe(state, typeNode)
 !NODE_INFERRER_END `end`
 
-local function getArgumentNodeForError(callOrReturnNode, valueIndex, valueExpr)
+local function getArgumentNodeForError(callOrReturnOrOther, valueIndex, valueExpr)
 	return
-		callOrReturnNode.nodeType == !(AST_CALL) and callOrReturnNode.isMethod and valueIndex == 1
+		callOrReturnOrOther.nodeType == !(AST_CALL) and callOrReturnOrOther.isMethod and valueIndex == 1
 		and valueExpr
 		or  astGetExpressionVisuallyFurthestToTheLeft(valueExpr)
 end
 
 -- doesMatch, compatibilityScore = checkIfValuesMatchArgumentTypes(
---     state, callOrReturnNode, values, valueTypes, typeInfos,
+--     state, callOrReturnOrOther, values, valueTypes, typeInfos,
 --     softCheck, calleeDeclarationForCurrentOverload=nil, argumentsNamed=nil
 -- )
-local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, valueTypes, typeInfos, softCheck, calleeDecl, argsNamed)
+local function checkIfValuesMatchArgumentTypes(state, callOrReturnOrOther, values, valueTypes, typeInfos, softCheck, calleeDecl, argsNamed)
 	--[[
 		Situations:
 
@@ -1687,12 +1687,12 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 		func(   x, var()    )-- request 1+list(1+vararg)
 	]]
 
-	local isCallingName         = callOrReturnNode.nodeType == !(AST_CALL) and callOrReturnNode.callee.nodeType == !(AST_IDENTIFIER)
+	local isCallingName         = callOrReturnOrOther.nodeType == !(AST_CALL) and callOrReturnOrOther.callee.nodeType == !(AST_IDENTIFIER)
 	local isCallingConstantName = false
 	local constLambda           = nil
 
 	if isCallingName then
-		calleeDecl            = calleeDecl or callOrReturnNode.callee.declaration
+		calleeDecl            = calleeDecl or callOrReturnOrOther.callee.declaration
 		isCallingConstantName = isDeclarationConstant(calleeDecl)
 
 		if isCallingConstantName then
@@ -1792,7 +1792,7 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 				if not argNamed then
 					!local NAMED_ARG_ERROR = trimTemplate`
 						if softCheck then  return false, 0  end
-						local call = callOrReturnNode
+						local call = callOrReturnOrOther
 						typeError2(state,
 							call, F("Missing value for required argument #%d (%s).", argIndex, arg.declaration.name.name),
 							arg,  F("...here is the argument in the called function.")
@@ -1830,20 +1830,20 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 		end
 	end
 
-	-- ifDEBUG `io.write(F("requested %.0f-%.0f, accepted %.0f-%.0f  ", requestedMin, requestedMax, acceptedMin, acceptedMax)) ; astPrint(callOrReturnNode)`
+	-- ifDEBUG `io.write(F("requested %.0f-%.0f, accepted %.0f-%.0f  ", requestedMin, requestedMax, acceptedMin, acceptedMax)) ; astPrint(callOrReturnOrOther)`
 
 	-- Too few values.
 	-- @UX: Better error message if the last value is a call (without parentheses).
 	if requestedMin < acceptedMin then
 		if softCheck then  return false, 0  end
 
-		local exprForError = valueExprLast and getArgumentNodeForError(callOrReturnNode, 1, values[1]) or callOrReturnNode
+		local exprForError = valueExprLast and getArgumentNodeForError(callOrReturnOrOther, 1, values[1]) or callOrReturnOrOther
 		local prefix       = requestedMax+acceptedMax == math.huge and "Incorrect number of" or "Missing"
-		local thingsStr    = callOrReturnNode.nodeType == !(AST_CALL) and "arguments" or "values to return"
+		local thingsStr    = (callOrReturnOrOther.nodeType == !(AST_CALL) and "arguments") or (callOrReturnOrOther.nodeType == !(AST_RETURN) and "values to return") or "values"
 		local gotStr       = (requestedMax ~= math.huge and F("%d", requestedMin)) or (requestedMin == 0 and "variable amount") or F("%d + variable amount", requestedMin)
 
 		local errorFunc
-			=   not valueExprLast and callOrReturnNode.nodeType == !(AST_RETURN)
+			=   not valueExprLast and callOrReturnOrOther.nodeType == !(AST_RETURN)
 			and typeErrorAfter
 			or  typeError
 
@@ -1858,9 +1858,9 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 
 		local valueIndex          = math.min(acceptedMax+1, valueCount)
 		local firstExtraValueExpr = values[valueIndex]
-		local exprForError        = getArgumentNodeForError(callOrReturnNode, valueIndex, firstExtraValueExpr)
+		local exprForError        = getArgumentNodeForError(callOrReturnOrOther, valueIndex, firstExtraValueExpr)
 		local prefix              = requestedMax+acceptedMax == math.huge and "Incorrect number of" or "Too many"
-		local thingsStr           = callOrReturnNode.nodeType == !(AST_CALL) and "arguments" or "values to return"
+		local thingsStr           = (callOrReturnOrOther.nodeType == !(AST_CALL) and "arguments") or (callOrReturnOrOther.nodeType == !(AST_RETURN) and "values to return") or "values"
 		local gotStr              = (requestedMax ~= math.huge and F("%d", requestedMin)) or (requestedMin == 0 and "variable amount") or F("%d + variable amount", requestedMin)
 
 		typeError(state, exprForError, "%s %s. (Wanted %d, got %s)", prefix, thingsStr, acceptedMax, gotStr) -- Note: acceptedMax is never infinite here.
@@ -1905,8 +1905,8 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 			end
 
 			local adjustVarargToIncludeNil = not (valueTypeInfo.tag == !(TYPE_VARARG) and typeInfoToMatch.tag == !(TYPE_VARARG))
-			local valueTypeInfoAdjusted    = adjustTypeToOne(state, valueExpr,        valueTypeInfo, adjustVarargToIncludeNil) -- We have a value with a type.
-			local typeInfoToMatchAdjusted  = adjustTypeToOne(state, callOrReturnNode, typeInfoToMatch)                         -- We want a specific type.
+			local valueTypeInfoAdjusted    = adjustTypeToOne(state, valueExpr,           valueTypeInfo, adjustVarargToIncludeNil) -- We have a value with a type.
+			local typeInfoToMatchAdjusted  = adjustTypeToOne(state, callOrReturnOrOther, typeInfoToMatch)                         -- We want a specific type.
 
 			local strictTypeMatch = false
 			!SET_STRICT_TYPE_MATCH_FLAG(`typeInfoIndex`)
@@ -1920,7 +1920,7 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 				typeError(
 					state, valueExpr,
 					"Type mismatch for %s #%d (return value #%d from call). (Wanted %s, got %s)",
-					callOrReturnNode.nodeType == !(AST_CALL) and "argument" or "return value",
+					(callOrReturnOrOther.nodeType == !(AST_CALL) and "argument") or (callOrReturnOrOther.nodeType == !(AST_RETURN) and "return value") or "value",
 					slot,
 					callOutArgIndex,
 					getFriendlyTypeInfoName(typeInfoToMatchAdjusted),
@@ -1931,8 +1931,8 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 		-- Vararg (0..inf values) OR other (1 value).
 		else
 			local adjustVarargToIncludeNil = not (valueTypeInfo.tag == !(TYPE_VARARG) and typeInfoToMatch.tag == !(TYPE_VARARG))
-			local valueTypeInfoAdjusted    = adjustTypeToOne(state, valueExpr,        valueTypeInfo, adjustVarargToIncludeNil) -- We have a value with a type.
-			local typeInfoToMatchAdjusted  = adjustTypeToOne(state, callOrReturnNode, typeInfoToMatch)                         -- We want a specific type.
+			local valueTypeInfoAdjusted    = adjustTypeToOne(state, valueExpr,           valueTypeInfo, adjustVarargToIncludeNil) -- We have a value with a type.
+			local typeInfoToMatchAdjusted  = adjustTypeToOne(state, callOrReturnOrOther, typeInfoToMatch)                         -- We want a specific type.
 
 			local strictTypeMatch = false
 			!SET_STRICT_TYPE_MATCH_FLAG(`typeInfoIndex`)
@@ -1941,11 +1941,11 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 
 			if not isCompatible then
 				if softCheck then  return false, 0  end
-				!ifDEBUG `astPrintTree(callOrReturnNode)`
+				!ifDEBUG `astPrintTree(callOrReturnOrOther)`
 				typeError(
-					state, getArgumentNodeForError(callOrReturnNode, valueIndex, valueExpr),
+					state, getArgumentNodeForError(callOrReturnOrOther, valueIndex, valueExpr),
 					"Type mismatch for %s #%d. (Wanted %s, got %s)",
-					callOrReturnNode.nodeType == !(AST_CALL) and "argument" or "return value",
+					(callOrReturnOrOther.nodeType == !(AST_CALL) and "argument") or (callOrReturnOrOther.nodeType == !(AST_RETURN) and "return value") or "value",
 					slot,
 					getFriendlyTypeInfoName(typeInfoToMatchAdjusted),
 					getFriendlyTypeInfoName(valueTypeInfoAdjusted)
@@ -1982,8 +1982,8 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 		local typeInfoToMatch = typeInfos[argIndex]
 
 		-- @Incomplete: Vararg is not yet supported for named arguments. 2020-04-09
-		local valueTypeInfoAdjusted   = adjustTypeToOne(state, valueExpr,        valueTypeInfo,   true)
-		local typeInfoToMatchAdjusted = adjustTypeToOne(state, callOrReturnNode, typeInfoToMatch, true)
+		local valueTypeInfoAdjusted   = adjustTypeToOne(state, valueExpr,           valueTypeInfo,   true)
+		local typeInfoToMatchAdjusted = adjustTypeToOne(state, callOrReturnOrOther, typeInfoToMatch, true)
 
 		local strictTypeMatch = false
 		!SET_STRICT_TYPE_MATCH_FLAG(`argIndex`)
@@ -1992,7 +1992,7 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnNode, values, 
 
 		if not isCompatible then
 			if softCheck then  return false, 0  end
-			!ifDEBUG `astPrintTree(callOrReturnNode)`
+			!ifDEBUG `astPrintTree(callOrReturnOrOther)`
 			typeError(
 				state, valueExpr,
 				"Type mismatch for argument #%d (%s). (Wanted %s, got %s)",
@@ -5317,6 +5317,7 @@ end
 		local values = forLoop.expressions
 
 		-- @Incomplete: Add all declarations now and infer their types later to fix confusing "undeclared identifier" errors.
+		-- (This is fixed since we wait with inferring the body, right? 2020-07-18)
 
 		for _, expr in ipairs(values) do
 			if not expr.inferredType then
@@ -5374,13 +5375,10 @@ end
 				end
 			end
 
-			addDeclarationInForLoop(
-				state, forLoop,
-				(names[1] and names[1].name  or "it"),
-				(names[1] and names[1].token or forLoop.token),
-				(names[1] == nil),
-				state.builtinTypeInfos[anyFloat and "float" or "int"]
-			)
+			local name     = (names[1] and names[1].name ) or "it"
+			local token    = (names[1] and names[1].token) or forLoop.token
+			local typeInfo = state.builtinTypeInfos[anyFloat and "float" or "int"]
+			addDeclarationInForLoop(state, forLoop, name, token, names[1]==nil, typeInfo)
 
 		----------------------------------------------------------------
 		-- for [ v1, ... : ] obj
@@ -5554,93 +5552,117 @@ end
 			!ASSERT `#names >= 1`
 			!ASSERT `values[1]`
 
-			local iterExpr, iterTypeInfo = getAssignmentValue(state, forLoop, values, 1, nil, nil, "loop value")
+			local iterExpr, iterType = getAssignmentValue(state, forLoop, values, 1, nil, nil, "loop value")
+			if iterType.tag ~= !(TYPE_FUNCTION) then
+				typeError(state, iterExpr, "For loop: Expected a function. (Got %s)", getFriendlyTypeInfoName(iterType))
+			end
 
-			if iterTypeInfo.tag ~= !(TYPE_FUNCTION) then
-				typeError(state, iterExpr, "For loop: Expected a function. (Got %s)", getFriendlyTypeInfoName(iterTypeInfo))
-
-			elseif #iterTypeInfo.argumentTypesIn ~= 2 then
-				-- @Incomplete: Consider optional arguments.
+			local iterArgInCount = #iterType.argumentTypesIn + (iterType.argumentTypesIn[1] and getLast(iterType.argumentTypesIn).tag == !(TYPE_VARARG) and -1 or 0)
+			if iterArgInCount > 2 then
 				typeError(
 					state, astGetExpressionVisuallyFurthestToTheLeft(iterExpr),
-					"For loop: Iterators must take two arguments - an invariant state object and a control value. (The signature of this function is %s)",
-					getFriendlyTypeInfoName(iterTypeInfo)
+					"For loop: Iterators must take at most two arguments - an invariant state object and a control value. (The signature of this function is %s)",
+					getFriendlyTypeInfoName(iterType)
 				)
+			end
 
-			elseif not iterTypeInfo.argumentTypesOut[1] then
+			local iterArgsOut = iterType.argumentTypesOut
+
+			if not iterArgsOut[1] then
 				typeError(
 					state, astGetExpressionVisuallyFurthestToTheLeft(iterExpr),
 					"For loop: Iterator does not return anything."
 				)
 
-			elseif iterTypeInfo.argumentTypesOut[1].tag == !(TYPE_NONE) then
+			elseif iterArgsOut[1].tag == !(TYPE_NONE) then
 				typeError(
 					state, astGetExpressionVisuallyFurthestToTheLeft(iterExpr),
-					"For loop: The type of the first returned value from iterators cannot be simply nil. It must be a compound type where nil is included."
+					"For loop: The type of the first returned value from iterators cannot be none."
 				)
 
-			elseif not (
-				iterTypeInfo.argumentTypesOut[1].tag == !(TYPE_ANY)
-				or (
-					iterTypeInfo.argumentTypesOut[1].tag == !(TYPE_COMPOUND)
-					and itemWith1(iterTypeInfo.argumentTypesOut[1], "tag", !(TYPE_NONE))
-				)
-			) then
+			elseif iterArgsOut[#iterArgsOut].tag ~= !(TYPE_VARARG) and #names > #iterArgsOut then
+				-- @Incomplete: Consider !must.
 				typeError(
-					state, astGetExpressionVisuallyFurthestToTheLeft(iterExpr),
-					"For loop: The type of the first returned value from iterators must be a compound type where nil is included. (This function returns %s)",
-					getFriendlyTypeInfoName(iterTypeInfo.argumentTypesOut[1])
-				)
-
-			elseif #iterTypeInfo.argumentTypesOut ~= #names then
-				-- @Incomplete: Consider !must and make everything else optional.
-				typeError(
-					state, names[math.min(#iterTypeInfo.argumentTypesOut+1, #names)],
-					"For loop: Incorrect number of names specified for iterator. (Expected %d, got %d)",
-					#iterTypeInfo.argumentTypesOut,
+					state, names[#iterArgsOut+1],
+					"For loop: Too many names specified for iterator. (Expected %d at most, got %d)",
+					#iterArgsOut,
 					#names
 				)
 			end
 
-			--
-			-- @Incomplete: Support 'for' loops/iterators that don't require an iterator value or
-			-- even a state (e.g. if values are read from somewhere else, like an event queue).
-			--
-			-- @Incomplete: Complain if getAssignmentValue() can return a fourth value.
-			--
-			local stateExpr, stateTypeInfo = getAssignmentValue(state, forLoop, values, 2, nil, nil, "loop value")
-			local initExpr,  initTypeInfo  = getAssignmentValue(state, forLoop, values, 3, nil, nil, "loop value")
+			local iterArgsIn = iterType.argumentTypesIn
 
-			if not isTypeCompatibleWith(adjustTypeToOne(state, stateExpr, stateTypeInfo, true), iterTypeInfo.argumentTypesIn[1]) then
-				typeError(
-					state, stateExpr,
-					"For loop: Type mismatch for iterator state (value #2). (Wanted %s, got %s)",
-					getFriendlyTypeInfoName(iterTypeInfo.argumentTypesIn[1]),
-					getFriendlyTypeInfoName(adjustTypeToOne(state, stateExpr, stateTypeInfo, true))
+			do
+				local stateExpr, stateTypeInfo = getAssignmentValue(state, forLoop, values, 2, nil, nil, "loop value", true)
+				local initExpr,  initTypeInfo  = getAssignmentValue(state, forLoop, values, 3, nil, nil, "loop value", true)
+
+				if stateExpr and not isTypeCompatibleWith(adjustTypeToOne(state, stateExpr, stateTypeInfo, true), iterArgsIn[1]) then
+					typeError(
+						state, stateExpr,
+						"For loop: Type mismatch for iterator state (value #2). (Wanted %s, got %s)",
+						getFriendlyTypeInfoName(iterArgsIn[1]),
+						getFriendlyTypeInfoName(adjustTypeToOne(state, stateExpr, stateTypeInfo, true))
+					)
+				end
+				if initExpr and not isTypeCompatibleWith(adjustTypeToOne(state, initExpr, initTypeInfo, true), iterArgsIn[2]) then
+					typeError(
+						state, initExpr,
+						"For loop: Type mismatch for initial control value (value #3). (Wanted %s, got %s)",
+						getFriendlyTypeInfoName(iterArgsIn[2]),
+						getFriendlyTypeInfoName(adjustTypeToOne(state, initExpr, initTypeInfo, true))
+					)
+				end
+			end
+
+			-- Check that the iterator will be called correctly by the loop.
+			do
+				-- Situations:
+				--   for ... in func()
+				--   for ... in expr, func()
+				--   for ... in expr, expr, func()
+				--   for ... in expr, expr, expr
+
+				local valueTypesForIter = {}
+				for i = 1, #values do
+					table.insert(valueTypesForIter, values[i].inferredType)
+				end
+
+				--
+				-- @UX: Better error messages in checkIf*() as they are currently optimized for calls and return nodes.
+				-- @UX: Can we have better error arrows too? But where should they point...?
+				--
+				-- @Cleanup: Don't add the iterator type as an invisible first argument to the iterator itself for this check. checkIf*() probably needs a medium-sized update.
+				--           Maybe we should construct a temporary AstCall here?
+				--
+				checkIfValuesMatchArgumentTypes(
+					state, forLoop, values, valueTypesForIter, {valueTypesForIter[1], unpack(iterArgsIn)},
+					false, nil, nil
 				)
 			end
-			if not isTypeCompatibleWith(adjustTypeToOne(state, initExpr, initTypeInfo, true), iterTypeInfo.argumentTypesIn[2]) then
-				typeError(
-					state, initExpr,
-					"For loop: Type mismatch for initial control value (value #3). (Wanted %s, got %s)",
-					getFriendlyTypeInfoName(iterTypeInfo.argumentTypesIn[2]),
-					getFriendlyTypeInfoName(adjustTypeToOne(state, initExpr, initTypeInfo, true))
-				)
+
+			local extraExpr = getAssignmentValue(state, forLoop, values, 4, nil, nil, "loop value", true)
+			if extraExpr then
+				typeError(state, extraExpr, "For loop: Too many loop values. (Expected 3 at most: interator function, interator state and control value)")
 			end
 
 			for i, ident in ipairs(names) do
-				local typeInfo = iterTypeInfo.argumentTypesOut[i]
+				local typeInfo = iterArgsOut[i] or iterArgsOut[#iterArgsOut] -- May be vararg.
+				typeInfo       = adjustTypeToOne(state, iterExpr, typeInfo, false)
 
-				if i > 1 or typeInfo.tag == !(TYPE_ANY) then
-					-- void
+				-- Strip none from compound types for the first value as an iterator returning nil will stop the loop.
+				if i == 1 and typeInfo.tag == !(TYPE_COMPOUND) then
+					local compound    = typeInfo
+					local iInCompound = indexOf(compound, state.builtinTypeInfos.none)
 
-				-- Strip nil from the compound type for the first value (unless it's 'any').
-				elseif #typeInfo > 2 then
-					local typeInfos = {unpack(typeInfo)}
-					removeItem(typeInfos, state.builtinTypeInfos.none)
-					typeInfo = getTypeInfoForCompoundType(state, typeInfos, false)
-				else
-					typeInfo = typeInfo[2].tag == !(TYPE_NONE) and typeInfo[1] or typeInfo[2] or errorInternal()
+					if not iInCompound then
+						-- void
+					elseif not compound[3] then
+						typeInfo = compound[3-iInCompound] -- We want the type in the compound that's not none.
+					else
+						local typeInfos = {unpack(compound)}
+						table.remove(typeInfos, iInCompound)
+						typeInfo = getTypeInfoForCompoundType(state, typeInfos, false)
+					end
 				end
 
 				addDeclarationInForLoop(state, forLoop, ident.name, ident.token, false, typeInfo)
@@ -6769,9 +6791,9 @@ end
 
 
 
--- expression, typeInfo = getAssignmentValue( state, assignmentTarget, values, valueIndex, expectedTypeInfo=any, extraBinaryOperation="", targetTerm="assignment target" )
+-- expression, typeInfo = getAssignmentValue( state, assignmentTarget, values, valueIndex, expectedTypeInfo=any, extraBinaryOperation="", targetTerm="assignment target" [, noError=false ] )
 -- Note: Vararg node/type may be returned.
-function _G.getAssignmentValue(state, targetExpr, values, i, typeInfoExpected, binOp, targetTerm)
+function _G.getAssignmentValue(state, targetExpr, values, i, typeInfoExpected, binOp, targetTerm, noError)
 	!(
 	local TEMPLATE_TARGET_NAME = trimTemplate`
 		targetExpr.nodeType == $nodeTypeIdent  and " ('"..targetExpr.name.."')" or
@@ -6840,6 +6862,8 @@ function _G.getAssignmentValue(state, targetExpr, values, i, typeInfoExpected, b
 			valueTypeInfo = valueTypeInfo[1]
 
 			if not valueTypeInfo then
+				if noError then  return valueExpr, valueTypeInfo  end
+
 				local call     = valueExpr
 				local argIndex = 1
 				!!(CALL_RETURNS_NOTHING)
@@ -6867,6 +6891,7 @@ function _G.getAssignmentValue(state, targetExpr, values, i, typeInfoExpected, b
 	valueExpr = values[#values]
 
 	if not valueExpr then
+		if noError then  return nil, nil  end
 		typeError(state, targetExpr, "Missing a value for %s #%d%s.", targetTerm, i, !!(TARGET_NAME))
 
 	elseif valueExpr.nodeType == !(AST_CALL) and not valueExpr.surroundedByParentheses then
@@ -6880,7 +6905,7 @@ function _G.getAssignmentValue(state, targetExpr, values, i, typeInfoExpected, b
 		if typeInfoForCall.tag == !(TYPE_LIST) then
 			listSig = typeInfoForCall
 		else
-			typeError(state, call, "The object being called is not a function. (It is %s)", getFriendlyTypeInfoName(typeInfoForCall))
+			typeError(state, call, "The object being called is not a function. (It is %s)", getFriendlyTypeInfoName(typeInfoForCall)) -- This would actually be an internal error, right? 2020-07-19
 		end
 
 		local typeInfoForOutArg = listSig[argIndex]
@@ -6890,6 +6915,7 @@ function _G.getAssignmentValue(state, targetExpr, values, i, typeInfoExpected, b
 		elseif listSig[1] and listSig[#listSig].tag == !(TYPE_VARARG) then
 			typeInfoForOutArg = listSig[#listSig]
 		else
+			if noError then  return nil, nil  end
 			!!(CALL_RETURNS_NOTHING)
 		end
 
@@ -6912,6 +6938,7 @@ function _G.getAssignmentValue(state, targetExpr, values, i, typeInfoExpected, b
 		return vararg, vararg.inferredType
 
 	else
+		if noError then  return nil, nil  end
 		typeError(state, targetExpr, "Missing a value for %s #%d%s.", targetTerm, i, !!(TARGET_NAME))
 	end
 end
