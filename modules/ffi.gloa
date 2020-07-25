@@ -11,8 +11,9 @@
 	load, loadGlobal
 	new, newArray
 	newInterface
-	toString
+	pointerToInt, pointerToUint
 	toInt, toFloat
+	toString
 
 	-- Types:
 	Carray
@@ -64,8 +65,8 @@ export ArchName :: enum {
 	MIPS   :: "mips",
 }
 export AbiName :: enum {
-	BIT32  :: "32bit",  -- 32 bit architecture.
-	BIT64  :: "64bit",  -- 64 bit architecture.
+	BIT32  :: "32bit",  -- 32-bit architecture.
+	BIT64  :: "64bit",  -- 64-bit architecture.
 	LE     :: "le",     -- Little-endian architecture.
 	BE     :: "be",     -- Big-endian architecture.
 	FPU    :: "fpu",    -- Target has a hardware FPU.
@@ -83,7 +84,7 @@ export ARCH: ArchName : !foreign lua "require'ffi'.arch"
 export Cdecl     :: string
 export CtypeSpec :: Cdecl|Ctype|Cdata
 
-local ParamForNew :: int|float|string|Cdata -- Not sure what exact types are allowed here.
+local ParamForNew :: int|float|string|Cdata|table -- (Not sure what exact types are allowed here.)
 
 
 
@@ -95,15 +96,17 @@ export Cdata :: !foreign struct {
 	},
 }
 
+local ffi :: !self
+
 export Ctype :: !foreign struct {
 	using Cdata,
 
 	!call    :: new,
-	new      :: (ctype:Ctype,            ...:ParamForNew) -> (success:bool, cdata:Cdata) { return new     (ctype,        ...) },
-	newArray :: (ctype:Ctype, count:int, ...:ParamForNew) -> (success:bool, cdata:Cdata) { return newArray(ctype, count, ...) },
+	new      :: (ctype:Ctype,            ...:ParamForNew) -> (success:bool, cdata:Cdata, err:string) { return ffi.new     (ctype,        ...) }, -- @Cleanup @Speed: Should we just say new::ffi.new here?
+	newArray :: (ctype:Ctype, count:int, ...:ParamForNew) -> (success:bool, cdata:Cdata, err:string) { return ffi.newArray(ctype, count, ...) }, -- @Cleanup @Speed: Should we just say newArray::ffi.newArray here?
 }
 
-export Carray :: struct (Item:Type) {
+export Carray :: !foreign struct (Item:Type) {
 	-- We want zero-indexed arrays and this is the only way to achieve that (otherwise expressions like arr[0] will trigger a compiler error).
 	!key:   int,
 	!value: Item,
@@ -117,29 +120,28 @@ export Carray :: struct (Item:Type) {
 
 
 
-local pcall :: (func:any, ...:any) -> bool, ...any !foreign lua "pcall"
-
 export define :: (definitions:Cdecl) !foreign lua "require'ffi'.cdef"
 
--- @Incomplete: Allow the second argument to be a table-like with params.
-export new :: (ct:CtypeSpec, ...:ParamForNew) -> (success:bool, cdata:Cdata, err:string) {
-	local helper :: (ct:CtypeSpec, ...:ParamForNew) -> Cdata !foreign lua "require'ffi'.new"
+local pcall :: (func:any, ...:any) -> bool, ...any !foreign lua "pcall"
+local _new  :: (ct:CtypeSpec, ...:ParamForNew) -> Cdata !foreign lua "require'ffi'.new"
 
-	local ok, cdataOrErr = pcall(helper, ct, ...)
+export new :: (ct:CtypeSpec, ...:ParamForNew) -> (success:bool, cdata:Cdata, err:string) {
+	local ok, cdataOrErr = pcall(_new, ct, ...)
 	if not ok  return false, NULL, cast(string)cdataOrErr
 
 	return true, cast(Cdata)cdataOrErr, ""
 }
 
+-- newArray() is exactly the same as new() - only, the first "parameter" must always be an array length.
 -- If ct is Cdecl (string) then it should end with "[?]".
 export newArray :: (ct:CtypeSpec, count:int, ...:ParamForNew) -> (success:bool, variableLengthObject:Cdata, err:string) {
-	local helper :: (ct:CtypeSpec, count:int, ...:ParamForNew) -> Cdata !foreign lua "require'ffi'.new"
-
-	local ok, cdataOrErr = pcall(helper, ct, count, ...)
+	local ok, cdataOrErr = pcall(_new, ct, count, ...)
 	if not ok  return false, NULL, cast(string)cdataOrErr
 
 	return true, cast(Cdata)cdataOrErr, ""
 }
+
+
 
 local Clib :: !foreign struct {}
 
@@ -177,21 +179,34 @@ export loadGlobal :: (name:string) -> (success:bool, err:string) {
 	return true, ""
 }
 
-export getType :: (cdata:CtypeSpec) -> Ctype !foreign lua "require'ffi'.typeof"
 
-export toString :: (pointer:Cdata, len=0--[[strlen(pointer)]]) -> string !foreign lua "require'ffi'.string"
+
+export toString :: (ptr:Cdata, len=0--[[strlen(ptr)]]) -> string !foreign lua "require'ffi'.string" -- Note: Does not work on "wide" strings in Windows (or any string with NULL bytes) if len is omitted.
 
 export toInt   :: (cdata:Cdata) -> int { return cast(int) toFloat(cdata) }
 export toFloat :: (cdata:Cdata) -> float !foreign lua "tonumber"
 
-export hasAbi :: (name:AbiName) -> bool !foreign lua "require'ffi'.abi"
+local pointerToNumber :: (cdata:Cdata) -> int !foreign lua "tonumber"
+
+export pointerToInt :: (ptr:Cdata) -> int { -- Returns a signed integer!
+	return pointerToNumber(castTo("intptr_t", castTo("void *", ptr)))
+}
+export pointerToUint :: (ptr:Cdata) -> int { -- Is slower than pointerToInt() in LuaJIT! (See http://wiki.luajit.org/ffi-knowledge#convert-a-cdata-pointer-to-lua-number)
+	return pointerToNumber(castTo("uintptr_t", castTo("void *", ptr)))
+}
+
+
+
+export getType :: (cdata:CtypeSpec) -> Ctype !foreign lua "require'ffi'.typeof"
 
 export castTo :: (ct:CtypeSpec, init:Cdata) -> Cdata !foreign lua "require'ffi'.cast"
 
-export isNull :: (pointer:Cdata) -> bool {
-	return pointer == NULL -- A null pointer can be compared to nil (at least in LuaJIT). Nil itself will be treated like a null pointer in this case.
-	-- return toInt(castTo("intptr_t", pointer)) == 0 -- If the above turns out not to work then we can fall back on this.
+export isNull :: (ptr:Cdata) -> bool {
+	return ptr == NULL -- A null pointer can be compared to nil (at least in LuaJIT). Nil itself will be treated like a null pointer in this case.
+	-- return pointerToInt(ptr) == 0 -- If the above turns out not to work then we can fall back on this.
 }
+
+export hasAbi :: (name:AbiName) -> bool !foreign lua "require'ffi'.abi"
 
 -- @Incomplete:
 -- ctype  = ffi.metatype(ct, metatable)
