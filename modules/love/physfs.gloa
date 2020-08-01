@@ -25,8 +25,8 @@ local DEFINITIONS = [[//C
 ]]
 local loveLib: !foreign struct {
 	PHYSFS_getWriteDir:   () -> ffi.Cdata;
-	PHYSFS_setWriteDir:   (dir:string|none) -> bool;
-	PHYSFS_mount:         (dir:string, mountPoint:string|none, appendToPath:bool) -> bool;
+	PHYSFS_setWriteDir:   (dir:string) -> bool;
+	PHYSFS_mount:         (dir:string, mountPoint:string, appendToPath:bool) -> bool;
 	PHYSFS_unmount:       (dir:string) -> bool;
 	PHYSFS_getSearchPath: () -> ffi.Cdata;
 } = NULL
@@ -37,7 +37,7 @@ local init :: () {
 
 	ffi.define(DEFINITIONS)
 
-	if ffi.OS == ffi.OsName.WINDOWS {
+	if ffi.OS == .WINDOWS {
 		local ok, ^loveLib = ffi.load("love", type_of(loveLib))
 		if not ok  error("FFI: Failed loading 'love' library.")
 	} else {
@@ -53,7 +53,7 @@ local init :: () {
 --   To use, wrap paths with mount() at the calling site.
 --
 --   WARNING: This may add a lot of directory paths to an internal list in PhysFS.
---   See mountReadDirectory(), unmountReadDirectory() and getSearchPaths() for more control.
+--   Use mountReadDirectory(), unmountReadDirectory() and getSearchPaths() for more control.
 --
 -- Examples:
 --   local mount :: physfs.mount
@@ -71,7 +71,7 @@ export mount :: (path:string) -> (name:string) {
 	assert(ok)
 
 	assert(loveLib.PHYSFS_setWriteDir(cast(string)parentDir))
-	assert(loveLib.PHYSFS_mount(cast(string)parentDir, nil, false))
+	assert(loveLib.PHYSFS_mount(cast(string)parentDir, NULL, false))
 
 	return cast(string) name
 }
@@ -80,7 +80,7 @@ export getWriteDirectory :: () -> (hasWriteDir:bool, dir:string) {
 	init()
 
 	local cDir = loveLib.PHYSFS_getWriteDir()
-	if ffi.isNull(cDir)  return false, NULL
+	if ffi.isNull(cDir)  return false, ""
 
 	return true, ffi.toString(cDir)
 }
@@ -90,14 +90,14 @@ export setWriteDirectory :: (dir:string) -> (success:bool) {
 }
 export disableWriting :: () -> (success:bool) {
 	init()
-	return loveLib.PHYSFS_setWriteDir(nil)
+	return loveLib.PHYSFS_setWriteDir(NULL)
 }
 
 -- Mount a directory to the root ("/").
 -- If append is false then the directory gets prepended.
 export mountReadDirectory :: (dir:string, append=false) -> (success:bool) {
 	init()
-	return loveLib.PHYSFS_mount(dir, nil, append)
+	return loveLib.PHYSFS_mount(dir, NULL, append)
 }
 -- Mount a directory to a specific mount point.
 export mountReadDirectory :: (dir:string, mountPoint:string, append=false) -> (success:bool) {
