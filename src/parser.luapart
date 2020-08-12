@@ -449,6 +449,7 @@ _G.!structAst"AstLambda:_AstScopeExpression"{
 	_scopeType = "imperative",
 
 	{`captures`,          {},  ast="array"},    -- []AstIdentifier
+	{`captureAll`,        false},
 	{`argumentsIn`,       nil, astRef="node"},  -- AstArguments
 	{`argumentsOut`,      nil, astRef="node"},  -- AstArguments
 	{`takingVararg`,      false},
@@ -2899,8 +2900,15 @@ end
 	local tokType, tokValue = peekNextToken(state, 1)
 
 	if !!(IS_TOKEN(TOKEN_PUNCTUATION, "[")) then
-		!!(EAT_NEXT_TOKEN)
-		!DO_OR_RETURN `parseNameList(state, lambda, lambda.captures, nil, false)`
+		!!(EAT_NEXT_TOKEN) -- '['
+		tokType, tokValue = peekNextToken(state, 1)
+
+		if !!(IS_TOKEN(TOKEN_PUNCTUATION, "*")) then
+			!!(EAT_NEXT_TOKEN) -- '*'
+			lambda.captureAll = true
+		else
+			!DO_OR_RETURN `parseNameList(state, lambda, lambda.captures, nil, false)`
+		end
 
 		tokType, tokValue = eatNextToken(state)
 		if not !!(IS_TOKEN(TOKEN_PUNCTUATION, "]")) then
@@ -3008,7 +3016,7 @@ end
 			end
 		end
 
-		if lambda.isPolymorphic and lambda.captures[1] then
+		if lambda.isPolymorphic and (lambda.captures[1] or lambda.captureAll) then
 			!ERROR_OR_RETURN `errorParsing(state, lambda.token, "Polymorphic functions cannot have captures.")`
 		end
 
@@ -3022,7 +3030,7 @@ end
 		end
 	end
 
-	if lambda.captures[1] and lambda.argumentsIn and not state.soft then
+	if (lambda.captures[1] or lambda.captureAll) and lambda.argumentsIn and not state.soft then
 		for _, arg in ipairs(lambda.argumentsIn.arguments) do
 			if arg.declaration.value then
 				state.warnings = state.warnings+1
@@ -3191,9 +3199,9 @@ end
 
 	if lambda.isPolymorphic and not lambda.body then
 		!ERROR_OR_RETURN `errorParsing(state, lambda.token, "Types of functions cannot be polymorphic - only functions themselves can.")`
-	elseif lambda.captures[1] and not lambda.body then
+	elseif (lambda.captures[1] or lambda.captureAll) and not lambda.body then
 		!ERROR_OR_RETURN `errorParsingAfterLast(state, "Expected a body for function with captures.")`
-	elseif lambda.captures[1] and lambda.bodyIsForeign then
+	elseif (lambda.captures[1] or lambda.captureAll) and lambda.bodyIsForeign then
 		!ERROR_OR_RETURN `errorParsing(state, lambda.token, "Foreign functions cannot have captures.")`
 	end
 
@@ -3302,7 +3310,8 @@ end
 	--     inArgs [-> outArgs] [body]
 	--     captures inArgs [-> outArgs] body
 	--
-	--     captures = '[' capture1, ... ']'
+	--     captures = [ capture1, ... ]
+	--     captures = [ * ]
 	--     inArgs   = ( [ inArg1, ... ] )
 	--     inArg    = [ $ [ ? ] ] name1 [, ... ] : [ $ ] type [ = defaultValue ]
 	--     inArg    = using       name1 [, ... ] : [ $ ] type [ = defaultValue ]
@@ -4666,7 +4675,7 @@ do
 
 			if node.nodeType == !(AST_TYPE) then
 				visitChildren = false
-			elseif node.nodeType == !(AST_LAMBDA) --[[and not node.captures[1] ]]then -- Do we care about captures here?
+			elseif node.nodeType == !(AST_LAMBDA) --[[and not (node.captures[1] or node.captureAll) ]]then -- Do we care about captures here?
 				visitNode     = visitLambdas
 				visitChildren = node == topNode
 			end
