@@ -17,18 +17,18 @@ local ffi :: !import "ffi"
 
 -- https://icculus.org/physfs/docs/html/physfs_8h.html
 local DEFINITIONS = [[//C
-	const char * PHYSFS_getWriteDir   (void);
-	bool         PHYSFS_setWriteDir   (const char *dir);
 	bool         PHYSFS_mount         (const char *dir, const char *mountPoint, bool appendToPath);
 	bool         PHYSFS_unmount       (const char *dir);
 	char **      PHYSFS_getSearchPath (void);
+	const char * PHYSFS_getWriteDir   (void);
+	bool         PHYSFS_setWriteDir   (const char *dir);
 ]]
 local loveLib: !foreign struct {
-	PHYSFS_getWriteDir:   () -> ffi.Cdata;
-	PHYSFS_setWriteDir:   (dir:string) -> bool;
 	PHYSFS_mount:         (dir:string, mountPoint:string, appendToPath:bool) -> bool;
 	PHYSFS_unmount:       (dir:string) -> bool;
 	PHYSFS_getSearchPath: () -> ffi.Cdata;
+	PHYSFS_getWriteDir:   () -> ffi.Cdata;
+	PHYSFS_setWriteDir:   (dir:string) -> bool;
 } = NULL
 
 local init :: () {
@@ -51,6 +51,7 @@ local init :: () {
 -- mount()
 --   Conveniently read from/save to anywhere on the computer in LÖVE.
 --   To use, wrap paths with mount() at the calling site.
+--   Raises an error on failure.
 --
 --   WARNING: This may add a lot of directory paths to an internal list in PhysFS.
 --   Use mountReadDirectory(), unmountReadDirectory() and getSearchPaths() for more control.
@@ -67,11 +68,11 @@ local init :: () {
 export mount :: (path:string) -> (name:string) {
 	init()
 
-	local ok, parentDir, name = matchPattern(path, "^(.+)/([^/]+)$")
+	local ok, parentDir, name = matchPattern(path, "^(.+)[/\\]([^/\\]+)$")
 	assert(ok)
 
-	assert(loveLib.PHYSFS_setWriteDir(cast(string)parentDir))
 	assert(loveLib.PHYSFS_mount(cast(string)parentDir, NULL, false))
+	assert(loveLib.PHYSFS_setWriteDir(cast(string)parentDir))
 
 	return cast(string) name
 }

@@ -928,15 +928,18 @@ function _G.writeExpression(state, writer, indent, nextLocalN, localsStack, expr
 		writeCast(state, writer, indent, nextLocalN, localsStack, cast)
 
 	elseif expr.nodeType == !(AST_TABLE) then
+		!local WRAP     = 10 -- We're trying to wrap very long lines. This solution ain't perfect but it's better than nothing!
 		local tableNode = expr
-		local first     = true
+		local indentStr = ("\t"):rep(indent)
+		local count     = 0
 		file:write("{")
 
 		if tableNode.inferredType.tag == !(TYPE_TABLE) then
 			for _, tableField in ipairs(tableNode.fields) do
 				if not (isExpressionNil(tableField.value) and isExpressionConstant(state, tableField.key, true)) then
-					if not first then  file:write(", ")  end
-					first = false
+					count = count + 1
+					if count % !(WRAP) == 0 then  file:write(",") ; writeEol(state, writer) ; file:write(indentStr, "\t")
+					elseif       count >  1 then  file:write(", ")  end
 
 					-- @Polish: Output sequence values without key in generic table constructors.
 					writeTableConstructorKey(state, writer, indent, nextLocalN, localsStack, tableField.key)
@@ -949,8 +952,9 @@ function _G.writeExpression(state, writer, indent, nextLocalN, localsStack, expr
 			for _, tableField in ipairs(tableNode.fields) do
 				!ASSERT("tableField.key.nodeType == "..AST_LITERAL) -- :VariableArrayIndices
 
-				if not first then  file:write(", ")  end
-				first = false
+				count = count + 1
+				if count % !(WRAP) == 0 then  file:write(",") ; writeEol(state, writer) ; file:write(indentStr, "\t")
+				elseif       count >  1 then  file:write(", ")  end
 
 				if not tableField.keyIsGenerated then
 					writeTableConstructorKey(state, writer, indent, nextLocalN, localsStack, tableField.key)
@@ -967,8 +971,9 @@ function _G.writeExpression(state, writer, indent, nextLocalN, localsStack, expr
 				local tableField = findTableFieldByNameInStructConstructor(state, tableNode, member.name)
 
 				if not (tableField or isStructMemberDefaultValueNil(state, structInfo.astNode, member.name, tableNode)) then
-					if not first then  file:write(", ")  end
-					first = false
+					count = count + 1
+					if count % !(WRAP) == 0 then  file:write(",") ; writeEol(state, writer) ; file:write(indentStr, "\t")
+					elseif       count >  1 then  file:write(", ")  end
 
 					writeTableConstructorKeyName(writer, member.name)
 					file:write("=")
@@ -978,8 +983,9 @@ function _G.writeExpression(state, writer, indent, nextLocalN, localsStack, expr
 
 			for _, tableField in ipairs(tableNode.fields) do
 				if tableField.keyIsGenerated or not isExpressionNil(tableField.value) then
-					if not first then  file:write(", ")  end
-					first = false
+					count = count + 1
+					if count % !(WRAP) == 0 then  file:write(",") ; writeEol(state, writer) ; file:write(indentStr, "\t")
+					elseif       count >  1 then  file:write(", ")  end
 
 					if not tableField.keyIsGenerated then
 						writeTableConstructorKey(state, writer, indent, nextLocalN, localsStack, tableField.key)
@@ -994,7 +1000,10 @@ function _G.writeExpression(state, writer, indent, nextLocalN, localsStack, expr
 		end
 
 		if tableNode.trailingExpression then
-			if not first then  file:write(", ")  end
+			count = count + 1
+			if count % !(WRAP) == 0 then  file:write(",") ; writeEol(state, writer) ; file:write(indentStr, "\t")
+			elseif       count >  1 then  file:write(", ")  end
+
 			writeExpression(state, writer, indent, nextLocalN, localsStack, tableNode.trailingExpression)
 		end
 
@@ -2924,14 +2933,24 @@ function _G.writeProgram(state, writer)
 		local USE_PADDING = true -- Enabling this seem better.
 		)
 
-		writer.currentOutputLine = writer.currentOutputLine+5
-		addLineMappingDummy(state, writer) -- For the xpcall() here below.
+		!local WRAP                     = 50
+		local lastOutputLineForMappings = writer.currentOutputLine
+		local lineCountForMappings      = math.floor(1 + lastOutputLineForMappings / !(WRAP))
+
+		writer.currentOutputLine = (writer.currentOutputLine
+			+ 1                    -- local _
+			+ 1                    -- lineMappings.paths
+			+ lineCountForMappings -- lineMappings.files
+			+ lineCountForMappings -- lineMappings.lines
+			+ 1                    -- xpcall (for which we add a mapping on the next line)
+		)
+		addLineMappingDummy(state, writer)
 
 		local MODULE_DIR_PREFIX = (COMPILER_DIRECTORY.."/modules/"):gsub("^%./", "")
 
 		local pathIndices = {}
 		local pathIndex   = 0
-		local first       = true
+		local count       = 0
 
 		file:write("local _ = nil\n") -- Takes up less space than 'nil'.
 
@@ -2940,8 +2959,8 @@ function _G.writeProgram(state, writer)
 			local path = writer.lineMappingFiles[ln]
 
 			if writer.lineMappingLines[ln] and not pathIndices[path] then
-				if not first then  file:write(",")  end
-				first = false
+				count = count + 1
+				if count > 1 then  file:write(",")  end -- We don't care about WRAP here as this array will be relatively short.
 
 				pathIndex         = pathIndex+1
 				pathIndices[path] = pathIndex
@@ -2961,15 +2980,17 @@ function _G.writeProgram(state, writer)
 		file:write("lineMappings.files = {")
 		!if USE_PADDING then
 			for ln = 1, writer.currentOutputLine do
-				if ln > 1 then  file:write(",")  end
+				if ln % !(WRAP) == 0 and ln <= lastOutputLineForMappings then  file:write(",") ; writeEol(state, writer) ; file:write("\t")
+				elseif ln       >  1 then  file:write(",")  end
 				file:write(pathIndices[writer.lineMappingFiles[ln]] or "_")
 			end
 		!else
-			first = true
+			count = 0
 			for ln = 1, writer.currentOutputLine do
 				if writer.lineMappingLines[ln] then
-					if not first then  file:write(",")  end
-					first = false
+					count = count + 1
+					if count % !(WRAP) == 0 and count <= lastOutputLineForMappings then  file:write(",") ; writeEol(state, writer) ; file:write("\t")
+					elseif count       >  1 then  file:write(",")  end
 					file:write(F("[%d]=%d", ln, pathIndices[writer.lineMappingFiles[ln]]))
 				end
 			end
@@ -2979,15 +3000,17 @@ function _G.writeProgram(state, writer)
 		file:write("lineMappings.lines = {")
 		!if USE_PADDING then
 			for ln = 1, writer.currentOutputLine do
-				if ln > 1 then  file:write(",")  end
+				if ln % !(WRAP) == 0 and ln <= lastOutputLineForMappings then  file:write(",") ; writeEol(state, writer) ; file:write("\t")
+				elseif ln       >  1 then  file:write(",")  end
 				file:write(writer.lineMappingLines[ln] or "_")
 			end
 		!else
-			first = true
+			count = 0
 			for ln = 1, writer.currentOutputLine do
 				if writer.lineMappingLines[ln] then
-					if not first then  file:write(",")  end
-					first = false
+					count = count + 1
+					if count % !(WRAP) == 0 and count <= lastOutputLineForMappings then  file:write(",") ; writeEol(state, writer) ; file:write("\t")
+					elseif count       >  1 then  file:write(",")  end
 					file:write(F("[%d]=%d", ln, writer.lineMappingLines[ln]))
 				end
 			end
