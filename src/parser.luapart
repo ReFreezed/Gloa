@@ -1624,8 +1624,18 @@ end
 		local enum = scope
 		!ASSERT("enum.nodeType == "..AST_ENUM) -- Note: We don't support !if or anything in enums, so the parent scope should always be the enum.
 
-		enum.autoValue        = enum.autoValue+1
-		declarations[1].value = newLiteral(declarations[1], nameListStartToken, !(LITERAL_INTEGER), enum.autoValue)
+		if enum.memberType and not (enum.memberType.typeName == "int" or enum.memberType.typeName == "string") then
+			!ERROR_OR_RETURN_FALSE `errorParsingAfterLast(state, "Expected a value for '%s'. (Only int and string enums support automatic values.)", declNames[1].name)`
+		end
+
+		if not enum.memberType or enum.memberType.typeName == "int" then
+			enum.autoValue        = enum.autoValue + 1
+			declarations[1].value = newLiteral(declarations[1], nameListStartToken, !(LITERAL_INTEGER), enum.autoValue)
+		elseif enum.memberType.typeName == "string" then
+			declarations[1].value = newLiteral(declarations[1], nameListStartToken, !(LITERAL_STRING), declNames[1].name)
+		else
+			errorInternal(state, enum.memberType, enum.memberType.typeName)
+		end
 
 		!ASSERT("declKind == "..DECL_KIND_LOCAL_VAR)
 
