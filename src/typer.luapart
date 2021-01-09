@@ -3309,6 +3309,10 @@ _G.!(local )!!BUILTIN_TYPE_TAG_TO_LITERAL_TYPE = {
 		typeInfo = adjustTypeToOne(state, unary.expression, typeInfo, true)
 	end
 
+	if not typeInfo.isReady then
+		!DEPEND_AND_RETURN(`unary`, DEPEND_STRUCT_MEMBERS_READY, `typeInfo`) -- Needed when e.g. getting the length of array-like structs in some cases.
+	end
+
 	if unary.operation == "+" or unary.operation == "-" then
 		-- @Incomplete: Allow int|float compound type here (or disallow declarations of that specific compound type).
 		if not isTypeNumeric(typeInfo) then
@@ -3328,7 +3332,7 @@ _G.!(local )!!BUILTIN_TYPE_TAG_TO_LITERAL_TYPE = {
 
 	elseif unary.operation == "#" then
 		if not (
-			(typeInfo.tag == !(TYPE_STRUCT) and typeInfo.valueType and not typeInfo.keyType) -- Should we allow keyType to be int?
+			(typeInfo.tag == !(TYPE_STRUCT) and typeInfo.valueType and not typeInfo.keyType) -- Should we allow keyType to be int? (Leaning towards no, I think. 2021-01-09)
 			or !!(CONST_SET{ TYPE_ARRAY, TYPE_TABLE, TYPE_STRING, TYPE_VARARG })[typeInfo.tag]
 		) then
 			typeError(
@@ -3528,13 +3532,13 @@ end
 -- memberName, memberValueType, constDecl = validateStructKey( state, dependent, keyExpr, structInfo, isLvalue )
 -- Returns nil on failure and the dependent is now waiting.
 function _G.validateStructKey(state, dependent, keyExpr, structInfo, isLvalue)
+	if not structInfo.isReady then
+		!DEPEND_AND_RETURN(`dependent`, DEPEND_STRUCT_MEMBERS_READY, `structInfo`, nil, `nil`)
+	end
+
 	local keyExprType = keyExpr.inferredType
 	local memberName  = ""
 	local memberValueType, constDecl
-
-	if structInfo.kind ~= !(STRUCT_KIND_NORMAL) and not structInfo.hasMembers then
-		!DEPEND_AND_RETURN(`dependent`, DEPEND_STRUCT_MEMBERS_READY, `structInfo`, nil, `nil`)
-	end
 
 	if structInfo.kind == !(STRUCT_KIND_TABLE) and (keyExprType.tag ~= !(TYPE_STRING) or structInfo.keyType.tag == !(TYPE_STRING)) then
 		if not isTypeCompatibleWith(keyExprType, structInfo.keyType) then
