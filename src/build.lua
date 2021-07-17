@@ -238,7 +238,7 @@ end
 pp.processFile{
 	pathIn          = DIR_HERE.."/main.lua2p",
 	pathOut         = pathGloaOut,
-	pathMeta        = pathGloaOut:gsub("%.%w+", ".meta%0"),
+	pathMeta        = pathGloaOut:gsub("%.%w+$", ".meta%0"),
 
 	debug           = false,
 	backtickStrings = true,

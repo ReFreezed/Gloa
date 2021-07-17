@@ -67,7 +67,7 @@ local main :: () {
 	print(ent.name) -- "no name"
 	print(ent.x)    -- 5
 
-	-- ent.foo = 5  -- Error, 'foo' is not a member of Entity!
+	-- ent.foo = 5  -- Error: 'foo' is not a member of Entity!
 
 	local ent2: Entity = {y=7} -- Structs can be initialized with custom values.
 	print(ent2.x, ent2.y)      -- 0 7
@@ -79,7 +79,7 @@ The 'end' keyword is also removed as we define scopes using C-style curly bracke
 ```lua
 -- Functions are generally declared as constants.
 local MY_CONST   :: 5
-local myFunction :: (x:int, y:int) -> bool, int { -- Function that takes two ints a returns a bool and an int.
+local myFunction :: (x:int, y:int) -> bool, int { -- Function that takes two ints and returns a bool and an int.
 	return true, 7
 }
 
@@ -91,7 +91,9 @@ local myFunction : (x:int, y:int) -> bool, int : (x:int, y:int) -> bool, int {
 -- Function declarations can get quite long this way so it's better to have their types be inferred.
 
 -- You can optionally name the return values for better-documented code.
-local myFunction :: (x:int, y:int) -> (success:bool, result:int) { }
+local myFunction :: (x:int, y:int) -> (success:bool, result:int) {
+	return true, 7
+}
 ```
 
 Variables can contain references to functions, and a function can take another function as an argument.
@@ -174,14 +176,14 @@ local main :: () {
 	while x > 0 {
 		x -= 1+1  -- Same as  x = x - (1+1)
 		if x < 5
-			break -- We can break or continue loops.
+			break -- We can 'break' or 'continue' loops.
 	}
 
 	-- For loops.
 	for 1, 3         print(it)          -- 1 2 3
 	for array        print(itIndex, it) -- 'it' is the default name for the item variable.
 	for v: array     print(itIndex, v)  -- Rename the 'it' variable.
-	for v, i: array  print(i, v)        -- Rename the 'itIndex' variable.
+	for v, i: array  print(i, v)        -- Rename both the 'it' and 'itIndex' variables.
 	-- Lua-style and iterators:
 	for i = 1, 3               print(i)    -- 1 2 3
 	for i, v in ipairs(array)  print(i, v) -- ipairs() returns an iterator and whatever value the 'for' loop require.
