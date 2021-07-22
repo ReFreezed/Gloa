@@ -16,12 +16,6 @@
 --============================================================]]
 
 !(
-local BYTE_SPACE     = getByte" "
-local BYTE_NL        = getByte"\n"
-local BYTE_CR        = getByte"\r"
-local BYTE_TAB       = getByte"\t"
-local BYTE_BACKSLASH = getByte"\\"
-
 -- Keyword notes:
 --   elseif: This actually gets split up into 'else if' or 'else !if'.
 --   NULL:   NULL should be used in situations where the actual value doesn't matter, as a dummy value.
@@ -129,9 +123,33 @@ _G.!struct"Tokens"{ -- SOA
 	{`lineCount`, 0},
 }
 
-function _G.tokenize(s, path, tokens, increaseTotalLineCount, lnStart)
-	local HUGE = math.huge
+!if DEBUG then
+	local tokenTestCounts = {}
+	local function increaseTokenTestCount(what)
+		tokenTestCounts[what] = (tokenTestCounts[what] or 0) + 1
+		return true
+	end
+	function _G.printTokenTestCounts(what)
+		local whats = {}
+		for what in pairs(tokenTestCounts) do
+			table.insert(whats, what)
+		end
+		table.sort(whats, function(a, b)
+			return tokenTestCounts[a] > tokenTestCounts[b]
+		end)
+		for _, what in ipairs(whats) do
+			print(tokenTestCounts[what], what)
+		end
+	end
+!end
+!(
+local function TOKEN_TEST(labelCode)
+	if DEBUG and 1==0 then  return "increaseTokenTestCount("..labelCode..") and"  end
+	return ""
+end
+)
 
+function _G.tokenize(s, path, tokens, increaseTotalLineCount, lnStart)
 	local bytesToString = string.char
 	local find          = string.find
 	local getByte       = string.byte
@@ -166,7 +184,7 @@ function _G.tokenize(s, path, tokens, increaseTotalLineCount, lnStart)
 				lnPos = find(s, "\n", lnPtr, true)
 
 				if not lnPos then
-					lnPtr = HUGE
+					lnPtr = 1/0
 					break
 				end
 			end
@@ -183,13 +201,13 @@ function _G.tokenize(s, path, tokens, increaseTotalLineCount, lnStart)
 	`
 
 	while true do
-		local byte = getByte(s, ptr)
+		local b = getByte(s, ptr)
 
 		-- Ignore whitespace.
-		if (byte == !(BYTE_SPACE) or byte == !(BYTE_NL) or byte == !(BYTE_TAB)) and not expectWordAfterEscape then
+		if (b == @@BYTE" " or b == @@BYTE"\n" or b == @@BYTE"\t") and not expectWordAfterEscape then
 			local _, i2 = find(s, "^%s*", ptr+1)
 			ptr         = i2+1
-			byte        = getByte(s, ptr)
+			b           = getByte(s, ptr)
 
 			!!(UPDATE_LINE_NUMBER)
 		end
@@ -201,19 +219,19 @@ function _G.tokenize(s, path, tokens, increaseTotalLineCount, lnStart)
 
 		-- Identifier/keyword/blank.
 		!(
-		local bytes = {getByte"_"}
-		for byte = getByte"A", getByte"Z" do  table.insert(bytes, byte)  end
-		for byte = getByte"a", getByte"z" do  table.insert(bytes, byte)  end
-		for byte = 194,        244        do  table.insert(bytes, byte)  end
+		local bytes = {BYTE"_"}
+		for b = BYTE"A", BYTE"Z" do  table.insert(bytes, b)  end
+		for b = BYTE"a", BYTE"z" do  table.insert(bytes, b)  end
+		for b = 194,     244     do  table.insert(bytes, b)  end
 		)
-		if !!(CONST_SET(bytes))[byte] then
+		if @@TOKEN_TEST"name" !!(CONST_SET(bytes))[b] then
 			local i2
 
-			for _ = 1, HUGE do
-				byte = getByte(s, ptr)
-				if not byte then
+			for _ = 1, 1/0 do
+				b = getByte(s, ptr)
+				if not b then
 					break -- EOF
-				elseif byte <= 127 then
+				elseif b <= 127 then
 					_, i2 = find(s, "^[%w_]+", ptr)
 				else
 					_, i2 = find(s, "^[\194-\244][\128-\191]*", ptr)
@@ -248,8 +266,29 @@ function _G.tokenize(s, path, tokens, increaseTotalLineCount, lnStart)
 		elseif expectWordAfterEscape then
 			errorInFile(s, path, ptr, "Tokenizer", "Expected a word after '\\'.")
 
+		-- Punctuation. (1)
+		!local BYTES_EQ = {
+			BYTE"+", BYTE"-", BYTE"*", BYTE"/", BYTE"%", BYTE"^",
+			BYTE"=", BYTE"~", BYTE"<", BYTE">",
+		}
+		!local BYTES_SINGLE_UNIQUE = {
+			BYTE"#", BYTE"?", BYTE"|", BYTE"$",
+			BYTE"(", BYTE")", BYTE"{", BYTE"}", BYTE"]",
+			BYTE":", BYTE";", BYTE",",
+		}
+		!local BYTES_SINGLE_SHARED = {
+			BYTE"+", BYTE"-", BYTE"*", BYTE"/", BYTE"%", BYTE"^", BYTE"=", BYTE"<", BYTE">", -- These can be e.g. '+='.
+			BYTE"[", -- This can be e.g. '[['.
+			BYTE".", -- This can be e.g. '..'.
+			BYTE"!", -- This can be e.g. '!foo'.
+		}
+		elseif @@TOKEN_TEST"punctoneuni" (!!(CONST_SET(BYTES_SINGLE_UNIQUE))[b]) then
+			tokType  = !(TOKEN_PUNCTUATION)
+			tokValue = sub(s, ptr, ptr)
+			ptr      = ptr+1
+
 		-- Number (hexadecimal, int/float).
-		elseif byte == !(getByte"0") and find(s, "^[Xx]", ptr+1) then
+		elseif @@TOKEN_TEST"numhex" (b == @@BYTE"0" and find(s, "^[Xx]", ptr+1)) then
 			!(
 			local NUM_HEX_FRAC_EXP_1 = ("^( .. _* ([%dA-Fa-f][%dA-Fa-f_]*) %. ([%dA-Fa-f]+) [Pp]([-+]?[%dA-Fa-f][%dA-Fa-f_]*) )"):gsub(" +", "") -- float
 			local NUM_HEX_FRAC_EXP_2 = ("^( .. _*                          %. ([%dA-Fa-f]+) [Pp]([-+]?[%dA-Fa-f][%dA-Fa-f_]*) )"):gsub(" +", "") -- float
@@ -300,7 +339,7 @@ function _G.tokenize(s, path, tokens, increaseTotalLineCount, lnStart)
 			tokValue = n
 
 		-- Number (decimal, int/float).
-		elseif (byte >= !(getByte"0") and byte <= !(getByte"9")) or (byte == !(getByte".") and find(s, "^%d", ptr+1)) then
+		elseif @@TOKEN_TEST"numdec" ((b >= @@BYTE"0" and b <= @@BYTE"9") or (b == @@BYTE"." and find(s, "^%d", ptr+1))) then
 			!(
 			local NUM_DEC_FRAC_EXP_1 = ("^( %d[%d_]* %. %d[%d_]* [Ee][-+]?%d[%d_]* )"):gsub(" +", "") -- float
 			local NUM_DEC_FRAC_EXP_2 = ("^(          %. %d[%d_]* [Ee][-+]?%d[%d_]* )"):gsub(" +", "") -- float
@@ -331,11 +370,11 @@ function _G.tokenize(s, path, tokens, increaseTotalLineCount, lnStart)
 			tokValue = n
 
 		-- String (short-form).
-		elseif byte == !(getByte'"') or byte == !(getByte"'") then
+		elseif @@TOKEN_TEST"strshort" (b == @@BYTE'"' or b == @@BYTE"'") then
 			local reprStart = ptr
 			local quoteByte = getByte(s, ptr)
 			local segCount  = 0
-			local pattern   = quoteByte == !(getByte'"') and '["\\]' or "['\\]"
+			local pattern   = quoteByte == @@BYTE'"' and '["\\]' or "['\\]"
 
 			ptr = ptr + 1 -- The starting quote.
 
@@ -345,7 +384,7 @@ function _G.tokenize(s, path, tokens, increaseTotalLineCount, lnStart)
 			local function ADD(substrCode)
 				__LUA(templateToLua(
 					trimTemplate`
-						segCount                 = segCount + 1
+						segCount             = segCount + 1
 						substrings[segCount] = $substr
 					`,
 					{substr=substrCode}
@@ -364,18 +403,18 @@ function _G.tokenize(s, path, tokens, increaseTotalLineCount, lnStart)
 				end
 				ptr = i
 
-				local byte = getByte(s, ptr)
-				ptr        = ptr + 1 -- The matching special character.
+				b   = getByte(s, ptr)
+				ptr = ptr + 1 -- The matching special character.
 
 				-- End of string.
-				if byte == quoteByte then
+				if b == quoteByte then
 					break
 
 				-- Escape sequence.
-				else--if byte == !(BYTE_BACKSLASH) then
-					byte = getByte(s, ptr)
+				else--if b == @@BYTE"\\" then
+					b = getByte(s, ptr)
 
-					if not byte then
+					if not b then
 						errorInFile(s, path, reprStart, "Tokenizer", "Unfinished string after escape character.")
 
 					-- \n or \ followed by a newline inserts a newline.
@@ -384,38 +423,38 @@ function _G.tokenize(s, path, tokens, increaseTotalLineCount, lnStart)
 					-- \\ inserts a backslash.
 					-- \" inserts a quotation mark.
 					-- \' inserts an apostrophe.
-					elseif byte == !(getByte"n") or byte == !(getByte"\n") then
+					elseif b == @@BYTE"n" or b == @@BYTE"\n" then
 						!ADD `"\n"`
 						ptr = ptr + 1
-					elseif byte == !(getByte"r") then
+					elseif b == @@BYTE"r" then
 						!ADD `"\r"`
 						ptr = ptr + 1
-					elseif byte == !(getByte"t") then
+					elseif b == @@BYTE"t" then
 						!ADD `"\t"`
 						ptr = ptr + 1
-					elseif byte == !(getByte"\\") then
+					elseif b == @@BYTE"\\" then
 						!ADD `"\\"`
 						ptr = ptr + 1
-					elseif byte == !(getByte'"') then
+					elseif b == @@BYTE'"' then
 						!ADD `'"'`
 						ptr = ptr + 1
-					elseif byte == !(getByte"'") then
+					elseif b == @@BYTE"'" then
 						!ADD `"'"`
 						ptr = ptr + 1
 
 					-- \ddd specifies a byte denoted by one to three decimal digits.
 					elseif find(s, "^%d", ptr) then
 						local numStr = match(s, "^%d%d?%d?", ptr)
-						byte         = tonumber(numStr)
-						if byte > 255 then
+						b            = tonumber(numStr)
+						if b > 255 then
 							errorInFile(
 								s, path, ptr, "Tokenizer",
 								"Invalid escape sequence. (Decimal number '%d' does not fit inside a byte.)",
-								byte
+								b
 							)
 						end
 						ptr = ptr + #numStr
-						!ADD `bytesToString(byte)`
+						!ADD `bytesToString(b)`
 
 					-- \xXX specifies a byte denoted by two hexadecimal digits.
 					elseif find(s, "^x[%dA-Fa-f][%dA-Fa-f]", ptr) then
@@ -431,7 +470,7 @@ function _G.tokenize(s, path, tokens, increaseTotalLineCount, lnStart)
 						!ADD `utf8Char(tonumber(hex, 16))`
 
 					-- \z skips the following span of whitespace characters.
-					elseif byte == !(getByte"z") then
+					elseif b == @@BYTE"z" then
 						local i1, i2 = find(s, "^%s*", ptr+1)
 						ptr          = i2 + 1
 
@@ -446,7 +485,7 @@ function _G.tokenize(s, path, tokens, increaseTotalLineCount, lnStart)
 			tokExtra = false--trimmedInitialNewline
 
 		-- String (long-form).
-		elseif byte == !(getByte"[") and find(s, "^=*%[", ptr+1) then
+		elseif @@TOKEN_TEST"strlong" (b == @@BYTE"[" and find(s, "^=*%[", ptr+1)) then
 			local reprStart      = ptr
 			local longEqualSigns = match(s, "^%[(=*)%[", ptr)
 
@@ -455,7 +494,7 @@ function _G.tokenize(s, path, tokens, increaseTotalLineCount, lnStart)
 			local stringPos1            = ptr
 			local trimmedInitialNewline = false
 
-			if getByte(s, stringPos1) == !(BYTE_NL) then
+			if getByte(s, stringPos1) == @@BYTE"\n" then
 				stringPos1            = stringPos1+1
 				trimmedInitialNewline = true
 			end
@@ -473,7 +512,7 @@ function _G.tokenize(s, path, tokens, increaseTotalLineCount, lnStart)
 			tokExtra = trimmedInitialNewline
 
 		-- Comment.
-		elseif byte == !(getByte"-") and find(s, "^%-", ptr+1) then
+		elseif @@TOKEN_TEST"comment" (b == @@BYTE"-" and find(s, "^%-", ptr+1)) then
 			local reprStart = ptr
 			ptr = ptr+2
 
@@ -498,7 +537,7 @@ function _G.tokenize(s, path, tokens, increaseTotalLineCount, lnStart)
 			-- Don't set tokType - just ignore the comment!
 
 		-- Directive.
-		elseif byte == !(getByte"!") and find(s, "^%a", ptr+1) then
+		elseif @@TOKEN_TEST"directive" (b == @@BYTE"!" and find(s, "^%a", ptr+1)) then
 			ptr = ptr+1
 
 			local i1, i2, word = find(s, "^(%a[%w_]+)", ptr)
@@ -510,26 +549,16 @@ function _G.tokenize(s, path, tokens, increaseTotalLineCount, lnStart)
 			tokType  = !(TOKEN_DIRECTIVE)
 			tokValue = word
 
-		-- Punctuation.
-		!local BYTES_EQ = {
-			getByte"+", getByte"-", getByte"*", getByte"/", getByte"%", getByte"^",
-			getByte"=", getByte"~", getByte"<", getByte">",
-		}
-		!local BYTES_SINGLE = {
-			getByte"+", getByte"-", getByte"*", getByte"/", getByte"%", getByte"^", getByte"#", getByte"=",
-			getByte"<", getByte">", getByte"(", getByte")", getByte"{", getByte"}", getByte"[", getByte"]",
-			getByte":", getByte";", getByte".", getByte",",
-			getByte"|", getByte"$", getByte"!", getByte"?",
-		}
-		elseif byte == !(getByte".")         and (find(s, "^%.=", ptr+1) or find(s, "^%.%.", ptr+1)) then  tokType = !(TOKEN_PUNCTUATION) ; tokValue = sub(s, ptr, ptr+2) ; ptr = ptr+3
-		elseif byte == !(getByte"/")         and (find(s, "^/=",  ptr+1)                           ) then  tokType = !(TOKEN_PUNCTUATION) ; tokValue = sub(s, ptr, ptr+2) ; ptr = ptr+3
-		elseif byte == !(getByte".")         and (find(s, "^%.",  ptr+1)                           ) then  tokType = !(TOKEN_PUNCTUATION) ; tokValue = sub(s, ptr, ptr+1) ; ptr = ptr+2
-		elseif byte == !(getByte"/")         and (find(s, "^/",   ptr+1)                           ) then  tokType = !(TOKEN_PUNCTUATION) ; tokValue = sub(s, ptr, ptr+1) ; ptr = ptr+2
-		elseif byte == !(getByte"-")         and (find(s, "^>",   ptr+1)                           ) then  tokType = !(TOKEN_PUNCTUATION) ; tokValue = sub(s, ptr, ptr+1) ; ptr = ptr+2
-		elseif !!(CONST_SET(BYTES_EQ))[byte] and (find(s, "^=",   ptr+1)                           ) then  tokType = !(TOKEN_PUNCTUATION) ; tokValue = sub(s, ptr, ptr+1) ; ptr = ptr+2
-		elseif !!(CONST_SET(BYTES_SINGLE))[byte]                                                     then  tokType = !(TOKEN_PUNCTUATION) ; tokValue = sub(s, ptr, ptr  ) ; ptr = ptr+1
+		-- Punctuation. (2)
+		elseif @@TOKEN_TEST"punctdotdot" (b == @@BYTE"."             and find(s, "^%.[.=]", ptr+1)) then  tokType = !(TOKEN_PUNCTUATION) ; tokValue = sub(s, ptr, ptr+2) ; ptr = ptr+3
+		elseif @@TOKEN_TEST"punctidiveq" (b == @@BYTE"/"             and find(s, "^/=",     ptr+1)) then  tokType = !(TOKEN_PUNCTUATION) ; tokValue = sub(s, ptr, ptr+2) ; ptr = ptr+3
+		elseif @@TOKEN_TEST"punctconcat" (b == @@BYTE"."             and find(s, "^%.",     ptr+1)) then  tokType = !(TOKEN_PUNCTUATION) ; tokValue = sub(s, ptr, ptr+1) ; ptr = ptr+2
+		elseif @@TOKEN_TEST"punctidiv"   (b == @@BYTE"/"             and find(s, "^/",      ptr+1)) then  tokType = !(TOKEN_PUNCTUATION) ; tokValue = sub(s, ptr, ptr+1) ; ptr = ptr+2
+		elseif @@TOKEN_TEST"punctarrow"  (b == @@BYTE"-"             and find(s, "^>",      ptr+1)) then  tokType = !(TOKEN_PUNCTUATION) ; tokValue = sub(s, ptr, ptr+1) ; ptr = ptr+2
+		elseif @@TOKEN_TEST"puncteq"     (!!(CONST_SET(BYTES_EQ))[b] and find(s, "^=",      ptr+1)) then  tokType = !(TOKEN_PUNCTUATION) ; tokValue = sub(s, ptr, ptr+1) ; ptr = ptr+2
+		elseif @@TOKEN_TEST"punctonesha" (!!(CONST_SET(BYTES_SINGLE_SHARED))[b]                   ) then  tokType = !(TOKEN_PUNCTUATION) ; tokValue = sub(s, ptr, ptr  ) ; ptr = ptr+1
 
-		elseif byte == !(getByte"@") then
+		elseif @@TOKEN_TEST"note" (b == @@BYTE"@") then
 			tokType  = !(TOKEN_PUNCTUATION)
 			tokValue = "@"
 			ptr      = ptr+1
@@ -538,13 +567,13 @@ function _G.tokenize(s, path, tokens, increaseTotalLineCount, lnStart)
 			end
 
 		-- Escaped identifier.
-		elseif byte == !(getByte"\\") then
+		elseif @@TOKEN_TEST"escape" (b == @@BYTE"\\") then
 			ptr                   = ptr+1
 			expectWordAfterEscape = true
 			-- Don't set tokType - just proceed to the next token!
 
 		else
-			errorInFile(s, path, ptr, "Tokenizer", "Unknown character. (Byte: %d)", byte)
+			errorInFile(s, path, ptr, "Tokenizer", "Unknown character. (Byte: %d)", b)
 		end
 
 		if tokType then
