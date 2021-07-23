@@ -299,9 +299,9 @@ local function runCompiler()
 		{`luaPreloadsRuntime`,     {}},    -- All '!preload runtime' strings.
 
 		-- Pipes:
-		{`queueActive`,           {}},
-		{`queueWaiting`,          {}},
-		{`priorityStack`,         {}},
+		{`queueActive`,           {n=0}},
+		{`queueWaiting`,          {n=0}},
+		{`priorityStack`,         {n=0}},
 		{`allQueueds`,            {}},
 		{`allDependencies`,       {}},
 		{`dependenciesForLookup`, dependenciesTableTemplate},
@@ -408,8 +408,8 @@ local function runCompiler()
 		!local FINAL_PIPE = DEBUG and `state.finalPipe` or toLua(PIPE_DONE-1)
 
 		!if DEBUG then
-			state.queueActiveMaxSize  = math.max(state.queueActiveMaxSize,  #state.queueActive)
-			state.queueWaitingMaxSize = math.max(state.queueWaitingMaxSize, #state.queueWaiting)
+			state.queueActiveMaxSize  = math.max(state.queueActiveMaxSize,  state.queueActive.n)
+			state.queueWaitingMaxSize = math.max(state.queueWaitingMaxSize, state.queueWaiting.n)
 			state.pipeCycles          = state.pipeCycles+1
 			-- print("cycle", state.pipeCycles)
 		!end
@@ -417,11 +417,13 @@ local function runCompiler()
 		local didSomething = false
 		local i            = 1
 
-		local queueActive     = state.queueActive
-		local queueWaiting    = state.queueWaiting
-		local priorityStack   = state.priorityStack
-		local nextQueueActive = {}
-		local gotPrioritized  = {}
+		local queueActive      = state.queueActive
+		local queueWaiting     = state.queueWaiting
+		local queueWaitingN    = queueWaiting.n
+		local priorityStack    = state.priorityStack
+		local nextQueueActiveN = 0
+		local nextQueueActive  = {n=0}
+		local gotPrioritized   = {}
 
 		local insert              = table.insert
 		local inferNode           = inferNode
@@ -441,14 +443,14 @@ local function runCompiler()
 		!end
 
 		while true do
-			local priority = priorityStack[1]
+			local priorityLen = priorityStack.n
 			local queued
 
-			if priority then
-				local len          = #priorityStack
-				queued             = priorityStack[len]
-				priorityStack[len] = nil
-				!ifDEBUG `state.prioriyCount = state.prioriyCount+1`
+			if priorityLen > 0 then
+				queued                       = priorityStack[priorityLen]
+				priorityStack[priorityLen]   = nil
+				priorityStack.n              = priorityLen - 1
+				!ifDEBUG `state.prioriyCount = state.prioriyCount + 1`
 			else
 				queued = queueActive[i] -- Note: New nodes (or nodes to reinfer) may be inserted into queueActive during this loop.
 				if not queued then  break  end
@@ -461,7 +463,8 @@ local function runCompiler()
 				-- void  WARNING: Make sure we don't queue prioritized nodes multiple times!
 
 			elseif queued.waitingOn then
-				insert(queueWaiting, queued)
+				queueWaitingN               = queueWaitingN + 1
+				queueWaiting[queueWaitingN] = queued
 
 			else
 				!(
@@ -519,26 +522,25 @@ local function runCompiler()
 				if queued.unqueued then
 					-- void
 				elseif queued.waitingOn then
-					insert(queueWaiting, queued)
+					queueWaitingN               = queueWaitingN + 1
+					queueWaiting[queueWaitingN] = queued
 				elseif queued.pipe < !(PIPE_DONE) then
 				-- elseif queued.pipe <= !!(FINAL_PIPE) then -- This doesn't work! Some nodes being inferred wants others to be emitted. :OnlyInferTypes
-					insert(nextQueueActive, queued)
+					nextQueueActiveN                  = nextQueueActiveN + 1
+					nextQueueActive[nextQueueActiveN] = queued
 				else
 					-- void
 				end
 			end
 
-			if priority then
+			if priorityLen > 0 then
 				gotPrioritized[queued] = true
 			else
 				i = i+1
 			end
 		end--while queueActive[i]
 
-		queueActive       = nextQueueActive
-		state.queueActive = queueActive
-
-		if not (queueWaiting[1] or queueActive[1]) then
+		if queueWaitingN == 0 and nextQueueActiveN == 0 then
 			!if DEBUG then
 				for _, queued in ipairs(state.allQueueds) do
 					if not (queued.pipe == !(PIPE_DONE) or queued.unqueued) then
@@ -551,10 +553,16 @@ local function runCompiler()
 			return true
 		end
 
+		queueWaiting.n    = queueWaitingN
+		nextQueueActive.n = nextQueueActiveN
+		queueActive       = nextQueueActive
+		state.queueActive = queueActive
+
 		if not didSomething then  errorPipesAreStuck(state)  end
 
 		local currentQueueWaiting = queueWaiting
-		queueWaiting              = {}
+		queueWaiting              = {n=0}
+		queueWaitingN             = 0
 		state.queueWaiting        = queueWaiting
 
 		local findPublicDeclarationInScope = findPublicDeclarationInScope
@@ -628,11 +636,15 @@ local function runCompiler()
 			if queued.unqueued then
 				-- void
 			elseif queued.waitingOn then
-				insert(queueWaiting, queued)
+				queueWaitingN               = queueWaitingN + 1
+				queueWaiting[queueWaitingN] = queued
 			else
-				insert(queueActive, queued)
+				queueActive.n              = queueActive.n + 1
+				queueActive[queueActive.n] = queued
 			end
 		end--for currentQueueWaiting
+
+		queueWaiting.n = queueWaitingN
 
 		!if DEBUG then
 			-- Guard against an infinite loop.
