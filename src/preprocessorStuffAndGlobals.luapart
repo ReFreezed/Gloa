@@ -384,8 +384,7 @@ end
 
 
 do
-	_G.structs         = {}
-	local structNumber = 0
+	_G.structs = {}
 
 	-- !struct       "_Name[:Parent]" { {[1]=field1, [2]=fieldValue, option1=optionValue, ...}, ... }
 	-- local !struct "Name[:Parent]"  { {[1]=field1, [2]=fieldValue, option1=optionValue, ...}, ... }
@@ -623,11 +622,11 @@ function _G.CONST(t, constName)
 		assert(not constNames[constName], constName)
 
 	else
-		constName = constNames[t]
+		constName = constNames[t] -- @Incomplete: We should look through all existing constants to see if any are effectively the same. (Very low prio.)
 		if constName then  return constName  end
 
-		constCount = constCount+1
-		constName  = "CONST"..constCount
+		constCount = constCount + 1
+		constName  = "CONST" .. constCount
 	end
 
 	constNames[t]         = constName
@@ -689,9 +688,41 @@ end
 
 
 
--- !STATIC `name = value`
-function _G.STATIC(assignmentCode)
-	preprocessorOutputAtTopOfFile("local "..assignmentCode)
+local staticCount   = 0
+local staticNameSet = {}
+
+local function defineStaticTable(t, staticName)
+	if type(t) == "string" then
+		staticName = t
+		return function(t)  return defineStaticTable(t, staticName)  end
+	end
+
+	if staticName then
+		assert(not staticNameSet[staticName], staticName)
+	else
+		staticCount = staticCount + 1
+		staticName  = "STATIC" .. staticCount
+	end
+
+	staticNameSet[staticName] = true
+
+	preprocessorOutputAtTopOfFile("local "..staticName.." = "..toLua(t))
+	return staticName
+end
+
+-- Static declaration:
+--   !STATIC `name = value`
+-- Static table:
+--   staticName = STATIC( table )
+--   staticName = STATIC "staticName" ( table )
+function _G.STATIC(assignmentCodeOrTableOrStaticName)
+	if type(assignmentCodeOrTableOrStaticName) == "string" and not assignmentCodeOrTableOrStaticName:find"^[%a_][%w_]*$" then
+		local assignmentCode = assignmentCodeOrTableOrStaticName
+		preprocessorOutputAtTopOfFile("local "..assignmentCode)
+	else
+		local tOrStaticName = assignmentCodeOrTableOrStaticName
+		return defineStaticTable(tOrStaticName)
+	end
 end
 )
 

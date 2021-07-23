@@ -2087,7 +2087,7 @@ local function ensureNamedArgumentsHaveAssignedIndicies(state, call, lambdaOrStr
 	end
 end
 
--- matchesOrNil = getMatchingFunctions( state, call, realArguments, realArgumentTypes, declarations )
+-- matches|nil = getMatchingFunctions( state, call, realArguments, realArgumentTypes, declarations )
 local function getMatchingFunctions(state, call, realArguments, realArgumentTypes, declarations)
 	local matches = nil
 
@@ -2888,7 +2888,12 @@ end
 	end
 
 	local realArguments     = (call.isMethod and {callee, unpack(call.arguments)} or call.arguments)
-	local realArgumentTypes = {}
+	-- local realArgumentTypes = {}
+
+	local realArgumentTypes = !!(STATIC{}) -- Not sure if actually faster.
+	for i = #realArgumentTypes, 1, -1 do
+		realArgumentTypes[i] = nil
+	end
 
 	if call.isMethod then
 		local typeInfo       = callee.object.inferredType
@@ -3718,14 +3723,13 @@ end
 		if not constDecl then
 			if typeRepresented then
 				-- We don't allow StructType.dynamicMember except in certain contexts.
+				-- @Incomplete: Make it possible to get default values, though!
 				local foundNode = astFindParent(access, !!(CONST_SET{
 					AST_TYPE_OF, AST_TYPE_INFO, AST_LOCATION,
 					unpack(scopeNodeTypes)
 				}))
 
-				if not !!(CONST_SET{
-					AST_TYPE_OF, AST_TYPE_INFO, AST_LOCATION,
-				})[foundNode.nodeType] then
+				if not !!(CONST_SET{ AST_TYPE_OF, AST_TYPE_INFO, AST_LOCATION, })[foundNode.nodeType] then
 					typeError(state, access.member, "Dynamic member '%s' is not accessible in static context.", memberName)
 				end
 			end
@@ -5867,7 +5871,7 @@ end
 	-- Inherit members from other structs.
 	if struct.inherits[1] then
 		local declarationsIncludingNew = {} -- Declarations will be sorted as expected.
-		local inheritIndices      = {}
+		local inheritIndices           = {}
 
 		for i, typeExpr in ipairs(struct.inherits) do
 			inheritIndices[typeExpr] = i
@@ -6812,26 +6816,26 @@ end
 -- Note: Vararg node/type may be returned.
 function _G.getAssignmentValue(state, targetExpr, values, i, typeInfoExpected, binOp, targetTerm, noError)
 	!(
-	local TEMPLATE_TARGET_NAME = trimTemplate`
+	local _TARGET_NAME = trimTemplate`
 		targetExpr.nodeType == $nodeTypeIdent  and " ('"..targetExpr.name.."')" or
 		targetExpr.nodeType == $nodeTypeAccess and targetExpr.member.nodeType == $nodeTypeLiteral and targetExpr.member.literalType == $literalTypeString and " ('"..targetExpr.member.value.."')" or
 		""
 	`
-	local TARGET_NAME = templateToLua(TEMPLATE_TARGET_NAME, {
+	local TARGET_NAME = templateToLua(_TARGET_NAME, {
 		nodeTypeIdent     = AST_IDENTIFIER,
 		nodeTypeAccess    = AST_ACCESS,
 		nodeTypeLiteral   = AST_LITERAL,
 		literalTypeString = LITERAL_STRING,
 	})
 
-	local TEMPLATE_CALL_RETURNS_NOTHING = trimTemplate`
+	local _CALL_RETURNS_NOTHING = trimTemplate`
 		typeError(state, call, "Called function returns nothing for %s #%d%s (return value #%d).", targetTerm, i, $targetName, argIndex)
 	`
-	local CALL_RETURNS_NOTHING = templateToLua(TEMPLATE_CALL_RETURNS_NOTHING, {
+	local CALL_RETURNS_NOTHING = templateToLua(_CALL_RETURNS_NOTHING, {
 		targetName = TARGET_NAME,
 	})
 
-	local TEMPLATE_CHECK_TYPE_COMPATABILITY_AND_MAYBE_RETURN = `
+	local _CHECK_TYPE_COMPATABILITY_AND_MAYBE_RETURN = `
 		if binOp == "" then
 			if isTypeCompatibleWith($valueTypeInfoAdjusted, typeInfoExpected) then  return $valueExpr, $valueTypeInfo  end
 
@@ -6857,7 +6861,7 @@ function _G.getAssignmentValue(state, targetExpr, values, i, typeInfoExpected, b
 		end
 	`
 	local function CHECK_TYPE_COMPATABILITY_AND_MAYBE_RETURN(valueExprVar, typeInfoVar, typeInfoAdjustedVar)
-		local lua = templateToLua(TEMPLATE_CHECK_TYPE_COMPATABILITY_AND_MAYBE_RETURN, {
+		local lua = templateToLua(_CHECK_TYPE_COMPATABILITY_AND_MAYBE_RETURN, {
 			valueExpr             = valueExprVar,
 			valueTypeInfo         = typeInfoVar,
 			valueTypeInfoAdjusted = typeInfoAdjustedVar,
@@ -7635,8 +7639,6 @@ end
 -- singleTypeInfo = adjustTypeToOne( state, expressionForError, typeInfo [, adjustVarargToIncludeNil=false ] )
 -- Types that aren't single: TypeInfoVararg and TypeInfoList.
 do
-	local twoTypes = {}
-
 	local function adjustVarargItemTypeToOneAndToIncludeNil(state, itemType)
 		local tag = itemType.tag
 		if tag == !(TYPE_ANY) or tag == !(TYPE_NONE) then  return itemType  end
@@ -7644,6 +7646,7 @@ do
 		local nilType = state.builtinTypeInfos.none
 
 		if tag ~= !(TYPE_COMPOUND) then
+			local twoTypes = !!(STATIC{})
 			if itemType.id < nilType.id then
 				twoTypes[1] = itemType
 				twoTypes[2] = nilType
@@ -8178,6 +8181,7 @@ local EXPRESSION_NOT_EXPECTED = !(Set{
 	AST_STRUCT,
 })
 
+-- Used by AstRun.
 function _G.isAnExpressionExpected(state, node)
 	local parent         = node.parent
 	local parentNodeType = parent.nodeType

@@ -85,7 +85,7 @@ function _G.addDependency(state, dependent, isInternal, dependType, dependOn, ex
 			errorInternal(state, dependent, "addDependency: Node trying to depend on itself for some reason.")
 		end
 		dependOn = dependOn.queued or errorInternal(state, dependOn, "addDependency: Missing queued.")
-		-- assert(not itemWith3(dependOn.waiters, "dependent",dependent, "dependType",dependType, "dependOn",dependOn))
+		-- if dependOn.waiters  assert(not itemWith3(dependOn.waiters, "dependent",dependent, "dependType",dependType, "dependOn",dependOn))  end
 	end
 
 	dependency = !new"_Dependency"{
@@ -109,9 +109,12 @@ function _G.addDependency(state, dependent, isInternal, dependType, dependOn, ex
 	end
 
 	if dependOnIsNode then
+		dependOn.waiters = dependOn.waiters or {}
 		table.insert(dependOn.waiters, dependency)
 	elseif dependType == !(DEPEND_STRUCT_MEMBERS_READY) then
-		table.insert(dependOn.astNode.queued.waiters, dependency)
+		local structQueued   = dependOn.astNode.queued
+		structQueued.waiters = structQueued.waiters or {}
+		table.insert(structQueued.waiters, dependency)
 	end
 
 	table.insert(state.allDependencies, dependency)
@@ -126,25 +129,15 @@ function _G.addDependency(state, dependent, isInternal, dependType, dependOn, ex
 			astPrint(dependent)
 
 			io.write("    ON ", DEPEND_TITLES[dependType], " ")
-			if dependType == !(DEPEND_DECLARATION) then
-				print(dependOn)
-			elseif dependType == !(DEPEND_MEMBER_DECLARATION) then
-				print(dependOn)
-			elseif dependType == !(DEPEND_HAS_DECLARATION) then
-				astPrint(dependOn.node)
-			elseif dependType == !(DEPEND_NODE_INFERRED) then
-				astPrint(dependOn.node)
-			elseif dependType == !(DEPEND_NODE_PASSED_INFER) then
-				astPrint(dependOn.node)
-			elseif dependType == !(DEPEND_NODE_PASSED_EMIT) then
-				astPrint(dependOn.node)
-			elseif dependType == !(DEPEND_STRUCT_MEMBERS_READY) then
-				print(getFriendlyTypeInfoName(dependOn))
-			elseif dependType == !(DEPEND_CONSTANT_READY) then
-				print(getFriendlyTypeInfoName(dependOn.valueType), tostring(dependOn.value))
-			else
-				print("? ("..tostring(dependOn)..")")
-			end
+			if     dependType == !(DEPEND_DECLARATION)          then  print(dependOn)
+			elseif dependType == !(DEPEND_MEMBER_DECLARATION)   then  print(dependOn)
+			elseif dependType == !(DEPEND_HAS_DECLARATION)      then  astPrint(dependOn.node)
+			elseif dependType == !(DEPEND_NODE_INFERRED)        then  astPrint(dependOn.node)
+			elseif dependType == !(DEPEND_NODE_PASSED_INFER)    then  astPrint(dependOn.node)
+			elseif dependType == !(DEPEND_NODE_PASSED_EMIT)     then  astPrint(dependOn.node)
+			elseif dependType == !(DEPEND_STRUCT_MEMBERS_READY) then  print(getFriendlyTypeInfoName(dependOn))
+			elseif dependType == !(DEPEND_CONSTANT_READY)       then  print(getFriendlyTypeInfoName(dependOn.valueType), tostring(dependOn.value))
+			else                                                      print("? ("..tostring(dependOn)..")")  end
 		end
 	!end
 end
@@ -192,6 +185,7 @@ end
 
 function _G.fulfillDependencies(state, queued, dependType)
 	local waiters = queued.waiters
+	if not waiters    then  return  end
 	if not waiters[1] then  return  end
 
 	for _, dependency in ipairs(waiters) do
@@ -227,7 +221,7 @@ end
 	{`key`,       nil}, -- String or integer.
 	{`pipe`,      PIPE_NONE},
 	{`waitingOn`, nil}, -- Dependency
-	{`waiters`,   {}},  -- []Dependency  Others waiting on this.
+	{`waiters`,   nil}, -- []Dependency  Others waiting on this. We don't create the table until we need it.
 	{`unqueued`,  false},
 }
 
