@@ -29,9 +29,7 @@ local STATIC_PROFILER = 1==0
 
 local STATIC_PROFILER_NAMES_TO_IGNORE = {
 	runCompiler     = true,
-	eatNextToken    = true,
 	eatNextTok      = true,
-	peekNextToken   = true,
 	peekNextTok     = true,
 	inferNode       = true,
 	indexOf         = true,

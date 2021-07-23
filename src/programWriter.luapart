@@ -285,8 +285,9 @@ _G.!struct"WriterState"{
 local function addLineMapping(state, writer, token)
 	local ln = writer.currentOutputLine
 	if (writer.lineMappingLines[ln] or 0) > 0 then  return  end
-	writer.lineMappingFiles[ln] = state.tokens[token].file  or errorInternal()
-	writer.lineMappingLines[ln] = state.tokens[token].line1 or errorInternal()
+	local tok                   = state.tokens[token]
+	writer.lineMappingFiles[ln] = tok.source.path
+	writer.lineMappingLines[ln] = tok.line1
 end
 -- addLineMappingDummy( state, writer [, path ] )
 local function addLineMappingDummy(state, writer, path)
@@ -316,8 +317,10 @@ function _G.writeIdentifierName(state, writer, ident)
 	writer.file:write(name)
 end
 
+local serializedStringCache = {}
+
 function _G.writeStringLiteral(writer, s)
-	local lua = F("%q", s):gsub("\\\n", "\\n")
+	local lua = serializedStringCache[s] or storeInCache(serializedStringCache, s, F("%q", s):gsub("\\\n", "\\n"))
 	writer.file:write(lua)
 end
 
@@ -529,7 +532,7 @@ function _G.writeCast(state, writer, indent, nextLocalN, localsStack, cast, name
 		!!(WRITE_EXPRESSION)
 	-- float -> int
 	elseif typeInfoSource.tag == !(TYPE_FLOAT) and typeInfoTarget.tag == !(TYPE_INT) then
-		writer.file:write("_MODF(") -- Note: math.modf() returns two values.
+		writer.file:write("_MODF(") -- Note: math.modf() returns two values. (Should we actually floor the value instead? I think that might be more "the Lua way".)
 		!!(WRITE_EXPRESSION)
 		writer.file:write(")")
 
@@ -2152,6 +2155,9 @@ function _G.writeForeignImportIfNew(state, writer, typeInfo, foreignSource, fore
 	end
 end
 
+local serializedIntCache   = {}
+local serializedFloatCache = {}
+
 -- writeNormalSimpleConstant( state, writer, tag, v, isEnum, nodeForError=nil )
 local function writeNormalSimpleConstant(state, writer, tag, v, isEnum, nodeForError)
 	local file = writer.file
@@ -2164,12 +2170,16 @@ local function writeNormalSimpleConstant(state, writer, tag, v, isEnum, nodeForE
 		if v == 0 then
 			file:write("0") -- Avoid writing '-0'.
 		else
-			local nStr = F("%.0f", v)
-			if not nStr:find"^%-?%d+$" then
-				errorLine("ProgramWriter", "Cannot write value as integer: %s (formatted as '%s')", tostring(v), nStr)
+			local nStr = serializedIntCache[v]
+			if not nStr then
+				nStr = F("%.0f", v)
+				if not nStr:find"^%-?%d+$" then
+					errorLine("ProgramWriter", "Cannot write value as integer: %s (formatted as '%s')", tostring(v), nStr)
+				end
+				serializedIntCache[v] = nStr
 			end
-			if nStr:byte(1) == @@BYTE"-" then
-				file:write("(", nStr, ")") -- @Incomplete: Use shouldOperationHaveSurroundingParentheses().
+			if nStr:byte(1) == @@BYTE"-" then -- @Incomplete: Use shouldOperationHaveSurroundingParentheses().
+				file:write("(", nStr, ")")
 			else
 				file:write(nStr)
 			end
@@ -2186,9 +2196,13 @@ local function writeNormalSimpleConstant(state, writer, tag, v, isEnum, nodeForE
 		elseif v ~= v then
 			file:write("(0/0)")
 		else
-			local floatStr = tostring(v)
-			if not floatStr:find"[.Ee]" then
-				floatStr = floatStr:gsub("^%d+", "%0.0")
+			local floatStr = serializedFloatCache[v]
+			if not floatStr then
+				floatStr = tostring(v)
+				if not floatStr:find"[.Ee]" then
+					floatStr = floatStr:gsub("^%d+", "%0.0")
+				end
+				serializedFloatCache[v] = floatStr
 			end
 			if floatStr:byte(1) == @@BYTE"-" then
 				file:write("(", floatStr, ")")
@@ -2238,7 +2252,7 @@ local function writeTypeInfo(state, writer, typeInfo)
 
 	local tag = typeInfo.tag
 
-	-- Note: This table must be synced with preload and messenger!
+	-- Note: This table's fields must be synced with preload and messenger!
 	file:write("{tag=", tag)
 	if outputDebugInfo then
 		TYPE_NAMES_UPPER[tag] = TYPE_NAMES_UPPER[tag] or TYPE_NAMES[tag]:upper()
@@ -2403,13 +2417,12 @@ function _G.writeConstantValue(state, writer, const, nodeForError)
 
 	elseif const.kind == !(CONST_KIND_LOCATION) then
 		local target = const.value
-		local tokens = state.tokens
-		local token  = target.token
+		local tok    = state.tokens[target.token]
 
-		-- Note: This table must be synced with the preload module!
+		-- Note: This table's fields must be synced with the preload module!
 		file:write("{filePath=")
-		writeStringLiteral(writer, tokens[token].file)
-		file:write(", lineNumber=", tokens[token].line1, ", position=", tokens[token].position1, "}")
+		writeStringLiteral(writer, tok.file)
+		file:write(", lineNumber=", tok.line1, ", position=", tok.position1, "}")
 
 	elseif const.kind == !(CONST_KIND_NULL) then
 		file:write("nil")
@@ -2527,15 +2540,16 @@ function _G.writeLuaPreloads(state, writer, luaPreloads, fromIndex)
 
 		local _, nlCount = luaPreload.lua:gsub("\n", "%0")
 
-		local trimmedInitialNewline = state.tokens[luaPreload.token].extra
-		local stringTokenFile       = state.tokens[luaPreload.token].file or errorInternal()
-		local stringTokenLn         = state.tokens[luaPreload.token].line1 + luaPreload.lineOffset - 2 + (trimmedInitialNewline and 1 or 0)
+		local tok                   = state.tokens[luaPreload.token]
+		local trimmedInitialNewline = tok.extra
+		local stringTokenPath       = tok.source.path or errorInternal()
+		local stringTokenLn         = tok.line1 + luaPreload.lineOffset - 2 + (trimmedInitialNewline and 1 or 0)
 
-		local outputOffsetLn = writer.currentOutputLine-1
+		local outputOffsetLn = writer.currentOutputLine - 1
 
 		for ln = 2, nlCount+2 do
-			writer.lineMappingFiles[outputOffsetLn+ln] = stringTokenFile
-			writer.lineMappingLines[outputOffsetLn+ln] = stringTokenLn+ln
+			writer.lineMappingFiles[outputOffsetLn+ln] = stringTokenPath
+			writer.lineMappingLines[outputOffsetLn+ln] = stringTokenLn + ln
 		end
 
 		writer.currentOutputLine = writer.currentOutputLine+nlCount+3

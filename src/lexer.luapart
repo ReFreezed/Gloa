@@ -138,7 +138,7 @@ local function TOKEN_TEST(labelCode)
 end
 )
 
-function _G.tokenize(s, path, tokens, increaseTotalLineCount, lnStart)
+function _G.tokenize(sourceInfo, tokens, increaseTotalLineCount, lnStart)
 	local bytesToString = string.char
 	local find          = string.find
 	local getByte       = string.byte
@@ -149,6 +149,8 @@ function _G.tokenize(s, path, tokens, increaseTotalLineCount, lnStart)
 	local utf8Char      = utf8Char
 	local concat        = table.concat
 
+	local path  = sourceInfo.path
+	local s     = sourceInfo.string
 	local count = tokens.n
 
 	local ptr   = 1
@@ -556,35 +558,40 @@ function _G.tokenize(s, path, tokens, increaseTotalLineCount, lnStart)
 			errorInFile(s, path, ptr, "Tokenizer", "Unknown character. (Byte: %d)", b)
 		end
 
+		local tok
+
 		if tokType then
 			count = count + 1
 
-			tokens[count] = {
+			tok = {
 				-- @Speed: Decrease amount of fields.
-				type      = tokType,  -- One of TOKEN_*.
-				value     = tokValue, -- Depends on the type.
-				extra     = tokExtra, -- Depends on the type.
-				file      = path,
-				buffer    = s,        -- The actual source string (which may not be from the file).
-				position1 = tokenPos, -- Start byte.
-				position2 = ptr-1,    -- End byte.
-				line1     = ln,       -- Start line.
-				line2     = ln,       -- End line. (Is updated below!)
-				inserted  = false,    -- Used for compilation stats.
+				type        = tokType,    -- One of TOKEN_*.
+				value       = tokValue,   -- Depends on the type.
+				extra       = tokExtra,   -- Depends on the type.
+				source      = sourceInfo, -- { path=realOrFakePath, string=actualSourceString }
+				position1   = tokenPos,   -- Start byte.
+				position2   = ptr-1,      -- End byte.
+				line1       = ln,         -- Start line.
+				-- line2    = nil,        -- End line. If this is nil then line1 should be used. (May be updated below!)
+				-- inserted = false,      -- Used for compilation stats. (Optimization: We let this be nil instead of false.)
 			}
+			tokens[count] = tok
 		end
 
+		local lnPrev = ln
 		!!(UPDATE_LINE_NUMBER)
 
 		if tokType then
-			tokens[count].line2 = ln
-			--[[
-			printf("%5d %s%s |%s|",
-				#tokTypes,
-				TOKEN_TITLES[tokType],
-				(" "):rep(11-#TOKEN_TITLES[tokType]),
-				tostring(tokValue))
-			--]]
+			if ln > lnPrev then  tok.line2 = ln  end
+
+			!if 1==0 then
+				printf("%5d %s%s |%s|",
+					#tokTypes,
+					TOKEN_TITLES[tokType],
+					(" "):rep(11-#TOKEN_TITLES[tokType]),
+					tostring(tokValue)
+				)
+			!end
 		end
 	end
 
@@ -599,21 +606,24 @@ function _G.tokenize(s, path, tokens, increaseTotalLineCount, lnStart)
 	end
 end
 
--- insertToken( tokens, tokenType, tokenValue [, buffer="", path=tokens[1].file ] )
-function _G.insertToken(tokens, tokType, tokValue, buffer, path)
+-- insertToken( tokens, tokenType, tokenValue [, sourceString="", path=tokens[1].source.path ] )
+-- This function should not be called a lot! Otherwise we'll need to change where we create the sourceInfo table.
+function _G.insertToken(tokens, tokType, tokValue, sourceString, path)
+	sourceString = sourceString or ""
+	path         = path         or tokens[1].source.path
+
 	local count = tokens.n + 1
 	tokens.n    = count
 
 	tokens[count] = {
 		type      = tokType,
 		value     = tokValue,
-		extra     = nil,
-		file      = path or tokens[1].file,
-		buffer    = buffer or "",
+		-- extra  = nil,
+		source    = {path=path, string=sourceString},
 		position1 = 1,
 		position2 = 1,
 		line1     = 1,
-		line2     = 1,
+		-- line2  = nil,
 		inserted  = true,
 	}
 end
@@ -636,87 +646,85 @@ end
 
 
 
-do
-	local BRACKETS          = {["("]=")", ["{"]="}", ["["]="]"}
-	local tokenizeTimeTotal = 0
+function _G.readAndTokenizeString(state, sourceInfo, lnStart, increaseTotalLineCount)
+	local tokens     = state.tokens
+	local startToken = tokens.n + 1
 
-	function _G.readAndTokenizeString(state, path, increaseTotalLineCount, s, lnStart)
-		local tokens     = state.tokens
-		local startToken = tokens.n + 1
+	local startTime = timerGetCurrentInSeconds()
+	tokenize(sourceInfo, tokens, increaseTotalLineCount, lnStart)
+	local endTime = timerGetCurrentInSeconds()
 
-		local startTime = timerGetCurrentInSeconds()
-		tokenize(s, path, tokens, increaseTotalLineCount, lnStart)
-		local endTime = timerGetCurrentInSeconds()
+	!if DEBUG and 1==0 then
+		!STATIC `tokenizeTimeTotal = 0.0`
+		tokenizeTimeTotal = tokenizeTimeTotal + (endTime-startTime)
+		printf("+%.3f = %.3f  %s", endTime-startTime, tokenizeTimeTotal, sourceInfo.path)
+		if sourceInfo.path:find("modules/lua.gloa", 1, true) then  os.exit(2)  end
+	!end
 
-		!if DEBUG and 1==0 then
-			tokenizeTimeTotal = tokenizeTimeTotal + (endTime-startTime)
-			printf("+%.3f = %.3f  %s", endTime-startTime, tokenizeTimeTotal, path)
-			if path:find("modules/lua.gloa", 1, true) then  os.exit(2)  end
-		!end
+	-- Quickly check for stray/unmatched brackets.
 
-		-- Quickly check for stray/unmatched brackets.
+	-- Note: Sometimes an error message here isn't very helpful, so we
+	-- sometimes continue with parsing despite getting an error here.
 
-		-- Note: Sometimes an error message here isn't very helpful, so we
-		-- sometimes continue with parsing despite getting an error here.
+	!local bracketsConstName  = CONST{ ["("]=")", ["{"]="}", ["["]="]" }
+	local bracketTokenIndices = {}
 
-		local bracketTokenIndices = {}
+	for i = startToken, tokens.n do
+		if tokens[i].type == !(TOKEN_PUNCTUATION) and !!(CONST_SET{"(","{","["})[tokens[i].value] then
+			table.insert(bracketTokenIndices, i)
 
-		for i = startToken, tokens.n do
-			if tokens[i].type == !(TOKEN_PUNCTUATION) and !!(CONST_SET{"(","{","["})[tokens[i].value] then
-				table.insert(bracketTokenIndices, i)
+		elseif tokens[i].type == !(TOKEN_PUNCTUATION) and !!(CONST_SET{")","}","]"})[tokens[i].value] then
+			local iStart   = table.remove(bracketTokenIndices)
+			local expected = !!(bracketsConstName)[tokens[iStart].value]
 
-			elseif tokens[i].type == !(TOKEN_PUNCTUATION) and !!(CONST_SET{")","}","]"})[tokens[i].value] then
-				local iStart   = table.remove(bracketTokenIndices)
-				local expected = BRACKETS[tokens[iStart].value]
+			if not iStart then
+				reportMessageInFile(io.stderr, sourceInfo.string, sourceInfo.path, tokens[i].position1, "Error", "BracketChecker", "Stray bracket.")
+				bracketTokenIndices[1] = nil
+				break
 
-				if not iStart then
-					reportMessageInFile(io.stderr, s, path, tokens[i].position1, "Error", "BracketChecker", "Stray bracket.")
-					bracketTokenIndices[1] = nil
-					break
-
-				elseif tokens[i].value ~= expected then
-					printerr()
-					reportMessageInFile(io.stderr, s, path, tokens[i     ].position1, "Error", "BracketChecker", "Expected '%s'.", expected)
-					reportMessageInFile(io.stderr, s, path, tokens[iStart].position1, "Info",  "BracketChecker", "...here is the unmatched bracket.")
-					exitFailure()
-				end
+			elseif tokens[i].value ~= expected then
+				printerr()
+				reportMessageInFile(io.stderr, sourceInfo.string, sourceInfo.path, tokens[i     ].position1, "Error", "BracketChecker", "Expected '%s'.", expected)
+				reportMessageInFile(io.stderr, sourceInfo.string, sourceInfo.path, tokens[iStart].position1, "Info",  "BracketChecker", "...here is the unmatched bracket.")
+				exitFailure()
 			end
 		end
-
-		if bracketTokenIndices[1] then
-			local i = bracketTokenIndices[1]
-			errorInFile(s, path, tokens[i].position1, "BracketChecker", "Missing end bracket.", BRACKETS[tokens[i].value])
-		end
-
-		!ifDEBUG `profilerUnpause()`
-		return startTime, endTime
 	end
 
-	function _G.readAndTokenizeFile(state, path, increaseTotalLineCount)
-		!ifDEBUG `profilerPause()`
-		assert(not state.fileBuffers[path], path)
-
-		if state.sendMessages then
-			local message = newMessage(!(MESSAGE_FILE))
-			message.path  = path
-			table.insert(state.messages, message)
-		end
-
-		local s, err = getFileContents(path, true)
-		if not s then
-			errorLine("Lexer", "Could not read file '%s'. (%s)", path, err)
-		end
-
-		-- Normalize line endings.
-		if s:find("\r", 1, true) then
-			s = s:gsub("\n?\r\n?", "\n")
-		end
-
-		state.fileBuffers[path] = s
-
-		local startTime, endTime = readAndTokenizeString(state, path, increaseTotalLineCount, s, 1)
-		return startTime, endTime
+	if bracketTokenIndices[1] then
+		local i = bracketTokenIndices[1]
+		errorInFile(sourceInfo.string, sourceInfo.path, tokens[i].position1, "BracketChecker", "Missing end bracket.", !!(bracketsConstName)[tokens[i].value])
 	end
+
+	!ifDEBUG `profilerUnpause()`
+	return startTime, endTime
+end
+
+function _G.readAndTokenizeFile(state, path, increaseTotalLineCount)
+	!ifDEBUG `profilerPause()`
+	assert(not state.fileBuffers[path], path)
+
+	if state.sendMessages then
+		local message = newMessage(!(MESSAGE_FILE))
+		message.path  = path
+		table.insert(state.messages, message)
+	end
+
+	local s, err = getFileContents(path, true)
+	if not s then
+		errorLine("Lexer", "Could not read file '%s'. (%s)", path, err)
+	end
+
+	-- Normalize line endings.
+	if s:find("\r", 1, true) then
+		s = s:gsub("\n?\r\n?", "\n")
+	end
+
+	state.fileBuffers[path] = s
+
+	local sourceInfo         = {path=path, string=s}
+	local startTime, endTime = readAndTokenizeString(state, sourceInfo, 1, increaseTotalLineCount)
+	return startTime, endTime
 end
 
 

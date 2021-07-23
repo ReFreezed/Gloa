@@ -20,14 +20,14 @@
 	astNewNode
 	astPrint, astPrintTree
 	astVisitAllNodes, astVisitAllNodesLeavesFirst, astVisitAllNodesInUnit
-	eatNextToken, eatNextTok, peekNextToken, peekNextTok, eatTrailingSemicolon
 	errorParsing*, parserMessage*
 	errorUnhandledNodeType, errorUnhandledType
 	isLiteral
 	isNodeAt
 	newLiteral, newIdentifier
 	nodeError, nodeErrorAfter, nodeMessage, where
-	parse*
+	parseFileScope
+	peekNextTok
 
 --============================================================]]
 
@@ -555,24 +555,33 @@ do
 end
 
 !(
-local functionsToExport = {}
+local fileLocals = {}
 
-local function EXPORT_LOCAL(header)
-	local funcNameAndArgs, funcName = header:match"^function _G%.((%w+).+)$"
+local function FILE_LOCAL(header)
+	local funcNameAndArgs, funcName = header:match"^function ((%w+)%(.+)$"
 	assert(funcName, header)
 
-	table.insert(functionsToExport, funcName)
+	table.insert(fileLocals, funcName)
 
 	__LUA("function ", funcNameAndArgs)
 
 	preprocessorOutputAtDuringPost("parserFunctionLocals", F(
 		"local %s",
-		table.concat(functionsToExport, ", ")
+		table.concat(fileLocals, ", ")
 	))
-	preprocessorOutputAtDuringPost("parserFunctionExports", F(
-		"_G.%s = %s",
-		table.concat(functionsToExport, ", _G."),
-		table.concat(functionsToExport, ", ")
+end
+
+local function EXPORT_LOCAL(header)
+	local funcNameAndArgs, funcName = header:match"^function _G%.((%w+)%(.+)$"
+	assert(funcName, header)
+
+	table.insert(fileLocals, funcName)
+
+	__LUA("function ", funcNameAndArgs)
+
+	preprocessorOutputAtDuringPost("parserFunctionLocals", F(
+		"local %s",
+		table.concat(fileLocals, ", ")
 	))
 end
 )
@@ -583,27 +592,6 @@ end
 local      EAT_NEXT_TOKEN = `state.nextToken = state.nextToken + 1` -- This macro does not "return" anything, unlike the function with the same name.
 local PUT_BACK_LAST_TOKEN = `state.nextToken = state.nextToken - 1`
 local     PEEK_LAST_TOKEN = `state.tokens[state.nextToken-1]`
-
--- lua = IS_TOKEN( [ localTokNum, ] tokenType, tokenValue1, ... )
-local function IS_TOKEN(localTokNum, tokType, tokValue1, ...)
-	if type(tokType) ~= "number" then
-		return IS_TOKEN(nil, localTokNum, tokType, tokValue1, ...)
-	end
-
-	local localSuffix = localTokNum and F("%d", localTokNum) or ""
-
-	if ... then
-		return F(
-			"(tokType%s == %s and %s[tokValue%s])",
-			localSuffix, toLua(tokType), CONST_SET{tokValue1,...}, localSuffix
-		)
-	else
-		return F(
-			"(tokType%s == %s and tokValue%s == %s)",
-			localSuffix, toLua(tokType), localSuffix, toLua(tokValue1)
-		)
-	end
-end
 
 -- lua = IS_TOK         ( [ localTokNum, ] tokenType, tokenValue1, ... )
 -- lua = IS_EXISTING_TOK( [ localTokNum, ] tokenType, tokenValue1, ... )
@@ -647,36 +635,21 @@ local function IS_EXISTING_TOK(localTokNum, tokType, tokValue1, ...)
 end
 )
 
--- tokenType, tokenValue, tokenIndex = eatNextToken( compilationState )
--- tok, tokenIndex = eatNextTok( compilationState )
-!EXPORT_LOCAL `function _G.eatNextToken(state)`
-	local i   = state.nextToken
-	local tok = state.tokens[i]
-	if not tok then  return nil  end
-	state.nextToken = i + 1
-	return tok.type, tok.value, i
-end
-!EXPORT_LOCAL `function _G.eatNextTok(state)`
+-- tok, tokenIndex = eatNextTok ( compilationState )
+-- tok, tokenIndex = peekNextTok( compilationState, steps )
+local function eatNextTok(state)
 	local i   = state.nextToken
 	local tok = state.tokens[i]
 	state.nextToken = i + 1
 	return tok, i
 end
-
--- tokenType, tokenValue, tokenIndex = peekNextToken( compilationState, steps )
--- tok, tokenIndex = peekNextTok( compilationState, steps )
-!EXPORT_LOCAL `function _G.peekNextToken(state, steps)`
-	local i   = state.nextToken + steps - 1
-	local tok = state.tokens[i]
-	if not tok then  return nil  end
-	return tok.type, tok.value, i
-end
-!EXPORT_LOCAL `function _G.peekNextTok(state, steps)`
+local function peekNextTok(state, steps)
 	local i = state.nextToken + steps - 1
 	return state.tokens[i], i
 end
+_G.peekNextTok = peekNextTok
 
-function _G.eatTrailingSemicolon(state)
+local function eatTrailingSemicolon(state)
 	local tok = state.tokens[state.nextToken]
 	if !!(IS_TOK(TOKEN_PUNCTUATION, ";")) then
 		!!(EAT_NEXT_TOKEN) -- ';'
@@ -685,7 +658,7 @@ end
 
 
 
-!EXPORT_LOCAL `function _G.parseIdentifier(state, parent)`
+local function parseIdentifier(state, parent)
 	local tok, token = eatNextTok(state)
 	if tok.type ~= !(TOKEN_IDENTIFIER) then
 		!ERROR_OR_RETURN_NIL `errorParsingLast(state, "Expected an identifier.")`
@@ -697,7 +670,7 @@ end
 	return ident
 end
 
-!EXPORT_LOCAL `function _G.parseUsing(state, parent)`
+local function parseUsing(state, parent)
 	local tok, token = eatNextTok(state)
 	if not !!(IS_TOK(TOKEN_KEYWORD, "using")) then
 		!ERROR_OR_RETURN_NIL `errorParsingLast(state, "Expected 'using'.")`
@@ -709,7 +682,7 @@ end
 	return using
 end
 
-!EXPORT_LOCAL `function _G.parseForeign(state, parent)`
+local function parseForeign(state, parent)
 	-- Note: Assume '!foreign' has been eaten already.
 
 	local foreign = astNewNode(AstForeign, state.nextToken-1, parent)
@@ -734,7 +707,7 @@ end
 	return foreign
 end
 
-!EXPORT_LOCAL `function _G.parseTable(state, parent)`
+local function parseTable(state, parent)
 	-- Note: Assume '{' has been eaten already.
 
 	local tableNode      = astNewNode(AstTable, state.nextToken-1, parent)
@@ -824,7 +797,7 @@ end
 
 -- Parse comma-separated expressions. Used for function calls, struct parameters, assignments etc.
 -- success = parseExpressionList( compilationState, parent, expressions, expressionsNamed=nil, expectLvalues )
-!EXPORT_LOCAL `function _G.parseExpressionList(state, parent, expressions, expressionsNamed, expectLvalues)`
+local function parseExpressionList(state, parent, expressions, expressionsNamed, expectLvalues)
 	local takenNames = expressionsNamed and {}
 
 	while true do
@@ -888,7 +861,7 @@ local function concatNamesInArgumentGroupForError(argsInGroup)
 	return table.concat(names, "', '", 1, #names-1) .. "' and '" .. names[#names]
 end
 
-!EXPORT_LOCAL `function _G.parseArguments(state, parent, isInput, allowVoid)`
+local function parseArguments(state, parent, isInput, allowVoid)
 	-- Note: Assume '(' has been eaten already.
 
 	local args            = astNewNode(AstArguments, state.nextToken, parent)
@@ -1184,7 +1157,7 @@ end
 	return args
 end
 
-!EXPORT_LOCAL `function _G.parseNamelessOutputArguments(state, parent)`
+local function parseNamelessOutputArguments(state, parent)
 	local args = astNewNode(AstArguments, state.nextToken, parent)
 
 	for groupN = 1, 1/0 do
@@ -1247,7 +1220,24 @@ end
 	return args
 end
 
-!EXPORT_LOCAL `function _G.parseStruct(state, parent)`
+-- success = parseNotes( state, declaration )
+local function parseNotes(state, decl)
+	local prevOpPrecedence = !(math.min(OPERATOR_PRECEDENCE.call, OPERATOR_PRECEDENCE.access)-1)
+	local tok              = peekNextTok(state, 1)
+
+	while !!(IS_TOK(TOKEN_PUNCTUATION, "@")) do
+		!!(EAT_NEXT_TOKEN) -- '@'
+
+		!SET_OR_RETURN_FALSE `local note = parseExpression(state, decl, prevOpPrecedence)`
+		table.insert(decl.notes, note)
+
+		tok = peekNextTok(state, 1)
+	end
+
+	return true
+end
+
+local function parseStruct(state, parent)
 	local struct = astNewNode(AstStruct, state.nextToken-1, parent) -- The token should be the 'struct' keyword.
 	local tok    = eatNextTok(state)
 
@@ -1389,7 +1379,7 @@ end
 	return struct
 end
 
-!EXPORT_LOCAL `function _G.parseEnum(state, parent)`
+local function parseEnum(state, parent)
 	local enum = astNewNode(AstEnum, state.nextToken-1, parent) -- The token should be the 'enum' keyword.
 	local tok  = peekNextTok(state, 1)
 
@@ -1457,26 +1447,9 @@ end
 	return enum
 end
 
--- success = parseNotes( state, declaration )
-!EXPORT_LOCAL `function _G.parseNotes(state, decl)`
-	local prevOpPrecedence = !(math.min(OPERATOR_PRECEDENCE.call, OPERATOR_PRECEDENCE.access)-1)
-	local tok              = peekNextTok(state, 1)
-
-	while !!(IS_TOK(TOKEN_PUNCTUATION, "@")) do
-		!!(EAT_NEXT_TOKEN) -- '@'
-
-		!SET_OR_RETURN_FALSE `local note = parseExpression(state, decl, prevOpPrecedence)`
-		table.insert(decl.notes, note)
-
-		tok = peekNextTok(state, 1)
-	end
-
-	return true
-end
-
 -- success = parseDeclarationStatement( compilationState, parentScope, inImperativeScope [, declarationType=DECLARATION_NORMAL ] )
 -- declarationType = DECLARATION_NORMAL|DECLARATION_STRUCT|DECLARATION_ENUM
-!EXPORT_LOCAL `function _G.parseDeclarationStatement(state, scope, imperative, declType)`
+!FILE_LOCAL `function parseDeclarationStatement(state, scope, imperative, declType)`
 	--[[
 	local a := 0        -- Variable, inferred type.
 	local a  = 0        -- Variable, inferred type (same as the above).
@@ -1837,7 +1810,7 @@ end
 	return true
 end
 
-!EXPORT_LOCAL `function _G.parseAssignment(state, parent)`
+local function parseAssignment(state, parent)
 	local assignment          = astNewNode(AstAssignment, 1, parent)
 	local statementStartToken = state.nextToken
 
@@ -1880,7 +1853,7 @@ end
 
 -- Add the names to the 'names' array.
 -- success = parseNameList( compilationState, parent, names, namesFromBefore=nil, allowBlanks )
-!EXPORT_LOCAL `function _G.parseNameList(state, parent, names, namesFromBefore, allowBlanks)`
+!FILE_LOCAL `function parseNameList(state, parent, names, namesFromBefore, allowBlanks)`
 	local takenNames = {}
 
 	while true do
@@ -1924,7 +1897,7 @@ end
 	return true
 end
 
-!EXPORT_LOCAL `function _G.parseDebugNode(state, parent)`
+!FILE_LOCAL `function parseDebugNode(state, parent)`
 	local tok, token = eatNextTok(state)
 	if tok.type ~= !(TOKEN_DIRECTIVE) then
 		!ERROR_OR_RETURN_NIL `errorParsingLast(state, "Expected a directive.")`
@@ -1964,7 +1937,7 @@ local function parseIfBranch(state, ifOrStaticIf, isFileScopeOrNamespace)
 	return block
 end
 
-!EXPORT_LOCAL `function _G.parseIfOrStaticIf(state, parent, isFileScopeOrNamespace)`
+local function parseIfOrStaticIf(state, parent, isFileScopeOrNamespace)
 	local tok, token = eatNextTok(state)
 	!if DEBUG then
 		assert((tok.type == !(TOKEN_KEYWORD) or tok.type == !(TOKEN_DIRECTIVE)) and tok.value == "if")
@@ -2017,7 +1990,7 @@ local function getBreakableNameFromSimpleExpression(expr)
 	return ""
 end
 
-!EXPORT_LOCAL `function _G.parseSwitch(state, parent, statementStartToken, valueExpr, complete)`
+local function parseSwitch(state, parent, statementStartToken, valueExpr, complete)
 	-- Note: Assume '... == {' has been eaten already.
 	local switch     = astNewNode(AstSwitch, statementStartToken, parent)
 	switch.complete  = complete
@@ -2085,7 +2058,7 @@ end
 end
 
 -- success = parseOneStatementButSometimesMoreAndAddToBlock( state, block )
-!EXPORT_LOCAL `function _G.parseOneStatementButSometimesMoreAndAddToBlock(state, block)`
+!FILE_LOCAL `function parseOneStatementButSometimesMoreAndAddToBlock(state, block)`
 	local tok  = peekNextTok(state, 1)
 	local tok2 = peekNextTok(state, 2)
 
@@ -2458,7 +2431,7 @@ end
 end
 
 -- success = parseBlockStatements( state, block )
-!EXPORT_LOCAL `function _G.parseBlockStatements(state, block)`
+local function parseBlockStatements(state, block)
 	!if DEBUG then
 		--[[
 		setmetatable(block, {__newindex=function(block, k, v)
@@ -2516,7 +2489,7 @@ end
 	return true
 end
 
-!EXPORT_LOCAL `function _G.parseBlock(state, parent)`
+local function parseBlock(state, parent)
 	-- Note: Assume '{' has been eaten already.
 
 	local block = astNewNode(AstBlock, state.nextToken-1, parent)
@@ -2526,7 +2499,7 @@ end
 end
 
 -- block = parseBlockOrScopedStatement( compilationState, parent )
-!EXPORT_LOCAL `function _G.parseBlockOrScopedStatement(state, parent)`
+!FILE_LOCAL `function parseBlockOrScopedStatement(state, parent)`
 	local tok, token = peekNextTok(state, 1)
 
 	if !!(IS_TOK(TOKEN_PUNCTUATION, "{")) then
@@ -2540,7 +2513,7 @@ end
 	return block
 end
 
-!EXPORT_LOCAL `function _G.parseImportOrLoad(state, parent)`
+local function parseImportOrLoad(state, parent)
 	local import = astNewNode(AstImport, state.nextToken, parent)
 
 	local tok = eatNextTok(state)
@@ -2564,7 +2537,7 @@ end
 	return import
 end
 
-!EXPORT_LOCAL `function _G.parseRun(state, parent, mustBeExpression)`
+!FILE_LOCAL `function parseRun(state, parent, mustBeExpression)`
 	local tok, token = eatNextTok(state)
 	if not !!(IS_TOK(TOKEN_DIRECTIVE, "run")) then
 		!ERROR_OR_RETURN_NIL `errorParsingLast(state, "Expected '!run'.")`
@@ -2655,7 +2628,7 @@ end
 
 -- success = parseFileScopeOrNamespaceStatements( state, parentScope, isTopLevel, singleStatement )
 -- WARNING: parentScope is currently modified even if success==false!
-!EXPORT_LOCAL `function _G.parseFileScopeOrNamespaceStatements(state, scope, isTopLevel, singleStatement)`
+!FILE_LOCAL `function parseFileScopeOrNamespaceStatements(state, scope, isTopLevel, singleStatement)`
 	while true do
 		local tok, token = peekNextTok(state, 1)
 		local tok2       = peekNextTok(state, 2)
@@ -2829,7 +2802,7 @@ end
 	return true
 end
 
-!EXPORT_LOCAL `function _G.parseFileScope(state, parent, path, isModule, moduleName)`
+local function parseFileScope(state, parent, path, isModule, moduleName)
 	local fileScope      = astNewNode(AstFileScope, state.nextToken, parent)
 	fileScope.path       = path
 	fileScope.isModule   = isModule
@@ -2865,6 +2838,7 @@ end
 
 	return fileScope
 end
+_G.parseFileScope = parseFileScope
 
 function _G.astMoveRelevantThingsFromFileScopeToGlobalScope(state, fileScope)
 	!ASSERT `not fileScope.isModule`
@@ -2881,7 +2855,7 @@ function _G.astMoveRelevantThingsFromFileScopeToGlobalScope(state, fileScope)
 	fileScope.imports = unmovedImports
 end
 
-!EXPORT_LOCAL `function _G.parseGlobalScope(state, firstFilePath)`
+function _G.parseGlobalScope(state, firstFilePath)
 	local globalScope    = astNewNode(AstGlobalScope, state.nextToken)
 	state.globalScope    = globalScope
 
@@ -2895,7 +2869,7 @@ end
 end
 
 -- call = parseCallChain( compilationState, parent [, callee=theFollowingIdentifier, isMethod=false ] )
-!EXPORT_LOCAL `function _G.parseCallChain(state, parent, callee, isMethod)`
+local function parseCallChain(state, parent, callee, isMethod)
 	if not callee then
 		!SET_OR_RETURN_NIL `callee = parseIdentifier(state, parent)` -- We'll update the parent in a moment.
 	end
@@ -2916,7 +2890,8 @@ end
 			call.arguments[1]   = literal
 
 		elseif !!(IS_TOK(TOKEN_PUNCTUATION, "(")) then
-			if tok.line1 > state.tokens[token-1].line2 then
+			local tokPrev = state.tokens[token-1]
+			if tok.line1 > (tokPrev.line2 or tokPrev.line1) then
 				!ERROR_OR_RETURN_NIL `errorParsingLast(state, "Ambigous syntax. (Is this a call or a new statement?)")`
 			end
 
@@ -2955,7 +2930,7 @@ end
 	return call
 end
 
-!EXPORT_LOCAL `function _G.parseLambda(state, parent)`
+local function parseLambda(state, parent)
 	local lambda = astNewNode(AstLambda, state.nextToken, parent)
 
 	-- Captures.
@@ -3749,7 +3724,7 @@ do
 end
 
 -- expression = parseExpression( compilationState, parent [, previousOperatorPrecedence, expectLvalue=false ] )
-!EXPORT_LOCAL `function _G.parseExpression(state, parent, prevOpPrecedence, expectLvalue)`
+!FILE_LOCAL `function parseExpression(state, parent, prevOpPrecedence, expectLvalue)`
 	prevOpPrecedence = prevOpPrecedence or 0
 
 	local tok, exprStartToken = eatNextTok(state)
@@ -4019,8 +3994,8 @@ function _G.errorParsing(state, token, s, ...)
 	local tok    = tokens[token]
 	local tok1   = tokens[1] or errorInternal("No tokens.")
 
-	local buffer = (tok or tok1).buffer -- The fallback is not great, but better than crashing.
-	local path   = (tok or tok1).file
+	local buffer = (tok or tok1).source.string -- The fallback is not great, but better than crashing.
+	local path   = (tok or tok1).source.path
 
 	local ptr
 		=  tok        and tok.position1
@@ -4036,7 +4011,7 @@ function _G.parserMessage(file, state, token, label, s, ...)
 	if type(file) ~= "userdata" then  return parserMessage(io.stdout, file, state, token, label, s, ...)  end
 
 	local tok = state.tokens[token] or errorInternal("No tokens.")
-	reportMessageInFile(file, tok.buffer, tok.file, tok.position1, label, "Parser", s, ...)
+	reportMessageInFile(file, tok.source.string, tok.source.path, tok.position1, label, "Parser", s, ...)
 end
 
 -- parserMessageAfter( [ outputFile=io.stdout, ] compilationState, token, label, formatString, ... )
@@ -4044,7 +4019,7 @@ function _G.parserMessageAfter(file, state, token, label, s, ...)
 	if type(file) ~= "userdata" then  return parserMessage(io.stdout, file, state, token, label, s, ...)  end
 
 	local tok = state.tokens[token] or errorInternal("No tokens.")
-	reportMessageInFile(file, tok.buffer, tok.file, tok.position2+1, label, "Parser", s, ...)
+	reportMessageInFile(file, tok.source.string, tok.source.path, tok.position2+1, label, "Parser", s, ...)
 end
 
 -- parserMessageLine( [ outputFile=io.stdout, ] compilationState, token, label, formatString, ... )
@@ -4053,12 +4028,12 @@ function _G.parserMessageLine(file, state, token, label, s, ...)
 
 	local tok = state.tokens[token] or errorInternal("No tokens.")
 
-	-- Temp until .line1 has useful values.
-	local _, nlCount = tok.buffer:sub(1, tok.position1-1):gsub("\n", "%0")
+	-- Temp until .line1 has useful values. (Do we now? @Incomplete 2021-07-23)
+	local _, nlCount = tok.source.string:sub(1, tok.position1-1):gsub("\n", "%0")
 	local ln         = nlCount + 1
 
-	reportMessageOnLine(file, tok.file, ln, label, "Parser", s, ...)
-	-- reportMessageOnLine(file, tok.file, tok.line1, label, "Parser", s, ...)
+	reportMessageOnLine(file, tok.source.path, ln, label, "Parser", s, ...)
+	-- reportMessageOnLine(file, tok.source.path, tok.line1, label, "Parser", s, ...)
 end
 
 -- errorParsingAfter( compilationState, tokenIndex, formatString, ... )
@@ -4067,8 +4042,8 @@ function _G.errorParsingAfter(state, token, s, ...)
 	local tok    = tokens[token]
 	local tok1   = tokens[1] or errorInternal("No tokens.")
 
-	local buffer = (tok or tok1).buffer -- The fallback is not great, but better than crashing.
-	local path   = (tok or tok1).file
+	local buffer = (tok or tok1).source.string -- The fallback is not great, but better than crashing.
+	local path   = (tok or tok1).source.path
 
 	local ptr
 		=  tok        and tok.position2+1
@@ -4121,7 +4096,7 @@ function _G.nodeError(state, nodeOrToken, agent, s, ...)
 	local tok   = state.tokens[token] or errorInternal("No tokens.")
 	!TRACE(2)
 	!ifDEBUG `if type(nodeOrToken) == "table" then  astPrint(nodeOrToken)  end`
-	errorInFile(tok.buffer, tok.file, tok.position1, agent, s, ...)
+	errorInFile(tok.source.string, tok.source.path, tok.position1, agent, s, ...)
 end
 
 -- nodeErrorAfter( compilationState, node,  agent, formatString, ... )
@@ -4131,7 +4106,7 @@ function _G.nodeErrorAfter(state, nodeOrToken, agent, s, ...)
 	local tok   = state.tokens[token] or errorInternal("No tokens.")
 	!TRACE(2)
 	!ifDEBUG `if type(nodeOrToken) == "table" then  astPrint(nodeOrToken)  end`
-	errorInFile(tok.buffer, tok.file, tok.position2+1, agent, s, ...)
+	errorInFile(tok.source.string, tok.source.path, tok.position2+1, agent, s, ...)
 end
 
 -- nodeMessage( [ outputFile=io.stdout, ] compilationState, node, label, agent, formatString, ... )
@@ -4139,7 +4114,7 @@ function _G.nodeMessage(file, state, node, label, agent, s, ...)
 	if type(file) ~= "userdata" then  return nodeMessage(io.stdout, file, state, node, label, agent, s, ...)  end
 
 	local tok = state.tokens[node.token] or errorInternal("No tokens.")
-	reportMessageInFile(file, tok.buffer, tok.file, tok.position1, label, agent, s, ...)
+	reportMessageInFile(file, tok.source.string, tok.source.path, tok.position1, label, agent, s, ...)
 end
 
 function _G.where(state, node)
@@ -4153,7 +4128,7 @@ function _G.printLocation(file, state, node)
 	if type(file) ~= "userdata" then  file, state, node = io.stdout, file, state  end
 
 	local tok = state.tokens[node.token]
-	file:write(tok.file, ":", tok.line1, ": ")
+	file:write(tok.source.path, ":", tok.line1, ": ")
 end
 
 
@@ -5171,11 +5146,11 @@ end
 function _G.isNodeAt(state, node, targetPath, targetLn)
 	local tok = state.tokens[node.token] or errorInternal("No tokens.")
 
-	if tok.file ~= targetPath then  return false  end
-	if not targetLn           then  return true   end
+	if tok.source.path ~= targetPath then  return false  end
+	if not targetLn                  then  return true   end
 
-	-- Temp until .line1 has useful values.
-	local _, nlCount = tok.buffer:sub(1, tok.position1-1):gsub("\n", "%0")
+	-- Temp until .line1 has useful values. (Do we now? @Incomplete 2021-07-23)
+	local _, nlCount = tok.source.string:sub(1, tok.position1-1):gsub("\n", "%0")
 	local ln         = nlCount + 1
 
 	return ln == targetLn
@@ -5247,5 +5222,3 @@ function _G.addDeclarationToNames(scope, decl)
 end
 
 
-
---[[INSERT:parserFunctionExports]]

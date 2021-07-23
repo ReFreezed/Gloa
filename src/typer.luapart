@@ -626,7 +626,7 @@ do
 				!ASSERT("nodeStatement.nodeType == "..AST_ARGUMENT)
 
 				!if DEBUG then
-					if state.tokens[arg.token].file ~= state.tokens[node.token].file then
+					if state.tokens[arg.token].source.path ~= state.tokens[node.token].source.path then
 						typeError2(state, node, "Internal compiler error: node", arg, "arg")
 					end
 				!end
@@ -3258,12 +3258,13 @@ end
 			and typeInfo
 			or  state.builtinTypeInfos.void
 
+		local tok               = state.tokens[decl.token]
 		local codeDecl          = CodeDeclaration()
 		codeDecl.serial         = decl.s
 		codeDecl.typeInfo       = getPublicType(state, typeInfoForPublic)
-		codeDecl.filepath       = state.tokens[decl.token].file
-		codeDecl.lineNumber     = state.tokens[decl.token].line1
-		codeDecl.filePosition   = state.tokens[decl.token].position1
+		codeDecl.filepath       = tok.source.path
+		codeDecl.lineNumber     = tok.line1
+		codeDecl.filePosition   = tok.position1
 		codeDecl.name           = identOrVararg.name
 		codeDecl.expressions[1] = nil -- @Incomplete: Generate child CodeNodes.
 		codeDecl.rootExpression = nil -- @Incomplete: Generate child CodeNodes.
@@ -4328,14 +4329,15 @@ end
 
 		-- @UX: Output all bodyTexts into a file that's easier to debug.
 		local pathDummy
-		if tokens[lambda.bodyTextLambda.token].file == fileScope.path then
+		if tokens[lambda.bodyTextLambda.token].source.path == fileScope.path then
 			pathDummy = F("<body_text @ %s:%d>", fileScope.path, tokens[lambda.bodyTextLambda.token].line1)
 		else
 			pathDummy = F("<body_text @ %s>", fileScope.path) -- @UX: Get the line number from the closest parent lambda with the same path as fileScope.
 		end
 
 		-- @Incomplete: Include these times in the compilation stats.
-		local timeLexingStart, timeLexingEnd = readAndTokenizeString(state, pathDummy, true, bodyText, 1)
+		local sourceInfo                     = {path=pathDummy, string=bodyText}
+		local timeLexingStart, timeLexingEnd = readAndTokenizeString(state, sourceInfo, 1, true)
 
 		insertToken(tokens, !(TOKEN_PUNCTUATION),"}", bodyText,pathDummy) -- So we can parse the block.
 		tokens[tokens.n].position1 = #bodyText
