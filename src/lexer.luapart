@@ -9,7 +9,7 @@
 --=
 --==============================================================
 
-	getToken, isTokenLiteral, isTokenBuiltinType, isTokenAssigning
+	getToken, isTokenAssigning
 	readAndTokenizeString, readAndTokenizeFile
 	tokenize, insertToken
 
@@ -20,55 +20,55 @@
 --   elseif: This actually gets split up into 'else if' or 'else !if'.
 --   NULL:   NULL should be used in situations where the actual value doesn't matter, as a dummy value.
 --   void:   Like nil represents the absence of a value, void represents the absence of a type (or anything at all as all things must have a type).
-local KEYWORDS = {
-	["and"]          = true,
-	["break"]        = true,
-	["case"]         = true,
-	["cast"]         = true,
-	["continue"]     = true,
-	["defer"]        = true,
-	["do"]           = true,
-	["else"]         = true,
-	["elseif"]       = true,
-	["enum"]         = true,
-	["export"]       = true,
-	["export_value"] = true,
-	["external"]     = true,
-	["for"]          = true,
-	["if"]           = true,
-	["in"]           = true,
-	["inline"]       = true,
-	["local"]        = true,
-	["namespace"]    = true,
-	["not"]          = true,
-	["or"]           = true,
-	["return"]       = true,
-	["static"]       = true,
-	["struct"]       = true,
-	["type_info"]    = true,
-	["type_of"]      = true,
-	["using"]        = true,
-	["variant_of"]   = true,
-	["while"]        = true,
+local KEYWORDS = Set{
+	"and",
+	"break",
+	"case",
+	"cast",
+	"continue",
+	"defer",
+	"do",
+	"else",
+	"elseif",
+	"enum",
+	"export",
+	"export_value",
+	"external",
+	"for",
+	"if",
+	"in",
+	"inline",
+	"local",
+	"namespace",
+	"not",
+	"or",
+	"return",
+	"static",
+	"struct",
+	"type_info",
+	"type_of",
+	"using",
+	"variant_of",
+	"while",
 	-- Reserved words:
-	["goto"]         = true,
-	["read_only"]    = true,
-	["until"]        = true,
+	"goto",
+	"read_only",
+	"until",
 	-- Literals:
-	["false"]        = true,
-	["nil"]          = true,
-	["NULL"]         = true,
-	["true"]         = true,
+	"false",
+	"nil",
+	"NULL",
+	"true",
 	-- Built-in types:
-	["any"]          = true,
-	["bool"]         = true,
-	["float"]        = true,
-	["int"]          = true,
-	["none"]         = true,
-	["string"]       = true,
-	["table"]        = true,
-	["Type"]         = true,
-	["void"]         = true,
+	"any",
+	"bool",
+	"float",
+	"int",
+	"none",
+	"string",
+	"table",
+	"Type",
+	"void", -- Special indicator. Not an actual type.
 }
 
 local DIRECTIVE_WORDS = Set{
@@ -106,21 +106,10 @@ local DIRECTIVE_WORDS = !(DIRECTIVE_WORDS)
 
 
 
-_G.!struct"Tokens"{ -- SOA
-	{`count`,     0},
-
-	{`type`,      {}}, -- One of TOKEN_*.
-	{`value`,     {}}, -- Depends on the type.
-	{`extra`,     {}}, -- Depends on the type.
-	{`file`,      {}},
-	{`buffer`,    {}}, -- The actual source string (which may not be from the file).
-	{`position1`, {}}, -- Start byte.
-	{`position2`, {}}, -- End byte.
-	{`line1`,     {}}, -- Start line.
-	{`line2`,     {}}, -- End line.
-	{`inserted`,  {}}, -- Used for compilation stats.
-
+_G.!struct"Tokens"{
+	{`n`,         0}, -- Length of array.
 	{`lineCount`, 0},
+	-- [1]=tok1, ...
 }
 
 !if DEBUG then
@@ -158,18 +147,9 @@ function _G.tokenize(s, path, tokens, increaseTotalLineCount, lnStart)
 	local sub           = string.sub
 	local tonumber      = tonumber
 	local utf8Char      = utf8Char
+	local concat        = table.concat
 
-	local tokTypes      = tokens.type
-	local tokValues     = tokens.value
-	local tokExtras     = tokens.extra
-	local tokFiles      = tokens.file
-	local tokBuffers    = tokens.buffer
-	local tokPositions1 = tokens.position1
-	local tokPositions2 = tokens.position2
-	local tokLines1     = tokens.line1
-	local tokLines2     = tokens.line2
-
-	local count = tokens.count
+	local count = tokens.n
 
 	local ptr   = 1
 	local ln    = lnStart
@@ -382,13 +362,13 @@ function _G.tokenize(s, path, tokens, increaseTotalLineCount, lnStart)
 			preprocessorOutputAtTopOfFile `local substrings = {}` -- Reuse the same table for all strings.
 
 			local function ADD(substrCode)
-				__LUA(templateToLua(
+				return templateToLua(
 					trimTemplate`
 						segCount             = segCount + 1
 						substrings[segCount] = $substr
 					`,
 					{substr=substrCode}
-				))
+				)
 			end
 			)
 
@@ -399,7 +379,7 @@ function _G.tokenize(s, path, tokens, increaseTotalLineCount, lnStart)
 				end
 
 				if i > ptr then
-					!ADD `sub(s, ptr, i-1)`
+					@@ADD(sub(s, ptr, i-1))
 				end
 				ptr = i
 
@@ -424,22 +404,22 @@ function _G.tokenize(s, path, tokens, increaseTotalLineCount, lnStart)
 					-- \" inserts a quotation mark.
 					-- \' inserts an apostrophe.
 					elseif b == @@BYTE"n" or b == @@BYTE"\n" then
-						!ADD `"\n"`
+						@@ADD"\n"
 						ptr = ptr + 1
 					elseif b == @@BYTE"r" then
-						!ADD `"\r"`
+						@@ADD"\r"
 						ptr = ptr + 1
 					elseif b == @@BYTE"t" then
-						!ADD `"\t"`
+						@@ADD"\t"
 						ptr = ptr + 1
 					elseif b == @@BYTE"\\" then
-						!ADD `"\\"`
+						@@ADD"\\"
 						ptr = ptr + 1
 					elseif b == @@BYTE'"' then
-						!ADD `'"'`
+						@@ADD'"'
 						ptr = ptr + 1
 					elseif b == @@BYTE"'" then
-						!ADD `"'"`
+						@@ADD"'"
 						ptr = ptr + 1
 
 					-- \ddd specifies a byte denoted by one to three decimal digits.
@@ -454,20 +434,20 @@ function _G.tokenize(s, path, tokens, increaseTotalLineCount, lnStart)
 							)
 						end
 						ptr = ptr + #numStr
-						!ADD `bytesToString(b)`
+						@@ADD(bytesToString(b))
 
 					-- \xXX specifies a byte denoted by two hexadecimal digits.
 					elseif find(s, "^x[%dA-Fa-f][%dA-Fa-f]", ptr) then
 						local hex = sub(s, ptr+1, ptr+2)
 						ptr       = ptr + 3
-						!ADD `bytesToString(tonumber(hex, 16))`
+						@@ADD(bytesToString(tonumber(hex, 16)))
 
 					-- \u{XXX} inserts the UTF-8 encoding of a Unicode codepoint denoted by a sequence of hexadecimal digits.
 					elseif find(s, "^u{[%dA-Fa-f]+}", ptr) then
 						-- @Robustness: Validate integer range.
 						local hex = match(s, "^[%dA-Fa-f]+", ptr+2)
 						ptr       = ptr + 3 + #hex
-						!ADD `utf8Char(tonumber(hex, 16))`
+						@@ADD(utf8Char(tonumber(hex, 16)))
 
 					-- \z skips the following span of whitespace characters.
 					elseif b == @@BYTE"z" then
@@ -481,7 +461,7 @@ function _G.tokenize(s, path, tokens, increaseTotalLineCount, lnStart)
 			end
 
 			tokType  = !(TOKEN_STRING)
-			tokValue = table.concat(substrings, "", 1, segCount)
+			tokValue = concat(substrings, "", 1, segCount)
 			tokExtra = false--trimmedInitialNewline
 
 		-- String (long-form).
@@ -579,21 +559,25 @@ function _G.tokenize(s, path, tokens, increaseTotalLineCount, lnStart)
 		if tokType then
 			count = count + 1
 
-			tokTypes[count]      = tokType
-			tokValues[count]     = tokValue
-			tokFiles[count]      = path
-			tokBuffers[count]    = s
-			tokPositions1[count] = tokenPos
-			tokPositions2[count] = ptr-1
-			tokLines1[count]     = ln
-
-			if tokExtra ~= nil then  tokExtras[count] = tokExtra  end -- The if is needed for speed!
+			tokens[count] = {
+				-- @Speed: Decrease amount of fields.
+				type      = tokType,  -- One of TOKEN_*.
+				value     = tokValue, -- Depends on the type.
+				extra     = tokExtra, -- Depends on the type.
+				file      = path,
+				buffer    = s,        -- The actual source string (which may not be from the file).
+				position1 = tokenPos, -- Start byte.
+				position2 = ptr-1,    -- End byte.
+				line1     = ln,       -- Start line.
+				line2     = ln,       -- End line. (Is updated below!)
+				inserted  = false,    -- Used for compilation stats.
+			}
 		end
 
 		!!(UPDATE_LINE_NUMBER)
 
 		if tokType then
-			tokLines2[count] = ln
+			tokens[count].line2 = ln
 			--[[
 			printf("%5d %s%s |%s|",
 				#tokTypes,
@@ -608,46 +592,45 @@ function _G.tokenize(s, path, tokens, increaseTotalLineCount, lnStart)
 		errorInFile(s, path, ptr, "Tokenizer", "Expected a word after '\\'.")
 	end
 
-	tokens.count = count
+	tokens.n = count
 
 	if increaseTotalLineCount then
 		tokens.lineCount = tokens.lineCount + ln - lnStart + 1
 	end
 end
 
--- insertToken( tokens, tokenType, tokenValue [, buffer="", path=tokens.file[1] ] )
+-- insertToken( tokens, tokenType, tokenValue [, buffer="", path=tokens[1].file ] )
 function _G.insertToken(tokens, tokType, tokValue, buffer, path)
-	local count             = tokens.count+1
-	tokens.count            = count
-	tokens.type [count]     = tokType
-	tokens.value[count]     = tokValue
-	tokens.position1[count] = 1
-	tokens.position2[count] = 1
-	tokens.line1[count]     = 1
-	tokens.line2[count]     = 1
-	tokens.buffer[count]    = buffer or ""
-	tokens.file[count]      = path   or tokens.file[1]
-	tokens.inserted[count]  = true
+	local count = tokens.n + 1
+	tokens.n    = count
+
+	tokens[count] = {
+		type      = tokType,
+		value     = tokValue,
+		extra     = nil,
+		file      = path or tokens[1].file,
+		buffer    = buffer or "",
+		position1 = 1,
+		position2 = 1,
+		line1     = 1,
+		line2     = 1,
+		inserted  = true,
+	}
 end
 
 
 
 -- tokenType, tokenValue = getToken( tokens, index )
 function _G.getToken(tokens, i)
-	return tokens.type[i], tokens.value[i]
+	local tok = tokens[i]
+	if not tok then  return nil  end
+	return tok.type, tok.value
 end
 
-function _G.isTokenLiteral(tokType, tokValue)
-	return
-		!!(CONST_SET{ TOKEN_FLOAT, TOKEN_INTEGER, TOKEN_STRING })[tokType]
-		or tokType == !(TOKEN_KEYWORD) and !!(CONST_SET{"true","false","nil"})[tokValue] ~= nil
-end
-
-function _G.isTokenBuiltinType(tokType, tokValue)
-	return tokType == !(TOKEN_KEYWORD) and !!(CONST_SET{"float","int","string","table","bool","Type","any","none"})[tokValue] ~= nil
-end
-
+-- bool = isTokenAssigning( tokenType, tokenValue )
+-- bool = isTokenAssigning( tok )
 function _G.isTokenAssigning(tokType, tokValue)
+	if type(tokType) == "table" then  tokValue = tokType.value ; tokType = tokType.type  end
 	return tokType == !(TOKEN_PUNCTUATION) and !!(CONST_SET{"=","+=","-=","*=","/=","//=","^=","%=","..="})[tokValue] ~= nil
 end
 
@@ -659,7 +642,7 @@ do
 
 	function _G.readAndTokenizeString(state, path, increaseTotalLineCount, s, lnStart)
 		local tokens     = state.tokens
-		local startToken = tokens.count+1
+		local startToken = tokens.n + 1
 
 		local startTime = timerGetCurrentInSeconds()
 		tokenize(s, path, tokens, increaseTotalLineCount, lnStart)
@@ -678,23 +661,23 @@ do
 
 		local bracketTokenIndices = {}
 
-		for i = startToken, tokens.count do
-			if tokens.type[i] == !(TOKEN_PUNCTUATION) and !!(CONST_SET{"(","{","["})[tokens.value[i]] then
+		for i = startToken, tokens.n do
+			if tokens[i].type == !(TOKEN_PUNCTUATION) and !!(CONST_SET{"(","{","["})[tokens[i].value] then
 				table.insert(bracketTokenIndices, i)
 
-			elseif tokens.type[i] == !(TOKEN_PUNCTUATION) and !!(CONST_SET{")","}","]"})[tokens.value[i]] then
+			elseif tokens[i].type == !(TOKEN_PUNCTUATION) and !!(CONST_SET{")","}","]"})[tokens[i].value] then
 				local iStart   = table.remove(bracketTokenIndices)
-				local expected = BRACKETS[tokens.value[iStart]]
+				local expected = BRACKETS[tokens[iStart].value]
 
 				if not iStart then
-					reportMessageInFile(io.stderr, s, path, tokens.position1[i], "Error", "BracketChecker", "Stray bracket.")
+					reportMessageInFile(io.stderr, s, path, tokens[i].position1, "Error", "BracketChecker", "Stray bracket.")
 					bracketTokenIndices[1] = nil
 					break
 
-				elseif tokens.value[i] ~= expected then
+				elseif tokens[i].value ~= expected then
 					printerr()
-					reportMessageInFile(io.stderr, s, path, tokens.position1[i],      "Error", "BracketChecker", "Expected '%s'.", expected)
-					reportMessageInFile(io.stderr, s, path, tokens.position1[iStart], "Info",  "BracketChecker", "...here is the unmatched bracket.")
+					reportMessageInFile(io.stderr, s, path, tokens[i     ].position1, "Error", "BracketChecker", "Expected '%s'.", expected)
+					reportMessageInFile(io.stderr, s, path, tokens[iStart].position1, "Info",  "BracketChecker", "...here is the unmatched bracket.")
 					exitFailure()
 				end
 			end
@@ -702,7 +685,7 @@ do
 
 		if bracketTokenIndices[1] then
 			local i = bracketTokenIndices[1]
-			errorInFile(s, path, tokens.position1[i], "BracketChecker", "Missing end bracket.", BRACKETS[tokens.value[i]])
+			errorInFile(s, path, tokens[i].position1, "BracketChecker", "Missing end bracket.", BRACKETS[tokens[i].value])
 		end
 
 		!ifDEBUG `profilerUnpause()`
@@ -724,9 +707,9 @@ do
 			errorLine("Lexer", "Could not read file '%s'. (%s)", path, err)
 		end
 
-		-- Normalize line endings.  @Robustness: Handle the uncommon occurrence of \n\r.
+		-- Normalize line endings.
 		if s:find("\r", 1, true) then
-			s = s:gsub("\r\n?", "\n")
+			s = s:gsub("\n?\r\n?", "\n")
 		end
 
 		state.fileBuffers[path] = s

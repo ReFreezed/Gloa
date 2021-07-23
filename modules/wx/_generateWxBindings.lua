@@ -564,7 +564,7 @@ local function parseFunction(s, isConstructor)
 	elseif s:find("^%[", ptr) then
 		ptr = ptr+1
 
-		for i = 1, math.huge do
+		for i = 1, 1/0 do
 			local typeName, pointer, isSpecialLuaType
 			typeName, pointer, isSpecialLuaType, ptr = parseType(s, ptr)
 
@@ -630,7 +630,7 @@ local function parseFunction(s, isConstructor)
 	-- /OverrideHacks
 
 	else
-		for i = 1, math.huge do
+		for i = 1, 1/0 do
 			local typeName, pointer, isSpecialLuaType
 			typeName, pointer, isSpecialLuaType, ptr = parseType(s, ptr)
 

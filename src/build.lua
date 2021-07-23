@@ -30,7 +30,9 @@ local STATIC_PROFILER = 1==0
 local STATIC_PROFILER_NAMES_TO_IGNORE = {
 	runCompiler     = true,
 	eatNextToken    = true,
+	eatNextTok      = true,
 	peekNextToken   = true,
+	peekNextTok     = true,
 	inferNode       = true,
 	indexOf         = true,
 	iprev           = true,
@@ -235,7 +237,7 @@ local function maybeAddProfilerStuff(lua)
 	return lua
 end
 
-pp.processFile{
+assert(pp.processFile{
 	pathIn          = DIR_HERE.."/main.lua2p",
 	pathOut         = pathGloaOut,
 	pathMeta        = pathGloaOut:gsub("%.%w+$", ".meta%0"),
@@ -267,7 +269,7 @@ pp.processFile{
 		-- An error message should already have been printed.
 		os.exit(1)
 	end,
-}
+})
 
 -- All done!
 ----------------------------------------------------------------

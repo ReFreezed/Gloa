@@ -626,7 +626,7 @@ do
 				!ASSERT("nodeStatement.nodeType == "..AST_ARGUMENT)
 
 				!if DEBUG then
-					if state.tokens.file[arg.token] ~= state.tokens.file[node.token] then
+					if state.tokens[arg.token].file ~= state.tokens[node.token].file then
 						typeError2(state, node, "Internal compiler error: node", arg, "arg")
 					end
 				!end
@@ -3261,9 +3261,9 @@ end
 		local codeDecl          = CodeDeclaration()
 		codeDecl.serial         = decl.s
 		codeDecl.typeInfo       = getPublicType(state, typeInfoForPublic)
-		codeDecl.filepath       = state.tokens.file[decl.token]
-		codeDecl.lineNumber     = state.tokens.line1[decl.token]
-		codeDecl.filePosition   = state.tokens.position1[decl.token]
+		codeDecl.filepath       = state.tokens[decl.token].file
+		codeDecl.lineNumber     = state.tokens[decl.token].line1
+		codeDecl.filePosition   = state.tokens[decl.token].position1
 		codeDecl.name           = identOrVararg.name
 		codeDecl.expressions[1] = nil -- @Incomplete: Generate child CodeNodes.
 		codeDecl.rootExpression = nil -- @Incomplete: Generate child CodeNodes.
@@ -4323,14 +4323,13 @@ end
 			typeError(state, lambda.bodyTextLambda, "Function did not return a string. (It returned %s)", type(bodyText))
 		end
 
-		local fileScope  = astFindParent1(lambda, !(AST_FILE_SCOPE))
-		local tokens     = state.tokens
-		local startToken = tokens.count+1
+		local fileScope = astFindParent1(lambda, !(AST_FILE_SCOPE))
+		local tokens    = state.tokens
 
 		-- @UX: Output all bodyTexts into a file that's easier to debug.
 		local pathDummy
-		if tokens.file[lambda.bodyTextLambda.token] == fileScope.path then
-			pathDummy = F("<body_text @ %s:%d>", fileScope.path, tokens.line1[lambda.bodyTextLambda.token])
+		if tokens[lambda.bodyTextLambda.token].file == fileScope.path then
+			pathDummy = F("<body_text @ %s:%d>", fileScope.path, tokens[lambda.bodyTextLambda.token].line1)
 		else
 			pathDummy = F("<body_text @ %s>", fileScope.path) -- @UX: Get the line number from the closest parent lambda with the same path as fileScope.
 		end
@@ -4339,12 +4338,12 @@ end
 		local timeLexingStart, timeLexingEnd = readAndTokenizeString(state, pathDummy, true, bodyText, 1)
 
 		insertToken(tokens, !(TOKEN_PUNCTUATION),"}", bodyText,pathDummy) -- So we can parse the block.
-		tokens.position1[tokens.count] = #bodyText
-		tokens.position2[tokens.count] = #bodyText
+		tokens[tokens.n].position1 = #bodyText
+		tokens[tokens.n].position2 = #bodyText
 
 		parseBlockStatements(state, lambda.body) -- May trigger a parsing error.
 
-		if peekNextToken(state, 1) then
+		if peekNextTok(state, 1) then
 			errorParsingLast(state, "Expected the end of the body text.") -- This is pointing at an unbalanced '}'.
 		end
 
@@ -4778,7 +4777,7 @@ end
 			insertToken(tokens, !(TOKEN_STRING),"preload",   "",path)
 		end
 
-		local startToken = tokens.count+1
+		local startToken = tokens.n + 1
 
 		local timeLexingStart, timeLexingEnd = readAndTokenizeFile(state, path, (not isPreload))
 		local timeLexing                     = timeLexingEnd - timeLexingStart
@@ -4794,13 +4793,13 @@ end
 		state.timeParsing        = state.timeParsing        + timeParsing
 		state.timeParsingInPipes = state.timeParsingInPipes + timeParsing
 
-		if peekNextToken(state, 1) then
+		if peekNextTok(state, 1) then
 			errorParsingNext(state, "Expected the end of the file.")
 		end
 
 		if isPreload then
-			for token = startToken, tokens.count do
-				tokens.inserted[token] = true
+			for token = startToken, tokens.n do
+				tokens[token].inserted = true
 			end
 		end
 
@@ -7880,7 +7879,14 @@ function _G.getExpectedTypeInfo(state, node, strict, expectantTerm, nodeForError
 			end
 
 			local memberName = memberLiteral.value
-			local member     = itemWith1(structInfo.members, "name", memberName) or errorInternal(state, memberLiteral, memberName)
+			local member     = itemWith1(structInfo.members, "name", memberName)
+
+			if not member then
+				typeError2(state,
+					memberLiteral,      F("%s has no member '%s'.", getFriendlyTypeInfoName(structInfo), memberName),
+					structInfo.astNode, F("...here is the struct.")
+				)
+			end
 
 			return member.typeInfo
 
