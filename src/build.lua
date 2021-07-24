@@ -174,7 +174,7 @@ local function profilerMaybeModifyFunction(func, name)
 		table.insert(func.body.statements, parser.newNode("return"))
 	end
 
-	parser.traverseTree(func.body, function(node, container, k)
+	parser.traverseTree(func.body, function(node, parent, container, k)
 		if node.type == "function" then  return "ignorechildren"  end
 		if node.type ~= "return"   then  return nil               end
 
@@ -192,45 +192,124 @@ local function profilerMaybeModifyFunction(func, name)
 end
 
 local function maybeAddProfilerStuff(lua)
-	if not STATIC_PROFILER then  return lua  end
-	if not debugMode       then  return lua  end
+	if not debugMode then  return lua  end
 
-	local parser = require"lib.dumbParser"
+	if STATIC_PROFILER then
+		local parser = require"lib.dumbParser"
 
-	local time = os.clock()
-	local ast  = assert(parser.parse(lua, "@lua"))
-	print("Profiler: parse", os.clock()-time)
+		local time = os.clock()
+		local ast  = assert(parser.parse(lua, "@lua"))
+		print("Profiler: parse", os.clock()-time)
 
-	local time = os.clock()
-	parser.traverseTree(ast, function(block, container, k)
-		if block.type ~= "block" then  return  end
+		local time = os.clock()
+		parser.traverseTree(ast, function(block, parent, container, k)
+			if block.type ~= "block" then  return  end
 
-		for _, statement in ipairs(block.statements) do
-			if (statement.type == "declaration" or statement.type == "assignment") and #statement.values == 1 and statement.values[1].type == "function" then
-				local func = statement.values[1]
-				local name
+			for _, statement in ipairs(block.statements) do
+				if (statement.type == "declaration" or statement.type == "assignment") and #statement.values == 1 and statement.values[1].type == "function" then
+					local func = statement.values[1]
+					local name
 
-				if statement.type == "declaration" then
-					name = statement.names[1].name
-				else
-					local target = statement.targets[1]
-					name
-						=  target.type == "identifier" and target.name
-						or target.type == "lookup"     and target.member.type == "literal"    and type(target.member.value) == "string"  and target.member.value
-						-- or target.type == "lookup"     and target.object.type == "identifier" and target.member.type        == "literal" and target.object.name..tostring(target.member.value)
-						or tostring(func):gsub("^table: (%x+)", "func%1")
-						or nil
+					if statement.type == "declaration" then
+						name = statement.names[1].name
+					else
+						local target = statement.targets[1]
+						name
+							=  target.type == "identifier" and target.name
+							or target.type == "lookup"     and target.member.type == "literal"    and type(target.member.value) == "string"  and target.member.value
+							-- or target.type == "lookup"     and target.object.type == "identifier" and target.member.type        == "literal" and target.object.name..tostring(target.member.value)
+							or tostring(func):gsub("^table: (%x+)", "func%1")
+							or nil
+					end
+
+					if name then  profilerMaybeModifyFunction(func, name)  end
+				end
+			end
+		end)
+		print("Profiler: modif", os.clock()-time)
+
+		local time = os.clock()
+		lua        = assert(parser.toLua(ast, true))
+		print("Profiler: toLua", os.clock()-time)
+
+	elseif 1==0 then
+		--
+		-- Report table constructions.
+		--
+		local file = assert(io.open("temp/gloa.raw.lua", "wb"))
+		file:write(lua)
+		file:close()
+
+		local parser = require"lib.dumbParser"
+
+		local time = os.clock()
+		local ast  = assert(parser.parse(lua, "@lua"))
+		print("Profiler: parse", os.clock()-time)
+
+		local time = os.clock()
+
+		parser.traverseTree(ast, function(tableNode, parent, container, k)
+			if tableNode.type ~= "table" then  return  end
+
+			local call        = parser.newNode("call")
+			call.callee       = parser.newNode("identifier", "TABLE")
+			call.arguments[1] = parser.newNode("literal", tableNode.line)
+			call.arguments[2] = tableNode
+			container[k]      = call
+		end)
+
+		for i, statement in ipairs(assert(parser.parse[[
+			local tableConstructions = {}
+			local function TABLE(ln, t)
+				tableConstructions[ln] = (tableConstructions[ln] or 0) + 1
+				return t
+			end
+		]]).statements) do
+			table.insert(ast.statements, i, statement)
+		end
+
+		parser.traverseTreeReverse(ast, function(node, parent, container, k)
+			-- Find function _G.exit()
+			if
+				node.type                        == "assignment"
+				and node.targets[1].type         == "lookup"
+				and node.targets[1].object.type  == "identifier"
+				and node.targets[1].object.name  == "_G"
+				and node.targets[1].member.type  == "literal"
+				and node.targets[1].member.value == "exit"
+				and node.values[1].type          == "function"
+			then
+				local funcBodyStatements = node.values[1].body.statements
+
+				for i, statement in ipairs(assert(parser.parse[[
+					local lines = {}
+					for line in io.lines"temp/gloa.raw.lua" do
+						table.insert(lines, line)
+					end
+					for _, ln in ipairs(sort(getKeys(tableConstructions), function(a, b)
+						if tableConstructions[a] ~= tableConstructions[b] then
+							return tableConstructions[a] > tableConstructions[b]
+						end
+						return a < b
+					end)) do
+						if tableConstructions[ln] >= 100 then
+							printf("temp/gloa.raw.lua:%d: %d: %s", ln, tableConstructions[ln], lines[ln]:match"^%s*(.-)%s*$")
+						end
+					end
+				]]).statements) do
+					table.insert(funcBodyStatements, i, statement)
 				end
 
-				if name then  profilerMaybeModifyFunction(func, name)  end
+				return "stop"
 			end
-		end
-	end)
-	print("Profiler: modif", os.clock()-time)
+		end)
 
-	local time = os.clock()
-	lua        = assert(parser.toLua(ast, true))
-	print("Profiler: toLua", os.clock()-time)
+		print("Profiler: modif", os.clock()-time)
+
+		local time = os.clock()
+		lua        = assert(parser.toLua(ast, true))
+		print("Profiler: toLua", os.clock()-time)
+	end
 
 	return lua
 end

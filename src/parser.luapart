@@ -380,7 +380,7 @@ _G.!structAst"AstDefer:_AstNode"{
 	{`statementsStatic`,    {}, ast="array"},    -- []AstNode
 	{`statementsDynamic`,   {}, ast="array"},    -- []AstNode
 	{`declarations`,        {}, astRef="array"}, -- []AstDeclaration  (Note that inner blocks have their own declarations.)
-	{`declarationsByName`,  {}, astRef="names"}, -- { name1, name1=declaration1, [declaration1]=nameIndex1, ... }
+	{`declarationsByName`,  {}, astRef="names"}, -- { name1, [name1]=declaration1, [declaration1]=nameIndex1, ... }
 	{`declarationsByName2`, {}, astRef="names"}, -- Fallback for declarationsByName when checking for redeclarations/overloads.
 	{`imports`,             {}, astRef="array"}, -- []AstImport
 	{`usings`,              {}, astRef="array"}, -- []AstUsing
@@ -431,7 +431,7 @@ _G.!structAst"AstStruct:_AstScopeExpression"{
 	{`valueType`,             nil, ast="node"},     -- AstExpression
 
 	{`isPolymorphic`,         false},
-	{`polymorphs`,            {},  astRef="array"}, -- []AstDeclaration
+	{`polymorphs`,            {},  astRef="array"}, -- []AstDeclaration  @Speed: Only create table when needed. (Probably applies to many of these tables.)
 	{`polymorphSourceStruct`, nil, astRef="node"},  -- AstStruct
 	{`bakeDeclarations`,      {},  astRef="array"}, -- []AstDeclaration
 
@@ -850,15 +850,15 @@ local function parseExpressionList(state, parent, expressions, expressionsNamed,
 end
 
 local function concatNamesInArgumentGroupForError(argsInGroup)
-	if not argsInGroup[2] then  return argsInGroup[1].declaration.name.name  end
+	if argsInGroup.n == 1 then  return argsInGroup[1].declaration.name.name  end
 
 	local names = {}
 
-	for i, arg in ipairs(argsInGroup) do
+	for i, arg in ipairsN(argsInGroup) do
 		names[i] = arg.declaration.name.name
 	end
 
-	return table.concat(names, "', '", 1, #names-1) .. "' and '" .. names[#names]
+	return table.concat(names, "', '", 1, argsInGroup.n-1) .. "' and '" .. names[argsInGroup.n]
 end
 
 local function parseArguments(state, parent, isInput, allowVoid)
@@ -883,7 +883,8 @@ local function parseArguments(state, parent, isInput, allowVoid)
 
 	for groupN = 1, 1/0 do
 		-- Argument name(s).
-		local argsInGroup = {}
+		local argsInGroup = getRecycledTable() or {}
+		argsInGroup.n     = 0
 		local isUsing     = false
 
 		local tok, token    = peekNextTok(state, 1)
@@ -932,7 +933,7 @@ local function parseArguments(state, parent, isInput, allowVoid)
 			arg.isUsing  = isUsing
 
 			table.insert(args.arguments, arg)
-			table.insert(argsInGroup,    arg)
+			insertN     (argsInGroup,    arg)
 
 			local decl           = astNewNode(AstDeclaration, token, arg)
 			decl.isDocumentation = not isInput
@@ -1005,7 +1006,7 @@ local function parseArguments(state, parent, isInput, allowVoid)
 			local hasPlaceholders = false
 			token                 = state.nextToken
 
-			for i, arg in ipairs(argsInGroup) do
+			for i, arg in ipairsN(argsInGroup) do
 				state.nextToken               = token
 				local decl                    = arg.declaration
 				!SET_OR_RETURN_NIL `decl.type = parseExpression(state, decl)` -- @Speed: Parse once then just copy the first one?
@@ -1055,7 +1056,7 @@ local function parseArguments(state, parent, isInput, allowVoid)
 
 			token = state.nextToken
 
-			for _, arg in ipairs(argsInGroup) do
+			for _, arg in ipairsN(argsInGroup) do
 				state.nextToken = token
 
 				if arg.autobake ~= !(AUTOBAKE_DISABLED) then
@@ -1108,13 +1109,13 @@ local function parseArguments(state, parent, isInput, allowVoid)
 				elseif not isInput then
 					!ERROR_OR_RETURN_NIL `errorParsingLast(state, "!shadow does nothing for return arguments.")`
 				end
-				for _, arg in ipairs(argsInGroup) do
+				for _, arg in ipairsN(argsInGroup) do
 					arg.declaration.canShadow = true
 				end
 
 			elseif !!(IS_TOK(TOKEN_DIRECTIVE, "must")) then
 				!!(EAT_NEXT_TOKEN) -- '!must'
-				local lastArg = argsInGroup[#argsInGroup]
+				local lastArg = argsInGroup[argsInGroup.n]
 				if lastArg.isRequired then
 					!ERROR_OR_RETURN_NIL `errorParsingLast(state, "Duplicate !must.")`
 				elseif isInput then
@@ -1127,6 +1128,7 @@ local function parseArguments(state, parent, isInput, allowVoid)
 			end
 		end
 
+		recycleTable(argsInGroup)
 		tok = peekNextTok(state, 1)
 
 		if !!(IS_TOK(TOKEN_PUNCTUATION, ",")) then
@@ -1541,7 +1543,7 @@ end
 		table.insert(declNames, ident)
 	end
 
-	!ASSERT `#declarations[1]`
+	!ASSERT `declarations[1]`
 	!ASSERT `#declarations == #declNames`
 
 	local typesStartToken = state.nextToken -- Dummy position, kinda.
@@ -4851,7 +4853,7 @@ do
 			copy.$field = node.$field
 		`
 		local TEMPLATE_COPY_VALUE_ARRAY = `
-			copy.$field = {unpack(node.$field)}
+			copyToArray(node.$field, copy.$field)
 		`
 		local TEMPLATE_COPY_VALUE_ARRAY_IF_SET = `
 			copy.$field = node.$field and {unpack(node.$field)}
