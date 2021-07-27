@@ -27,7 +27,7 @@
 	newTypeInfo, markTypeAsReady, isTypeBuiltin, getTypeInfo*
 	prepareToRun
 	simplifyExpressionIfConstant, simplifyTypeExpression
-	typeError*, typeErrorAfter, typeMessage
+	typeError*, typeMessage
 	wrapInImplicitCast
 
 --============================================================]]
@@ -613,7 +613,7 @@ do
 				local declScope, declStatement = astFindParentScope(decl.assignment or decl)
 				assert(declScope == block)
 
-				return (declStatement.token < nodeStatement.token)
+				return (declStatement.position < nodeStatement.position)
 
 			elseif nodeScope.nodeType == !(AST_LAMBDA) then
 				-- Lambdas act as imperative scopes for arguments, but declarative scopes otherwise. (Could maybe use some @Cleanup.)
@@ -626,12 +626,12 @@ do
 				!ASSERT("nodeStatement.nodeType == "..AST_ARGUMENT)
 
 				!if DEBUG then
-					if state.tokens[arg.token].source.path ~= state.tokens[node.token].source.path then
+					if arg.source.path ~= node.source.path then
 						typeError2(state, node, "Internal compiler error: node", arg, "arg")
 					end
 				!end
 
-				return (arg.token < nodeStatement.token)
+				return (arg.position < nodeStatement.position)
 
 			elseif nodeScope.nodeType == !(AST_FOR) then
 				-- This is really a combination of a declarative scope and an imperative scope. (Not sure if this is good. 2020-03-19)
@@ -714,10 +714,6 @@ end
 function _G.typeError(state, node, s, ...)
 	nodeError(state, node, "Typer", s, ...)
 end
-function _G.typeErrorAfter(state, node, s, ...)
-	nodeErrorAfter(state, node, "Typer", s, ...)
-end
-
 function _G.typeError2(state, node1,s1, node2,s2)
 	!TRACE(2)
 	printerr()
@@ -924,7 +920,7 @@ local function getEarlyAndLateForRedeclarationError(state, identEarly, identLate
 		local depthEarly = astGetDepth(identEarly)
 		local depthLate  = astGetDepth(identLate)
 
-		if depthLate < depthEarly or (depthLate == depthEarly and identLate.token < identEarly.token) then
+		if depthLate < depthEarly or (depthLate == depthEarly and identLate.position < identEarly.position) then
 			-- @Incomplete: Explicitly handle the identifiers being declared in different files. (May be unnecessary.)
 			identEarly, identLate = identLate, identEarly
 		end
@@ -1139,7 +1135,7 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 			-- Polymorphic structs are similar to polymorphed functions as they are collections of structs, so referring to them may be a bad idea too!
 			-- (Also, like with the functions, think about modules. @Incomplete @Robustness)
 			elseif valueExpr.nodeType == !(AST_STRUCT) and valueExpr.isPolymorphic then
-				typeErrorAfter(state, ident, "Missing arguments for polymorphic struct '%s'.", ident.name)
+				typeError(state, ident, "Missing arguments after name for polymorphic struct '%s'.", ident.name) -- @Polish: Point after the identifier.
 			end
 		end
 
@@ -1157,10 +1153,10 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 		if identOrVararg.fromUsing then
 			-- @Cleanup: Move this to simplifyExpressionIfConstant()?
 			!ASSERT `ident`
-			local access        = astNewNode(AstAccess, ident.token, parent)
-			access.object       = astCopy(ident.fromUsing.expression, access.token, access)
+			local access        = astNewNode(AstAccess, ident, parent)
+			access.object       = astCopy(ident.fromUsing.expression, access, access)
 
-			local literal       = astNewNode(AstLiteral, access.token, access)
+			local literal       = astNewNode(AstLiteral, access, access)
 			literal.literalType = !(LITERAL_STRING)
 			literal.value       = ident.name
 			access.member       = literal
@@ -1844,12 +1840,12 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnOrOther, value
 		local thingsStr    = (callOrReturnOrOther.nodeType == !(AST_CALL) and "arguments") or (callOrReturnOrOther.nodeType == !(AST_RETURN) and "values to return") or "values"
 		local gotStr       = (requestedMax ~= math.huge and F("%d", requestedMin)) or (requestedMin == 0 and "variable amount") or F("%d + variable amount", requestedMin)
 
-		local errorFunc
-			=   not valueExprLast and callOrReturnOrOther.nodeType == !(AST_RETURN)
-			and typeErrorAfter
-			or  typeError
+		-- local errorFunc
+		-- 	=   not valueExprLast and callOrReturnOrOther.nodeType == !(AST_RETURN)
+		-- 	and typeErrorAfter -- @Polish: Point after 'return'.
+		-- 	or  typeError
 
-		errorFunc(state, exprForError, "%s %s. (Wanted %d, got %s)", prefix, thingsStr, acceptedMin, gotStr)
+		typeError--[[errorFunc]](state, exprForError, "%s %s. (Wanted %d, got %s)", prefix, thingsStr, acceptedMin, gotStr)
 
 	-- Too many values.
 	-- @UX: Better error message if the last value is a call (without parentheses).
@@ -2289,9 +2285,9 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 	end
 
 	-- Create declaration for the morphed lambda.
-	local morphDecl            = astNewNode(AstDeclaration, lambda.token, lambda)
+	local morphDecl            = astNewNode(AstDeclaration, lambda, lambda)
 	morphDecl.kind             = !(DECL_KIND_LOCAL_CONST)
-	morphDecl.name             = newIdentifier(morphDecl, morphDecl.token, !(IDENT_KIND_DECLARATION), F("%s_POLY%d", ident.name, #lambda.polymorphs+1), morphDecl)
+	morphDecl.name             = newIdentifier(morphDecl, morphDecl, !(IDENT_KIND_DECLARATION), F("%s_POLY%d", ident.name, #lambda.polymorphs+1), morphDecl)
 	morphDecl.addedByPolymorph = true
 
 	local morphLambda                 = astCopy(lambda, nil, morphDecl)
@@ -2465,9 +2461,9 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 
 				local declBaked = morphLambda.bakeDeclarations[bakeIndex] or errorInternal(state, bake)
 				if bakeValueExpr then
-					declBaked.value = astCopy(bakeValueExpr, declBaked.token, declBaked)
+					declBaked.value = astCopy(bakeValueExpr, declBaked, declBaked)
 				else
-					declBaked.value = createTypeNodeFromInfo(state, bakeValueType, declBaked.token, declBaked)
+					declBaked.value = createTypeNodeFromInfo(state, bakeValueType, declBaked, declBaked)
 				end
 
 				return !(VISIT_IGNORE_CHILDREN) -- There should only be an identifier inside AstBake.
@@ -2670,7 +2666,7 @@ local function handlePolymorphicStruct(state, call)
 
 		if isMatch then
 			-- Change the call into a type node.
-			local morphTypeNode       = astNewNode(AstType, typeNode.token, call.parent)
+			local morphTypeNode       = astNewNode(AstType, typeNode, call.parent)
 			morphTypeNode.kind        = !(TYPE_KIND_USER)
 			morphTypeNode.typeName    = morphDecl.name.name
 			morphTypeNode.declaration = morphDecl
@@ -2688,9 +2684,9 @@ local function handlePolymorphicStruct(state, call)
 	end
 
 	-- Create declaration for the morphed struct.
-	local morphDecl            = astNewNode(AstDeclaration, struct.token, struct)
+	local morphDecl            = astNewNode(AstDeclaration, struct, struct)
 	morphDecl.kind             = !(DECL_KIND_LOCAL_CONST)
-	morphDecl.name             = newIdentifier(morphDecl, morphDecl.token, !(IDENT_KIND_DECLARATION), F("%s_POLY%d", typeNode.typeName, #struct.polymorphs+1), morphDecl)
+	morphDecl.name             = newIdentifier(morphDecl, morphDecl, !(IDENT_KIND_DECLARATION), F("%s_POLY%d", typeNode.typeName, #struct.polymorphs+1), morphDecl)
 	morphDecl.addedByPolymorph = true
 
 	local morphStruct                 = astCopy(struct, nil, morphDecl)
@@ -2735,7 +2731,7 @@ local function handlePolymorphicStruct(state, call)
 	addToQueueRecursively(state, morphDecl, struct.statementsStatic, i, !(PIPE_INFER))
 
 	-- Change the call into a type node.
-	local morphTypeNode       = astNewNode(AstType, typeNode.token, call.parent)
+	local morphTypeNode       = astNewNode(AstType, typeNode, call.parent)
 	morphTypeNode.kind        = !(TYPE_KIND_USER)
 	morphTypeNode.typeName    = morphDecl.name.name
 	morphTypeNode.declaration = morphDecl
@@ -2847,7 +2843,7 @@ end
 	elseif doesExpressionRepresentPolymorphicStructType(callee) then -- @Cleanup: We can/should probably just check callee.declaration.valueTypeInfo here.
 		if isScope(call.parent) then
 			errorParsing(
-				state, astGetExpressionVisuallyFurthestToTheLeft(call).token,
+				state, astGetExpressionVisuallyFurthestToTheLeft(call),
 				"Invalid statement. This not a function call - it is struct type '%s'.",
 				getFriendlyTypeInfoName(getTypeRepresentedByExpression(callee))
 			)
@@ -2869,7 +2865,7 @@ end
 			typeError(state, call, "%s has no !call declaration and thus cannot be called.", getFriendlyTypeInfoName(structInfo))
 		end
 
-		local ident = astCopyIdentifier(decl.name, callee.token, call, !(IDENT_KIND_LOOSE))
+		local ident = astCopyIdentifier(decl.name, callee, call, !(IDENT_KIND_LOOSE))
 		replaceQueuedNodeAndUnqueueOldTree(state, callee, ident)
 
 		return inferNode(state, call)
@@ -3262,13 +3258,12 @@ end
 			and typeInfo
 			or  state.builtinTypeInfos.void
 
-		local tok               = state.tokens[decl.token]
 		local codeDecl          = CodeDeclaration()
 		codeDecl.serial         = decl.s
 		codeDecl.typeInfo       = getPublicType(state, typeInfoForPublic)
-		codeDecl.filepath       = tok.source.path
-		codeDecl.lineNumber     = tok.line1
-		codeDecl.filePosition   = tok.position1
+		codeDecl.filepath       = decl.source.path
+		codeDecl.lineNumber     = decl.line
+		codeDecl.filePosition   = decl.position
 		codeDecl.name           = identOrVararg.name
 		codeDecl.expressions[1] = nil -- @Incomplete: Generate child CodeNodes.
 		codeDecl.rootExpression = nil -- @Incomplete: Generate child CodeNodes.
@@ -3750,17 +3745,17 @@ end
 		local replacement
 
 		if !!(CONST_SET{ AST_LITERAL, AST_FOREIGN })[nodeType] then
-			replacement = astCopy(valueExpr, access.member.token)
+			replacement = astCopy(valueExpr, access.member)
 
 		elseif nodeType == !(AST_TYPE) then
-			replacement = astCopy(valueExpr, access.member.token)
+			replacement = astCopy(valueExpr, access.member)
 			addUnqueuedChildrenToQueueRecursively(state, replacement, !(PIPE_DONE))
 
 		elseif nodeType == !(AST_IDENTIFIER) and valueExpr.inferredType.tag == !(TYPE_ENUM) then
-			replacement = astCopy(valueExpr, access.member.token)
+			replacement = astCopy(valueExpr, access.member)
 
 		elseif !!(CONST_SET{ AST_ENUM, AST_STRUCT })[nodeType] then
-			replacement = createTypeNodeFromInfo(state, valueExpr.representedType, access.member.token, access.parent) -- Parent is temp and will change in a moment.
+			replacement = createTypeNodeFromInfo(state, valueExpr.representedType, access.member, access.parent) -- Parent is temp and will change in a moment.
 
 		elseif nodeType == !(AST_LAMBDA) then
 			if access.parent.nodeType == !(AST_CALL) and access == access.parent.callee and access.parent.isMethod then
@@ -3792,7 +3787,7 @@ end
 				end
 
 				-- Update callee using access. (Note: access==callee)
-				local ident = newIdentifier(call, access.member.token, !(IDENT_KIND_LOOSE), constDecl.name.name, constDecl, constDecl.inferredType)
+				local ident = newIdentifier(call, access.member, !(IDENT_KIND_LOOSE), constDecl.name.name, constDecl, constDecl.inferredType)
 				replaceQueuedNode(state, access, ident)
 				moveToNextRelevantPipe(state, ident)
 
@@ -3805,7 +3800,7 @@ end
 				return
 			end
 
-			replacement = newIdentifier(access.parent, access.member.token, !(IDENT_KIND_LOOSE), constDecl.name.name, constDecl, constDecl.inferredType)
+			replacement = newIdentifier(access.parent, access.member, !(IDENT_KIND_LOOSE), constDecl.name.name, constDecl, constDecl.inferredType)
 
 		else
 			!ifDEBUG `where(state, access)`
@@ -3832,7 +3827,7 @@ end
 
 		!ASSERT `isDeclarationConstant(decl)`
 
-		local ident = astCopyIdentifier(decl.name, access.token, access.parent, !(IDENT_KIND_LOOSE))
+		local ident = astCopyIdentifier(decl.name, access, access.parent, !(IDENT_KIND_LOOSE))
 		replaceQueuedNodeAndUnqueueOldTree(state, access, ident)
 
 		-- Stay in the current pipe so we get simplified. (Needed? Or maybe we can @Speed things up here?)
@@ -3857,7 +3852,7 @@ end
 			!DEPEND_AND_RETURN(`access`, DEPEND_NODE_INFERRED, `decl`)
 		end
 
-		local ident = astCopyIdentifier(decl.name, access.token, access.parent, !(IDENT_KIND_LOOSE))
+		local ident = astCopyIdentifier(decl.name, access, access.parent, !(IDENT_KIND_LOOSE))
 		replaceQueuedNodeAndUnqueueOldTree(state, access, ident)
 
 		-- Stay in the current pipe so we get simplified. (Needed? Or maybe we can @Speed things up here?)
@@ -3890,7 +3885,7 @@ end
 			typeError(state, indexExpr, "Byte position is greater than the length of the string. (Index is %d, length is %d)", i, #s)
 		end
 
-		local literal = newLiteral(access.parent, access.token, !(LITERAL_INTEGER), s:byte(i), typeMember)
+		local literal = newLiteral(access.parent, access, !(LITERAL_INTEGER), s:byte(i), typeMember)
 		replaceQueuedNodeAndUnqueueOldTree(state, access, literal)
 		moveToNextRelevantPipe(state, literal, !(PIPE_INFER))
 
@@ -4328,21 +4323,25 @@ end
 		end
 
 		local fileScope = astFindParent1(lambda, !(AST_FILE_SCOPE))
-		local tokens    = state.tokens
 
 		-- @UX: Output all bodyTexts into a file that's easier to debug.
 		local pathDummy
-		if tokens[lambda.bodyTextLambda.token].source.path == fileScope.path then
-			pathDummy = F("<body_text @ %s:%d>", fileScope.path, tokens[lambda.bodyTextLambda.token].line1)
+		if lambda.bodyTextLambda.source.path == fileScope.path then
+			pathDummy = F("<body_text @ %s:%d>", fileScope.path, lambda.bodyTextLambda.line)
 		else
 			pathDummy = F("<body_text @ %s>", fileScope.path) -- @UX: Get the line number from the closest parent lambda with the same path as fileScope.
 		end
 
+		local tokens     = state.tokens
+		local startToken = tokens.n + 1
+
 		-- @Incomplete: Include these times in the compilation stats.
 		local sourceInfo                     = {path=pathDummy, string=bodyText}
-		local timeLexingStart, timeLexingEnd = readAndTokenizeString(state, sourceInfo, 1, true)
+		local timeLexingStart, timeLexingEnd = tokenizeString(state, sourceInfo, 1, true)
 
-		insertToken(tokens, !(TOKEN_PUNCTUATION),"}", bodyText,pathDummy) -- So we can parse the block.
+		countLinesOfCode(state, startToken, tokens.n)
+		insertNewToken(tokens, !(TOKEN_PUNCTUATION),"}", bodyText,pathDummy) -- So we can parse the block.
+
 		tokens[tokens.n].position1 = #bodyText
 		tokens[tokens.n].position2 = #bodyText
 
@@ -4456,7 +4455,7 @@ end
 		)
 	end
 
-	local identCopy       = astCopy(ident, variant.token, variant.parent)
+	local identCopy       = astCopy(ident, variant, variant.parent)
 	identCopy.fromVariant = true
 
 	replaceQueuedNodeAndUnqueueOldTree(state, variant, identCopy)
@@ -4507,7 +4506,7 @@ end
 
 	!ASSERT `typeInfoStructName`
 
-	local decl = findInferredPreloadDeclaration(state, typeInfoNode, typeInfoStructName, !(TYPE_STRUCT))
+	local decl = findInferredPreloadDeclaration(state, typeInfoNode, typeInfoStructName, !(TYPE_STRUCT)) -- @Speed: Cache 'decl'.
 	if not decl then  return  end
 
 	typeInfoNode.valueTypeInfo = typeRepresented
@@ -4521,7 +4520,7 @@ end
 		!DEPEND_AND_RETURN(`loc`, DEPEND_NODE_INFERRED, `target`)
 	end
 
-	local decl = findInferredPreloadDeclaration(state, loc, "SourceCodeLocation", !(TYPE_STRUCT))
+	local decl = findInferredPreloadDeclaration(state, loc, "SourceCodeLocation", !(TYPE_STRUCT)) -- @Speed: Cache 'decl'.
 	if not decl then  return  end
 
 	if not target then
@@ -4778,8 +4777,8 @@ end
 		local tokens    = state.tokens
 
 		if not isPreload then
-			insertToken(tokens, !(TOKEN_DIRECTIVE),"import", "",path)
-			insertToken(tokens, !(TOKEN_STRING),"preload",   "",path)
+			insertNewToken(tokens, !(TOKEN_DIRECTIVE),"import", "",path)
+			insertNewToken(tokens, !(TOKEN_STRING),"preload",   "",path)
 		end
 
 		local startToken = tokens.n + 1
@@ -4788,6 +4787,10 @@ end
 		local timeLexing                     = timeLexingEnd - timeLexingStart
 		!ASSERT(`state.fileBuffers[path]`, `path`)
 		-- !ifDEBUG `printf("%.7f  %s", timeLexing, path)`
+
+		if not isPreload then
+			countLinesOfCode(state, startToken, tokens.n)
+		end
 
 		local timeStart   = timerGetCurrentInSeconds()
 		local fileScope   = parseFileScope(state, globalScope, path, (not import.isLoad), importName)
@@ -4800,12 +4803,6 @@ end
 
 		if peekNextTok(state, 1) then
 			errorParsingNext(state, "Expected the end of the file.")
-		end
-
-		if isPreload then
-			for token = startToken, tokens.n do
-				tokens[token].inserted = true
-			end
 		end
 
 		!ifDEBUG `profilerUnpause()`
@@ -4896,7 +4893,7 @@ end
 		local usingEarly = usingExisting
 		local usingLate  = using
 
-		if usingLate.token < usingEarly.token then
+		if usingLate.position < usingEarly.position then
 			usingEarly, usingLate = usingLate, usingEarly
 		end
 
@@ -4913,8 +4910,8 @@ end
 
 !NODE_INFERRER `function nodeInferrers.AstForeign(state, foreign)`
 	-- @Cleanup: Make AstLambda use AstForeign?
-	if foreign.source == "method" then
-		errorParsing(state, foreign.token+1, "Only function bodies can be marked as foreign methods.")
+	if foreign.foreignSource == "method" then
+		errorParsing(state, foreign.foreignSourceName, "Only function bodies can be marked as foreign methods.")
 	end
 
 	-- @Robustness: Further limit places the expected type can be inferred from for foreign values.
@@ -4923,12 +4920,12 @@ end
 
 	foreign.inferredType = typeInfoExpected
 
-	if not foreign.sourceName then
-		errorInternal(state, foreign, "@Incomplete: Infer foreign.sourceName")
+	if not foreign.foreignSourceName then
+		errorInternal(state, foreign, "@Incomplete: Infer foreign.foreignSourceName")
 	end
 
-	validateForeignSource(state, foreign.source, foreign.sourceName.value, foreign.sourceName)
-	foreign.sourceId = foreign.source.." "..foreign.sourceName.value
+	validateForeignSource(state, foreign.foreignSource, foreign.foreignSourceName.value, foreign.foreignSourceName)
+	foreign.foreignSourceId = foreign.foreignSource.." "..foreign.foreignSourceName.value
 
 	moveToNextRelevantPipe(state, foreign)
 !NODE_INFERRER_END `end`
@@ -4941,7 +4938,7 @@ end
 	)) then
 		astPrintTree(bake)
 		astPrintTree(scope)
-		errorParsing(state, bake.token, "Unexpected '$'.")
+		errorParsing(state, bake, "Unexpected '$'.")
 	end
 
 	if not bake.name.inferredType then
@@ -5177,6 +5174,7 @@ end
 				end
 
 			-- The following is not needed anymore after adding the above, right? 2020-06-20
+			-- Note: .token is @Depricated. 2021-07-25
 			-- elseif newlyDeclared[decl.name.name] and decl.token > staticIf.token and decl.queued.pipe > !(PIPE_INFER) then
 			-- 	-- @Robustness: Do we need to call ensureConstantIdentifierChainHasAllDeclarationsSet() here?
 			-- 	checkRedeclarationAndMaybeAddOverload(state, decl.name, decl, false, scope, nil)
@@ -5297,10 +5295,10 @@ end
 	-- @Incomplete: Simplify AstSwitch.
 !NODE_INFERRER_END `end`
 
-local function addDeclarationInForLoop(state, forLoop, name, token, isImplicit, typeInfo)
-	local decl        = astNewNode(AstDeclaration, token, forLoop)
+local function addDeclarationInForLoop(state, forLoop, name, sourceNode, isImplicit, typeInfo)
+	local decl        = astNewNode(AstDeclaration, sourceNode, forLoop)
 	decl.inferredType = typeInfo
-	decl.name         = newIdentifier(decl, token, !(IDENT_KIND_DECLARATION), name, decl, typeInfo)
+	decl.name         = newIdentifier(decl, sourceNode, !(IDENT_KIND_DECLARATION), name, decl, typeInfo)
 
 	table.insert(forLoop.statementsDynamic, decl)
 	table.insert(forLoop.declarations,      decl)
@@ -5394,10 +5392,10 @@ end
 				end
 			end
 
-			local name     = (names[1] and names[1].name ) or "it"
-			local token    = (names[1] and names[1].token) or forLoop.token
-			local typeInfo = state.builtinTypeInfos[anyFloat and "float" or "int"]
-			addDeclarationInForLoop(state, forLoop, name, token, names[1]==nil, typeInfo)
+			local name       = (names[1] and names[1].name) or "it"
+			local sourceNode = names[1] or forLoop
+			local typeInfo   = state.builtinTypeInfos[anyFloat and "float" or "int"]
+			addDeclarationInForLoop(state, forLoop, name, sourceNode, names[1]==nil, typeInfo)
 
 		----------------------------------------------------------------
 		-- for [ v1, ... : ] obj
@@ -5418,36 +5416,36 @@ end
 				if names[3] then
 					typeError(state, names[3], "For loop: Too many names for short-form array loop. (Expected at most a value name and an index name.)")
 				end
-				local name1  = (names[1] and names[1].name ) or "it"
-				local name2  = (names[2] and names[2].name ) or "itIndex"
-				local token1 = (names[1] and names[1].token) or forLoop.token
-				local token2 = (names[2] and names[2].token) or forLoop.token
-				addDeclarationInForLoop(state, forLoop, name2, token2, names[2]==nil, state.builtinTypeInfos.int)
-				addDeclarationInForLoop(state, forLoop, name1, token1, names[1]==nil, arraySig.itemType)
+				local name1       = (names[1] and names[1].name ) or "it"
+				local name2       = (names[2] and names[2].name ) or "itIndex"
+				local sourceNode1 = names[1] or forLoop
+				local sourceNode2 = names[2] or forLoop
+				addDeclarationInForLoop(state, forLoop, name2, sourceNode2, names[2]==nil, state.builtinTypeInfos.int)
+				addDeclarationInForLoop(state, forLoop, name1, sourceNode1, names[1]==nil, arraySig.itemType)
 
 			elseif objType.tag == !(TYPE_VARARG) then
 				local varargSig = objType
 				if names[3] then
 					typeError(state, names[3], "For loop: Too many names for short-form vararg loop. (Expected at most a value name and an index name.)")
 				end
-				local name1  = (names[1] and names[1].name ) or "it"
-				local name2  = (names[2] and names[2].name ) or "itIndex"
-				local token1 = (names[1] and names[1].token) or forLoop.token
-				local token2 = (names[2] and names[2].token) or forLoop.token
-				addDeclarationInForLoop(state, forLoop, name2, token2, names[2]==nil, state.builtinTypeInfos.int)
-				addDeclarationInForLoop(state, forLoop, name1, token1, names[1]==nil, varargSig.itemType)
+				local name1       = (names[1] and names[1].name ) or "it"
+				local name2       = (names[2] and names[2].name ) or "itIndex"
+				local sourceNode1 = names[1] or forLoop
+				local sourceNode2 = names[2] or forLoop
+				addDeclarationInForLoop(state, forLoop, name2, sourceNode2, names[2]==nil, state.builtinTypeInfos.int)
+				addDeclarationInForLoop(state, forLoop, name1, sourceNode1, names[1]==nil, varargSig.itemType)
 
 			elseif objType.tag == !(TYPE_TABLE) then
 				if names[3] then
 					typeError(state, names[3], "For loop: Too many names for short-form table loop. (Expected at most a value name and a key name.)")
 				end
-				local name1    = (names[1] and names[1].name ) or "it"
-				local name2    = (names[2] and names[2].name ) or "itIndex"
-				local token1   = (names[1] and names[1].token) or forLoop.token
-				local token2   = (names[2] and names[2].token) or forLoop.token
-				local typeInfo = state.builtinTypeInfos.any
-				addDeclarationInForLoop(state, forLoop, name2, token2, names[2]==nil, typeInfo)
-				addDeclarationInForLoop(state, forLoop, name1, token1, names[1]==nil, typeInfo)
+				local name1       = (names[1] and names[1].name ) or "it"
+				local name2       = (names[2] and names[2].name ) or "itIndex"
+				local sourceNode1 = names[1] or forLoop
+				local sourceNode2 = names[2] or forLoop
+				local typeInfo    = state.builtinTypeInfos.any
+				addDeclarationInForLoop(state, forLoop, name2, sourceNode2, names[2]==nil, typeInfo)
+				addDeclarationInForLoop(state, forLoop, name1, sourceNode1, names[1]==nil, typeInfo)
 
 			elseif objType.tag == !(TYPE_STRUCT) then
 				local structInfo = objType
@@ -5512,13 +5510,13 @@ end
 					if names[3] then
 						typeError(state, names[3], "For loop: Too many names for short-form struct loop. (Expected at most a value name and a control value name.)")
 					end
-					names[1] = names[1] or newIdentifier(forLoop, forLoop.token, !(IDENT_KIND_LOOSE), "itIndex")
-					names[2] = names[2] or newIdentifier(forLoop, forLoop.token, !(IDENT_KIND_LOOSE), "it")
+					names[1] = names[1] or newIdentifier(forLoop, forLoop, !(IDENT_KIND_LOOSE), "itIndex")
+					names[2] = names[2] or newIdentifier(forLoop, forLoop, !(IDENT_KIND_LOOSE), "it")
 
 					-- Convert FOR_SHORT into FOR_ITERATOR.
 					values[1] = astCopyIdentifier(decl.name, nil, forLoop, !(IDENT_KIND_LOOSE))
 					values[2] = objExpr
-					values[3] = newLiteral(forLoop, forLoop.token, !(LITERAL_INTEGER), 0, intType)
+					values[3] = newLiteral(forLoop, forLoop, !(LITERAL_INTEGER), 0, intType)
 					objExpr.queued.key = 2
 					addToQueue(state, values[1], values,1, !(PIPE_INFER))
 					addToQueue(state, values[3], values,3, !(PIPE_INFER))
@@ -5530,12 +5528,12 @@ end
 					if names[3] then
 						typeError(state, names[3], "For loop: Too many names for short-form array loop. (Expected at most a value name and an index name.)")
 					end
-					local name1  = (names[1] and names[1].name ) or "it"
-					local name2  = (names[2] and names[2].name ) or "itIndex"
-					local token1 = (names[1] and names[1].token) or forLoop.token
-					local token2 = (names[2] and names[2].token) or forLoop.token
-					addDeclarationInForLoop(state, forLoop, name2, token2, names[2]==nil, state.builtinTypeInfos.int)
-					addDeclarationInForLoop(state, forLoop, name1, token1, names[1]==nil, structInfo.valueType)
+					local name1       = (names[1] and names[1].name ) or "it"
+					local name2       = (names[2] and names[2].name ) or "itIndex"
+					local sourceNode1 = names[1] or forLoop
+					local sourceNode2 = names[2] or forLoop
+					addDeclarationInForLoop(state, forLoop, name2, sourceNode2, names[2]==nil, state.builtinTypeInfos.int)
+					addDeclarationInForLoop(state, forLoop, name1, sourceNode1, names[1]==nil, structInfo.valueType)
 
 				else
 					typeError(state, objExpr, "For loop: %s has no default iterator and is not array-like.", getFriendlyTypeInfoName(structInfo))
@@ -5682,7 +5680,7 @@ end
 					end
 				end
 
-				addDeclarationInForLoop(state, forLoop, ident.name, ident.token, false, typeInfo)
+				addDeclarationInForLoop(state, forLoop, ident.name, ident, false, typeInfo)
 			end
 
 		----------------------------------------------------------------
@@ -5782,7 +5780,7 @@ local function checkForRecursiveStruct(state, declThatWeAreChecking, memberPath,
 end
 
 function _G.getEarlyAndLateExpression(expr1, expr2)
-	if expr1.token < expr2.token then  return expr1, expr2  end
+	if expr1.position < expr2.position then  return expr1, expr2  end
 	return expr2, expr1
 end
 
@@ -6331,7 +6329,7 @@ local function createRunReplacementFromTypeAndLuaValue(state, runNode, parent, t
 	if tag == !(TYPE_INT) or (tag == !(TYPE_ANY) and type(v) == "number" and v == math.floor(v)) then
 		local n = v
 		assert(type(n) == "number" and n == math.floor(n))
-		local literal        = astNewNode(AstLiteral, runNode.token, parent)
+		local literal        = astNewNode(AstLiteral, runNode, parent)
 		literal.literalType  = !(LITERAL_INTEGER)
 		literal.value        = n
 		literal.inferredType = state.builtinTypeInfos.int
@@ -6340,7 +6338,7 @@ local function createRunReplacementFromTypeAndLuaValue(state, runNode, parent, t
 	elseif tag == !(TYPE_FLOAT) or (tag == !(TYPE_ANY) and type(v) == "number") then
 		local n = v
 		assert(type(n) == "number")
-		local literal        = astNewNode(AstLiteral, runNode.token, parent)
+		local literal        = astNewNode(AstLiteral, runNode, parent)
 		literal.literalType  = !(LITERAL_FLOAT)
 		literal.value        = n
 		literal.inferredType = state.builtinTypeInfos.float
@@ -6349,7 +6347,7 @@ local function createRunReplacementFromTypeAndLuaValue(state, runNode, parent, t
 	elseif tag == !(TYPE_STRING) or (tag == !(TYPE_ANY) and type(v) == "string") then
 		local s = v
 		assert(type(s) == "string")
-		local literal        = astNewNode(AstLiteral, runNode.token, parent)
+		local literal        = astNewNode(AstLiteral, runNode, parent)
 		literal.literalType  = !(LITERAL_STRING)
 		literal.value        = s
 		literal.inferredType = state.builtinTypeInfos.string
@@ -6358,7 +6356,7 @@ local function createRunReplacementFromTypeAndLuaValue(state, runNode, parent, t
 	elseif tag == !(TYPE_BOOL) or (tag == !(TYPE_ANY) and type(v) == "boolean") then
 		local flag = v
 		assert(type(flag) == "boolean")
-		local literal        = astNewNode(AstLiteral, runNode.token, parent)
+		local literal        = astNewNode(AstLiteral, runNode, parent)
 		literal.literalType  = !(LITERAL_BOOLEAN)
 		literal.value        = flag
 		literal.inferredType = state.builtinTypeInfos.bool
@@ -6366,7 +6364,7 @@ local function createRunReplacementFromTypeAndLuaValue(state, runNode, parent, t
 
 	elseif tag == !(TYPE_NONE) or (tag == !(TYPE_ANY) and v == nil) then
 		assert(v == nil)
-		local literal        = astNewNode(AstLiteral, runNode.token, parent)
+		local literal        = astNewNode(AstLiteral, runNode, parent)
 		literal.literalType  = !(LITERAL_NIL)
 		literal.value        = nil
 		literal.inferredType = state.builtinTypeInfos.none
@@ -6375,7 +6373,7 @@ local function createRunReplacementFromTypeAndLuaValue(state, runNode, parent, t
 	elseif tag == !(TYPE_TABLE) or (tag == !(TYPE_ANY) and type(v) == "table") then
 		local t = v
 		assert(type(t) == "table")
-		local tableNode = astNewNode(AstTable, runNode.token, parent)
+		local tableNode = astNewNode(AstTable, runNode, parent)
 		local anyType   = state.builtinTypeInfos.any
 
 		for k, v in pairsSorted(t, naturalCompare) do
@@ -6392,14 +6390,14 @@ local function createRunReplacementFromTypeAndLuaValue(state, runNode, parent, t
 		local t = v
 		assert(type(t) == "table")
 		local arraySig  = typeInfo
-		local tableNode = astNewNode(AstTable, runNode.token, parent)
+		local tableNode = astNewNode(AstTable, runNode, parent)
 		local intType   = state.builtinTypeInfos.int
 
 		-- @Robustness: Check that all keys in 't' are valid.
 		for i, v in ipairs(t) do
 			local tableField          = TableField()
 
-			local indexLiteral        = astNewNode(AstLiteral, runNode.token, tableNode)
+			local indexLiteral        = astNewNode(AstLiteral, runNode, tableNode)
 			indexLiteral.literalType  = !(LITERAL_INTEGER)
 			indexLiteral.value        = i
 			indexLiteral.inferredType = intType
@@ -6417,7 +6415,7 @@ local function createRunReplacementFromTypeAndLuaValue(state, runNode, parent, t
 		local t = v
 		assert(type(t) == "table")
 		local structInfo = typeInfo
-		local tableNode  = astNewNode(AstTable, runNode.token, parent)
+		local tableNode  = astNewNode(AstTable, runNode, parent)
 		local stringType = state.builtinTypeInfos.string
 		assert(structInfo.hasMembers)
 
@@ -6430,7 +6428,7 @@ local function createRunReplacementFromTypeAndLuaValue(state, runNode, parent, t
 		for _, member in ipairs(structInfo.members) do
 			local tableField           = TableField()
 
-			local memberLiteral        = astNewNode(AstLiteral, runNode.token, tableNode)
+			local memberLiteral        = astNewNode(AstLiteral, runNode, tableNode)
 			memberLiteral.literalType  = !(LITERAL_STRING)
 			memberLiteral.value        = member.name
 			memberLiteral.inferredType = stringType
@@ -6446,7 +6444,7 @@ local function createRunReplacementFromTypeAndLuaValue(state, runNode, parent, t
 
 	elseif tag == !(TYPE_ENUM) then
 		local enumInfo     = typeInfo
-		local ident        = astNewNode(AstIdentifier, runNode.token, parent)
+		local ident        = astNewNode(AstIdentifier, runNode, parent)
 		ident.kind         = !(IDENT_KIND_LOOSE)
 		ident.inferredType = enumInfo
 
@@ -6501,11 +6499,12 @@ local function createRunReplacementFromTypeAndLuaValue(state, runNode, parent, t
 
 		if lambda.parent.nodeType == !(AST_DECLARATION) then
 			local decl  = lambda.parent
-			local ident = astCopyIdentifier(decl.name, runNode.token, parent, !(IDENT_KIND_LOOSE))
+			local ident = astCopyIdentifier(decl.name, runNode, parent, !(IDENT_KIND_LOOSE))
 			return ident
 		else
-			local copy = astCopy(lambda, nil, parent)
-			copy.token = runNode.token
+			local copy    = astCopy(lambda, nil, parent)
+			copy.position = runNode.position
+			copy.line     = runNode.line
 			return copy
 		end
 
@@ -6518,7 +6517,7 @@ local function createRunReplacementFromTypeAndLuaValue(state, runNode, parent, t
 			typeError(state, runNode, "Got the ID of a type that doesn't exist. (Type ID %d)", typeId)
 		end
 
-		local typeNode = createTypeNodeFromInfo(state, typeRepresented, runNode.token, parent)
+		local typeNode = createTypeNodeFromInfo(state, typeRepresented, runNode, parent)
 		return typeNode
 
 	elseif tag == !(TYPE_COMPOUND) then
@@ -6965,9 +6964,9 @@ end
 
 
 
--- inferredTypeNode = createTypeNodeFromInfo( state, typeRepresented, token, parent )
-function _G.createTypeNodeFromInfo(state, typeRepresented, token, parent)
-	local typeNode           = astNewNode(AstType, token, parent)
+-- inferredTypeNode = createTypeNodeFromInfo( state, typeRepresented, sourceNode, parent )
+function _G.createTypeNodeFromInfo(state, typeRepresented, sourceNode, parent)
+	local typeNode           = astNewNode(AstType, sourceNode, parent)
 	typeNode.inferredType    = state.builtinTypeInfos.Type
 	typeNode.representedType = typeRepresented
 
@@ -6992,7 +6991,7 @@ function _G.createTypeNodeFromInfo(state, typeRepresented, token, parent)
 	elseif tag == !(TYPE_ARRAY) then
 		local arraySig             = typeRepresented
 		typeNode.kind              = !(TYPE_KIND_ARRAY)
-		typeNode.arrayItemType     = createTypeNodeFromInfo(state, arraySig.itemType, token, typeNode)
+		typeNode.arrayItemType     = createTypeNodeFromInfo(state, arraySig.itemType, sourceNode, typeNode)
 
 	elseif tag == !(TYPE_FUNCTION) then
 		local funcSig              = typeRepresented
@@ -7036,7 +7035,7 @@ function _G.simplifyTypeExpression(state, expr, typeRepresented)
 
 	if isTypeOrDoesTypeContainPlaceholder(typeRepresented) then  return nil  end
 
-	local typeNode = createTypeNodeFromInfo(state, typeRepresented, expr.token, expr.parent)
+	local typeNode = createTypeNodeFromInfo(state, typeRepresented, expr, expr.parent)
 
 	if expr.nodeType == !(AST_IDENTIFIER) then
 		local ident          = expr
@@ -7075,7 +7074,7 @@ local function simplifyCast(state, cast)
 		!ASSERT("cast.expression.nodeType == "..AST_LITERAL)
 		!ASSERT("type(cast.expression.value) == 'number'")
 
-		local literal        = astNewNode(AstLiteral, cast.token, cast.parent)
+		local literal        = astNewNode(AstLiteral, cast, cast.parent)
 		literal.literalType  = !(LITERAL_FLOAT)
 		literal.value        = cast.expression.value
 		literal.inferredType = castTypeInfo
@@ -7088,7 +7087,7 @@ local function simplifyCast(state, cast)
 		!ASSERT("cast.expression.nodeType == "..AST_LITERAL)
 		!ASSERT("type(cast.expression.value) == 'number'")
 
-		local literal        = astNewNode(AstLiteral, cast.token, cast.parent)
+		local literal        = astNewNode(AstLiteral, cast, cast.parent)
 		literal.literalType  = !(LITERAL_INTEGER)
 		literal.value        = math.modf(cast.expression.value)
 		literal.inferredType = castTypeInfo
@@ -7102,7 +7101,7 @@ local function simplifyCast(state, cast)
 		!ASSERT("cast.expression.nodeType == "..AST_LITERAL)
 		!ASSERT("type(cast.expression.value) == 'number'")
 
-		local literal        = astNewNode(AstLiteral, cast.token, cast.parent)
+		local literal        = astNewNode(AstLiteral, cast, cast.parent)
 		literal.literalType  = !(LITERAL_BOOLEAN)
 		literal.value        = cast.expression.value ~= 0
 		literal.inferredType = castTypeInfo
@@ -7115,7 +7114,7 @@ local function simplifyCast(state, cast)
 		!ASSERT("cast.expression.nodeType == "..AST_LITERAL)
 		!ASSERT("type(cast.expression.value) == 'string'")
 
-		local literal        = astNewNode(AstLiteral, cast.token, cast.parent)
+		local literal        = astNewNode(AstLiteral, cast, cast.parent)
 		literal.literalType  = !(LITERAL_BOOLEAN)
 		literal.value        = cast.expression.value ~= ""
 		literal.inferredType = castTypeInfo
@@ -7128,7 +7127,7 @@ local function simplifyCast(state, cast)
 		local tableNode = followIdentifiersToConstantValue(state, cast.expression)
 		assert(tableNode.nodeType == !(AST_TABLE))
 
-		local literal        = astNewNode(AstLiteral, cast.token, cast.parent)
+		local literal        = astNewNode(AstLiteral, cast, cast.parent)
 		literal.literalType  = !(LITERAL_BOOLEAN)
 		literal.value        = tableNode.fields[1] ~= nil -- (Assume the array constructor is valid.)
 		literal.inferredType = castTypeInfo
@@ -7154,7 +7153,7 @@ local function simplifyCast(state, cast)
 				errorInternal(state, literal)
 			end
 
-			local literalCopy = astCopy(literal, cast.token)
+			local literalCopy = astCopy(literal, cast)
 
 			if castIsDirect then
 				assert(literalCopy.inferredType == castTypeInfo)
@@ -7181,7 +7180,7 @@ local function simplifyCast(state, cast)
 			local typeNode = valueExpr
 			assert(typeNode.nodeType == !(AST_TYPE))
 
-			local typeNodeCopy = astCopy(typeNode, cast.token)
+			local typeNodeCopy = astCopy(typeNode, cast)
 
 			addUnqueuedChildrenToQueueRecursively(state, typeNodeCopy, !(PIPE_DONE)) -- Only does something if the type has parameters.
 			replaceQueuedNodeAndUnqueueOldTree(state, cast, typeNodeCopy)
@@ -7195,7 +7194,7 @@ local function simplifyCast(state, cast)
 	elseif castTypeInfo.tag == !(TYPE_ENUM) and exprTypeInfo == castTypeInfo.memberTypeInfo then
 		local enumInfo = castTypeInfo
 		local decl     = findDeclarationInEnumForValue(state, enumInfo.astNode, cast.expression) or errorInternal(state, cast.expression)
-		local ident    = astCopyIdentifier(decl.name, cast.token, cast.parent, !(IDENT_KIND_LOOSE))
+		local ident    = astCopyIdentifier(decl.name, cast, cast.parent, !(IDENT_KIND_LOOSE))
 
 		replaceQueuedNodeAndUnqueueOldTree(state, cast, ident)
 		moveToNextRelevantPipe(state, ident, !(PIPE_INFER))
@@ -7203,7 +7202,7 @@ local function simplifyCast(state, cast)
 	-- Type -> int
 	elseif exprTypeInfo.tag == !(TYPE_TYPE) and castTypeInfo.tag == !(TYPE_INT) then
 		local typeRepresented = getTypeRepresentedByExpression(cast.expression) or errorInternal(state, cast)
-		local literal         = newLiteral(cast.parent, cast.token, !(LITERAL_INTEGER), typeRepresented.id, castTypeInfo)
+		local literal         = newLiteral(cast.parent, cast, !(LITERAL_INTEGER), typeRepresented.id, castTypeInfo)
 
 		replaceQueuedNodeAndUnqueueOldTree(state, cast, literal)
 		moveToNextRelevantPipe(state, literal, !(PIPE_INFER))
@@ -7241,7 +7240,7 @@ local function simplifyUnary(state, unary)
 		!ASSERT("unary.expression.nodeType == "..AST_LITERAL)
 		!ASSERT("type(unary.expression.value) == 'number'")
 
-		local literal = astNewNode(AstLiteral, unary.token, unary.parent)
+		local literal = astNewNode(AstLiteral, unary, unary.parent)
 
 		literal.literalType
 			=  typeInfo.tag == !(TYPE_INT)   and !(LITERAL_INTEGER)
@@ -7259,7 +7258,7 @@ local function simplifyUnary(state, unary)
 		!ASSERT("unary.expression.nodeType == "..AST_LITERAL)
 		!ASSERT("type(unary.expression.value) == 'boolean'")
 
-		local literal        = astNewNode(AstLiteral, unary.token, unary.parent)
+		local literal        = astNewNode(AstLiteral, unary, unary.parent)
 		literal.literalType  = !(LITERAL_BOOLEAN)
 		literal.value        = not unary.expression.value
 		literal.inferredType = typeInfo
@@ -7296,7 +7295,7 @@ local function simplifyUnary(state, unary)
 			errorUnhandledNodeType(state, valueExpr)
 		end
 
-		local literal        = astNewNode(AstLiteral, unary.token, unary.parent)
+		local literal        = astNewNode(AstLiteral, unary, unary.parent)
 		literal.literalType  = !(LITERAL_INTEGER)
 		literal.value        = length
 		literal.inferredType = typeInfo
@@ -7340,7 +7339,7 @@ local function simplifyBinary(state, binary)
 			s, count = count, s
 		end
 
-		replacement = newLiteral(binary.parent, binary.token, !(LITERAL_STRING), s:rep(count), typeInfo)
+		replacement = newLiteral(binary.parent, binary, !(LITERAL_STRING), s:rep(count), typeInfo)
 
 	!for _, opArithmeticKeepType in ipairs{"+","-","*","^","%"} do
 	elseif op == !(opArithmeticKeepType) then
@@ -7353,18 +7352,18 @@ local function simplifyBinary(state, binary)
 
 		local n = l.value !!(opArithmeticKeepType) r.value -- This should produce the correct result for any combination of int and float.
 
-		replacement = newLiteral(binary.parent, binary.token, literalType, n, typeInfo)
+		replacement = newLiteral(binary.parent, binary, literalType, n, typeInfo)
 	!end
 
 	elseif op == "/" then
 		!!(ASSERT_BOTH_OPERANDS_NUMERIC_LITERALS)
 
-		replacement = newLiteral(binary.parent, binary.token, !(LITERAL_FLOAT), l.value/r.value, typeInfo)
+		replacement = newLiteral(binary.parent, binary, !(LITERAL_FLOAT), l.value/r.value, typeInfo)
 
 	elseif op == "//" then
 		!!(ASSERT_BOTH_OPERANDS_NUMERIC_LITERALS)
 
-		replacement = newLiteral(binary.parent, binary.token, !(LITERAL_INTEGER), math.floor(l.value/r.value), typeInfo)
+		replacement = newLiteral(binary.parent, binary, !(LITERAL_INTEGER), math.floor(l.value/r.value), typeInfo)
 
 	!for _, opComparison in ipairs{"<",">","<=",">="} do
 	elseif op == !(opComparison) then
@@ -7377,7 +7376,7 @@ local function simplifyBinary(state, binary)
 			!ASSERT("lType == 'number' or lType == 'string'")
 		!end
 
-		replacement = newLiteral(binary.parent, binary.token, !(LITERAL_BOOLEAN), (l.value !!(opComparison) r.value), typeInfo)
+		replacement = newLiteral(binary.parent, binary, !(LITERAL_BOOLEAN), (l.value !!(opComparison) r.value), typeInfo)
 	!end
 
 	!for _, opEquality in ipairs{"==","~="} do
@@ -7407,7 +7406,7 @@ local function simplifyBinary(state, binary)
 			!ASSERT("valueL.nodeType == valueR.nodeType")
 		end
 
-		replacement = newLiteral(binary.parent, binary.token, !(LITERAL_BOOLEAN), (valueL !!(opEquality) valueR), typeInfo)
+		replacement = newLiteral(binary.parent, binary, !(LITERAL_BOOLEAN), (valueL !!(opEquality) valueR), typeInfo)
 	!end
 
 	!for _, opLogical in ipairs{"and","or"} do
@@ -7417,7 +7416,7 @@ local function simplifyBinary(state, binary)
 		!ASSERT("type(l.value) == 'boolean'")
 		!ASSERT("type(r.value) == 'boolean'")
 
-		replacement = newLiteral(binary.parent, binary.token, !(LITERAL_BOOLEAN), (l.value !!(opLogical) r.value), typeInfo)
+		replacement = newLiteral(binary.parent, binary, !(LITERAL_BOOLEAN), (l.value !!(opLogical) r.value), typeInfo)
 	!end
 
 	elseif op == ".." then
@@ -7427,7 +7426,7 @@ local function simplifyBinary(state, binary)
 		!ASSERT("type(r.value) == 'string'")
 
 		-- @Speed: Concatenate more than two values at a time. (Maybe the parsing stage need an update.)
-		replacement = newLiteral(binary.parent, binary.token, !(LITERAL_STRING), l.value..r.value, typeInfo)
+		replacement = newLiteral(binary.parent, binary, !(LITERAL_STRING), l.value..r.value, typeInfo)
 
 	else
 		errorUnhandledNodeType(state, binary)
@@ -7453,7 +7452,7 @@ function _G.simplifyExpressionIfConstant(state, expr)
 		then
 			local ident       = expr
 			local foreign     = ident.declaration.value
-			local foreignCopy = astCopy(foreign, ident.token, ident.parent)
+			local foreignCopy = astCopy(foreign, ident, ident.parent)
 
 			replaceQueuedNodeAndUnqueueOldTree(state, ident, foreignCopy)
 			moveToNextRelevantPipe(state, foreignCopy, !(PIPE_INFER))
@@ -7469,7 +7468,7 @@ function _G.simplifyExpressionIfConstant(state, expr)
 		if typeInfo.tag == !(TYPE_ENUM) then
 			if ident.name ~= decl.name.name then
 				-- @Cleanup: Is this necessary? Can't we just do ident.name=decl.name.name?
-				local copy = astCopyIdentifier(decl.name, ident.token, ident.parent, !(IDENT_KIND_LOOSE))
+				local copy = astCopyIdentifier(decl.name, ident, ident.parent, !(IDENT_KIND_LOOSE))
 				replaceQueuedNodeAndUnqueueOldTree(state, ident, copy)
 				moveToNextRelevantPipe(state, copy, !(PIPE_INFER))
 			end
@@ -7495,7 +7494,7 @@ function _G.simplifyExpressionIfConstant(state, expr)
 			errorInternal(state, literal)
 		end
 
-		local copy = astCopy(literal, ident.token, ident.parent)
+		local copy = astCopy(literal, ident, ident.parent)
 		replaceQueuedNodeAndUnqueueOldTree(state, ident, copy)
 		moveToNextRelevantPipe(state, copy, !(PIPE_INFER))
 
@@ -8140,7 +8139,7 @@ end
 
 
 function _G.wrapInImplicitCast(state, nodeToWrap, resultingTypeInfo, addToInferPipe)
-	local cast        = astNewNode(AstCast, nodeToWrap.token, nodeToWrap.parent)
+	local cast        = astNewNode(AstCast, nodeToWrap, nodeToWrap.parent)
 	cast.isImplicit   = true
 	cast.inferredType = resultingTypeInfo
 	pokeAndQueueUnqueuedNodeIntoTree(state, nodeToWrap, cast, cast,"expression", (addToInferPipe and !(PIPE_INFER) or !(PIPE_DONE)))

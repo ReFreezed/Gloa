@@ -7,6 +7,14 @@
 --=  Glóa - a language that compiles into Lua
 --=  by Marcus 'ReFreezed' Thunström
 --=
+--==============================================================
+
+	compilationInitState, compilationStart, compilationDoOneCycle
+	compileProgram
+	compilerErrorHandler
+	countLinesOfCode
+	maybeWriteProgram
+
 --============================================================]]
 !(
 local VERSION = "0.1.0"
@@ -24,12 +32,15 @@ Options:
     --silent      Disable output to stdout. (Errors and warnings are still printed to stderr.)
     --            Start of arguments for metaprogram.]]
 
+local DISABLE_STDOUT_BUFFER = 1==1 -- Note: Slows down all printing.
+
 local EXTRA_STATS                  = 1==0 -- Pipe cycles.
+local COUNT_LOC_PER_FILE           = 1==0
 local FUNCTION_TO_MEASURE_CALLS_ON = ""--`inferIdentifierOrVararg` -- Also see profiler*() in functions.luapart. (The two features are not compatible.)
-local DISABLE_STDOUT_BUFFER        = 1==1 -- Note: Slows down all printing.
 
 if not DEBUG then
 	EXTRA_STATS                  = false
+	COUNT_LOC_PER_FILE           = false
 	FUNCTION_TO_MEASURE_CALLS_ON = ""
 end
 )
@@ -266,6 +277,7 @@ local function runCompiler()
 
 		{`fileBuffers`,        {}},
 		{`tokens`,             nil},   -- Tokens (struct)
+		{`tokensUnused`,       nil},   -- Tokens (struct)  @Incomplete: Use this!
 		{`settings`,           nil},   -- CompilationSettings
 
 		{`pathToFirstFile`,    ""},
@@ -290,13 +302,19 @@ local function runCompiler()
 
 		{`warnings`,           0},
 
+		-- Lexer:
+		{`lineCount`,       0},
+		{`locCount`,        0},
+		{`locCountPerPath`, (COUNT_LOC_PER_FILE and {} or STRUCT_FIELD_IGNORE)},
+		{`locCountPaths`,   (COUNT_LOC_PER_FILE and {} or STRUCT_FIELD_IGNORE)},
+
 		-- Parser:
 		{`globalScope`,            nil},   -- AstGlobalScope
 		{`nextToken`,              1},
 		{`soft`,                   false}, -- Enabling this will make parsing functions return nil on error instead of triggering an actual error.
-		{`luaPreloads`,            {}},    -- All '!preload' strings.
-		{`luaPreloadsCompiletime`, {}},    -- All '!preload compiletime' strings.
-		{`luaPreloadsRuntime`,     {}},    -- All '!preload runtime' strings.
+		{`luaPreloads`,            {}},    -- { lua=string, lineOffset=number, path=string, line=number, trimmedInitialNewline=bool } -- All '!preload' strings.
+		{`luaPreloadsCompiletime`, {}},    -- { lua=string, lineOffset=number, path=string, line=number, trimmedInitialNewline=bool } -- All '!preload compiletime' strings.
+		{`luaPreloadsRuntime`,     {}},    -- { lua=string, lineOffset=number, path=string, line=number, trimmedInitialNewline=bool } -- All '!preload runtime' strings.
 
 		-- Pipes:
 		{`queueActive`,           {n=0}},
@@ -347,8 +365,9 @@ local function runCompiler()
 
 	function _G.compilationInitState(pathToFirstFile)
 		local state = !new"_CompilationState"{
-			`id`,     `nextStateId`,
-			`tokens`, `Tokens()`,
+			`id`,           `nextStateId`,
+			`tokens`,       `Tokens()`,
+			`tokensUnused`, `Tokens()`,
 		}
 		nextStateId = nextStateId + 1
 
@@ -386,11 +405,17 @@ local function runCompiler()
 		local pathToFirstFile = state.pathToFirstFile
 		if not silent then  print("Compiling "..pathToFirstFile:gsub("^.*/", ""))  end
 
-		insertToken(state.tokens, !(TOKEN_DIRECTIVE),"import", "",pathToFirstFile)
-		insertToken(state.tokens, !(TOKEN_STRING),"preload",   "",pathToFirstFile)
+		local tokens = state.tokens
+
+		insertNewToken(tokens, !(TOKEN_DIRECTIVE),"import", "",pathToFirstFile)
+		insertNewToken(tokens, !(TOKEN_STRING),"preload",   "",pathToFirstFile)
+
+		local startToken = tokens.n + 1
 
 		local timeLexingStart, timeLexingEnd = readAndTokenizeFile(state, pathToFirstFile, true)
 		state.timeLexing                     = timeLexingEnd - timeLexingStart
+
+		countLinesOfCode(state, startToken, tokens.n)
 
 		local timeStart = timerGetCurrentInSeconds()
 		parseGlobalScope(state, pathToFirstFile)
@@ -673,6 +698,54 @@ local function runCompiler()
 		state.timeOutput = timerGetCurrentInSeconds() - timeStart
 	end
 
+	function _G.countLinesOfCode(state, tokenFirst, tokenLast)
+		local tokens   = state.tokens
+		local locCount = state.locCount
+
+		!if COUNT_LOC_PER_FILE then
+		local locCountPerPath = state.locCountPerPath
+		local locCountPaths   = state.locCountPaths
+		!end
+
+		local lastPath = ""
+		local lastLine = 0
+
+		for token = tokenFirst, tokenLast do
+			local tok  = tokens[token]
+			local path = tok.source.path
+
+			if path ~= lastPath then
+				lastPath = path
+				lastLine = 0
+
+				!if COUNT_LOC_PER_FILE then
+					if not locCountPerPath[path] then
+						locCountPerPath[path] = 0
+						table.insert(locCountPaths, path)
+					end
+				!end
+			end
+
+			if tok.line1 ~= lastLine then
+				locCount = locCount + 1
+				!if COUNT_LOC_PER_FILE then
+					locCountPerPath[path] = locCountPerPath[path] + 1
+				!end
+			end
+
+			if tok.line2 then
+				locCount = locCount + tok.line2 - tok.line1
+				!if COUNT_LOC_PER_FILE then
+					locCountPerPath[path] = locCountPerPath[path] + tok.line2 - tok.line1
+				!end
+			end
+
+			lastLine = tok.line2 or tok.line1
+		end
+
+		state.locCount = locCount
+	end
+
 	function _G.compileProgram(pathToFirstFile)
 		local timeCompilingStart            = timerGetCurrentInSeconds()
 		local timeDoingSubCompilationsStart = timeDoingSubCompilations
@@ -700,29 +773,8 @@ local function runCompiler()
 		!ifNotDEBUG`if not silent then`
 			!ifDEBUG `if debug_onlyParse then  astPrintTree(state.globalScope)  end`
 
-			local tokens        = state.tokens
-			local subTime       = timeDoingSubCompilations - timeDoingSubCompilationsStart
-			local lineCountCode = 0
-			local lastPath      = ""
-			local lastLine      = 0
-
-			for token = 1, tokens.n do
-				local tok = tokens[token]
-
-				if not tok.inserted then
-					if tok.source.path ~= lastPath then
-						lastPath = tok.source.path
-						lastLine = 0
-					end
-
-					if tok.line1 ~= lastLine then
-						lineCountCode = lineCountCode+1
-					end
-
-					lineCountCode = lineCountCode + (tok.line2 or tok.line1) - tok.line1
-					lastLine      = tok.line2 or tok.line1
-				end
-			end
+			local tokens  = state.tokens
+			local subTime = timeDoingSubCompilations - timeDoingSubCompilationsStart
 
 			!local OK = {
 				"██████████████████████ ",
@@ -748,11 +800,25 @@ local function runCompiler()
 
 			printf(
 				!((DEBUG and OK[incN()] or "").."%d LOC in %d file%s (%d lines including empty lines and comments)"),
-				lineCountCode,
+				state.locCount,
 				#state.globalScope.fileScopes-1,
 				(state.globalScope.fileScopes[3] and "s" or ""),
-				tokens.lineCount
+				state.lineCount
 			)
+
+			!if COUNT_LOC_PER_FILE then
+				--[[ -- Sort by name.
+				table.sort(locCountPaths)
+				--[=[]] -- Sort by count.
+				table.sort(locCountPaths, function(a, b)
+					if locCountPerPath[a] ~= locCountPerPath[b] then  return locCountPerPath[a] > locCountPerPath[b]  end
+					return a < b
+				end)
+				--]=]
+				for _, path in ipairs(locCountPaths) do
+					printf(!((DEBUG and OK[incN()] or "").."LOC: %-5d  %-25s  %s"), locCountPerPath[path], path:match"[^/]+$", path)
+				end
+			!end
 
 			!if DEBUG then
 				local dependencyCount = {}

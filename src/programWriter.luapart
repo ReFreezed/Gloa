@@ -282,12 +282,11 @@ _G.!struct"WriterState"{
 
 
 
-local function addLineMapping(state, writer, token)
+local function addLineMapping(state, writer, sourceNode)
 	local ln = writer.currentOutputLine
 	if (writer.lineMappingLines[ln] or 0) > 0 then  return  end
-	local tok                   = state.tokens[token]
-	writer.lineMappingFiles[ln] = tok.source.path
-	writer.lineMappingLines[ln] = tok.line1
+	writer.lineMappingFiles[ln] = sourceNode.source.path
+	writer.lineMappingLines[ln] = sourceNode.line
 end
 -- addLineMappingDummy( state, writer [, path ] )
 local function addLineMappingDummy(state, writer, path)
@@ -306,7 +305,7 @@ function _G.writeIdentifierName(state, writer, ident)
 	local decl = ident.declaration
 	local name = decl.topScopeName
 
-	addLineMapping(state, writer, ident.token)
+	addLineMapping(state, writer, ident)
 
 	if name == "" then  name = decl.localName  end
 
@@ -362,8 +361,14 @@ function _G.shouldOperationHaveSurroundingParentheses(node)
 	)
 end
 
--- writeBinaryOperation( state, writer, indent, nextLocalN, localsStack, left:AstNode|string, right:AstNode|string, binaryOperation leftType, rightType, resultingType, token, binary=nil )
-function _G.writeBinaryOperation(state, writer, indent, nextLocalN, localsStack, l, r, binOp, lType, rType, resultingType, token, binary)
+-- writeBinaryOperation(
+--   state, writer, indent, nextLocalN, localsStack,
+--   left:AstNode|string, right:AstNode|string,
+--   binaryOperation,
+--   leftType, rightType, resultingType,
+--   sourceNode, binary=nil
+-- )
+function _G.writeBinaryOperation(state, writer, indent, nextLocalN, localsStack, l, r, binOp, lType, rType, resultingType, sourceNode, binary)
 	!(
 	local function WRITE_OPERAND(sideCode)
 		__LUA(templateToLua(
@@ -382,7 +387,7 @@ function _G.writeBinaryOperation(state, writer, indent, nextLocalN, localsStack,
 	local file      = writer.file
 	local addParens = binary and shouldOperationHaveSurroundingParentheses(binary)
 
-	addLineMapping(state, writer, token)
+	addLineMapping(state, writer, sourceNode)
 
 	if !!(CONST_SET{"..","and","or"})[binOp] then
 		-- @Polish: For the logical operators there is probably more we can do, but we may have to dive deeper in the sub-trees to make some predictions or something...
@@ -516,7 +521,7 @@ function _G.writeCast(state, writer, indent, nextLocalN, localsStack, cast, name
 	local typeInfoSource = adjustTypeToOne(state, cast.expression, cast.expression.inferredType, true)
 	local typeInfoTarget = cast.inferredType
 
-	addLineMapping(state, writer, cast.token)
+	addLineMapping(state, writer, cast)
 
 	writer.file:write("(") -- In case the written expression is a list of some kind.
 
@@ -687,7 +692,7 @@ function _G.writeExpression(state, writer, indent, nextLocalN, localsStack, expr
 
 		local callingForeignMethod = false
 
-		addLineMapping(state, writer, call.token)
+		addLineMapping(state, writer, call)
 
 		if call.surroundedByParentheses then  file:write("(")  end
 
@@ -833,7 +838,7 @@ function _G.writeExpression(state, writer, indent, nextLocalN, localsStack, expr
 
 	elseif expr.nodeType == !(AST_UNARY) then
 		local unary = expr
-		addLineMapping(state, writer, unary.token)
+		addLineMapping(state, writer, unary)
 
 		-- Lua doesn't have unary '+'.
 		if unary.operation == "+" then
@@ -847,8 +852,8 @@ function _G.writeExpression(state, writer, indent, nextLocalN, localsStack, expr
 		elseif unary.operation == "not" and unary.expression.nodeType == !(AST_CAST) and !!(CONST_SET{ TYPE_STRING, TYPE_INT, TYPE_FLOAT })[unary.expression.expression.inferredType.tag] then
 			local cast = unary.expression
 
-			addLineMapping(state, writer, cast.token)
-			addLineMapping(state, writer, cast.expression.token)
+			addLineMapping(state, writer, cast)
+			addLineMapping(state, writer, cast.expression)
 
 			file:write("(")
 			writeExpression(state, writer, indent, nextLocalN, localsStack, cast.expression)
@@ -878,7 +883,7 @@ function _G.writeExpression(state, writer, indent, nextLocalN, localsStack, expr
 			binary.left, binary.right,
 			binary.operation,
 			binary.left.inferredType, binary.right.inferredType, binary.inferredType,
-			binary.token, binary
+			binary, binary
 		)
 
 	elseif expr.nodeType == !(AST_LITERAL) then
@@ -1612,7 +1617,7 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 
 					if fetchObj[i] or fetchKey[i] then
 						local access              = targetExpr
-						local accessDummy         = astNewNode(AstAccess, access.token, access.parent)
+						local accessDummy         = astNewNode(AstAccess, access, access.parent)
 						accessDummy.XXX_AWBO_HACK = true
 						accessDummy.object        = fetchObj[i] and "_AWBO_OBJ"..i or access.object -- @Hack!!!
 						accessDummy.member        = fetchKey[i] and "_AWBO_KEY"..i or access.member -- @Hack!!!
@@ -1628,7 +1633,7 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 						targetExpr, (fetchVal[i] and "_AWBO_VAL"..i or assignment.values[i]),
 						assignment.binaryOperation,
 						targetExpr.inferredType, valueType, targetExpr.inferredType,
-						targetExpr.token, nil
+						targetExpr, nil
 					)
 				end
 
@@ -1769,7 +1774,7 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 				if objType.tag == !(TYPE_VARARG) then
 					!ASSERT("objExpr.nodeType == "..AST_VARARG)
 
-					addLineMapping(state, writer, objExpr.token)
+					addLineMapping(state, writer, objExpr)
 					writeIdentifierName(state, writer, forLoop.declarations[1].name)
 					file:write(" = ")
 
@@ -1800,7 +1805,7 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 					file:write(" in ")
 
 					if objType.tag == !(TYPE_ARRAY) or (objType.tag == !(TYPE_STRUCT) and objType.kind == !(STRUCT_KIND_ARRAY)) then
-						addLineMapping(state, writer, objExpr.token)
+						addLineMapping(state, writer, objExpr)
 						if forLoop.reverse then
 							file:write("_IPAIRSR")
 						else
@@ -1809,7 +1814,7 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 
 					elseif objType.tag == !(TYPE_TABLE) then
 						assert(not forLoop.reverse)
-						addLineMapping(state, writer, objExpr.token)
+						addLineMapping(state, writer, objExpr)
 						file:write("_PAIRS")
 
 					elseif objType.tag == !(TYPE_STRUCT) then
@@ -2034,7 +2039,7 @@ function _G.writeFunction(state, writer, indent, nextLocalN, localsStack, lambda
 
 	local file = writer.file
 
-	addLineMapping(state, writer, lambda.token)
+	addLineMapping(state, writer, lambda)
 
 	if lambda.bodyIsForeign then
 		writeForeignReference(state, writer, lambda.foreignSourceId, lambda.foreignSourceName)
@@ -2080,7 +2085,7 @@ function _G.writeFunction(state, writer, indent, nextLocalN, localsStack, lambda
 	writer.argumentN = argumentN
 end
 
-function _G.writeForeignImportIfNew(state, writer, typeInfo, foreignSource, foreignSourceName, foreignSourceId, token, asGlobal)
+function _G.writeForeignImportIfNew(state, writer, typeInfo, foreignSource, foreignSourceName, foreignSourceId, sourceNode, asGlobal)
 	assert(foreignSourceId ~= "")
 
 	if writer.foreignReferences[foreignSourceId] then  return  end
@@ -2101,7 +2106,7 @@ function _G.writeForeignImportIfNew(state, writer, typeInfo, foreignSource, fore
 		writeEol(state, writer)
 	end
 
-	addLineMapping(state, writer, token) -- Must happen after _FOREIGN is declared.
+	addLineMapping(state, writer, sourceNode) -- Must happen after _FOREIGN is declared.
 
 	if foreignSource == "lua" then
 		if outputDebugInfo then
@@ -2409,7 +2414,7 @@ function _G.writeConstantValue(state, writer, const, nodeForError)
 
 	if const.kind == !(CONST_KIND_FOREIGN) then
 		local foreign = const.value
-		writeForeignReference(state, writer, foreign.sourceId, nodeForError)
+		writeForeignReference(state, writer, foreign.foreignSourceId, nodeForError)
 
 	elseif const.kind == !(CONST_KIND_TYPE_INFO) then
 		local typeInfo = const.value
@@ -2417,12 +2422,11 @@ function _G.writeConstantValue(state, writer, const, nodeForError)
 
 	elseif const.kind == !(CONST_KIND_LOCATION) then
 		local target = const.value
-		local tok    = state.tokens[target.token]
 
 		-- Note: This table's fields must be synced with the preload module!
 		file:write("{filePath=")
-		writeStringLiteral(writer, tok.source.path)
-		file:write(", lineNumber=", tok.line1, ", position=", tok.position1, "}")
+		writeStringLiteral(writer, target.source.path)
+		file:write(", lineNumber=", target.line, ", position=", target.position, "}")
 
 	elseif const.kind == !(CONST_KIND_NULL) then
 		file:write("nil")
@@ -2538,17 +2542,12 @@ function _G.writeLuaPreloads(state, writer, luaPreloads, fromIndex)
 
 		file:write("do\n", luaPreload.lua, "\nend\n")
 
-		local _, nlCount = luaPreload.lua:gsub("\n", "%0")
-
-		local tok                   = state.tokens[luaPreload.token]
-		local trimmedInitialNewline = tok.extra
-		local stringTokenPath       = tok.source.path
-		local stringTokenLn         = tok.line1 + luaPreload.lineOffset - 2 + (trimmedInitialNewline and 1 or 0)
-
+		local _, nlCount     = luaPreload.lua:gsub("\n", "%0") -- @Speed
+		local stringTokenLn  = luaPreload.line + luaPreload.lineOffset - 2 + (luaPreload.trimmedInitialNewline and 1 or 0)
 		local outputOffsetLn = writer.currentOutputLine - 1
 
 		for ln = 2, nlCount+2 do
-			writer.lineMappingFiles[outputOffsetLn+ln] = stringTokenPath
+			writer.lineMappingFiles[outputOffsetLn+ln] = luaPreload.path
 			writer.lineMappingLines[outputOffsetLn+ln] = stringTokenLn + ln
 		end
 
@@ -2663,11 +2662,11 @@ function _G.writeForeignImports(state, writer, constants, asGlobals, relevantObj
 		elseif const.kind == !(CONST_KIND_NORMAL) and const.valueType.tag == !(TYPE_FUNCTION) and const.value.bodyIsForeign then
 			-- @Polish: Treat function constants pointing to the same foreign function as the same constant.
 			local lambda = const.value
-			writeForeignImportIfNew(state, writer, const.valueType, lambda.foreignSource, lambda.foreignSourceName.value, lambda.foreignSourceId, lambda.token, asGlobals)
+			writeForeignImportIfNew(state, writer, const.valueType, lambda.foreignSource, lambda.foreignSourceName.value, lambda.foreignSourceId, lambda, asGlobals)
 
 		elseif const.kind == !(CONST_KIND_FOREIGN) then
 			local foreign = const.value
-			writeForeignImportIfNew(state, writer, foreign.inferredType, foreign.source, foreign.sourceName.value, foreign.sourceId, foreign.token, asGlobals)
+			writeForeignImportIfNew(state, writer, foreign.inferredType, foreign.foreignSource, foreign.foreignSourceName.value, foreign.foreignSourceId, foreign, asGlobals)
 		end
 	end
 end
@@ -2724,8 +2723,9 @@ function _G.writeConstantObjectsAndForwardDeclarations(state, writer, constants,
 	table.sort(constantFunctions, function(a, b)
 		a = a.value
 		b = b.value
-		if a.bodyIsForeign ~= b.bodyIsForeign then  return a.bodyIsForeign    end
-		if a.token         ~= b.token         then  return a.token < b.token  end
+		if a.bodyIsForeign ~= b.bodyIsForeign then  return a.bodyIsForeign                end
+		if a.source.path   ~= b.source.path   then  return a.source.path < b.source.path  end
+		if a.position      ~= b.position      then  return a.position    < b.position     end
 		return a.s < b.s
 	end)
 

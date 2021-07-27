@@ -9,9 +9,9 @@
 --=
 --==============================================================
 
-	getToken, isTokenAssigning
-	readAndTokenizeString, readAndTokenizeFile
-	tokenize, insertToken
+	insertNewToken
+	isTokenAssigning
+	tokenizeString, readAndTokenizeFile
 
 --============================================================]]
 
@@ -107,9 +107,19 @@ local DIRECTIVE_WORDS = !(DIRECTIVE_WORDS)
 
 
 _G.!struct"Tokens"{
-	{`n`,         0}, -- Length of array.
-	{`lineCount`, 0},
-	-- [1]=tok1, ...
+	{`n`, 0}, -- Length of array.
+	-- [1]=tok, ...
+
+	-- tok = {
+	--   type      = tokenType,  -- One of TOKEN_*.
+	--   value     = tokenValue, -- Depends on the type.
+	--   extra     = extraValue, -- Depends on the type.
+	--   source    = { path=sourcePath, string=sourceString },
+	--   position1 = startBytePosition,
+	--   position2 = endBytePosition,
+	--   line1     = startLineNumber,
+	--   line2     = endLineNumber|nil, -- If this is nil then line1 should be used.
+	-- }
 }
 
 !if DEBUG then
@@ -138,7 +148,7 @@ local function TOKEN_TEST(labelCode)
 end
 )
 
-function _G.tokenize(sourceInfo, tokens, increaseTotalLineCount, lnStart)
+local function tokenize(state, sourceInfo, lnStart, increaseTotalLineCount)
 	local bytesToString = string.char
 	local find          = string.find
 	local getByte       = string.byte
@@ -149,9 +159,11 @@ function _G.tokenize(sourceInfo, tokens, increaseTotalLineCount, lnStart)
 	local utf8Char      = utf8Char
 	local concat        = table.concat
 
-	local path  = sourceInfo.path
-	local s     = sourceInfo.string
-	local count = tokens.n
+	local path = sourceInfo.path
+	local s    = sourceInfo.string
+
+	local tokens = state.tokens
+	local count  = tokens.n
 
 	local ptr   = 1
 	local ln    = lnStart
@@ -564,15 +576,14 @@ function _G.tokenize(sourceInfo, tokens, increaseTotalLineCount, lnStart)
 			count = count + 1
 
 			tok = {
-				type        = tokType,    -- One of TOKEN_*.
-				value       = tokValue,   -- Depends on the type.
-				extra       = tokExtra,   -- Depends on the type.
-				source      = sourceInfo, -- { path=realOrFakePath, string=actualSourceString }
-				position1   = tokenPos,   -- Start byte.
-				position2   = ptr-1,      -- End byte.
-				line1       = ln,         -- Start line.
-				-- line2    = nil,        -- End line. If this is nil then line1 should be used. (May be updated below!)
-				-- inserted = false,      -- Used for compilation stats. (Optimization: We let this be nil instead of false.)
+				type      = tokType,
+				value     = tokValue,
+				extra     = tokExtra,
+				source    = sourceInfo,
+				position1 = tokenPos,
+				position2 = ptr-1,
+				line1     = ln,
+				-- line2  = nil,
 			}
 			tokens[count] = tok
 		end
@@ -601,13 +612,13 @@ function _G.tokenize(sourceInfo, tokens, increaseTotalLineCount, lnStart)
 	tokens.n = count
 
 	if increaseTotalLineCount then
-		tokens.lineCount = tokens.lineCount + ln - lnStart + 1
+		state.lineCount = state.lineCount + ln - lnStart + 1
 	end
 end
 
--- insertToken( tokens, tokenType, tokenValue [, sourceString="", path=tokens[1].source.path ] )
+-- insertNewToken( tokens, tokenType, tokenValue [, sourceString="", path=tokens[1].source.path ] )
 -- This function should not be called a lot! Otherwise we'll need to change where we create the sourceInfo table.
-function _G.insertToken(tokens, tokType, tokValue, sourceString, path)
+function _G.insertNewToken(tokens, tokType, tokValue, sourceString, path)
 	sourceString = sourceString or ""
 	path         = path         or tokens[1].source.path
 
@@ -623,34 +634,24 @@ function _G.insertToken(tokens, tokType, tokValue, sourceString, path)
 		position2 = 1,
 		line1     = 1,
 		-- line2  = nil,
-		inserted  = true,
 	}
 end
 
 
 
--- tokenType, tokenValue = getToken( tokens, index )
-function _G.getToken(tokens, i)
-	local tok = tokens[i]
-	if not tok then  return nil  end
-	return tok.type, tok.value
-end
-
--- bool = isTokenAssigning( tokenType, tokenValue )
--- bool = isTokenAssigning( tok )
-function _G.isTokenAssigning(tokType, tokValue)
-	if type(tokType) == "table" then  tokValue = tokType.value ; tokType = tokType.type  end
-	return tokType == !(TOKEN_PUNCTUATION) and !!(CONST_SET{"=","+=","-=","*=","/=","//=","^=","%=","..="})[tokValue] ~= nil
+function _G.isTokenAssigning(tok)
+	-- @Incomplete: 'and=' 'or='
+	return tok.type == !(TOKEN_PUNCTUATION) and !!(CONST_SET{"=","+=","-=","*=","/=","//=","^=","%=","..="})[tok.value] ~= nil
 end
 
 
 
-function _G.readAndTokenizeString(state, sourceInfo, lnStart, increaseTotalLineCount)
+function _G.tokenizeString(state, sourceInfo, lnStart, increaseTotalLineCount)
 	local tokens     = state.tokens
 	local startToken = tokens.n + 1
 
 	local startTime = timerGetCurrentInSeconds()
-	tokenize(sourceInfo, tokens, increaseTotalLineCount, lnStart)
+	tokenize(state, sourceInfo, lnStart, increaseTotalLineCount)
 	local endTime = timerGetCurrentInSeconds()
 
 	!if DEBUG and 1==0 then
@@ -722,7 +723,7 @@ function _G.readAndTokenizeFile(state, path, increaseTotalLineCount)
 	state.fileBuffers[path] = s
 
 	local sourceInfo         = {path=path, string=s}
-	local startTime, endTime = readAndTokenizeString(state, sourceInfo, 1, increaseTotalLineCount)
+	local startTime, endTime = tokenizeString(state, sourceInfo, 1, increaseTotalLineCount)
 	return startTime, endTime
 end
 
