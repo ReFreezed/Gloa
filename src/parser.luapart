@@ -452,7 +452,7 @@ _G.!structAst"AstLambda:_AstScopeExpression"{
 	_overrides = {{`nodeType`,AST_LAMBDA}},
 	_scopeType = "imperative",
 
-	{`captures`,          {},  ast="array"}, -- []AstIdentifier
+	{`captures`,          nil, ast="array"}, -- []AstIdentifier  Is set when needed.
 	{`captureAll`,        false},
 	{`argumentsIn`,       nil, astRef="node"}, -- AstArguments
 	{`argumentsOut`,      nil, astRef="node"}, -- AstArguments
@@ -557,6 +557,10 @@ do
 			errorInternal("DEBUG")
 		end
 		--]]
+
+		!if EXTRA_STATS then
+			nodeCreationCounts[node.nodeType] = nodeCreationCounts[node.nodeType] + 1
+		!end
 
 		return node
 	end
@@ -2967,6 +2971,7 @@ local function parseLambda(state, parent)
 			!!(EAT_NEXT_TOKEN) -- '*'
 			lambda.captureAll = true
 		else
+			lambda.captures = {}
 			!DO_OR_RETURN_NIL `parseNameList(state, lambda, lambda.captures, nil, false)`
 		end
 
@@ -3076,7 +3081,7 @@ local function parseLambda(state, parent)
 			end
 		end
 
-		if lambda.isPolymorphic and (lambda.captures[1] or lambda.captureAll) then
+		if lambda.isPolymorphic and (lambda.captures or lambda.captureAll) then
 			!ERROR_OR_RETURN_NIL `errorParsing(state, lambda, "Polymorphic functions cannot have captures.")`
 		end
 
@@ -3090,7 +3095,7 @@ local function parseLambda(state, parent)
 		end
 	end
 
-	if (lambda.captures[1] or lambda.captureAll) and lambda.argumentsIn and not state.soft then
+	if (lambda.captures or lambda.captureAll) and lambda.argumentsIn and not state.soft then
 		for _, arg in ipairs(lambda.argumentsIn.arguments) do
 			if arg.declaration.value then
 				state.warnings = state.warnings+1
@@ -3259,9 +3264,9 @@ local function parseLambda(state, parent)
 
 	if lambda.isPolymorphic and not lambda.body then
 		!ERROR_OR_RETURN_NIL `errorParsing(state, lambda, "Types of functions cannot be polymorphic - only functions themselves can.")`
-	elseif (lambda.captures[1] or lambda.captureAll) and not lambda.body then
+	elseif (lambda.captures or lambda.captureAll) and not lambda.body then
 		!ERROR_OR_RETURN_NIL `errorParsingAfterLast(state, "Expected a body for function with captures.")`
-	elseif (lambda.captures[1] or lambda.captureAll) and lambda.bodyIsForeign then
+	elseif (lambda.captures or lambda.captureAll) and lambda.bodyIsForeign then
 		!ERROR_OR_RETURN_NIL `errorParsing(state, lambda, "Foreign functions cannot have captures.")`
 	end
 
@@ -4838,7 +4843,7 @@ do
 
 			if node.nodeType == !(AST_TYPE) then
 				visitChildren = false
-			elseif node.nodeType == !(AST_LAMBDA) --[[and not (node.captures[1] or node.captureAll) ]]then -- Do we care about captures here?
+			elseif node.nodeType == !(AST_LAMBDA) --[[and not (node.captures or node.captureAll) ]]then -- Do we care about captures here?
 				visitNode     = visitLambdas
 				visitChildren = node == topNode
 			end

@@ -34,13 +34,15 @@ Options:
 
 local DISABLE_STDOUT_BUFFER = 1==1 -- Note: Slows down all printing.
 
-local EXTRA_STATS                  = 1==0 -- Pipe cycles.
+local EXTRA_STATS                  = 1==0 -- Pipe cycles and more.
 local COUNT_LOC_PER_FILE           = 1==0
+local COUNT_TOKEN_REUSES           = 1==0
 local FUNCTION_TO_MEASURE_CALLS_ON = ""--`inferIdentifierOrVararg` -- Also see profiler*() in functions.luapart. (The two features are not compatible.)
 
 if not DEBUG then
 	EXTRA_STATS                  = false
 	COUNT_LOC_PER_FILE           = false
+	COUNT_TOKEN_REUSES           = false
 	FUNCTION_TO_MEASURE_CALLS_ON = ""
 end
 )
@@ -117,6 +119,14 @@ local function runCompiler()
 	_G.outputDebugInfo      = false
 	_G.keepDeadCode         = false
 	_G.rootDirectory        = ""
+
+	!if EXTRA_STATS then
+		_G.nodeCreationCounts = {
+			!for nodeType in pairs(AST_NAMES) do
+				[!(nodeType)] = 0,
+			!end
+		}
+	!end
 
 	!if DEBUG then
 	_G.debug_onlyParse      = false
@@ -914,6 +924,18 @@ local function runCompiler()
 
 	!if FUNCTION_TO_MEASURE_CALLS_ON ~= "" then
 		debug.sethook(nil)
+	!end
+
+	!if EXTRA_STATS then
+		local nodeTypes = getKeys(AST_NAMES)
+		table.sort(nodeTypes, function(a, b)
+			if nodeCreationCounts[a] ~= nodeCreationCounts[b] then  return nodeCreationCounts[a] > nodeCreationCounts[b]  end
+			return a < b
+		end)
+		for _, nodeType in ipairs(nodeTypes) do
+			printf(!((DEBUG and OK[incN()] or "").."Nodes %-6d %s"), nodeCreationCounts[nodeType], AST_NAMES[nodeType])
+		end
+		print()
 	!end
 
 	!ifNotDEBUG`if not silent then`
