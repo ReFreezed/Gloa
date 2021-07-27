@@ -276,9 +276,8 @@ local function runCompiler()
 		{`id`,                 0},
 
 		{`fileBuffers`,        {}},
-		{`tokens`,             nil},   -- Tokens (struct)
-		{`tokensUnused`,       nil},   -- Tokens (struct)  @Incomplete: Use this!
-		{`settings`,           nil},   -- CompilationSettings
+		{`tokens`,             nil}, -- Tokens (struct)
+		{`settings`,           nil}, -- CompilationSettings
 
 		{`pathToFirstFile`,    ""},
 		{`projectDirectory`,   ""},
@@ -365,9 +364,8 @@ local function runCompiler()
 
 	function _G.compilationInitState(pathToFirstFile)
 		local state = !new"_CompilationState"{
-			`id`,           `nextStateId`,
-			`tokens`,       `Tokens()`,
-			`tokensUnused`, `Tokens()`,
+			`id`,     `nextStateId`,
+			`tokens`, `Tokens()`,
 		}
 		nextStateId = nextStateId + 1
 
@@ -405,17 +403,18 @@ local function runCompiler()
 		local pathToFirstFile = state.pathToFirstFile
 		if not silent then  print("Compiling "..pathToFirstFile:gsub("^.*/", ""))  end
 
-		local tokens = state.tokens
+		local tokens     = state.tokens
+		local sourceInfo = {path=pathToFirstFile, string=""}
 
-		insertNewToken(tokens, !(TOKEN_DIRECTIVE),"import", "",pathToFirstFile)
-		insertNewToken(tokens, !(TOKEN_STRING),"preload",   "",pathToFirstFile)
+		insertNewToken(tokens, !(TOKEN_DIRECTIVE), "import",  sourceInfo)
+		insertNewToken(tokens, !(TOKEN_STRING),    "preload", sourceInfo)
 
-		local startToken = tokens.n + 1
+		local locCountStartToken = tokens.n + 1
 
 		local timeLexingStart, timeLexingEnd = readAndTokenizeFile(state, pathToFirstFile, true)
 		state.timeLexing                     = timeLexingEnd - timeLexingStart
 
-		countLinesOfCode(state, startToken, tokens.n)
+		countLinesOfCode(state, locCountStartToken, tokens.n)
 
 		local timeStart = timerGetCurrentInSeconds()
 		parseGlobalScope(state, pathToFirstFile)
@@ -425,6 +424,7 @@ local function runCompiler()
 			errorParsingNext(state, "Expected the end of the file.")
 		end
 
+		markTokensAsUnused(state)
 		addTypeInfosForBuiltinTypes(state)
 	end
 
@@ -773,7 +773,6 @@ local function runCompiler()
 		!ifNotDEBUG`if not silent then`
 			!ifDEBUG `if debug_onlyParse then  astPrintTree(state.globalScope)  end`
 
-			local tokens  = state.tokens
 			local subTime = timeDoingSubCompilations - timeDoingSubCompilationsStart
 
 			!local OK = {
@@ -843,6 +842,10 @@ local function runCompiler()
 					!((DEBUG and OK[incN()] or "").."Deps:%d (%s)"),
 					#state.allDependencies,
 					table.concat(depencyCountTexts, " ")
+				)
+				printf(
+					!((DEBUG and OK[incN()] or "").."Toks:%d TokReuses:%d"),
+					state.tokens.n, (state.tokens.reuseCount or -1)
 				)
 
 				!if EXTRA_STATS then

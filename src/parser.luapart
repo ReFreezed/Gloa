@@ -1368,7 +1368,7 @@ local function parseStruct(state, parent)
 		local maybeMoreStatements = !!(IS_TOK(TOKEN_PUNCTUATION, ",",";"))
 
 		if parsedDecl then
-			!DO_OR_RETURN_FALSE `parseNotes(state, parsedDecl)`
+			!DO_OR_RETURN_NIL `parseNotes(state, parsedDecl)`
 		end
 
 		if maybeMoreStatements then
@@ -2455,10 +2455,15 @@ local function parseBlockStatements(state, block)
 		--]]
 	!end
 
+	local tok = peekNextTok(state, 1)
+	if tok and tok.type == !(TOKEN_DUMMY) then
+		!!(EAT_NEXT_TOKEN) -- dummy token
+	end
+
 	local lastNodeType = 0
 
 	while true do
-		local tok = peekNextTok(state, 1)
+		tok = peekNextTok(state, 1)
 
 		if not tok then
 			!ERROR_OR_RETURN_FALSE `errorParsing(state, block, "Unfinished block.")`
@@ -2820,15 +2825,15 @@ end
 end
 
 local function parseFileScope(state, parent, path, isModule, moduleName)
-	local fileScope      = astNewNode(AstFileScope, state.tokens[state.nextToken], parent) -- @Incomplete @Robustness: state.tokens may be empty!
-	fileScope.path       = path
-	fileScope.isModule   = isModule
-	fileScope.moduleName = moduleName
-
 	local tok = peekNextTok(state, 1)
 	if tok and tok.type == !(TOKEN_DUMMY) then
 		!!(EAT_NEXT_TOKEN) -- dummy token
 	end
+
+	local fileScope      = astNewNode(AstFileScope, (tok or state.tokens[state.tokens.n]), parent)
+	fileScope.path       = path
+	fileScope.isModule   = isModule
+	fileScope.moduleName = moduleName
 
 	!DO_OR_RETURN_NIL `parseFileScopeOrNamespaceStatements(state, fileScope, true, false)`
 
@@ -2873,8 +2878,9 @@ function _G.astMoveRelevantThingsFromFileScopeToGlobalScope(state, fileScope)
 end
 
 function _G.parseGlobalScope(state, firstFilePath)
-	local globalScope    = astNewNode(AstGlobalScope, state.tokens[state.nextToken], nil) -- @Incomplete @Robustness: state.tokens may be empty!
-	state.globalScope    = globalScope
+	local tok         = peekNextTok(state, 1)
+	local globalScope = astNewNode(AstGlobalScope, (tok or state.tokens[state.tokens.n]), nil)
+	state.globalScope = globalScope
 
 	local firstFileScope = parseFileScope(state, globalScope, firstFilePath, false, state.mainFileBasename)
 
@@ -4028,7 +4034,18 @@ function _G.errorParsing(state, tokenOrTokOrNode, s, ...)
 		or token <= 1 and 1
 		or tokens[tokens.n].position2+1
 
+	!if 1==0 then
+		for token = math.max(state.nextToken-20, 1), math.min(state.nextToken+5, tokens.n) do
+			print(
+				(token == state.nextToken and "*"..token or token),
+				TOKEN_TITLES[tokens[token].type],
+				tokens[token].value
+			)
+		end
+	!end
+
 	!TRACE(2)
+	!ifDEBUG `s = "(tok=" .. TOKEN_TITLES[(tok or tok1).type] .. ") " .. s`
 	errorInFile(buffer, path, ptr, "Parser", s, ...)
 end
 

@@ -25,7 +25,8 @@ exec lua "$0" "$@"
 
 --============================================================]]
 
-local STATIC_PROFILER = 1==0
+local STATIC_PROFILER            = 1==0
+local REPORT_TABLE_CONSTRUCTIONS = 1==0
 
 local STATIC_PROFILER_NAMES_TO_IGNORE = {
 	runCompiler     = true,
@@ -232,7 +233,7 @@ local function maybeAddProfilerStuff(lua)
 		lua        = assert(parser.toLua(ast, true))
 		print("Profiler: toLua", os.clock()-time)
 
-	elseif 1==0 then
+	elseif REPORT_TABLE_CONSTRUCTIONS then
 		--
 		-- Report table constructions.
 		--
@@ -286,16 +287,19 @@ local function maybeAddProfilerStuff(lua)
 					for line in io.lines"temp/gloa.raw.lua" do
 						table.insert(lines, line)
 					end
+					local total = 0
 					for _, ln in ipairs(sort(getKeys(tableConstructions), function(a, b)
 						if tableConstructions[a] ~= tableConstructions[b] then
 							return tableConstructions[a] > tableConstructions[b]
 						end
 						return a < b
 					end)) do
+						total = total + tableConstructions[ln]
 						if tableConstructions[ln] >= 100 then
 							printf("temp/gloa.raw.lua:%d: %d: %s", ln, tableConstructions[ln], lines[ln]:match"^%s*(.-)%s*$")
 						end
 					end
+					printf("Total: %d", total)
 				]]).statements) do
 					table.insert(funcBodyStatements, i, statement)
 				end

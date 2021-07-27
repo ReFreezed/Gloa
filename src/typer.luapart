@@ -4333,14 +4333,17 @@ end
 		end
 
 		local tokens     = state.tokens
-		local startToken = tokens.n + 1
+		local sourceInfo = {path=pathDummy, string=bodyText}
+
+		insertNewToken(tokens, !(TOKEN_DUMMY), nil, sourceInfo)
+
+		local locCountStartToken = tokens.n + 1
 
 		-- @Incomplete: Include these times in the compilation stats.
-		local sourceInfo                     = {path=pathDummy, string=bodyText}
 		local timeLexingStart, timeLexingEnd = tokenizeString(state, sourceInfo, 1, true)
 
-		countLinesOfCode(state, startToken, tokens.n)
-		insertNewToken(tokens, !(TOKEN_PUNCTUATION),"}", bodyText,pathDummy) -- So we can parse the block.
+		countLinesOfCode(state, locCountStartToken, tokens.n)
+		insertNewToken(tokens, !(TOKEN_PUNCTUATION), "}", sourceInfo) -- So we can parse the block.
 
 		tokens[tokens.n].position1 = #bodyText
 		tokens[tokens.n].position2 = #bodyText
@@ -4350,6 +4353,8 @@ end
 		if peekNextTok(state, 1) then
 			errorParsingLast(state, "Expected the end of the body text.") -- This is pointing at an unbalanced '}'.
 		end
+
+		markTokensAsUnused(state)
 
 		--
 		-- WARNING: The body will be able to see everything a normal body would even though
@@ -4773,15 +4778,18 @@ end
 	else
 		!ifDEBUG `profilerPause()`
 
-		local isPreload = not import.isLoad and importName == "preload"
-		local tokens    = state.tokens
+		local isPreload  = not import.isLoad and importName == "preload"
+		local tokens     = state.tokens
+		local sourceInfo = {path=path, string=""}
 
-		if not isPreload then
-			insertNewToken(tokens, !(TOKEN_DIRECTIVE),"import", "",path)
-			insertNewToken(tokens, !(TOKEN_STRING),"preload",   "",path)
+		if isPreload then
+			insertNewToken(tokens, !(TOKEN_DUMMY),     nil,       sourceInfo)
+		else
+			insertNewToken(tokens, !(TOKEN_DIRECTIVE), "import",  sourceInfo)
+			insertNewToken(tokens, !(TOKEN_STRING),    "preload", sourceInfo)
 		end
 
-		local startToken = tokens.n + 1
+		local locCountStartToken = tokens.n + 1
 
 		local timeLexingStart, timeLexingEnd = readAndTokenizeFile(state, path, (not isPreload))
 		local timeLexing                     = timeLexingEnd - timeLexingStart
@@ -4789,7 +4797,7 @@ end
 		-- !ifDEBUG `printf("%.7f  %s", timeLexing, path)`
 
 		if not isPreload then
-			countLinesOfCode(state, startToken, tokens.n)
+			countLinesOfCode(state, locCountStartToken, tokens.n)
 		end
 
 		local timeStart   = timerGetCurrentInSeconds()
@@ -4804,6 +4812,8 @@ end
 		if peekNextTok(state, 1) then
 			errorParsingNext(state, "Expected the end of the file.")
 		end
+
+		markTokensAsUnused(state)
 
 		!ifDEBUG `profilerUnpause()`
 

@@ -9,11 +9,13 @@
 --=
 --==============================================================
 
-	insertNewToken
+	insertNewToken, markTokensAsUnused
 	isTokenAssigning
 	tokenizeString, readAndTokenizeFile
 
 --============================================================]]
+
+!local COUNT_TOKEN_REUSES = DEBUG and 1==0
 
 !(
 -- Keyword notes:
@@ -107,7 +109,10 @@ local DIRECTIVE_WORDS = !(DIRECTIVE_WORDS)
 
 
 _G.!struct"Tokens"{
-	{`n`, 0}, -- Length of array.
+	{`n`,          0}, -- Length of array.
+	{`nextUnused`, 1},
+	{`lastUnused`, 0},
+	{`reuseCount`, COUNT_TOKEN_REUSES and 0 or STRUCT_FIELD_IGNORE},
 	-- [1]=tok, ...
 
 	-- tok = {
@@ -162,8 +167,14 @@ local function tokenize(state, sourceInfo, lnStart, increaseTotalLineCount)
 	local path = sourceInfo.path
 	local s    = sourceInfo.string
 
-	local tokens = state.tokens
-	local count  = tokens.n
+	local tokens     = state.tokens
+	local count      = tokens.n
+	local nextUnused = tokens.nextUnused
+	local lastUnused = tokens.lastUnused
+
+	!if COUNT_TOKEN_REUSES then
+		local reuseCount = tokens.reuseCount
+	!end
 
 	local ptr   = 1
 	local ln    = lnStart
@@ -575,16 +586,36 @@ local function tokenize(state, sourceInfo, lnStart, increaseTotalLineCount)
 		if tokType then
 			count = count + 1
 
-			tok = {
-				type      = tokType,
-				value     = tokValue,
-				extra     = tokExtra,
-				source    = sourceInfo,
-				position1 = tokenPos,
-				position2 = ptr-1,
-				line1     = ln,
-				-- line2  = nil,
-			}
+			if nextUnused <= lastUnused then
+				tok        = tokens[nextUnused]
+				nextUnused = nextUnused + 1
+
+				tok.type      = tokType
+				tok.value     = tokValue
+				tok.extra     = tokExtra
+				tok.source    = sourceInfo
+				tok.position1 = tokenPos
+				tok.position2 = ptr-1
+				tok.line1     = ln
+				tok.line2     = nil
+
+				!if COUNT_TOKEN_REUSES then
+					reuseCount = reuseCount + 1
+				!end
+
+			else
+				tok = {
+					type      = tokType,
+					value     = tokValue,
+					extra     = tokExtra,
+					source    = sourceInfo,
+					position1 = tokenPos,
+					position2 = ptr-1,
+					line1     = ln,
+					-- line2  = nil,
+				}
+			end
+
 			tokens[count] = tok
 		end
 
@@ -609,32 +640,62 @@ local function tokenize(state, sourceInfo, lnStart, increaseTotalLineCount)
 		errorInFile(s, path, ptr, "Tokenizer", "Expected a word after '\\'.")
 	end
 
-	tokens.n = count
+	tokens.n          = count
+	tokens.nextUnused = nextUnused
+
+	!if COUNT_TOKEN_REUSES then
+		tokens.reuseCount = reuseCount
+	!end
 
 	if increaseTotalLineCount then
 		state.lineCount = state.lineCount + ln - lnStart + 1
 	end
 end
 
--- insertNewToken( tokens, tokenType, tokenValue [, sourceString="", path=tokens[1].source.path ] )
--- This function should not be called a lot! Otherwise we'll need to change where we create the sourceInfo table.
-function _G.insertNewToken(tokens, tokType, tokValue, sourceString, path)
-	sourceString = sourceString or ""
-	path         = path         or tokens[1].source.path
+function _G.insertNewToken(tokens, tokType, tokValue, sourceInfo)
+	!ASSERT `sourceInfo`
 
-	local count = tokens.n + 1
-	tokens.n    = count
+	local nextUnused = tokens.nextUnused
+	local tok
 
-	tokens[count] = {
-		type      = tokType,
-		value     = tokValue,
-		-- extra  = nil,
-		source    = {path=path, string=sourceString},
-		position1 = 1,
-		position2 = 1,
-		line1     = 1,
-		-- line2  = nil,
-	}
+	if nextUnused <= tokens.lastUnused then
+		tok               = tokens[nextUnused]
+		tokens.nextUnused = nextUnused + 1
+
+		tok.type      = tokType
+		tok.value     = tokValue
+		tok.extra     = nil
+		tok.source    = sourceInfo
+		tok.position1 = 1
+		tok.position2 = 1
+		tok.line1     = 1
+		tok.line2     = nil
+
+		!if COUNT_TOKEN_REUSES then
+			tokens.reuseCount = tokens.reuseCount + 1
+		!end
+
+	else
+		tok = {
+			type      = tokType,
+			value     = tokValue,
+			-- extra  = nil,
+			source    = sourceInfo,
+			position1 = 1,
+			position2 = 1,
+			line1     = 1,
+			-- line2  = nil,
+		}
+	end
+
+	local count   = tokens.n + 1
+	tokens.n      = count
+	tokens[count] = tok
+end
+
+function _G.markTokensAsUnused(state)
+	state.tokens.lastUnused = state.tokens.n
+	state.nextToken         = state.tokens.n + 1 -- Not sure if actually needed.
 end
 
 
