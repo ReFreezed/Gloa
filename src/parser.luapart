@@ -1842,9 +1842,21 @@ local function parseAssignment(state, parent)
 		end
 	end
 
-	local tok = eatNextTok(state)
+	local tok  = eatNextTok(state)
+	local tok2 = peekNextTok(state, 1)
 
-	if not (tok and isTokenAssigning(tok)) then
+	if tok and isTokenAssigning(tok) then
+		assignment.position        = tok.position1
+		assignment.line            = tok.line1
+		assignment.binaryOperation = tok.value:sub(1, -2) -- All assignments with extra operations (in the case of punctuation here) end with '=' (e.g. '+='). Here we just strip away the '='.
+
+	elseif tok2 and !!(IS_EXISTING_TOK(TOKEN_KEYWORD, "and","or")) and !!(IS_EXISTING_TOK(2, TOKEN_PUNCTUATION, "=")) then
+		!!(EAT_NEXT_TOKEN) -- '='
+		assignment.position        = tok.position1
+		assignment.line            = tok.line1
+		assignment.binaryOperation = tok.value
+
+	else
 		!TRACE()
 		!ERROR_OR_RETURN_NIL `
 			printerr()
@@ -1853,10 +1865,6 @@ local function parseAssignment(state, parent)
 			exitFailure()
 		`
 	end
-
-	assignment.position        = tok.position1
-	assignment.line            = tok.line1
-	assignment.binaryOperation = tok.value:sub(1, -2) -- All assignments with extra operations end with '=' (e.g. '+='). Here we just strip away the '='.
 
 	!DO_OR_RETURN_NIL `parseExpressionList(state, assignment, assignment.values, nil, false)`
 
@@ -3826,7 +3834,7 @@ end
 		--
 
 		-- Left-associative binary operations. (1)
-		if !!(IS_EXISTING_TOK(TOKEN_KEYWORD, "and","or")) and OPERATOR_PRECEDENCE[tokValue] > prevOpPrecedence then
+		if !!(IS_EXISTING_TOK(TOKEN_KEYWORD, "and","or")) and not !!(IS_TOK(2, TOKEN_PUNCTUATION, "=")) and OPERATOR_PRECEDENCE[tokValue] > prevOpPrecedence then
 			!!(EAT_NEXT_TOKEN) -- the binary operator
 
 			local binary                     = astNewNode(AstBinary, tok, parent)
@@ -4032,9 +4040,13 @@ end
 		elseif expr.nodeType == !(AST_ACCESS) then
 			-- void
 		else
-			tok = peekNextTok(state, 1)
+			tok        = peekNextTok(state, 1)
+			local tok2 = peekNextTok(state, 2)
+
 			if tok and isTokenAssigning(tok) then
 				!ERROR_OR_RETURN_NIL `errorParsingAfterLast(state, "Expected an assignment target to the left of '%s'. Ambigous statement.", tok.value)`
+			elseif !!(IS_TOK(TOKEN_KEYWORD, "and","or")) and !!(IS_TOK(2, TOKEN_PUNCTUATION, "=")) then
+				!ERROR_OR_RETURN_NIL `errorParsingAfterLast(state, "Expected an assignment target to the left of '%s='. Ambigous statement.", tok.value)`
 			else
 				!ERROR_OR_RETURN_NIL `errorParsing(state, exprStartTok, "Ambigous statement.")`
 			end
