@@ -239,7 +239,7 @@ local function doesLambdaHaveSignature(lambda, funcSig)
 		end
 	end
 
-	-- if lambda.isPolymorphic ~= funcSig.isPolymorphic then  return false  end  -- Not needed when using dumbHash.
+	-- if (lambda.polymorphs ~= nil) ~= funcSig.isPolymorphic then  return false  end  -- Not needed when using dumbHash.
 
 	return true
 end
@@ -249,7 +249,7 @@ function _G.getTypeInfoForLambda(state, lambda)
 	local argsOut  = lambda.argumentsOut
 	local dumbHash = 0
 
-	if lambda.isPolymorphic then
+	if lambda.polymorphs then
 		dumbHash = -(1 + (argsIn and #argsIn.arguments or 0) + (argsOut and #argsOut.arguments*0x100 or 0))
 
 	else
@@ -280,10 +280,10 @@ function _G.getTypeInfoForLambda(state, lambda)
 	end
 
 	local funcSig         = newTypeInfo(state, TypeInfoFunction)
-	funcSig.isPolymorphic = lambda.isPolymorphic
+	funcSig.isPolymorphic = lambda.polymorphs ~= nil
 
-	local placeholderType       = lambda.isPolymorphic and state.builtinTypeInfos.placeholder           or nil
-	local placeholderTypeVararg = placeholderType      and getTypeInfoForVararg(state, placeholderType) or nil
+	local placeholderType       = lambda.polymorphs and state.builtinTypeInfos.placeholder           or nil
+	local placeholderTypeVararg = placeholderType   and getTypeInfoForVararg(state, placeholderType) or nil
 
 	if argsIn then
 		for i, arg in ipairs(argsIn.arguments) do
@@ -457,7 +457,7 @@ function _G.findDeclaration(state, startNode, name, declToIgnore)
 	while scope do
 		-- This seem a little bit @Ugly maybe. How does this compare to polymorphic functions regarding declarations
 		-- existing directly in the scope? (Baked values in functions probably set decl.checkedRedeclaration.)
-		while scope.nodeType == !(AST_STRUCT) and scope.isPolymorphic do
+		while scope.nodeType == !(AST_STRUCT) and scope.polymorphs do
 			scope = astFindParentScope(scope)
 			if not scope then  return nil, nil  end
 		end
@@ -474,42 +474,46 @@ function _G.findDeclaration(state, startNode, name, declToIgnore)
 			end
 		end
 
-		for _, import in ipairs(scope.imports) do
-			local fileScope = import.fileScope
-			local decl = fileScope and (
-				not fileScope.declarationsByName[declToIgnore]
-				and fileScope.declarationsByName[name]
-				or  fileScope.declarationsByName2[name]
-			)
-			if decl and isDeclarationExported(decl) then
-				-- assert(decl ~= declToIgnore)
-				return decl, nil
+		if scope.imports then
+			for _, import in ipairs(scope.imports) do
+				local fileScope = import.fileScope
+				local decl = fileScope and (
+					not fileScope.declarationsByName[declToIgnore]
+					and fileScope.declarationsByName[name]
+					or  fileScope.declarationsByName2[name]
+				)
+				if decl and isDeclarationExported(decl) then
+					-- assert(decl ~= declToIgnore)
+					return decl, nil
+				end
 			end
 		end
 
-		for _, using in ipairs(scope.usings) do
-			local usingScope = using.scope
-			local decl = usingScope and (
-				not usingScope.declarationsByName[declToIgnore]
-				and usingScope.declarationsByName[name]
-				or  usingScope.declarationsByName2[name]
-			)
-			local nodeType = decl and usingScope.nodeType
-			if nodeType
-				and (
-					not (nodeType == !(AST_FILE_SCOPE) or nodeType == !(AST_GLOBAL_SCOPE) or nodeType == !(AST_NAMESPACE)) -- Look for only exports in these scopes.
-					or isDeclarationExported(decl)
+		if scope.usings then
+			for _, using in ipairs(scope.usings) do
+				local usingScope = using.scope
+				local decl = usingScope and (
+					not usingScope.declarationsByName[declToIgnore]
+					and usingScope.declarationsByName[name]
+					or  usingScope.declarationsByName2[name]
 				)
-				and (
-					isDeclarationConstant(decl)
-					or (
-						using.variableDeclaration
-						and canNodeSeeDeclaration(state, startNode, using.variableDeclaration)
+				local nodeType = decl and usingScope.nodeType
+				if nodeType
+					and (
+						not (nodeType == !(AST_FILE_SCOPE) or nodeType == !(AST_GLOBAL_SCOPE) or nodeType == !(AST_NAMESPACE)) -- Look for only exports in these scopes.
+						or isDeclarationExported(decl)
 					)
-				)
-			then
-				-- assert(decl ~= declToIgnore)
-				return decl, using
+					and (
+						isDeclarationConstant(decl)
+						or (
+							using.variableDeclaration
+							and canNodeSeeDeclaration(state, startNode, using.variableDeclaration)
+						)
+					)
+				then
+					-- assert(decl ~= declToIgnore)
+					return decl, using
+				end
 			end
 		end
 
@@ -748,30 +752,34 @@ function _G.getFriendlyTypeInfoName(typeInfo)
 
 	if typeInfo.tag == !(TYPE_STRUCT) then
 		local structInfo = typeInfo
+		local struct     = structInfo.astNode
 		name             = structInfo.name
 
-		if structInfo.astNode.polymorphSourceStruct then
+		if struct.polymorphSourceStruct then
 			local params = {}
 
-			for argIndex, declBaked in ipairs(structInfo.astNode.bakeDeclarations) do
-				local valueExpr = declBaked.value
+			if struct.bakeDeclarations then
+				for argIndex, declBaked in ipairs(struct.bakeDeclarations) do
+					local valueExpr = declBaked.value
 
-				if valueExpr.nodeType == !(AST_LITERAL) then
-					local literal    = valueExpr
-					params[argIndex] = literal.literalType == !(LITERAL_STRING) and F("%q", literal.value) or tostring(literal.value)
+					if valueExpr.nodeType == !(AST_LITERAL) then
+						local literal    = valueExpr
+						params[argIndex] = literal.literalType == !(LITERAL_STRING) and F("%q", literal.value) or tostring(literal.value)
 
-				elseif valueExpr.nodeType == !(AST_TYPE) then
-					local typeNode   = valueExpr
-					params[argIndex] = getFriendlyTypeInfoName(typeNode.representedType)
+					elseif valueExpr.nodeType == !(AST_TYPE) then
+						local typeNode   = valueExpr
+						params[argIndex] = getFriendlyTypeInfoName(typeNode.representedType)
 
-				else
-					params[argIndex] = "~"
+					else
+						params[argIndex] = "~"
+					end
 				end
 			end
 
-			name
-				= structInfo.astNode.polymorphSourceStruct.representedType.name
-				.."("..table.concat(params, ",")..")"
+			name = (
+				struct.polymorphSourceStruct.representedType.name
+				.. "(" .. table.concat(params, ",") .. ")"
+			)
 		end
 
 	elseif typeInfo.tag == !(TYPE_ENUM) then
@@ -985,6 +993,7 @@ local function checkRedeclarationAndMaybeAddOverload(state, ident, decl, isMembe
 		if declExisting == decl then
 			-- This simplifies finding an overload later.
 			declExisting.overloadOf = declExisting
+			declExisting.overloads  = declExisting.overloads or {}
 			table.insert(declExisting.overloads, declExisting)
 
 		elseif scope ~= scopeExisting then
@@ -1017,7 +1026,8 @@ local function checkRedeclarationAndMaybeAddOverload(state, ident, decl, isMembe
 				)
 			end
 
-			decl.overloadOf = declExisting
+			decl.overloadOf        = declExisting
+			declExisting.overloads = declExisting.overloads or {}
 			table.insert(declExisting.overloads, decl)
 
 			-- This dependency means declExisting won't get inferred until earliest next
@@ -1129,12 +1139,12 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 
 			-- Polymorphic functions also contain the polymorphed functions and are thus a collection of functions, so referring to them may be a bad idea!
 			-- (How does this work when calling a function from a module or a static struct member function? @Incomplete @Robustness)
-			if valueExpr.nodeType == !(AST_LAMBDA) and valueExpr.isPolymorphic then
+			if valueExpr.nodeType == !(AST_LAMBDA) and valueExpr.polymorphs then
 				typeError(state, ident, "Cannot refer to polymorphic function '%s' outside calls.", ident.name)
 
 			-- Polymorphic structs are similar to polymorphed functions as they are collections of structs, so referring to them may be a bad idea too!
 			-- (Also, like with the functions, think about modules. @Incomplete @Robustness)
-			elseif valueExpr.nodeType == !(AST_STRUCT) and valueExpr.isPolymorphic then
+			elseif valueExpr.nodeType == !(AST_STRUCT) and valueExpr.polymorphs then
 				typeError(state, ident, "Missing arguments after name for polymorphic struct '%s'.", ident.name) -- @Polish: Point after the identifier.
 			end
 		end
@@ -2028,7 +2038,10 @@ local function ensureNamedArgumentsHaveAssignedIndicies(state, call, lambdaOrStr
 					break
 				end
 			end
+
 		else
+			!ASSERT `lambdaOrStruct.bakeDeclarations`
+
 			for _argIndex, declBaked in ipairs(lambdaOrStruct.bakeDeclarations) do
 				if declBaked.name.name == name then
 					argIndex = _argIndex
@@ -2176,6 +2189,7 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 		end
 	end
 
+	!ASSERT `lambda.polymorphs`
 	for _, morphDecl in ipairs(lambda.polymorphs) do
 		if not morphDecl.inferredType then
 			!DEPEND_AND_RETURN(`call`, DEPEND_NODE_INFERRED, `morphDecl`)
@@ -2297,8 +2311,7 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 	-- Don't keep copies of previous polymorphs we've made - that would quickly create a mess!
 	-- (@Speed: Don't even copy them in the first place.)
 	do
-		morphLambda.isPolymorphic = false
-		morphLambda.polymorphs    = {}
+		morphLambda.polymorphs = nil
 
 		for i, statement in ipairsr(morphLambda.statementsStatic) do
 			if statement.nodeType == !(AST_DECLARATION) and statement.addedByPolymorph then
@@ -2306,8 +2319,10 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 			end
 		end
 
-		for _, declBaked in ipairs(morphLambda.bakeDeclarations) do
-			declBaked.checkedRedeclaration = true -- @Hack to prevent redeclaration errors between polymorphed lambda and base lambda.
+		if morphLambda.bakeDeclarations then
+			for _, declBaked in ipairs(morphLambda.bakeDeclarations) do
+				declBaked.checkedRedeclaration = true -- @Hack to prevent redeclaration errors between polymorphed lambda and base lambda.
+			end
 		end
 	end
 
@@ -2426,26 +2441,28 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 						end
 
 						local structInfo = bakeValueType
+						local struct     = structInfo.astNode
+
 						if structInfo.tag ~= !(TYPE_STRUCT) then
 							!BAKE_ERROR`"Polymorphic call: Expected a type to be a (polymorphic) struct. (Got %s)", getFriendlyTypeInfoName(structInfo)`
-						elseif not structInfo.astNode.polymorphSourceStruct then
-							bakeValueExpr = structInfo.astNode
+						elseif not struct.polymorphSourceStruct then
+							bakeValueExpr = struct
 							!BAKE_ERROR`"Polymorphic call: Expected a type to be a polymorphic struct. (%s is not polymorphic)", getFriendlyTypeInfoName(structInfo)`
 						end
 
 						-- @Incomplete: Handle optional arguments.
-						if #patternCall.arguments ~= #structInfo.astNode.bakeDeclarations then
-							bakeValueExpr = structInfo.astNode
+						if #patternCall.arguments ~= #(struct.bakeDeclarations or EMPTY_TABLE) then
+							bakeValueExpr = struct
 							!BAKE_ERROR`
 								"Polymorphic call: Expected an argument value type to be a polymorphic struct that takes %d argument%s. (%s takes %d)  (Note: Optional arguments are not handled properly yet.)",
 								#patternCall.arguments,
 								patternCall.arguments[2] and "s" or "",
 								getFriendlyTypeInfoName(structInfo),
-								#structInfo.astNode.bakeDeclarations
+								#(struct.bakeDeclarations or EMPTY_TABLE)
 							`
 						end
 
-						local declBakedOther = structInfo.astNode.bakeDeclarations[patternLoc.key] or errorInternal(state, valueExpr)
+						local declBakedOther = struct.bakeDeclarations and struct.bakeDeclarations[patternLoc.key] or errorInternal(state, valueExpr)
 
 						bakeValueExpr = declBakedOther.value or errorInternal(state, declBakedOther)
 						bakeValueType = bakeValueExpr.inferredType -- Note: declBakedOther.name may not be inferred yet.
@@ -2459,7 +2476,7 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 					end
 				end--for getPathToNode
 
-				local declBaked = morphLambda.bakeDeclarations[bakeIndex] or errorInternal(state, bake)
+				local declBaked = morphLambda.bakeDeclarations and morphLambda.bakeDeclarations[bakeIndex] or errorInternal(state, bake)
 				if bakeValueExpr then
 					declBaked.value = astCopy(bakeValueExpr, declBaked, declBaked)
 				else
@@ -2471,9 +2488,11 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 			astVisitAllNodes(declTypeExpr, fillInBakedValues)
 		end
 	end
-	!ASSERT `bakeIndex == #lambda.bakeDeclarations`
+	!ASSERT `bakeIndex == #(lambda.bakeDeclarations or EMPTY_TABLE)`
 
 	if autobaking then
+		morphLambda.bakeValues = morphLambda.bakeValues or {}
+
 		for argIndex, arg in ipairsr(morphLambda.argumentsIn.arguments) do
 			if arg.autobake == !(AUTOBAKE_REQUIRED) then
 				--
@@ -2485,7 +2504,7 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 				declBaked.checkedRedeclaration = true -- @Hack to prevent redeclaration errors between polymorphed lambda and base lambda.
 				table.insert(morphLambda.statementsStatic, declBaked)
 				table.insert(morphLambda.declarations,     declBaked)
-				-- table.insert(morphLambda.bakeDeclarations, declBaked) -- Should we do this? It may be useless.
+				-- morphLambda.bakeDeclarations = morphLambda.bakeDeclarations or {} ; table.insert(morphLambda.bakeDeclarations, declBaked) -- Should we do this? It may be useless.
 				addDeclarationToNames(morphLambda, declBaked)
 
 				-- Reuse valueExpr instead of making a copy. Note that this is the
@@ -2521,10 +2540,12 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 	addUnqueuedChildrenToQueueRecursively(state, morphDecl, !(PIPE_INFER))
 	addToQueue(state, morphDecl, lambda.statementsStatic, i, !(PIPE_INFER))
 
-	for _, declBaked in ipairs(morphLambda.bakeDeclarations) do
-		local valueExpr         = declBaked.value
-		declBaked.valueTypeInfo = getTypeRepresentedByExpression(valueExpr)
-		moveToNextRelevantPipe(state, valueExpr)
+	if morphLambda.bakeDeclarations then
+		for _, declBaked in ipairs(morphLambda.bakeDeclarations) do
+			local valueExpr         = declBaked.value
+			declBaked.valueTypeInfo = getTypeRepresentedByExpression(valueExpr)
+			moveToNextRelevantPipe(state, valueExpr)
+		end
 	end
 
 	-- Update the callee to represent the correct polymorph.
@@ -2546,6 +2567,7 @@ local function handleOverloadedCall(state, call, realArguments, realArgumentType
 	local ident    = call.callee
 	local declBase = ident.declaration.overloadOf
 
+	!ASSERT `declBase.overloads`
 	local matchingOverloads = getMatchingFunctions(state, call, realArguments, realArgumentTypes, declBase.overloads)
 
 	if not matchingOverloads then
@@ -2590,6 +2612,7 @@ local function handlePolymorphicStruct(state, call)
 
 	local struct = structInfo.astNode
 
+	!ASSERT `struct.polymorphs`
 	for _, morphDecl in ipairs(struct.polymorphs) do
 		if not morphDecl.inferredType then
 			!DEPEND_AND_RETURN(`call`, DEPEND_NODE_INFERRED, `morphDecl`)
@@ -2614,6 +2637,7 @@ local function handlePolymorphicStruct(state, call)
 		end
 	end
 
+	!ASSERT `struct.bakeDeclarations`
 	local requested   = #call.arguments + #call.argumentsNamed
 	local acceptedMax = #struct.bakeDeclarations
 	local acceptedMin = acceptedMax
@@ -2698,8 +2722,7 @@ local function handlePolymorphicStruct(state, call)
 	-- Don't keep copies of previous polymorphs we've made - that would quickly create a mess!
 	-- (@Speed: Don't even copy them in the first place.)
 	do
-		morphStruct.isPolymorphic = false
-		morphStruct.polymorphs    = {}
+		morphStruct.polymorphs = nil
 
 		for i, statement in ipairsr(morphStruct.statementsStatic) do
 			if statement.nodeType == !(AST_DECLARATION) and statement.addedByPolymorph then
@@ -3094,9 +3117,11 @@ end
 		!DEPEND_AND_RETURN(`decl`, DEPEND_NODE_INFERRED, `identOrVararg`)
 	end
 
-	for _, note in ipairs(decl.notes) do
-		if not note.inferredType then
-			!DEPEND_AND_RETURN(`decl`, DEPEND_NODE_INFERRED, `note`)
+	if decl.notes then
+		for _, note in ipairs(decl.notes) do
+			if not note.inferredType then
+				!DEPEND_AND_RETURN(`decl`, DEPEND_NODE_INFERRED, `note`)
+			end
 		end
 	end
 
@@ -3240,10 +3265,12 @@ end
 		typeError(state, identOrVararg, "Variables in type group '%s' must have a specified initial value.", TYPE_NAMES[typeInfo.tag])
 	end
 
-	for _, note in ipairs(decl.notes) do
-		local typeRepresented = requireTypeRepresentedByExpression(state, note)
-		if typeRepresented.tag ~= !(TYPE_STRUCT) then
-			typeError(state, note, "Expected a struct type. (This is %s)", getFriendlyTypeInfoName(typeRepresented))
+	if decl.notes then
+		for _, note in ipairs(decl.notes) do
+			local typeRepresented = requireTypeRepresentedByExpression(state, note)
+			if typeRepresented.tag ~= !(TYPE_STRUCT) then
+				typeError(state, note, "Expected a struct type. (This is %s)", getFriendlyTypeInfoName(typeRepresented))
+			end
 		end
 	end
 
@@ -3269,9 +3296,11 @@ end
 		codeDecl.rootExpression = nil -- @Incomplete: Generate child CodeNodes.
 		codeDecl.isConstant     = isConst
 
-		for i, note in ipairs(decl.notes) do
-			local typeRepresented = getTypeRepresentedByExpression(note)
-			codeDecl.notes[i]     = typeRepresented.id
+		if decl.notes then
+			for i, note in ipairs(decl.notes) do
+				local typeRepresented = getTypeRepresentedByExpression(note)
+				codeDecl.notes[i]     = typeRepresented.id
+			end
 		end
 
 		message.declaration = codeDecl
@@ -4250,7 +4279,7 @@ end
 !NODE_INFERRER_END `end`
 
 !NODE_INFERRER `function nodeInferrers.AstLambda(state, lambda)`
-	if lambda.isPolymorphic then
+	if lambda.polymorphs then
 		lambda.inferredType = getTypeInfoForLambda(state, lambda) or errorInternal(state, lambda)
 		moveToNextRelevantPipe(state, lambda)
 		return
@@ -4451,6 +4480,7 @@ end
 		decl.overloadOf
 		or (
 			lambda.parent.parent.nodeType == !(AST_LAMBDA)
+			and lambda.parent.parent.polymorphs
 			and indexOf(lambda.parent.parent.polymorphs, lambda.parent)
 		)
 	) then
@@ -4893,10 +4923,11 @@ end
 
 	local scopeOfUsing = astFindParentScope(using)
 
-	local usingExisting =
-		itemWith1(scopeOfUsing.usings, "scope", usingScope)
+	local usingExisting = (
+		scopeOfUsing.usings and itemWith1(scopeOfUsing.usings, "scope", usingScope)
 		-- Treat usings among function arguments as if they were in the body.
-		or scopeOfUsing.nodeType == !(AST_BLOCK) and scopeOfUsing.parent.nodeType == !(AST_LAMBDA) and itemWith1(scopeOfUsing.parent.usings, "scope", usingScope)
+		or scopeOfUsing.nodeType == !(AST_BLOCK) and scopeOfUsing.parent.nodeType == !(AST_LAMBDA) and scopeOfUsing.parent.usings and itemWith1(scopeOfUsing.parent.usings, "scope", usingScope)
+	)
 
 	if usingExisting then
 		-- Note: We don't look at .variableDeclaration. Maybe we should?
@@ -4944,7 +4975,7 @@ end
 	local scope, statement = astFindParentScope(bake)
 	if not (scope and (
 		(scope.nodeType == !(AST_LAMBDA) and statement == scope.argumentsIn)
-		-- or (scope.nodeType == !(AST_STRUCT) and indexOf(scope.bakeDeclarations, statement))
+		-- or (scope.nodeType == !(AST_STRUCT) and scope.bakeDeclarations and indexOf(scope.bakeDeclarations, statement))
 	)) then
 		astPrintTree(bake)
 		astPrintTree(scope)
@@ -5145,12 +5176,18 @@ end
 			newlyDeclared[decl.name.name] = true
 			addDeclarationToNames(scope, decl)
 		end
-		for _, import in ipairs(branchToUse.imports) do
-			if import.exported then  errorInternal(state, import, "@Incomplete: Export from static if.")  end
-			table.insert(scope.imports, import)
+		if branchToUse.imports then
+			scope.imports = scope.imports or {}
+			for _, import in ipairs(branchToUse.imports) do
+				if import.exported then  errorInternal(state, import, "@Incomplete: Export from static if.")  end
+				table.insert(scope.imports, import)
+			end
 		end
-		for _, using in ipairs(branchToUse.usings) do
-			table.insert(scope.usings, using)
+		if branchToUse.usings then
+			scope.usings = scope.usings or {}
+			for _, using in ipairs(branchToUse.usings) do
+				table.insert(scope.usings, using)
+			end
 		end
 	end
 
@@ -5795,10 +5832,10 @@ function _G.getEarlyAndLateExpression(expr1, expr2)
 end
 
 !NODE_INFERRER `function nodeInferrers.AstStruct(state, struct)`
-	if struct.isPolymorphic then
+	if struct.polymorphs then
 		local structInfo         = newTypeInfo(state, TypeInfoStruct)
 		structInfo.astNode       = struct
-		-- structInfo.kind          = ?
+		-- structInfo.kind       = ?
 		structInfo.isPolymorphic = true
 		structInfo.hasMembers    = true -- Probably doesn't matter.
 
@@ -5849,19 +5886,21 @@ end
 	end
 
 	-- Wait for and validate inherits.
-	for i, typeExpr in ipairs(struct.inherits) do
-		typeExpr           = astGetReplacement(typeExpr)
-		struct.inherits[i] = typeExpr
+	if struct.inherits then
+		for i, typeExpr in ipairs(struct.inherits) do
+			typeExpr           = astGetReplacement(typeExpr)
+			struct.inherits[i] = typeExpr
 
-		local structInfoToInherit = requireTypeRepresentedByExpression(state, typeExpr)
-		if structInfoToInherit.tag ~= !(TYPE_STRUCT) then
-			typeError(state, typeExpr, "Expected the type of a struct to inherit members from.")
-		end
-		if not structInfoToInherit.hasMembers then
-			!DEPEND_AND_RETURN(`struct`, DEPEND_STRUCT_MEMBERS_READY, `structInfoToInherit`)
-		end
-		if doesStructInherit(structInfoToInherit, structInfo) then
-			typeError(state, typeExpr, "Struct is trying to inherit members from itself.")
+			local structInfoToInherit = requireTypeRepresentedByExpression(state, typeExpr)
+			if structInfoToInherit.tag ~= !(TYPE_STRUCT) then
+				typeError(state, typeExpr, "Expected the type of a struct to inherit members from.")
+			end
+			if not structInfoToInherit.hasMembers then
+				!DEPEND_AND_RETURN(`struct`, DEPEND_STRUCT_MEMBERS_READY, `structInfoToInherit`)
+			end
+			if doesStructInherit(structInfoToInherit, structInfo) then
+				typeError(state, typeExpr, "Struct is trying to inherit members from itself.")
+			end
 		end
 	end
 
@@ -5876,7 +5915,7 @@ end
 	if typeSourceNodeV then  structInfo.valueType = requireTypeRepresentedByExpression(state, typeSourceNodeV)  end
 
 	-- Inherit members from other structs.
-	if struct.inherits[1] then
+	if struct.inherits then
 		local declarationsIncludingNew = {} -- Declarations will be sorted as expected.
 		local inheritIndices           = {}
 
@@ -6387,7 +6426,7 @@ local function createRunReplacementFromTypeAndLuaValue(state, runNode, parent, t
 		local anyType   = state.builtinTypeInfos.any
 
 		for k, v in pairsSorted(t, naturalCompare) do
-			local tableField    = TableField()
+			local tableField    = KeyValuePair()
 			tableField.key      = createRunReplacementFromTypeAndLuaValue(state, runNode, tableNode, anyType, k)
 			tableField.value    = createRunReplacementFromTypeAndLuaValue(state, runNode, tableNode, anyType, v)
 			table.insert(tableNode.fields, tableField)
@@ -6405,7 +6444,7 @@ local function createRunReplacementFromTypeAndLuaValue(state, runNode, parent, t
 
 		-- @Robustness: Check that all keys in 't' are valid.
 		for i, v in ipairs(t) do
-			local tableField          = TableField()
+			local tableField = KeyValuePair()
 
 			local indexLiteral        = astNewNode(AstLiteral, runNode, tableNode)
 			indexLiteral.literalType  = !(LITERAL_INTEGER)
@@ -6413,9 +6452,9 @@ local function createRunReplacementFromTypeAndLuaValue(state, runNode, parent, t
 			indexLiteral.inferredType = intType
 			tableField.key            = indexLiteral
 
-			tableField.value          = createRunReplacementFromTypeAndLuaValue(state, runNode, tableNode, arraySig.itemType, v)
+			tableField.value = createRunReplacementFromTypeAndLuaValue(state, runNode, tableNode, arraySig.itemType, v)
 
-			tableNode.fields[i]       = tableField
+			tableNode.fields[i] = tableField
 		end
 
 		tableNode.inferredType = arraySig
@@ -6436,7 +6475,7 @@ local function createRunReplacementFromTypeAndLuaValue(state, runNode, parent, t
 
 		-- @Robustness: Check that all keys in 't' are valid.
 		for _, member in ipairs(structInfo.members) do
-			local tableField           = TableField()
+			local tableField = KeyValuePair()
 
 			local memberLiteral        = astNewNode(AstLiteral, runNode, tableNode)
 			memberLiteral.literalType  = !(LITERAL_STRING)
@@ -6444,7 +6483,7 @@ local function createRunReplacementFromTypeAndLuaValue(state, runNode, parent, t
 			memberLiteral.inferredType = stringType
 			tableField.key             = memberLiteral
 
-			tableField.value           = createRunReplacementFromTypeAndLuaValue(state, runNode, tableNode, member.typeInfo, t[member.name])
+			tableField.value = createRunReplacementFromTypeAndLuaValue(state, runNode, tableNode, member.typeInfo, t[member.name])
 
 			table.insert(tableNode.fields, tableField)
 		end
@@ -7629,6 +7668,8 @@ end
 function _G.doesStructInherit(structInfoToCheck, otherStructInfo)
 	!ASSERT `otherStructInfo`
 
+	if not structInfoToCheck.astNode.inherits then  return false  end
+
 	for _, typeExpr in ipairs(structInfoToCheck.astNode.inherits) do
 		local structInfoInherited = getTypeRepresentedByExpression(typeExpr)
 
@@ -8199,7 +8240,7 @@ function _G.isAnExpressionExpected(state, node)
 	elseif EXPRESSION_NOT_EXPECTED[parentNodeType] then
 		return false
 	elseif parentNodeType == !(AST_DECLARATION) then
-		return node == parent.name or node == parent.type or node == parent.value or indexOf(parent.notes, node) ~= nil
+		return node == parent.name or node == parent.type or node == parent.value or (parent.notes and indexOf(parent.notes, node)) ~= nil
 	elseif parentNodeType == !(AST_FOR) then
 		return node ~= parent.body
 	elseif !!(CONST_SET{ AST_IF, AST_STATIC_IF, AST_WHILE })[parentNodeType] then

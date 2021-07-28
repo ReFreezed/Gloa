@@ -166,8 +166,8 @@ _G.!structAst"AstType:_AstExpression"{
 	_overrides = {{`nodeType`,AST_TYPE}},
 	{`functionHeader`,    nil, ast="node"},    -- AstLambda without a body. This is used to create the actual function type.
 	{`arrayItemType`,     nil, ast="node"},    -- AstType
-	{`arguments`,         nil, ast="array"},   -- []AstExpression  (Is set for parameterized structs.)
-	{`components`,        {},  ast="array"},   -- []AstExpression  (Used if kind is TYPE_KIND_COMPOUND.)
+	{`arguments`,         nil, ast="array"},   -- []AstExpression  Is set for parameterized structs.
+	{`components`,        nil, ast="array"},   -- []AstExpression  Used if kind is TYPE_KIND_COMPOUND. Is set when needed.
 	{`kind`,              TYPE_KIND_UNSET},    -- TYPE_KIND_SIMPLE_BUILTIN|TYPE_KIND_USER|TYPE_KIND_FUNCTION|TYPE_KIND_ARRAY|TYPE_KIND_COMPOUND
 	{`typeName`,          ""},
 	{`typeReferenceNode`, nil, astRef="node"}, -- AstExpression  Node that represents the type. (This is kind of a hack for !self.)
@@ -191,7 +191,7 @@ _G.!structAst"AstAccess:_AstExpression"{
 	{`object`, nil, ast="node"}, -- AstExpression
 	{`member`, nil, ast="node"}, -- AstExpression
 }
-_G.!struct"TableField"{
+_G.!struct"KeyValuePair"{
 	{`key`,            nil}, -- AstExpression
 	{`value`,          nil}, -- AstExpression
 	{`keyIsGenerated`, false},
@@ -200,15 +200,15 @@ _G.!struct"TableField"{
 }
 _G.!structAst"AstTable:_AstExpression"{
 	_overrides = {{`nodeType`,AST_TABLE}},
-	{`fields`,                {},  ast="fields"}, -- []TableField
+	{`fields`,                {},  ast="fields"}, -- []KeyValuePair
 	{`trailingExpression`,    nil, ast="node"},   -- AstVararg|AstCall  This expression potentially expands to multiple values in any resulting Lua table.
 	{`highestGeneratedIndex`, 0},
 }
 _G.!structAst"AstCall:_AstExpression"{
 	_overrides = {{`nodeType`,AST_CALL}},
 	{`callee`,                  nil, ast="node"},   -- AstExpression
-	{`arguments`,               {},  ast="array"},  -- []AstExpression
-	{`argumentsNamed`,          {},  ast="fields"}, -- []TableField  @Cleanup: Rename TableField struct to something more fitting.
+	{`arguments`,               {},  ast="array"},  -- []AstExpression  @Speed: Only set this when needed.
+	{`argumentsNamed`,          {},  ast="fields"}, -- []KeyValuePair   @Speed: Only set this when needed.
 	{`isMethod`,                false},
 	{`surroundedByParentheses`, false},
 	-- Type phase:
@@ -322,7 +322,7 @@ _G.!structAst"AstDeclaration:_AstNode"{
 	{`type`,                 nil, ast="node"},  -- AstType  If this is nil then the type is inferred from the value.
 	{`value`,                nil, ast="node"},  -- AstExpression  Either this or assignment should be set, or neither for getting the default value for the type.
 	{`name`,                 nil, ast="node"},  -- AstIdentifier|AstVararg|AstBlank
-	{`notes`,                {},  ast="array"}, -- []AstExpression
+	{`notes`,                nil, ast="array"}, -- []AstExpression  Is set when needed.
 
 	{`kind`,                 DECL_KIND_LOCAL_VAR}, -- DECL_KIND_LOCAL_VAR|DECL_KIND_LOCAL_CONST|DECL_KIND_EXPORT_VAR|DECL_KIND_EXPORT_CONST|DECL_KIND_STATIC  @Incomplete: DECL_KIND_READ_ONLY  Note: Globals are exports.
 	{`canShadow`,            false},
@@ -336,7 +336,7 @@ _G.!structAst"AstDeclaration:_AstNode"{
 	{`inferredType`,         nil}, -- TypeInfo  @Cleanup: Maybe use a different name as declarations are not expressions. Need to update the dependency code in that case.
 	{`valueTypeInfo`,        nil}, -- TypeInfo  Type represented by the assigned value if the declaration is constant. If this is set then the declared identifier can be used in places where a type is expected. Can be nil.
 	{`checkedRedeclaration`, false},
-	{`overloads`,            {}},
+	{`overloads`,            nil}, -- []AstDeclaration  Is set when needed.
 	{`overloadOf`,           nil, astRef="node"}, -- AstDeclaration  (If this is self then we're the base declaration for the overloads and the overloads array should be filled.)
 	{`overloadsLocked`,      false},
 
@@ -381,13 +381,13 @@ _G.!structAst"AstDefer:_AstNode"{
 }
 
 !structAst"_AstScope:_AstNode"{
-	{`statementsStatic`,    {}, ast="array"},    -- []AstNode
-	{`statementsDynamic`,   {}, ast="array"},    -- []AstNode
-	{`declarations`,        {}, astRef="array"}, -- []AstDeclaration  (Note that inner blocks have their own declarations.)
-	{`declarationsByName`,  {}, astRef="names"}, -- { name1, [name1]=declaration1, [declaration1]=nameIndex1, ... }
-	{`declarationsByName2`, {}, astRef="names"}, -- Fallback for declarationsByName when checking for redeclarations/overloads.
-	{`imports`,             {}, astRef="array"}, -- []AstImport
-	{`usings`,              {}, astRef="array"}, -- []AstUsing
+	{`statementsStatic`,    {},  ast="array"},    -- []AstNode
+	{`statementsDynamic`,   {},  ast="array"},    -- []AstNode
+	{`declarations`,        {},  astRef="array"}, -- []AstDeclaration  (Note that inner blocks have their own declarations.)
+	{`declarationsByName`,  {},  astRef="names"}, -- { name1, [name1]=declaration1, [declaration1]=nameIndex1, ... }
+	{`declarationsByName2`, {},  astRef="names"}, -- Fallback for declarationsByName when checking for redeclarations/overloads.
+	{`imports`,             nil, astRef="array"}, -- []AstImport  Is set when needed.
+	{`usings`,              nil, astRef="array"}, -- []AstUsing   Is set when needed.
 	-- Type phase:
 	{`declarationsInTree`,  {}, doNotCopy=true}, -- Includes all child scopes. Does not include shadows.
 }
@@ -429,15 +429,14 @@ _G.!structAst"AstStruct:_AstScopeExpression"{
 	_overrides = {{`nodeType`,AST_STRUCT}},
 	_scopeType = "declarative",
 
-	{`inherits`,              {},  astRef="array"}, -- []AstExpression
+	{`inherits`,              nil, astRef="array"}, -- []AstExpression  Is set when needed.
 
 	{`keyType`,               nil, ast="node"},     -- AstExpression
 	{`valueType`,             nil, ast="node"},     -- AstExpression
 
-	{`isPolymorphic`,         false},
-	{`polymorphs`,            {},  astRef="array"}, -- []AstDeclaration  @Speed: Only create table when needed. (Probably applies to many of these tables.)
+	{`polymorphs`,            nil, astRef="array"}, -- []AstDeclaration  If this is set then the struct is polymorphic.
 	{`polymorphSourceStruct`, nil, astRef="node"},  -- AstStruct
-	{`bakeDeclarations`,      {},  astRef="array"}, -- []AstDeclaration
+	{`bakeDeclarations`,      nil, astRef="array"}, -- []AstDeclaration  Is set when needed.
 
 	{`isForeign`,             false},               -- Foreign structs cannot be instantiated.
 	-- {`foreignThroughNode`,    nil, astRef="node"},  -- AstNode
@@ -454,8 +453,8 @@ _G.!structAst"AstLambda:_AstScopeExpression"{
 
 	{`captures`,          nil, ast="array"}, -- []AstIdentifier  Is set when needed.
 	{`captureAll`,        false},
-	{`argumentsIn`,       nil, astRef="node"}, -- AstArguments
-	{`argumentsOut`,      nil, astRef="node"}, -- AstArguments
+	{`argumentsIn`,       nil, astRef="node"}, -- AstArguments  Is set when needed.
+	{`argumentsOut`,      nil, astRef="node"}, -- AstArguments  Is set when needed.
 	{`takingVararg`,      false},
 
 	{`body`,              nil, astRef="node"}, -- AstBlock  (If this is nil then the lambda is a function signature. If bodyIsForeign is set then this is a dummy block.)
@@ -465,11 +464,10 @@ _G.!structAst"AstLambda:_AstScopeExpression"{
 
 	{`bodyEndDummy`,      nil}, -- AstDummy  For better error messages.
 
-	{`isPolymorphic`,         false},
-	{`polymorphs`,            {},  astRef="array"}, -- []AstDeclaration
+	{`polymorphs`,            nil, astRef="array"}, -- []AstDeclaration  If this is set then the lambda is polymorphic.
 	{`polymorphSourceLambda`, nil, astRef="node"},  -- AstLambda
-	{`bakeDeclarations`,      {},  astRef="array"}, -- []AstDeclaration
-	{`bakeValues`,            {},  astRef="array"}, -- []AstExpression
+	{`bakeDeclarations`,      nil, astRef="array"}, -- []AstDeclaration  Is set when needed.
+	{`bakeValues`,            nil, astRef="array"}, -- []AstExpression   Is set when needed.
 
 	{`bodyTextLambda`,    nil, astRef="node"}, -- AstLambda
 
@@ -723,7 +721,7 @@ local function parseTable(state, parent)
 		end
 
 		local tok2       = peekNextTok(state, 2)
-		local tableField = TableField()
+		local tableField = KeyValuePair()
 		local tableKey
 
 		-- [k]=v
@@ -808,7 +806,7 @@ local function parseExpressionList(state, parent, expressions, expressionsNamed,
 			table.insert(expressions, blank)
 
 		elseif expressionsNamed and tok.type == !(TOKEN_IDENTIFIER) and !!(IS_TOK(2, TOKEN_PUNCTUATION, "=")) then
-			local exprNamed                   = TableField()
+			local exprNamed                   = KeyValuePair()
 			!SET_OR_RETURN_FALSE `local ident = parseIdentifier(state, parent)`
 			ident.kind                        = !(IDENT_KIND_IGNORE)
 			exprNamed.key                     = ident
@@ -1234,6 +1232,8 @@ local function parseNotes(state, decl)
 		!!(EAT_NEXT_TOKEN) -- '@'
 
 		!SET_OR_RETURN_FALSE `local note = parseExpression(state, decl, prevOpPrecedence)`
+
+		decl.notes = decl.notes or {}
 		table.insert(decl.notes, note)
 
 		tok = peekNextTok(state, 1)
@@ -1252,7 +1252,7 @@ local function parseStruct(state, parent)
 			!ERROR_OR_RETURN_NIL `errorParsingNext(state, "Polymorphic structs cannot have an empty argument list.")`
 		end
 
-		struct.isPolymorphic           = true
+		struct.polymorphs              = {}
 		!SET_OR_RETURN_NIL `local args = parseArguments(state, struct, true, false)`
 
 		local gotError = false
@@ -1281,6 +1281,7 @@ local function parseStruct(state, parent)
 			decl.parent = struct
 			decl.kind   = !(DECL_KIND_LOCAL_CONST)
 
+			struct.bakeDeclarations = struct.bakeDeclarations or {}
 			table.insert(struct.statementsStatic, decl)
 			table.insert(struct.declarations,     decl)
 			table.insert(struct.bakeDeclarations, decl)
@@ -1323,6 +1324,8 @@ local function parseStruct(state, parent)
 		) then
 			!!(EAT_NEXT_TOKEN) -- 'using'
 			!SET_OR_RETURN_NIL `local expr = parseExpression(state, struct)`
+
+			struct.inherits = struct.inherits or {}
 			table.insert(struct.statementsStatic, expr)
 			table.insert(struct.inherits,         expr)
 
@@ -1762,7 +1765,7 @@ end
 			state.nextToken = token
 			!DO_OR_RETURN_FALSE `parseNotes(state, decl)`
 
-			if not decl.notes[1] then  break  end
+			if not decl.notes then  break  end
 		end
 	end
 
@@ -1806,6 +1809,7 @@ end
 			ident.declaration = decl
 			using.expression  = ident
 
+			scope.usings = scope.usings or {}
 			table.insert(scope.statementsStatic, using)
 			table.insert(scope.usings,           using)
 		end
@@ -2369,7 +2373,9 @@ end
 		!SET_OR_RETURN_FALSE `local using = parseUsing(state, block)`
 		statement                         = using
 
+		block.usings = block.usings or {}
 		table.insert(block.usings, using)
+		-- Shouldn't we also insert 'using' into block.statementsStatic? @Robustness
 
 	elseif !!(IS_TOK(TOKEN_DIRECTIVE, "assert","print")) then
 		!SET_OR_RETURN_FALSE `statement = parseDebugNode(state, block)`
@@ -2416,6 +2422,8 @@ end
 			-- @Incomplete: Warn about duplicate imports? It'll make imports more similar to how 'using's work.
 			local import = exprTest
 			statement    = import
+
+			block.imports = block.imports or {}
 			table.insert(block.imports, import)
 
 		else
@@ -2496,8 +2504,8 @@ local function parseBlockStatements(state, block)
 
 				local extra
 					=  lastNodeType ~= !(AST_RETURN) and ""
-					or getLambda(block).argumentsOut          and " (Note: The function has return arguments.)"
-					or                                            " (Note: The function has no return arguments.)"
+					or getLambda(block).argumentsOut and " (Note: The function has return arguments.)"
+					or                                   " (Note: The function has no return arguments.)"
 
 				!ERROR_OR_RETURN_FALSE `errorParsing(state, state.nextToken, "Unreachable code after %s statement.%s", nodeTitle, extra)`
 			end
@@ -2681,6 +2689,7 @@ end
 
 			import.exported = true
 
+			scope.imports = scope.imports or {}
 			table.insert(scope.statementsStatic, import)
 			table.insert(scope.imports,          import)
 
@@ -2724,11 +2733,15 @@ end
 		elseif !!(IS_TOK(TOKEN_DIRECTIVE, "import","load")) then
 			-- @Incomplete: Warn about duplicate imports? Maybe not necessay as things will only ever be imported once anyway.
 			!SET_OR_RETURN_FALSE `local import = parseImportOrLoad(state, scope)`
+
+			scope.imports = scope.imports or {}
 			table.insert(scope.statementsStatic, import)
 			table.insert(scope.imports,          import)
 
 		elseif !!(IS_TOK(TOKEN_KEYWORD, "using")) then
 			!SET_OR_RETURN_FALSE `local using = parseUsing(state, scope)`
+
+			scope.usings = scope.usings or {}
 			table.insert(scope.statementsStatic, using)
 			table.insert(scope.usings,           using)
 
@@ -2870,15 +2883,27 @@ function _G.astMoveRelevantThingsFromFileScopeToGlobalScope(state, fileScope)
 	!ASSERT `not fileScope.isModule`
 	!ASSERT `not fileScope.queued`
 
+	if not fileScope.imports then
+		return
+	end
+
 	local globalScope    = state.globalScope
-	local globalImports  = globalScope.imports
+	local globalImports  = globalScope.imports -- May be nil.
 	local unmovedImports = {}
 
 	for _, import in ipairs(fileScope.imports) do
-		table.insert((import.exported and globalImports or unmovedImports), import)
+		if import.exported then
+			if not globalImports then
+				globalImports       = {}
+				globalScope.imports = globalImports
+			end
+			table.insert(globalImports, import)
+		else
+			table.insert(unmovedImports, import)
+		end
 	end
 
-	fileScope.imports = unmovedImports
+	fileScope.imports = unmovedImports -- May be empty, but there's probably no reason to set .imports to nil in that case.
 end
 
 function _G.parseGlobalScope(state, firstFilePath)
@@ -3013,7 +3038,7 @@ local function parseLambda(state, parent)
 				end
 
 				if node.nodeType ~= !(AST_BAKE) then  return  end
-				lambda.isPolymorphic = true
+				lambda.polymorphs = lambda.polymorphs or {}
 
 				local bake  = node
 				local ident = bake.name
@@ -3038,6 +3063,7 @@ local function parseLambda(state, parent)
 				-- Note: We're not setting decl.type nor decl.value, leaving the declaration unfinished.
 				-- It should be ok as polymorphic functions shouldn't get inferred.
 
+				lambda.bakeDeclarations = lambda.bakeDeclarations or {}
 				table.insert(lambda.statementsStatic, decl)
 				table.insert(lambda.declarations,     decl)
 				table.insert(lambda.bakeDeclarations, decl)
@@ -3057,18 +3083,18 @@ local function parseLambda(state, parent)
 			addDeclarationToNames(lambda, decl)
 
 			if arg.autobake == !(AUTOBAKE_REQUIRED) then
-				lambda.isPolymorphic = true
+				lambda.polymorphs = lambda.polymorphs or {}
 
-				local typeNode       = astNewNode(AstType, decl, decl)
-				typeNode.kind        = !(TYPE_KIND_SIMPLE_BUILTIN)
-				typeNode.typeName    = "placeholder"
+				local typeNode    = astNewNode(AstType, decl, decl)
+				typeNode.kind     = !(TYPE_KIND_SIMPLE_BUILTIN)
+				typeNode.typeName = "placeholder"
 
-				decl.kind            = !(DECL_KIND_LOCAL_CONST)
-				decl.value           = typeNode -- During baking this may end up being replaced with something that's not a type, but we don't care about that at this moment!
+				decl.kind  = !(DECL_KIND_LOCAL_CONST)
+				decl.value = typeNode -- During baking this may end up being replaced with something that's not a type, but we don't care about that at this moment!
 			end
 
 			if arg.isUsing then
-				local using       = astNewNode(AstUsing, arg, lambda)
+				local using = astNewNode(AstUsing, arg, lambda)
 
 				local ident       = astNewNode(AstIdentifier, arg, using)
 				ident.kind        = !(IDENT_KIND_LOOSE)
@@ -3076,12 +3102,13 @@ local function parseLambda(state, parent)
 				ident.declaration = decl
 				using.expression  = ident
 
+				lambda.usings = lambda.usings or {}
 				table.insert(lambda.statementsStatic, using)
 				table.insert(lambda.usings,           using)
 			end
 		end
 
-		if lambda.isPolymorphic and (lambda.captures or lambda.captureAll) then
+		if lambda.polymorphs and (lambda.captures or lambda.captureAll) then
 			!ERROR_OR_RETURN_NIL `errorParsing(state, lambda, "Polymorphic functions cannot have captures.")`
 		end
 
@@ -3262,7 +3289,7 @@ local function parseLambda(state, parent)
 		lambda.bodyEndDummy = astNewNode(AstDummy, state.tokens[state.nextToken-1]) -- Dummy value that shouldn't be used since there's no body. (Maybe we can even leave it nil.)
 	end
 
-	if lambda.isPolymorphic and not lambda.body then
+	if lambda.polymorphs and not lambda.body then
 		!ERROR_OR_RETURN_NIL `errorParsing(state, lambda, "Types of functions cannot be polymorphic - only functions themselves can.")`
 	elseif (lambda.captures or lambda.captureAll) and not lambda.body then
 		!ERROR_OR_RETURN_NIL `errorParsingAfterLast(state, "Expected a body for function with captures.")`
@@ -3919,8 +3946,9 @@ end
 		elseif tokValue == "|" and !(OPERATOR_PRECEDENCE.compound) > prevOpPrecedence then
 			!!(EAT_NEXT_TOKEN) -- '|'
 
-			local typeNodeCompound = astNewNode(AstType, tok, parent)
-			typeNodeCompound.kind  = !(TYPE_KIND_COMPOUND)
+			local typeNodeCompound      = astNewNode(AstType, tok, parent)
+			typeNodeCompound.kind       = !(TYPE_KIND_COMPOUND)
+			typeNodeCompound.components = {}
 
 			table.insert(typeNodeCompound.components, expr)
 
@@ -4505,8 +4533,8 @@ do
 					local lambda     = node
 					local assignment = astFindParent1(lambda, !(AST_ASSIGNMENT))
 					local i          = assignment and assignment.forDeclaration and indexOf(assignment.values, lambda)
-					if lambda.isPolymorphic then  write(" (polymorphs=", #lambda.polymorphs, ")")  end
-					if i                    then  write(" (", assignment.targets[i].name,     ")")  end
+					if lambda.polymorphs then  write(" (polymorphs=", #lambda.polymorphs, ")")  end
+					if i                 then  write(" (", assignment.targets[i].name,     ")")  end
 
 				elseif node.nodeType == !(AST_FILE_SCOPE) then
 					local fileScope = node
@@ -4919,7 +4947,7 @@ do
 		local TEMPLATE_COPY_FIELDS = `
 			local fieldsCopy = copy.$field
 			for i, tableField in ipairs(node.$field) do
-				local tableFieldCopy          = TableField()
+				local tableFieldCopy          = KeyValuePair()
 				tableFieldCopy.key            = tableField.key   and copyTree(tableField.key,   tokOrSourceNode, copy, copies)
 				tableFieldCopy.value          = tableField.value and copyTree(tableField.value, tokOrSourceNode, copy, copies)
 				tableFieldCopy.keyIsGenerated = tableField.keyIsGenerated
