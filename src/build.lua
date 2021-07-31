@@ -214,8 +214,6 @@ local function profilerMaybeModifyFunction(func, name)
 end
 
 local function maybeAddProfilerStuff(lua)
-	if not debugMode then  return lua  end
-
 	if STATIC_PROFILER then
 		local parser = require"lib.dumbParser"
 
@@ -365,7 +363,11 @@ local lua = assert(pp.processFile{
 			return postInserts[label] or error(label)
 		end)
 
-		lua = maybeAddProfilerStuff(lua)
+		if debugMode then
+			lua = maybeAddProfilerStuff(lua)
+		else
+			lua = lua:gsub("[ \t]+\n", "\n"):gsub("\n\n\n+", "\n\n")
+		end
 
 		return COMPILER_HEADER .. lua
 	end,
