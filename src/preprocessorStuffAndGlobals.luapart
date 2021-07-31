@@ -8,6 +8,7 @@
 --=  by Marcus 'ReFreezed' Thunström
 --=
 --============================================================]]
+!recordLineNumber(@file, @line)
 
 !(
 -- CONST, CONST_SET
@@ -21,6 +22,7 @@
 -- STATIC
 -- struct, new
 -- trimTemplate, templateToLua
+-- UNINDENT
 
 
 
@@ -84,12 +86,14 @@ _G.VISIT_IGNORE_CHILDREN = 3
 
 _G.PIPE_NONE  = 0
 _G.PIPE_INFER = 1
-_G.PIPE_EMIT  = 2
-_G.PIPE_DONE  = 3
+_G.PIPE_READY = 2
+_G.PIPE_EMIT  = 3
+_G.PIPE_DONE  = 4
 
 local PIPE_TITLES = {
 	[PIPE_NONE]  = "none",
 	[PIPE_INFER] = "infer",
+	[PIPE_READY] = "ready",
 	[PIPE_EMIT]  = "emit",
 	[PIPE_DONE]  = "done",
 }
@@ -97,11 +101,13 @@ local PIPE_TITLES = {
 _G.DEPEND_DECLARATION          = 1
 _G.DEPEND_MEMBER_DECLARATION   = 2
 _G.DEPEND_HAS_DECLARATION      = 3
-_G.DEPEND_NODE_INFERRED        = 4
+_G.DEPEND_NODE_INFERRED        = 4 -- When node has a type, even if the type isn't ready.
 _G.DEPEND_NODE_PASSED_INFER    = 5
-_G.DEPEND_NODE_PASSED_EMIT     = 6
-_G.DEPEND_STRUCT_MEMBERS_READY = 7
-_G.DEPEND_CONSTANT_READY       = 8
+_G.DEPEND_NODE_PASSED_READY    = 6
+_G.DEPEND_NODE_PASSED_EMIT     = 7 -- Any constants have beed allocated.
+_G.DEPEND_TYPE_READY           = 8
+_G.DEPEND_STRUCT_MEMBERS_READY = 9
+_G.DEPEND_CONSTANT_READY       = 10
 
 _G.DEPEND_TITLES = {
 	[DEPEND_DECLARATION]          = "declaration",
@@ -109,7 +115,9 @@ _G.DEPEND_TITLES = {
 	[DEPEND_HAS_DECLARATION]      = "hasDeclaration",
 	[DEPEND_NODE_INFERRED]        = "nodeInferred",
 	[DEPEND_NODE_PASSED_INFER]    = "nodePassedInferPipe",
+	[DEPEND_NODE_PASSED_READY]    = "nodePassedReadyPipe",
 	[DEPEND_NODE_PASSED_EMIT]     = "nodePassedEmitPipe",
+	[DEPEND_TYPE_READY]           = "typeReady",
 	[DEPEND_STRUCT_MEMBERS_READY] = "structMembersReady",
 	[DEPEND_CONSTANT_READY]       = "constantReady",
 }
@@ -732,6 +740,14 @@ function _G.STATIC(assignmentCodeOrTableOrStaticName)
 		local tOrStaticName = assignmentCodeOrTableOrStaticName
 		return defineStaticTable(tOrStaticName)
 	end
+end
+
+
+
+function _G.UNINDENT(s)
+	local tabs = s:match"^\t*()" - 1
+	local pat  = "%f[^%z\n]" .. ("\t?"):rep(tabs)
+	return (s:gsub(pat, ""))
 end
 )
 

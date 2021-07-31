@@ -119,8 +119,15 @@ export TESTS_THAT_SHOULD_FAIL :: {
 		local v : type_of(nonexistent) -- Undeclared identifier.
 	]=],
 	[=[
-		local circularA :: circularB -- Circular dependency. @UX: Better error message.
+		local circularA :: circularB -- Circular dependency.
 		local circularB :: circularA
+	]=],
+	[=[
+		local circularA: type_of(circularB) : 0 -- Circular dependency. @UX: Better error message.
+		local circularB: type_of(circularA) : 0
+	]=],
+	[=[
+		local T: []T : {} -- Circular dependency. @UX: Better error message.
 	]=],
 	[=[
 		local var =  5
@@ -1574,4 +1581,83 @@ export TESTS_THAT_SHOULD_FAIL :: {
 		}
 		local FLAG :: true
 	]=],
+	-- Problems with structs.
+	[=[
+		local main :: () {
+			local S :: struct {
+				n: int : !foreign lua "0",
+				f :: (a=S.n) !foreign lua "function()end",
+			}
+			local o: S
+			o.bad = true -- No such member.
+		}
+	]=],
+	[=[
+		local main :: () {
+			local S :: struct {
+				n: int : !foreign lua "0",
+				s :: "foo",
+				f :: (a=S.n) !foreign lua "function()end",
+			}
+			local o: S
+			o[o.s] = "" -- No such member.
+		}
+	]=],
+	[=[
+		local main :: () {
+			local S :: struct {
+				n: int : !foreign lua "0",
+				f :: (a=S.n) !foreign lua "function()end",
+			}
+			local o: S
+			o.n = 1 -- Cannot assign to constant members.
+		}
+	]=],
+	[=[
+		local main :: () {
+			local S :: struct {
+				n: int : !foreign lua "0",
+				s :: "n",
+				f :: (a=S.n) !foreign lua "function()end",
+			}
+			local o: S
+			o[o.s] = "" -- Cannot assign to constant members.
+		}
+	]=],
+	[=[
+		local main :: () {
+			local S :: struct {
+				using IntBoolPairs,
+				n: int : !foreign lua "0",
+				f :: (a=S.n) !foreign lua "function()end",
+			}
+			local o: S
+			o.bad = true -- No such member.
+		}
+		local IntBoolPairs :: struct {
+			!key:   int,
+			!value: bool,
+		}
+	]=],
+	[=[
+		local main :: () {
+			local S :: struct {
+				using IntBoolPairs,
+				n: int : !foreign lua "0",
+				f :: (a=S.n) !foreign lua "function()end",
+			}
+			local o: S
+			o[false] = true -- Bad key type.
+		}
+		local IntBoolPairs :: struct {
+			!key:   int,
+			!value: bool,
+		}
+	]=],
+	--[[
+	[=[
+		local main :: () {
+		}
+	]=],
+	--]]
 }

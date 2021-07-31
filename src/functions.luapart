@@ -39,9 +39,11 @@
 	storeInCache
 	timeIt, stall
 	trim, triml, trimr
+	tryToFixLocationForCompilerError
 	utf8Char, utf8Codepoint
 
 --============================================================]]
+!recordLineNumber(@file, @line)
 
 !(
 local PROFILE_CALLS   = 1==0
@@ -153,17 +155,26 @@ function _G.printTraceback(file, level)
 		local where = info.source:match"^@(.+)"
 		where       = where and where:gsub("\\", "/") or info.short_src
 
-		local lnStr = info.currentline > 0 and ":"..info.currentline or ""
+		local ln = info.currentline
+
+		!if DEBUG and 1==1 then
+			if where == COMPILER_PATH then
+				ln        = tonumber(ln)
+				where, ln = tryToFixLocationForCompilerError(where, ln)
+			end
+		!end
+
+		local lnStr = (ln > 0) and ":"..ln or ""
 
 		local name
-			=  info.name -- May be "".
+			=  info.name ~= ""      and info.name
 			or info.linedefined > 0 and where..":"..info.linedefined
-			or info.what == "main" and "main chunk"
-			or info.what == "tail" and "tail call"
+			or info.what == "main"  and "main chunk"
+			or info.what == "tail"  and "tail call"
 			or ""
 
-		file:write("\t",where,lnStr)
-		if name ~= "" then  file:write("  (",name,")")  end
+		file:write("\t", where, lnStr)
+		if name ~= "" then  file:write("  (", name, ")")  end
 		file:write("\n")
 	end
 end
@@ -1521,5 +1532,47 @@ function _G.storeInCache(cache, k, v)
 	cache[k] = v
 	return v
 end
+
+
+
+!if DEBUG then
+	local lineNumberMap = nil
+
+	local function init()
+		if lineNumberMap then  return  end
+
+		lineNumberMap = {}
+
+		local file = io.open(COMPILER_PATH)
+		if not file then  return  end
+
+		local outputLn = 0
+		local sourceLn = 0
+
+		for outputLine in file:lines() do
+			outputLn = outputLn + 1
+			sourceLn = tonumber(outputLine:match"%-%-%[%[@(%d+)%]%]") or sourceLn+1
+
+			lineNumberMap[outputLn] = sourceLn
+		end
+
+		file:close()
+	end
+
+	-- path, lineNumber = tryToFixLocationForCompilerError( path, lineNumber )
+	function _G.tryToFixLocationForCompilerError(path, outputLn)
+		init()
+		if not lineNumberMap[outputLn] then  return path, outputLn  end
+
+		for _, lnInfo in ipairsr(compilerLineNumbers) do
+			if lnInfo.outputLine <= outputLn then
+				return lnInfo.sourcePath, lineNumberMap[outputLn]
+			end
+		end
+
+		-- We shouldn't ever get here unless recordLineNumber() is messed up.
+		return path, outputLn
+	end
+!end
 
 

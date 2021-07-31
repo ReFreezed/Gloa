@@ -16,10 +16,23 @@
 	outputDependencyGraph
 
 --============================================================]]
+!recordLineNumber(@file, @line)
 
 !local INFINITE_LOOP_PRINT_CONTEXT = 1==0
-!local OUTPUT_DEPENDENCY_GRAPH     = 1==0
-local MAX_ERRORS_MESSAGES          = !(DEBUG and 20 or 4) -- @Incomplete: Make this a compiler option.
+
+!local DEPENDENCY_TRACK_TRACEBACK        = DEBUG and 1==0
+!local PRINT_TREE_WHEN_STUCK             = DEBUG and 1==0
+!local PRINT_TYPE_READY_STATE_WHEN_STUCK = DEBUG and 1==0
+!local OUTPUT_DEPENDENCY_GRAPH           = DEBUG and 1==0
+
+!local UML_MAX_SIZE           = 4096*2 -- 4096 is the default.
+!local UML_VERTICAL           = 1==1 -- Vertical fits more.
+!local UML_COMPACT            = 1==0 -- Doesn't actually make it more compact. :/
+!local UML_INFO_SHOW_EXTRA    = 1==1 -- E.g. identifier names.
+!local UML_INFO_SHOW_LOCATION = 1==1 -- File and line number.
+!local UML_INFO_MULTILINE     = 1==1
+
+local MAX_ERRORS_MESSAGES = !(DEBUG and 20 or 4) -- @Incomplete: Make this a compiler option.
 
 
 
@@ -30,7 +43,7 @@ local MAX_ERRORS_MESSAGES          = !(DEBUG and 20 or 4) -- @Incomplete: Make t
 	{`extraData`,  nil},   -- AstScope|nil
 	{`next`,       nil},   -- Dependency  This is for chaining multiple dependencies.
 	{`internal`,   false}, -- Internal dependencies are (preferably) never reported to users during errors.
-	{`traceback`,  nil},   -- For debugging.
+	{`traceback`,  not DEPENDENCY_TRACK_TRACEBACK and STRUCT_FIELD_IGNORE or nil}, -- For debugging.
 }
 
 -- addDependency( state, dependent, isInternal, DEPEND_DECLARATION,          name [, scope ] )
@@ -38,7 +51,9 @@ local MAX_ERRORS_MESSAGES          = !(DEBUG and 20 or 4) -- @Incomplete: Make t
 -- addDependency( state, dependent, isInternal, DEPEND_HAS_DECLARATION,      identifier )
 -- addDependency( state, dependent, isInternal, DEPEND_NODE_INFERRED,        astNode )
 -- addDependency( state, dependent, isInternal, DEPEND_NODE_PASSED_INFER,    astNode )
+-- addDependency( state, dependent, isInternal, DEPEND_NODE_PASSED_READY,    astNode )
 -- addDependency( state, dependent, isInternal, DEPEND_NODE_PASSED_EMIT,     astNode )
+-- addDependency( state, dependent, isInternal, DEPEND_TYPE_READY,           typeInfo )
 -- addDependency( state, dependent, isInternal, DEPEND_STRUCT_MEMBERS_READY, structInfo )
 -- addDependency( state, dependent, isInternal, DEPEND_CONSTANT_READY,       constant )
 function _G.addDependency(state, dependent, isInternal, dependType, dependOn, extraData)
@@ -49,14 +64,14 @@ function _G.addDependency(state, dependent, isInternal, dependType, dependOn, ex
 		elseif dependType == !(DEPEND_MEMBER_DECLARATION) then
 			!ASSERT `type(dependOn)  == "string"`
 			!ASSERT `type(extraData) == "table"`
-		elseif !!(CONST_SET{ DEPEND_HAS_DECLARATION, DEPEND_NODE_INFERRED, DEPEND_NODE_PASSED_INFER, DEPEND_NODE_PASSED_EMIT, DEPEND_STRUCT_MEMBERS_READY, DEPEND_CONSTANT_READY })[dependType] then
+		elseif !!(CONST_SET{ DEPEND_HAS_DECLARATION, DEPEND_NODE_INFERRED, DEPEND_NODE_PASSED_INFER, DEPEND_NODE_PASSED_READY, DEPEND_NODE_PASSED_EMIT, DEPEND_TYPE_READY, DEPEND_STRUCT_MEMBERS_READY, DEPEND_CONSTANT_READY })[dependType] then
 			!ASSERT `type(dependOn)  == "table"`
 		else
 			errorInternal("%d", dependType)
 		end
 	!end
 
-	local dependOnIsNode = !!(CONST_SET{ DEPEND_HAS_DECLARATION, DEPEND_NODE_INFERRED, DEPEND_NODE_PASSED_INFER, DEPEND_NODE_PASSED_EMIT })[dependType]
+	local dependOnIsNode = !!(CONST_SET{ DEPEND_HAS_DECLARATION, DEPEND_NODE_INFERRED, DEPEND_NODE_PASSED_INFER, DEPEND_NODE_PASSED_READY, DEPEND_NODE_PASSED_EMIT })[dependType]
 	local dependency     = getExistingDependency(state, dependent, dependType, dependOn)
 
 	if dependency then
@@ -70,10 +85,10 @@ function _G.addDependency(state, dependent, isInternal, dependType, dependOn, ex
 			nodeMessage(io.stderr, state, dependOn, "Info", "Pipes", "...depending on this.")
 		end
 
-		if dependency.traceback then
+		!if DEPENDENCY_TRACK_TRACEBACK then
 			io.write("Previous ")
 			print(dependency.traceback)
-		end
+		!end
 
 		exitFailure()
 	end
@@ -96,7 +111,9 @@ function _G.addDependency(state, dependent, isInternal, dependType, dependOn, ex
 		`internal`,   `isInternal`,
 	}
 
-	-- !ifDEBUG `dependency.traceback = debug.traceback("", 2)`
+	!if DEPENDENCY_TRACK_TRACEBACK then
+		dependency.traceback = debug.traceback("", 2)
+	!end
 
 	local waitingOn = dependent.waitingOn
 	if waitingOn then
@@ -112,6 +129,7 @@ function _G.addDependency(state, dependent, isInternal, dependType, dependOn, ex
 		dependOn.waiters = dependOn.waiters or {}
 		table.insert(dependOn.waiters, dependency)
 	elseif dependType == !(DEPEND_STRUCT_MEMBERS_READY) then
+		!ASSERT("dependOn.tag == "..TYPE_STRUCT)
 		local structQueued   = dependOn.astNode.queued
 		structQueued.waiters = structQueued.waiters or {}
 		table.insert(structQueued.waiters, dependency)
@@ -134,10 +152,18 @@ function _G.addDependency(state, dependent, isInternal, dependType, dependOn, ex
 			elseif dependType == !(DEPEND_HAS_DECLARATION)      then  astPrint(dependOn.node)
 			elseif dependType == !(DEPEND_NODE_INFERRED)        then  astPrint(dependOn.node)
 			elseif dependType == !(DEPEND_NODE_PASSED_INFER)    then  astPrint(dependOn.node)
+			elseif dependType == !(DEPEND_NODE_PASSED_READY)    then  astPrint(dependOn.node)
 			elseif dependType == !(DEPEND_NODE_PASSED_EMIT)     then  astPrint(dependOn.node)
+			elseif dependType == !(DEPEND_TYPE_READY)           then  print(getFriendlyTypeInfoName(dependOn))
 			elseif dependType == !(DEPEND_STRUCT_MEMBERS_READY) then  print(getFriendlyTypeInfoName(dependOn))
 			elseif dependType == !(DEPEND_CONSTANT_READY)       then  print(getFriendlyTypeInfoName(dependOn.valueType), tostring(dependOn.value))
 			else                                                      print("? ("..tostring(dependOn)..")")  end
+		end
+	!end
+
+	!if DEBUG and 1==0 then
+		if dependType == !(DEPEND_STRUCT_MEMBERS_READY) and dependent.node.s == 67793 then
+			print(debug.traceback("HERE"))
 		end
 	!end
 end
@@ -147,7 +173,7 @@ end
 -- DEPEND_INTERNAL           ( dependentCode, dependType, dependOnCode [, extraDataCode ] )
 -- DEPEND_AND_RETURN         ( dependentCode, dependType, dependOnCode [, extraDataCode, valueToReturnCode ] )
 -- DEPEND_AND_RETURN_INTERNAL( dependentCode, dependType, dependOnCode [, extraDataCode, valueToReturnCode ] )
-local function depend(dependentCode, isInternal, dependType, dependOnCode, extraDataCode)
+local function depend         (dependentCode, isInternal, dependType, dependOnCode, extraDataCode)
 	__LUA("addDependency(state, ",dependentCode,", ",toLua(isInternal),", ",toLua(dependType),", ",dependOnCode)
 	if extraDataCode then  __LUA(", ",extraDataCode)  end
 	__LUA(")")
@@ -175,7 +201,7 @@ end
 function _G.getExistingDependency(state, dependent, dependType, dependOn)
 	dependent = dependent.queued
 
-	if !!(CONST_SET{ DEPEND_HAS_DECLARATION, DEPEND_NODE_INFERRED, DEPEND_NODE_PASSED_INFER, DEPEND_NODE_PASSED_EMIT })[dependType] then
+	if !!(CONST_SET{ DEPEND_HAS_DECLARATION, DEPEND_NODE_INFERRED, DEPEND_NODE_PASSED_INFER, DEPEND_NODE_PASSED_READY, DEPEND_NODE_PASSED_EMIT })[dependType] then
 		dependOn = dependOn.queued
 	end
 
@@ -504,6 +530,20 @@ function _G.moveToNextRelevantPipe(state, node, fromPipe)
 	fromPipe     = fromPipe or queued.pipe
 
 	if fromPipe == !(PIPE_INFER) then
+		if not node.inferredType or node.nodeType == !(AST_DECLARATION) then -- @Cleanup: Declarations have a inferredType field, but they are not expressions!
+			return moveToNextRelevantPipe(state, node, !(PIPE_READY))
+		elseif not node.inferredType.isReady then
+			queued.pipe = !(PIPE_READY)
+		else
+			local typeInfoRepresented = getTypeRepresentedByExpression(node)
+			if typeInfoRepresented and not typeInfoRepresented.isReady then
+				queued.pipe = !(PIPE_READY)
+			else
+				return moveToNextRelevantPipe(state, node, !(PIPE_READY))
+			end
+		end
+
+	elseif fromPipe == !(PIPE_READY) then
 		local nodeType = node.nodeType
 
 		if nodeType == !(AST_LITERAL) or nodeType == !(AST_FOREIGN) or nodeType == !(AST_TYPE_INFO) then
@@ -548,6 +588,22 @@ function _G.moveToNextRelevantPipe(state, node, fromPipe)
 	end
 end
 
+!if DEBUG and 1==0 then
+	local _moveToNextRelevantPipe = moveToNextRelevantPipe
+
+	function _G.moveToNextRelevantPipe(state, node, fromPipe)
+		local pipe = node.queued.pipe
+
+		_moveToNextRelevantPipe(state, node, fromPipe)
+
+		if node.s == 121 then
+			printf("Moved %s @%d from %s to %s.", AST_NAMES[node.nodeType], node.s, PIPE_TITLES[pipe], PIPE_TITLES[node.queued.pipe])
+			printTraceback(2)
+			print()
+		end
+	end
+!end
+
 function _G.moveTreeToNextRelevantPipe(state, topNode)
 	local currentPipe = topNode.queued.pipe
 
@@ -581,9 +637,31 @@ end
 function _G.errorPipesAreStuck(state)
 	!TRACE()
 
-	!if DEBUG and OUTPUT_DEPENDENCY_GRAPH then
+	!if OUTPUT_DEPENDENCY_GRAPH then
 		outputDependencyGraph(state)
+	!end
+	!if PRINT_TREE_WHEN_STUCK then
 		astPrintTree(state.globalScope)
+	!end
+	!if PRINT_TYPE_READY_STATE_WHEN_STUCK then
+		local lines = {}
+		for _, typeInfo in ipairs(state.allTypeInfos) do
+			local seenTexts = {}
+			for _, seenTypeInfo in ipairs(typeInfo.seen) do
+				table.insert(seenTexts, getFriendlyTypeInfoName(seenTypeInfo))
+			end
+			local line = F(
+				"%- 5s  %s  |||  %s",
+				(typeInfo.isReady and "ready" or "-"),
+				getFriendlyTypeInfoName(typeInfo),
+				table.concat(seenTexts, ", ")
+			)
+			table.insert(lines, line)
+		end
+		table.sort(lines)
+		for _, line in ipairs(lines) do
+			print(line)
+		end
 	!end
 
 	local reportCount = 0
@@ -876,7 +954,9 @@ end
 
 !if DEBUG then
 function _G.errorPipesAreInfiniteLooping(state, finalPipe)
-	-- astPrintTree(state.globalScope)
+	!if PRINT_TREE_WHEN_STUCK then
+		astPrintTree(state.globalScope)
+	!end
 
 	local printCount = 0
 	printerr()
@@ -906,7 +986,7 @@ function _G.errorPipesAreInfiniteLooping(state, finalPipe)
 				astPrint(queued.node)
 			!end
 
-			if dependency and !!(CONST_SET{ DEPEND_HAS_DECLARATION, DEPEND_NODE_INFERRED, DEPEND_NODE_PASSED_INFER, DEPEND_NODE_PASSED_EMIT })[dependency.dependType] then
+			if dependency and !!(CONST_SET{ DEPEND_HAS_DECLARATION, DEPEND_NODE_INFERRED, DEPEND_NODE_PASSED_INFER, DEPEND_NODE_PASSED_READY, DEPEND_NODE_PASSED_EMIT })[dependency.dependType] then
 				!if INFINITE_LOOP_PRINT_CONTEXT then
 					astPrint(dependency.dependOn.node)
 					nodeMessage(io.stderr, state, dependency.dependOn.node, "Debug", nil, "...waiting on this.")
@@ -918,7 +998,7 @@ function _G.errorPipesAreInfiniteLooping(state, finalPipe)
 		end
 	end
 
-	!if DEBUG and OUTPUT_DEPENDENCY_GRAPH then
+	!if OUTPUT_DEPENDENCY_GRAPH then
 		outputDependencyGraph(state)
 	!end
 	errorInternal("[DEBUG] Pipes ran for too long. (waiting:%d)", state.queueWaiting.n)
@@ -930,7 +1010,6 @@ end
 function _G.outputDependencyGraph(state)
 	!if PLANTUML_PATH ~= "" then
 		-- [=[ Dependency graph.
-		!local MAX_SIZE = 8192
 		local PATH_UML  = COMPILER_DIRECTORY.."/temp/dependencies.plantuml"
 		local PATH_PNG  = COMPILER_DIRECTORY.."/temp/dependencies.png"
 		local file, err = io.open(PATH_UML, "wb")
@@ -940,58 +1019,161 @@ function _G.outputDependencyGraph(state)
 
 		else
 			local function writeNode(node)
-				file:write("(", AST_NAMES[node.nodeType], " ", node.s)
+				file:write('"')
+				file:write(AST_NAMES[node.nodeType], " ", node.s)
 
-				if node.nodeType == !(AST_IDENTIFIER) then
-					file:write("\\n", node.name)
-				elseif node.nodeType == !(AST_DECLARATION) then
-					file:write("\\n", node.name.name)
-				elseif node.nodeType == !(AST_ASSIGNMENT) then
-					if #node.targets == 1 and node.targets[1].nodeType == !(AST_IDENTIFIER) then
-						file:write("\\n", node.targets[1].name)
+				!if UML_INFO_SHOW_EXTRA then
+					if node.nodeType == !(AST_IDENTIFIER) then
+						file:write!(UML_INFO_MULTILINE and "\\n" or " ")
+						file:write(node.name)
+					elseif node.nodeType == !(AST_DECLARATION) then
+						file:write!(UML_INFO_MULTILINE and "\\n" or " ")
+						file:write(node.name.name)
+					elseif node.nodeType == !(AST_ASSIGNMENT) then
+						if #node.targets == 1 and node.targets[1].nodeType == !(AST_IDENTIFIER) then
+							file:write!(UML_INFO_MULTILINE and "\\n" or " ")
+							file:write(node.targets[1].name)
+						end
 					end
-				end
+				!end
 
-				file:write("\\n@", (node.source.path:match"([^/]+)%.%w+$" or "?"), ":", node.line)
-				file:write(")")
+				!if UML_INFO_SHOW_LOCATION then
+					file:write!(UML_INFO_MULTILINE and "\\n" or " ")
+					file:write("@", (node.source.path:match"([^/]+)%.%w+$" or "?"), ":", node.line)
+				!end
+				file:write('"')
 			end
 
-			file:write("@startuml\n")
-			file:write(!("scale max "..MAX_SIZE.."*"..MAX_SIZE.."\n"))
+			local nodeIds = {}
 
-			for _, queued in ipairs(state.allQueueds) do
-			-- for _, queued in ipairs(state.queueWaiting) do
+			local function maybeDeclareNode(node)
+				if nodeIds[node] then  return  end
+
+				nodeIds[node] = "node" .. tostring(node):gsub("^table: ", ""):gsub("^0x", ""):gsub("[^%w]+", "")
+
+				file:write!(UML_COMPACT and "label " or "card ")
+				writeNode(node)
+				file:write(" as ", nodeIds[node])
+				file:write("\n")
+			end
+
+			local function writeNodeId(node)
+				file:write(nodeIds[node] or errorInternal(state, node, "UML: Not declared."))
+			end
+
+			file:write!(UNINDENT([[
+				@startuml
+				skinparam backgroundColor #000000
+
+				skinparam defaultFontSize  9
+				skinparam defaultFontColor #ffffff
+
+				skinparam nodesep 1
+				skinparam ranksep 1
+
+				skinparam padding 0
+
+				skinparam cardBackgroundColor    #666666
+				skinparam cardBorderColor        #666666
+				skinparam usecaseBackgroundColor #666666
+				skinparam usecaseBorderColor     #666666
+
+				skinparam usecaseArrowColor     #44ff88
+				skinparam usecaseArrowFontColor #44ff88
+
+				skinparam shadowing false
+
+				$ltr
+				scale max $maxSize*$maxSize
+
+			]]):gsub("$(%w+)", {
+				ltr     = UML_VERTICAL and "left to right direction" or "",
+				maxSize = UML_MAX_SIZE,
+			}))
+
+			local queueds = state.allQueueds
+			-- local queueds = state.queueWaiting
+
+			for _, queued in ipairs(queueds) do
 				local dependency = not queued.unqueued and queued.waitingOn
 
 				if dependency then
-					local known = true
-					writeNode(queued.node)
+					maybeDeclareNode(queued.node)
 
 					if dependency.dependType == !(DEPEND_DECLARATION) or dependency.dependType == !(DEPEND_MEMBER_DECLARATION) then
-						local name = dependency.dependOn
-						file:write(" --|> (Name ", name, ")")
+						-- void
 
-					elseif !!(CONST_SET{ DEPEND_HAS_DECLARATION, DEPEND_NODE_INFERRED, DEPEND_NODE_PASSED_INFER, DEPEND_NODE_PASSED_EMIT })[dependency.dependType] then
+					elseif !!(CONST_SET{ DEPEND_HAS_DECLARATION, DEPEND_NODE_INFERRED, DEPEND_NODE_PASSED_INFER, DEPEND_NODE_PASSED_READY, DEPEND_NODE_PASSED_EMIT })[dependency.dependType] then
 						local nodeOther = dependency.dependOn.node
-						file:write(" --|> ")
-						writeNode(nodeOther)
+						maybeDeclareNode(nodeOther)
+
+					elseif dependency.dependType == !(DEPEND_TYPE_READY) then
+						local typeInfo = dependency.dependOn
+						if typeInfo.tag == !(TYPE_STRUCT) or typeInfo.tag == !(TYPE_STRUCT) then
+							maybeDeclareNode(typeInfo.astNode)
+						else
+							-- void
+						end
 
 					elseif dependency.dependType == !(DEPEND_STRUCT_MEMBERS_READY) then
 						local structInfo = dependency.dependOn
-						file:write(" --|> ")
-						writeNode(structInfo.astNode)
+						maybeDeclareNode(structInfo.astNode)
 
 					elseif dependency.dependType == !(DEPEND_CONSTANT_READY) then
 						local const = dependency.dependOn
 						if const.valueType.tag == !(TYPE_FUNCTION) then
 							local lambda = const.value
-							file:write(" --|> ")
-							writeNode(lambda)
+							maybeDeclareNode(lambda)
 						else
-							file:write(" --|> (Const ", const.name, ")")
+							-- void
+						end
+					end
+				end
+			end
+
+			for _, queued in ipairs(queueds) do
+				local dependency = not queued.unqueued and queued.waitingOn
+
+				if dependency then
+					local known = true
+					writeNodeId(queued.node)
+					file:write(" -->> ")
+
+					if dependency.dependType == !(DEPEND_DECLARATION) or dependency.dependType == !(DEPEND_MEMBER_DECLARATION) then
+						local name = dependency.dependOn
+						file:write("(Name ", name, ")")
+
+					elseif !!(CONST_SET{ DEPEND_HAS_DECLARATION, DEPEND_NODE_INFERRED, DEPEND_NODE_PASSED_INFER, DEPEND_NODE_PASSED_READY, DEPEND_NODE_PASSED_EMIT })[dependency.dependType] then
+						local nodeOther = dependency.dependOn.node
+						writeNodeId(nodeOther)
+
+					elseif dependency.dependType == !(DEPEND_TYPE_READY) then
+						local typeInfo = dependency.dependOn
+						if typeInfo.tag == !(TYPE_STRUCT) or typeInfo.tag == !(TYPE_STRUCT) then
+							writeNodeId(typeInfo.astNode)
+						else
+							local name = getFriendlyTypeInfoName(typeInfo):gsub("[()]", !!(CONST{
+								["("] = "<U+0028>",
+								[")"] = "<U+0029>",
+							}))
+							file:write("(Type ", name, ")")
+						end
+
+					elseif dependency.dependType == !(DEPEND_STRUCT_MEMBERS_READY) then
+						local structInfo = dependency.dependOn
+						writeNodeId(structInfo.astNode)
+
+					elseif dependency.dependType == !(DEPEND_CONSTANT_READY) then
+						local const = dependency.dependOn
+						if const.valueType.tag == !(TYPE_FUNCTION) then
+							local lambda = const.value
+							writeNodeId(lambda)
+						else
+							file:write("(Const ", const.name, ")")
 						end
 
 					else
+						file:write("(", DEPEND_TITLES[dependency.dependType], ")")
 						known = false
 					end
 
@@ -1005,11 +1187,11 @@ function _G.outputDependencyGraph(state)
 			file:write("@enduml\n")
 			file:close()
 
-			local cmd = F([["SET PLANTUML_LIMIT_SIZE=%d & SET "GRAPHVIZ_DOT=%s" & java -jar "%s" "%s""]], !(MAX_SIZE), !(GRAPHVIZ_PATH), !(PLANTUML_PATH), PATH_UML)
+			local cmd = F([["SET "PLANTUML_LIMIT_SIZE=%d" & SET "GRAPHVIZ_DOT=%s" & java -jar "%s" "%s""]], !(UML_MAX_SIZE), !(GRAPHVIZ_PATH), !(PLANTUML_PATH), PATH_UML)
 			if os.execute(cmd) ~= 0 then
 				printerr("Failed running command: "..cmd)
 			else
-				os.execute(F([["START "" /W "%s""]], PATH_PNG))
+				os.execute(F([["START "" "%s""]], PATH_PNG))
 			end
 		end
 		--]=]

@@ -24,13 +24,14 @@
 	isExpressionConstant, isExpressionExactlyOneValue
 	isScope, isScopeDeclarative, isScopeImperative
 	isTypeSimple, isTypeNumeric, isTypeTableLike, isTypePublic, isTypeCompatibleWith, doesStructInherit, adjustTypeToOne, compareIdsOfTypes
-	newTypeInfo, markTypeAsReady, isTypeBuiltin, getTypeInfo*
+	newTypeInfo, markTypeAsReady, seeType, seeMultipleTypes, isTypeBuiltin, getTypeInfo*
 	prepareToRun
 	simplifyExpressionIfConstant, simplifyTypeExpression
 	typeError*, typeMessage
 	wrapInImplicitCast
 
 --============================================================]]
+!recordLineNumber(@file, @line)
 
 
 
@@ -45,6 +46,7 @@ local structTypeInfo = struct
 	{`tag`,     0}, -- This is like the "type of type" or the "type group". The word "type" is used in so many places so we call it "tag" here to make it less confusing.
 	{`id`,      0},
 	{`isReady`, false},
+	{`seen`,    {}}, -- []TypeInfo and set of TypeInfo.
 }
 
 local !structTypeInfo"TypeInfoAny:_TypeInfo"   {_overrides={{`tag`,TYPE_ANY}}}
@@ -95,15 +97,15 @@ local !struct"TypeInfoStructMember"{
 local !structTypeInfo"TypeInfoStruct:_TypeInfo"{
 	_overrides={{`tag`,TYPE_STRUCT}},
 
-	{`astNode`,       nil}, -- AstStruct
-	{`name`,          ""},  -- Filled in during definition.
+	{`astNode`,       nil},   -- AstStruct
+	{`name`,          ""},    -- Filled in during definition.
 
 	{`kind`,          STRUCT_KIND_NORMAL}, -- STRUCT_KIND_NORMAL|STRUCT_KIND_TABLE|STRUCT_KIND_ARRAY
-	{`keyType`,       nil}, -- TypeInfo  Used if kind==STRUCT_KIND_TABLE.
-	{`valueType`,     nil}, -- TypeInfo  Used if kind==STRUCT_KIND_TABLE or kind==STRUCT_KIND_ARRAY.
+	{`keyType`,       nil},   -- TypeInfo  Used if kind==STRUCT_KIND_TABLE.
+	{`valueType`,     nil},   -- TypeInfo  Used if kind~=STRUCT_KIND_NORMAL.
 
-	{`members`,       {}},  -- []TypeInfoStructMember
-	{`hasMembers`,    false},
+	{`members`,       {}},    -- []TypeInfoStructMember
+	{`hasMembers`,    false}, -- @Cleanup: Can we remove this and rely on isReady? I think so. 2021-07-29 (Or maybe not? 2021-07-30)
 
 	{`isPolymorphic`, false},
 }
@@ -115,7 +117,7 @@ local !structTypeInfo"TypeInfoEnum:_TypeInfo"{
 	_overrides={{`tag`,TYPE_ENUM}},
 	{`astNode`,        nil}, -- AstEnum
 	{`name`,           ""},
-	{`memberTypeInfo`, nil}, -- Must be one of these primitive types: int, string, type, bool or float.
+	{`memberTypeInfo`, nil}, -- Must be one of these primitive types: int, string, Type, bool or float.
 	{`members`,        {}},  -- []TypeInfoEnumMember
 }
 
@@ -145,6 +147,9 @@ function _G.newTypeInfo(state, TypeInfoCreator)
 	local typeInfo   = TypeInfoCreator()
 	typeInfo.id      = state.lastTypeId
 
+	typeInfo.seen[1]        = typeInfo
+	typeInfo.seen[typeInfo] = true
+
 	--[[
 	if typeInfo.id == 22 then
 		errorInternal("DEBUG")
@@ -155,9 +160,30 @@ function _G.newTypeInfo(state, TypeInfoCreator)
 end
 
 function _G.markTypeAsReady(state, typeInfo)
+	!ASSERT `not typeInfo.isReady`
 	typeInfo.isReady = true
 	if state.runnerWriter and isTypePublic(typeInfo) then
 		getPublicType(state, typeInfo)
+	end
+end
+
+function _G.seeType(typeInfo, seenTypeInfo)
+	!ASSERT `typeInfo.tag`
+	!ASSERT `seenTypeInfo.tag`
+
+	if typeInfo.seen[seenTypeInfo] then  return  end
+
+	typeInfo.seen[seenTypeInfo] = true
+	table.insert(typeInfo.seen, seenTypeInfo)
+
+	for _, innerSeenTypeInfo in ipairs(seenTypeInfo.seen) do
+		seeType(typeInfo, innerSeenTypeInfo)
+	end
+end
+
+function _G.seeMultipleTypes(typeInfo, seenTypeInfos)
+	for _, seenTypeInfo in ipairs(seenTypeInfos) do
+		seeType(typeInfo, seenTypeInfo)
 	end
 end
 
@@ -202,7 +228,7 @@ do
 	function _G.addTypeInfosForBuiltinTypes(state)
 		for _, typeName in ipairs(BUILTIN_TYPE_NAMES) do
 			local typeInfo   = newTypeInfo(state, BUILTIN_TYPE_STRUCTS[typeName])
-			typeInfo.isReady = true
+			typeInfo.isReady = true -- No need to call markTypeAsReady() at this point. No usercode should be running.
 
 			state.builtinTypeInfos[typeName] = typeInfo
 			table.insert(state.allTypeInfos,                    typeInfo)
@@ -285,29 +311,41 @@ function _G.getTypeInfoForLambda(state, lambda)
 	local placeholderType       = lambda.polymorphs and state.builtinTypeInfos.placeholder           or nil
 	local placeholderTypeVararg = placeholderType   and getTypeInfoForVararg(state, placeholderType) or nil
 
+	local allAreReady = true
+
 	if argsIn then
 		for i, arg in ipairs(argsIn.arguments) do
-			funcSig.argumentTypesIn[i]
-				=   placeholderType
+			local typeInfo = (
+				placeholderType
 				and (arg.declaration.name.nodeType == !(AST_VARARG) and placeholderTypeVararg or placeholderType)
-				or  arg.declaration.inferredType
-				or  errorInternal(state, arg)
+				or  arg.declaration.inferredType or errorInternal(state, arg)
+			)
+			seeType(funcSig, typeInfo)
+			funcSig.argumentTypesIn[i] = typeInfo
+			allAreReady                = allAreReady and typeInfo.isReady
 		end
 	end
 	if argsOut then
 		for i, arg in ipairs(argsOut.arguments) do
-			funcSig.argumentTypesOut[i]
-				=   placeholderType
+			local typeInfo = (
+				placeholderType
 				and (arg.declaration.name.nodeType == !(AST_VARARG) and placeholderTypeVararg or placeholderType)
-				or  arg.declaration.inferredType
-				or  errorInternal(state, arg)
+				or  arg.declaration.inferredType or errorInternal(state, arg)
+			)
+			seeType(funcSig, typeInfo)
+			funcSig.argumentTypesOut[i] = typeInfo
+			allAreReady                 = allAreReady and typeInfo.isReady
 		end
 	end
 
 	table.insert(state.allTypeInfos,                        funcSig)
 	table.insert(state.allTypeInfosByTag[!(TYPE_FUNCTION)], funcSig)
 	byTagAndValue[typeInfoCachedLast or dumbHash] = funcSig
-	markTypeAsReady(state, funcSig)
+
+	if allAreReady then
+		markTypeAsReady(state, funcSig)
+	end
+
 	return funcSig
 end
 
@@ -320,9 +358,24 @@ do
 		local typeInfo = newTypeInfo(state, schematicForTypeInfo)
 		copyToArray(typeInfos, typeInfo)
 
+		seeMultipleTypes(typeInfo, typeInfos)
+
 		table.insert(state.allTypeInfos,           typeInfo)
 		table.insert(state.allTypeInfosByTag[tag], typeInfo)
-		markTypeAsReady(state, typeInfo)
+
+		local allAreReady = true
+
+		for _, itemType in ipairs(typeInfos) do
+			if not itemType.isReady then
+				allAreReady = false
+				break
+			end
+		end
+
+		if allAreReady then
+			markTypeAsReady(state, typeInfo)
+		end
+
 		return typeInfo
 	end
 
@@ -349,9 +402,15 @@ do
 		local typeInfo    = newTypeInfo(state, schematicForTypeInfo)
 		typeInfo.itemType = itemType or errorInternal()
 
+		seeType(typeInfo, itemType)
+
 		table.insert(state.allTypeInfos,           typeInfo)
 		table.insert(state.allTypeInfosByTag[tag], typeInfo)
-		markTypeAsReady(state, typeInfo)
+
+		if itemType.isReady then
+			markTypeAsReady(state, typeInfo)
+		end
+
 		return typeInfo
 	end
 
@@ -377,7 +436,9 @@ function _G.getTypeInfoForNamespace(state, scope)
 	table.insert(state.allTypeInfos,                         namespaceInfo)
 	table.insert(state.allTypeInfosByTag[!(TYPE_NAMESPACE)], namespaceInfo)
 	byTagAndValue[scope] = namespaceInfo
+
 	markTypeAsReady(state, namespaceInfo)
+
 	return namespaceInfo
 end
 
@@ -402,8 +463,8 @@ function _G.getTypeRepresentedByExpression(expr)
 	elseif nodeType == !(AST_BAKE) then
 		return expr.name.declaration.valueTypeInfo -- May be nil.
 
-	elseif expr.inferredType.tag == !(TYPE_TYPE) then
-		errorInternal("Incomplete: Unhandled node type: %s", getFriendlyTypeInfoName(expr.inferredType))
+	-- elseif expr.inferredType.tag == !(TYPE_TYPE) then
+	-- 	errorInternal("Incomplete: Unhandled type node type '%s'.", AST_NAMES[expr.nodeType]) -- (Good? Not sure. 2021-07-31)
 	else
 		return nil
 	end
@@ -1440,11 +1501,12 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 	end
 
 	if vararg then
-		typeInfo = getTypeInfoForVararg(state, typeInfo)
-
-		if vararg.surroundedByParentheses or not areMultipleValuesEnabledAtPosition(state, vararg) then
+		if vararg.surroundedByParentheses then
+			-- void
+		elseif not areMultipleValuesEnabledAtPosition(state, vararg) then
 			vararg.surroundedByParentheses = true
-			typeInfo                       = adjustTypeToOne(state, vararg, typeInfo, true)
+		else
+			typeInfo = getTypeInfoForVararg(state, typeInfo)
 		end
 	end
 
@@ -1656,8 +1718,11 @@ end
 		end
 	end
 
-	typeNode.representedType = typeInfoRepresented or errorInternal()
-	typeNode.inferredType    = typeInfo            or errorInternal()
+	!ASSERT `typeInfoRepresented`
+	!ASSERT `typeInfo`
+
+	typeNode.representedType = typeInfoRepresented
+	typeNode.inferredType    = typeInfo
 	typeNode.declaration     = decl
 	fulfillDependencies(state, typeNode.queued, !(DEPEND_HAS_DECLARATION))
 
@@ -1919,7 +1984,7 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnOrOther, value
 			local strictTypeMatch = false
 			!SET_STRICT_TYPE_MATCH_FLAG(`typeInfoIndex`)
 
-			isCompatible, compatibilityScore = isTypeCompatibleWith(valueTypeInfoAdjusted, typeInfoToMatchAdjusted, strictTypeMatch)
+			isCompatible, compatibilityScore = isTypeCompatibleWith(state, valueTypeInfoAdjusted, typeInfoToMatchAdjusted, strictTypeMatch, valueExpr)
 
 			if not isCompatible then
 				if softCheck then  return false, 0  end
@@ -1945,7 +2010,7 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnOrOther, value
 			local strictTypeMatch = false
 			!SET_STRICT_TYPE_MATCH_FLAG(`typeInfoIndex`)
 
-			isCompatible, compatibilityScore = isTypeCompatibleWith(valueTypeInfoAdjusted, typeInfoToMatchAdjusted, strictTypeMatch)
+			isCompatible, compatibilityScore = isTypeCompatibleWith(state, valueTypeInfoAdjusted, typeInfoToMatchAdjusted, strictTypeMatch, valueExpr)
 
 			if not isCompatible then
 				if softCheck then  return false, 0  end
@@ -1996,7 +2061,7 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnOrOther, value
 		local strictTypeMatch = false
 		!SET_STRICT_TYPE_MATCH_FLAG(`argIndex`)
 
-		local isCompatible, compatibilityScore = isTypeCompatibleWith(valueTypeInfoAdjusted, typeInfoToMatchAdjusted, strictTypeMatch)
+		local isCompatible, compatibilityScore = isTypeCompatibleWith(state, valueTypeInfoAdjusted, typeInfoToMatchAdjusted, strictTypeMatch, valueExpr)
 
 		if not isCompatible then
 			if softCheck then  return false, 0  end
@@ -2179,20 +2244,20 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 	assert(lambda.nodeType == !(AST_LAMBDA))
 
 	for _, statement in ipairs(lambda.statementsStatic) do
-		if statement.queued and statement.queued.pipe <= !(PIPE_INFER) then
-			!DEPEND_AND_RETURN(`call`, DEPEND_NODE_INFERRED, `statement`)
+		if statement.queued and statement.queued.pipe <= !(PIPE_READY) then
+			!DEPEND_AND_RETURN(`call`, DEPEND_NODE_PASSED_READY, `statement`)
 		end
 	end
 	for _, statement in ipairs(lambda.statementsDynamic) do
-		if statement.queued and statement.queued.pipe <= !(PIPE_INFER) then
-			!DEPEND_AND_RETURN(`call`, DEPEND_NODE_INFERRED, `statement`)
+		if statement.queued and statement.queued.pipe <= !(PIPE_READY) then
+			!DEPEND_AND_RETURN(`call`, DEPEND_NODE_PASSED_READY, `statement`)
 		end
 	end
 
 	!ASSERT `lambda.polymorphs`
 	for _, morphDecl in ipairs(lambda.polymorphs) do
-		if not morphDecl.inferredType then
-			!DEPEND_AND_RETURN(`call`, DEPEND_NODE_INFERRED, `morphDecl`)
+		if morphDecl.queued.pipe <= !(PIPE_READY) then
+			!DEPEND_AND_RETURN(`lambda`, DEPEND_NODE_PASSED_READY, `morphDecl`)
 		end
 	end
 
@@ -2825,9 +2890,12 @@ end
 
 	-- Wait for arguments.
 	for _, argExpr in ipairs(call.arguments) do
-		if not argExpr.inferredType then
-			!DEPEND_AND_RETURN(`call`, DEPEND_NODE_INFERRED, `argExpr`)
+		if argExpr.queued.pipe <= !(PIPE_READY) then
+			!DEPEND_AND_RETURN(`call`, DEPEND_NODE_PASSED_READY, `argExpr`)
 		end
+		-- if not argExpr.inferredType then
+		-- 	!DEPEND_AND_RETURN(`call`, DEPEND_NODE_INFERRED, `argExpr`)
+		-- end
 	end
 	for _, argNamed in ipairs(call.argumentsNamed) do
 		-- Only wait for the values.
@@ -3191,7 +3259,7 @@ end
 			if decl.assignment then
 				getAssignmentValue(state, identOrVararg, decl.assignment.values, decl.assignmentIndex, typeInfo, nil, nil)
 
-			elseif not isTypeCompatibleWith(valueType, typeInfo) then -- Note: No need to call adjustTypeToOne() for valueExpr.
+			elseif not isTypeCompatibleWith(state, valueType, typeInfo, false, valueExpr) then -- Note: No need to call adjustTypeToOne() for valueExpr.
 				-- @UX: Use the same error message as getAssignmentValue().
 				typeError(
 					state, valueExpr, "Value type mismatch for assignment target #%d. (Wanted %s, got %s)",
@@ -3341,7 +3409,7 @@ _G.!(local )!!BUILTIN_TYPE_TAG_TO_LITERAL_TYPE = {
 	end
 
 	if not typeInfo.isReady then
-		!DEPEND_AND_RETURN(`unary`, DEPEND_STRUCT_MEMBERS_READY, `typeInfo`) -- Needed when e.g. getting the length of array-like structs in some cases.
+		!DEPEND_AND_RETURN(`unary`, DEPEND_TYPE_READY, `typeInfo`) -- Needed when e.g. getting the length of array-like structs in some cases.  @Speed: Only wait when actually needed!
 	end
 
 	if unary.operation == "+" or unary.operation == "-" then
@@ -3563,27 +3631,78 @@ end
 -- memberName, memberValueType, constDecl = validateStructKey( state, dependent, keyExpr, structInfo, isLvalue )
 -- Returns nil on failure and the dependent is now waiting.
 function _G.validateStructKey(state, dependent, keyExpr, structInfo, isLvalue)
-	if not structInfo.isReady then
-		!DEPEND_AND_RETURN(`dependent`, DEPEND_STRUCT_MEMBERS_READY, `structInfo`, nil, `nil`)
-	end
-
 	local keyExprType = keyExpr.inferredType
 	local memberName  = ""
 	local memberValueType, constDecl
 
-	if structInfo.kind == !(STRUCT_KIND_TABLE) and (keyExprType.tag ~= !(TYPE_STRING) or structInfo.keyType.tag == !(TYPE_STRING)) then
-		if not isTypeCompatibleWith(keyExprType, structInfo.keyType) then
-			typeError(state, keyExpr, "Expected struct member name or %s. (Got %s)", getFriendlyTypeInfoName(structInfo.keyType), getFriendlyTypeInfoName(keyExprType))
+	if keyExprType.tag == !(TYPE_STRING) and keyExpr.nodeType == !(AST_LITERAL) then
+		local memberLiteral = keyExpr
+		memberName          = memberLiteral.value
+
+		local decl = findMemberDeclaration(state, structInfo.astNode, memberName)
+
+		if decl then
+			if isLvalue and isDeclarationConstant(decl) then
+				typeError2(state,
+					memberLiteral, F("Cannot assign value to constant struct member %s.%s.", getFriendlyTypeInfoName(structInfo), memberName),
+					decl,          F("...here is the declaration.")
+				)
+			end
+
+			memberValueType = decl.inferredType
+			if not memberValueType then
+				!DEPEND_AND_RETURN(`dependent`, DEPEND_NODE_INFERRED, `decl`, nil, `nil`)
+			end
+
+			if isDeclarationConstant(decl) then  constDecl = decl  end
+
+			return memberName, memberValueType, constDecl
 		end
+	end
+
+	!local STRUCT_ERROR_NO_SUCH_MEMBER = `
+	typeError2(state,
+		keyExpr,            F("%s has no member '%s'.", getFriendlyTypeInfoName(structInfo), memberName),
+		structInfo.astNode, F("...here is the accessed struct.")
+	)
+	`
+
+	if structInfo.kind == !(STRUCT_KIND_TABLE) then
+		if not structInfo.hasMembers then
+			!DEPEND_AND_RETURN(`dependent`, DEPEND_STRUCT_MEMBERS_READY, `structInfo`, nil, `nil`) --
+		elseif not isTypeCompatibleWith(state, keyExprType, structInfo.keyType, false, keyExpr) then
+			if memberName ~= "" then
+				!!(STRUCT_ERROR_NO_SUCH_MEMBER)
+			else
+				typeError(state, keyExpr, "Expected struct member name or %s. (Got %s)", getFriendlyTypeInfoName(structInfo.keyType), getFriendlyTypeInfoName(keyExprType))
+			end
+		end
+		memberName      = "" -- We know it's not a member at this point.
 		memberValueType = structInfo.valueType
 
-	elseif structInfo.kind == !(STRUCT_KIND_ARRAY) and keyExprType.tag ~= !(TYPE_STRING) then
+	elseif structInfo.kind == !(STRUCT_KIND_ARRAY) then
 		if keyExprType.tag ~= !(TYPE_INT) then
 			typeError(state, keyExpr, "Expected struct member name or array index. (Got %s)", getFriendlyTypeInfoName(keyExprType))
 		end
+		memberName      = "" -- We know it's not a member at this point.
 		memberValueType = structInfo.valueType
 
+	elseif memberName ~= "" then
+		if not structInfo.hasMembers then
+			-- This dependency should get fulfilled when hasMembers is set if
+			-- there's no appropriate declaration, so we can handle the
+			-- situation of table-like structs with string keys (or show a
+			-- better error message than when pipes get stuck).
+			!DEPEND_AND_RETURN(`dependent`, DEPEND_MEMBER_DECLARATION, `memberName`, `structInfo.astNode`, `nil`)
+		end
+		!!(STRUCT_ERROR_NO_SUCH_MEMBER)
+
+	elseif not structInfo.hasMembers then
+		!DEPEND_AND_RETURN(`dependent`, DEPEND_STRUCT_MEMBERS_READY, `structInfo`, nil, `nil`) -- Make sure structInfo.kind is fully known.
+
 	else
+		!ASSERT("structInfo.kind == "..STRUCT_KIND_NORMAL)
+
 		if keyExprType.tag ~= !(TYPE_STRING) then
 			typeError(
 				state, astGetExpressionVisuallyFurthestToTheLeft(keyExpr),
@@ -3593,26 +3712,11 @@ function _G.validateStructKey(state, dependent, keyExpr, structInfo, isLvalue)
 		elseif keyExpr.nodeType ~= !(AST_LITERAL) then
 			typeError(
 				state, astGetExpressionVisuallyFurthestToTheLeft(keyExpr),
-				"Member names for struct instances must be constant. (Type is string)"
+				"Member names for struct instances must be constant expressions. (Type is string)"
 			)
+		else
+			!!(STRUCT_ERROR_NO_SUCH_MEMBER)
 		end
-
-		local memberLiteral = keyExpr
-		memberName          = memberLiteral.value
-
-		local decl = findMemberDeclaration(state, structInfo.astNode, memberName)
-		if not decl then
-			!DEPEND_AND_RETURN(`dependent`, DEPEND_MEMBER_DECLARATION, `memberName`, `structInfo.astNode`, `nil`)
-		elseif isLvalue and isDeclarationConstant(decl) then
-			typeError(state, memberLiteral, "Cannot assign value to constant member %s.%s", getFriendlyTypeInfoName(structInfo), memberName)
-		end
-
-		memberValueType = decl.inferredType
-		if not memberValueType then
-			!DEPEND_AND_RETURN(`dependent`, DEPEND_NODE_INFERRED, `decl`, nil, `nil`)
-		end
-
-		if isDeclarationConstant(decl) then  constDecl = decl  end
 	end
 
 	return memberName, memberValueType, constDecl
@@ -4005,7 +4109,7 @@ local function validateIndiciesInArrayLikeConstructor(state, tableNode, itemType
 		-- void
 
 	elseif trailingExpr.nodeType == !(AST_VARARG) then
-		if not isTypeCompatibleWith(trailingExpr.inferredType.itemType, itemType) then
+		if not isTypeCompatibleWith(state, trailingExpr.inferredType.itemType, itemType, false, trailingExpr) then
 			typeError(
 				state, trailingExpr,
 				"Array item type mismatch for vararg. (Wanted %s, got %s)",
@@ -4021,7 +4125,7 @@ local function validateIndiciesInArrayLikeConstructor(state, tableNode, itemType
 		for i, argTypeInfo in ipairs(argTypesOut) do
 			argTypeInfo = adjustTypeToOne(state, call, argTypeInfo)
 
-			if not isTypeCompatibleWith(argTypeInfo, itemType) then
+			if not isTypeCompatibleWith(state, argTypeInfo, itemType, false, trailingExpr) then
 				typeError(
 					state, call,
 					"Array item type mismatch for return value #%d from call. (Wanted %s, got %s)",
@@ -4055,7 +4159,7 @@ local function inferTableArray(state, tableNode, arraySig)
 		local itemTypeInfo = itemExpr.inferredType
 
 		if itemTypeInfo then
-			if not isTypeCompatibleWith(adjustTypeToOne(state, itemExpr, itemTypeInfo, true), arraySig.itemType) then
+			if not isTypeCompatibleWith(state, adjustTypeToOne(state, itemExpr, itemTypeInfo, true), arraySig.itemType, false, itemExpr) then
 				typeError(
 					state, astGetExpressionVisuallyFurthestToTheLeft(itemExpr),
 					"Array item type mismatch. (Wanted %s, got %s)",
@@ -4111,7 +4215,7 @@ local function inferTableStruct(state, tableNode, structInfo)
 		local fieldValueType = fieldValue.inferredType
 
 		if fieldValueType then
-			if not isTypeCompatibleWith(adjustTypeToOne(state, fieldValue, fieldValueType, true), memberValueType) then
+			if not isTypeCompatibleWith(state, adjustTypeToOne(state, fieldValue, fieldValueType, true), memberValueType, false, fieldValue) then
 				typeError(
 					state, astGetExpressionVisuallyFurthestToTheLeft(fieldValue),
 					"Type mismatch for %s. (Wanted %s, got %s)",
@@ -4629,7 +4733,7 @@ end
 
 	elseif
 		-- Compatible types.
-		(exprTypeTag == !(TYPE_ANY) or isTypeCompatibleWith(exprType, castType))
+		(exprTypeTag == !(TYPE_ANY) or isTypeCompatibleWith(state, exprType, castType, false, expr))
 		-- float <-> int
 		or (isTypeNumeric(castType) and isTypeNumeric(exprType))
 		-- Struct to substruct.
@@ -5298,7 +5402,7 @@ end
 			-- void
 		elseif not isExpressionConstant(state, case.value, true) then
 			typeError(state, astGetExpressionVisuallyFurthestToTheLeft(case.value), "Case expression must be constant.")
-		elseif not isTypeCompatibleWith(case.value.inferredType, typeInfo) then
+		elseif not isTypeCompatibleWith(state, case.value.inferredType, typeInfo, false, case.value) then
 			typeError(
 				state, case.value,
 				"Case type mismatch. (Wanted %s, got %s)",
@@ -5526,7 +5630,7 @@ end
 							"Default iterators for structs must take exactly two values - the struct instance and a control value. (This returns %d)",
 							#iterTypeInfo.argumentTypesOut
 						)
-					elseif not isTypeCompatibleWith(structInfo, iterTypeInfo.argumentTypesIn[1]) then
+					elseif not isTypeCompatibleWith(state, structInfo, iterTypeInfo.argumentTypesIn[1], false, objExpr) then
 						typeError(
 							state, iterLambda.argumentsIn.arguments[1],
 							"The default iterator must take %s as the first argument. (This is %s)",
@@ -5660,7 +5764,7 @@ end
 				local stateExpr, stateTypeInfo = getAssignmentValue(state, forLoop, values, 2, nil, nil, "loop value", true)
 				local initExpr,  initTypeInfo  = getAssignmentValue(state, forLoop, values, 3, nil, nil, "loop value", true)
 
-				if stateExpr and not isTypeCompatibleWith(adjustTypeToOne(state, stateExpr, stateTypeInfo, true), iterArgsIn[1]) then
+				if stateExpr and not isTypeCompatibleWith(state, adjustTypeToOne(state, stateExpr, stateTypeInfo, true), iterArgsIn[1], false, stateExpr) then
 					typeError(
 						state, stateExpr,
 						"For loop: Type mismatch for iterator state (value #2). (Wanted %s, got %s)",
@@ -5668,7 +5772,7 @@ end
 						getFriendlyTypeInfoName(adjustTypeToOne(state, stateExpr, stateTypeInfo, true))
 					)
 				end
-				if initExpr and not isTypeCompatibleWith(adjustTypeToOne(state, initExpr, initTypeInfo, true), iterArgsIn[2]) then
+				if initExpr and not isTypeCompatibleWith(state, adjustTypeToOne(state, initExpr, initTypeInfo, true), iterArgsIn[2], false, initExpr) then
 					typeError(
 						state, initExpr,
 						"For loop: Type mismatch for initial control value (value #3). (Wanted %s, got %s)",
@@ -5839,14 +5943,17 @@ end
 		structInfo.astNode       = struct
 		-- structInfo.kind       = ?
 		structInfo.isPolymorphic = true
-		structInfo.hasMembers    = true -- Probably doesn't matter.
 
 		table.insert(state.allTypeInfos,                      structInfo)
 		table.insert(state.allTypeInfosByTag[!(TYPE_STRUCT)], structInfo)
-		markTypeAsReady(state, structInfo)
 
 		struct.representedType = structInfo
 		struct.inferredType    = state.builtinTypeInfos.Type
+
+		structInfo.hasMembers = true -- Probably doesn't matter.
+		fulfillDependencies(state, struct.queued, !(DEPEND_STRUCT_MEMBERS_READY))
+
+		markTypeAsReady(state, structInfo)
 
 		moveToNextRelevantPipe(state, struct)
 		return
@@ -5877,7 +5984,7 @@ end
 	-- Wait for explicit contents to infer.
 	for _, statement in ipairs(struct.statementsStatic) do
 		if statement.queued.pipe <= !(PIPE_INFER) then
-			!DEPEND_AND_RETURN(`struct`, DEPEND_NODE_INFERRED, `statement`)
+			!DEPEND_AND_RETURN(`struct`, DEPEND_NODE_INFERRED, `statement`) -- Shouldn't this be DEPEND_NODE_PASSED_INFER?
 		end
 	end
 	if struct.keyType and not struct.keyType.inferredType then
@@ -6017,6 +6124,8 @@ end
 	end
 
 	-- Add members to structInfo.
+	local allAreReady
+
 	for _, decl in ipairs(struct.declarations) do
 		if not isDeclarationConstant(decl) then
 			local memberName = decl.name.name
@@ -6026,6 +6135,9 @@ end
 			member.name     = memberName
 			member.typeInfo = memberType
 			table.insert(structInfo.members, member)
+			seeType(structInfo, memberType)
+
+			allAreReady = allAreReady and memberType.isReady
 
 			-- Make sure we never attempt to construct foreign values for members natively.
 			-- (There's also a check for this in ProgramWriter.)
@@ -6055,10 +6167,21 @@ end
 		end
 	end
 
-	structInfo.hasMembers = true
-	markTypeAsReady(state, structInfo)
+	if structInfo.keyType then
+		seeType(structInfo, structInfo.keyType)
+		allAreReady = allAreReady and structInfo.keyType.isReady
+	end
+	if structInfo.valueType then
+		seeType(structInfo, structInfo.valueType)
+		allAreReady = allAreReady and structInfo.valueType.isReady
+	end
 
+	structInfo.hasMembers = true
 	fulfillDependencies(state, struct.queued, !(DEPEND_STRUCT_MEMBERS_READY))
+
+	if allAreReady then
+		markTypeAsReady(state, structInfo)
+	end
 
 	if structInfo.keyType then
 		if (structInfo.members[1] or struct.declarations[1]) and (structInfo.keyType.tag == !(TYPE_STRING) or structInfo.keyType.tag == !(TYPE_ANY)) then
@@ -6127,7 +6250,7 @@ end
 			typeError(state, valueExpr, "Enum values cannot be foreign.")
 		elseif not isExpressionConstant(state, valueExpr, false) then
 			typeError(state, valueExpr, "Enum value is not constant.")
-		elseif not isTypeCompatibleWith(valueExpr.inferredType, enumMemberInfo) then
+		elseif not isTypeCompatibleWith(state, valueExpr.inferredType, enumMemberInfo, false, valueExpr) then
 			typeError(state, valueExpr,
 				"Value type mismatch for '%s'. (Wanted %s, got %s)",
 				decl.name.name,
@@ -6146,7 +6269,8 @@ end
 
 	table.insert(state.allTypeInfos,                    enumInfo)
 	table.insert(state.allTypeInfosByTag[!(TYPE_ENUM)], enumInfo)
-	markTypeAsReady(state, enumInfo)
+	seeType(enumInfo, enumMemberInfo)
+	markTypeAsReady(state, enumInfo) -- This is ok because the member type is always a built-in.
 
 	enum.representedType = enumInfo
 	enum.inferredType    = state.builtinTypeInfos.Type
@@ -6886,7 +7010,7 @@ function _G.getAssignmentValue(state, targetExpr, values, i, typeInfoExpected, b
 
 	local _CHECK_TYPE_COMPATABILITY_AND_MAYBE_RETURN = `
 		if binOp == "" then
-			if isTypeCompatibleWith($valueTypeInfoAdjusted, typeInfoExpected) then  return $valueExpr, $valueTypeInfo  end
+			if isTypeCompatibleWith(state, $valueTypeInfoAdjusted, typeInfoExpected, false, $valueExpr) then  return $valueExpr, $valueTypeInfo  end
 
 		else
 			$valueTypeInfoAdjusted = checkBinaryOperation(
@@ -6898,12 +7022,13 @@ function _G.getAssignmentValue(state, targetExpr, values, i, typeInfoExpected, b
 				true
 			) or errorInternal()
 
-			if not isTypeCompatibleWith($valueTypeInfoAdjusted, typeInfoExpected) then
+			if not isTypeCompatibleWith(state, $valueTypeInfoAdjusted, typeInfoExpected, false, $valueExpr) then
 				typeError(
 					state, targetExpr,
 					"Type mismatch between %s #%d%s (%s) and result of binary operation (%s) (%s).",
 					targetTerm, i, $targetName, getFriendlyTypeInfoName(typeInfoExpected),
-					binOp, getFriendlyTypeInfoName($valueTypeInfoAdjusted))
+					binOp, getFriendlyTypeInfoName($valueTypeInfoAdjusted)
+				)
 			end
 
 			return $valueExpr, $valueTypeInfo
@@ -7084,7 +7209,7 @@ function _G.simplifyTypeExpression(state, expr, typeRepresented)
 	!ASSERT("expr.nodeType ~= "..AST_TYPE)
 	!ASSERT("typeRepresented")
 
-	if isTypeOrDoesTypeContainPlaceholder(typeRepresented) then  return nil  end
+	if isTypeOrDoesTypeContainPlaceholder(typeRepresented) then  return  end
 
 	local typeNode = createTypeNodeFromInfo(state, typeRepresented, expr, expr.parent)
 
@@ -7187,7 +7312,7 @@ local function simplifyCast(state, cast)
 		moveToNextRelevantPipe(state, literal, !(PIPE_INFER))
 
 	-- enum -> enumMemberType (int, float, string, bool or Type)
-	elseif exprTypeInfo.tag == !(TYPE_ENUM) and isTypeCompatibleWith(exprTypeInfo.memberTypeInfo, castTypeInfo) then
+	elseif exprTypeInfo.tag == !(TYPE_ENUM) and isTypeCompatibleWith(state, exprTypeInfo.memberTypeInfo, castTypeInfo, false, cast.expression) then
 		local castIsDirect = (castTypeInfo == exprTypeInfo.memberTypeInfo)
 
 		local enumInfo = exprTypeInfo
@@ -7593,12 +7718,17 @@ function _G.isTypePublic(typeInfo)
 	return true
 end
 
--- isCompatible, compatibilityScore = isTypeCompatibleWith( typeToCheck, otherType [, strictTypeMatch=false ] )
+-- isCompatible, compatibilityScore = isTypeCompatibleWith( state, typeToCheck, otherType, strictTypeMatch, nodeForError )
 --
 -- strictTypeMatch ought to be set for arguments of morphed polymorphic functions that were baked or came from a placeholder argument.
 -- (Not sure if the baked state matter - maybe just the placeholder state.)
 --
-function _G.isTypeCompatibleWith(typeToCheck, otherType, strictTypeMatch)
+function _G.isTypeCompatibleWith(state, typeToCheck, otherType, strictTypeMatch, nodeForError)
+	!ASSERT `type(typeToCheck)     == "table"`
+	!ASSERT `type(otherType)       == "table"`
+	!ASSERT `type(strictTypeMatch) == "boolean"`
+	!ASSERT `type(nodeForError)    == "table"`
+
 	!local SCORE = 0x10000
 	if typeToCheck == otherType then  return true, !(SCORE)  end
 
@@ -7638,7 +7768,7 @@ function _G.isTypeCompatibleWith(typeToCheck, otherType, strictTypeMatch)
 			-- All compound items has to match the target. (If only one item matches, an explicit cast is needed.)
 			local compoundToCheck = typeToCheck
 			for _, compoundItemToCheck in ipairs(compoundToCheck) do
-				if not isTypeCompatibleWith(compoundItemToCheck, otherType, false) then  return false, 0  end
+				if not isTypeCompatibleWith(state, compoundItemToCheck, otherType, false, nodeForError) then  return false, 0  end
 			end
 			return true, !(SCORE)
 		end
@@ -7648,7 +7778,7 @@ function _G.isTypeCompatibleWith(typeToCheck, otherType, strictTypeMatch)
 			-- typeToCheck has to match at least one compound item.
 			local otherCompound = otherType
 			for _, otherCompoundItem in ipairs(otherCompound) do
-				if isTypeCompatibleWith(typeToCheck, otherCompoundItem, false) then  return true, !(SCORE)  end
+				if isTypeCompatibleWith(state, typeToCheck, otherCompoundItem, false, nodeForError) then  return true, !(SCORE)  end
 			end
 			return false, 0
 		end
@@ -7657,10 +7787,22 @@ function _G.isTypeCompatibleWith(typeToCheck, otherType, strictTypeMatch)
 	-- Array compatability completely depends on the item type.
 	if otherType.tag == !(TYPE_ARRAY) then
 		if typeToCheck.tag == !(TYPE_ARRAY) then
-			return isTypeCompatibleWith(typeToCheck.itemType, otherType.itemType, strictTypeMatch)
+			!if DEBUG then
+				if not typeToCheck.itemType then  errorInternal(state, nodeForError, getFriendlyTypeInfoName(typeToCheck))  end
+				if not otherType.itemType   then  errorInternal(state, nodeForError, getFriendlyTypeInfoName(otherType))    end
+			!end
+			!ifDEBUG `local isCompatible, compatibilityScore = isTypeCompatibleWith(state, typeToCheck.itemType, otherType.itemType, strictTypeMatch, nodeForError) ; return isCompatible, compatibilityScore`
+			!ifNotDEBUG                                `return isTypeCompatibleWith(state, typeToCheck.itemType, otherType.itemType, strictTypeMatch, nodeForError)`
+
 		elseif typeToCheck.tag == !(TYPE_STRUCT) and typeToCheck.kind == !(STRUCT_KIND_ARRAY) then -- We allow array-like structs even if strictTypeMatch is set.
-			return isTypeCompatibleWith(typeToCheck.valueType, otherType.itemType, strictTypeMatch)
+			!if DEBUG then
+				if not typeToCheck.valueType then  errorInternal(state, nodeForError, getFriendlyTypeInfoName(typeToCheck))  end
+				if not otherType.itemType    then  errorInternal(state, nodeForError, getFriendlyTypeInfoName(otherType))    end
+			!end
+			!ifDEBUG `local isCompatible, compatibilityScore = isTypeCompatibleWith(state, typeToCheck.valueType, otherType.itemType, strictTypeMatch, nodeForError) ; return isCompatible, compatibilityScore`
+			!ifNotDEBUG                                `return isTypeCompatibleWith(state, typeToCheck.valueType, otherType.itemType, strictTypeMatch, nodeForError)`
 		end
+
 		return false, 0
 	end
 

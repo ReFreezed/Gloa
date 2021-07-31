@@ -24,6 +24,7 @@
 	- toLua, serialize
 	Only during processing:
 	- getCurrentPathIn, getCurrentPathOut
+	- getOutputSoFar, getOutputSizeSoFar, getCurrentLineNumberInOutput
 	- outputValue, outputLua, outputLuaTemplate
 	Search this file for 'EnvironmentTable' for more info.
 
@@ -201,7 +202,7 @@ local _concatTokens
 local _tokenize
 local assertarg
 local cleanError
-local copyTable
+local copyArray, copyTable
 local countString, countSubString
 local errorf, errorLine, errorfLine, errorOnLine, errorInFile, errorAtToken, errorAfterToken
 local errorIfNotRunningMeta
@@ -1089,6 +1090,14 @@ end
 
 
 
+function copyArray(t)
+	local copy = {}
+	for i, v in ipairs(table_name) do
+		copy[i] = v
+	end
+	return copy
+end
+
 -- copy = copyTable( table [, deep=false ] )
 do
 	local function deepCopy(t, copy, tableCopies)
@@ -1442,6 +1451,46 @@ function metaFuncs.outputLuaTemplate(lua, ...)
 	end)
 
 	tableInsert(outputFromMeta, lua)
+end
+
+-- getOutputSoFar()
+--   Get Lua code that's been outputted so far.
+--   output = getOutputSoFar( [ asTable=false ] )
+--   If asTable is false then the full Lua code string is returned.
+--   If asTable is true then an array of Lua code segments is returned. (This avoids allocating, possibly large, strings.)
+function metaFuncs.getOutputSoFar(asTable)
+	errorIfNotRunningMeta(2)
+	return asTable and copyArray(outputFromMeta) or table.concat(outputFromMeta)
+end
+
+-- getOutputSizeSoFar()
+--   Get the amount of bytes outputted so far.
+--   size = getOutputSizeSoFar( )
+function metaFuncs.getOutputSizeSoFar()
+	errorIfNotRunningMeta(2)
+
+	local size = 0
+
+	for _, lua in ipairs(outputFromMeta) do
+		size = size + #lua
+	end
+
+	return size
+end
+
+-- getCurrentLineNumberInOutput()
+--   Get the current line number in the output.
+--   lineNumber = getCurrentLineNumberInOutput( )
+function metaFuncs.getCurrentLineNumberInOutput()
+	errorIfNotRunningMeta(2)
+
+	local ln = 1
+
+	for _, lua in ipairs(outputFromMeta) do
+		ln = ln + countString(lua, "\n", true)
+	end
+
+	return ln
 end
 
 -- getCurrentPathIn()
@@ -2495,7 +2544,7 @@ local function _processFileOrString(params, isFile)
 		local luaMeta
 
 		if isDebug then
-			luaMeta = F("__LUA(%q)\n", lua):gsub("\n", "n")
+			luaMeta = F("__LUA(%q)\n", lua):gsub("\\\n", "\\n")
 		else
 			luaMeta = F("__LUA%q", lua)
 		end

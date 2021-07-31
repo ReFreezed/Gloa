@@ -1,0 +1,164 @@
+--[[============================================================
+--=
+--=  Type-ready pipe stuff
+--=  Here we wait for types to be, or make them, ready!
+--=
+--=-------------------------------------------------------------
+--=
+--=  Glóa - a language that compiles into Lua
+--=  by Marcus 'ReFreezed' Thunström
+--=
+--==============================================================
+
+	handleTypeReadyPipe
+
+--============================================================]]
+!recordLineNumber(@file, @line)
+
+
+
+function _G.handleTypeReadyPipe(state, node)
+	local typeInfo = node.inferredType
+
+	--
+	-- Nodes.
+	--
+
+	if node.nodeType == !(AST_STRUCT) then
+		local struct     = node
+		local structInfo = struct.representedType
+
+		for _, member in ipairs(structInfo.members) do
+			if not member.typeInfo.isReady and not member.typeInfo.seen[structInfo] then
+				!DEPEND_AND_RETURN(`struct`, DEPEND_TYPE_READY, `member.typeInfo`)
+			end
+		end
+
+		if structInfo.keyType and not structInfo.keyType.isReady and not structInfo.keyType.seen[structInfo] then
+			!DEPEND_AND_RETURN(`struct`, DEPEND_TYPE_READY, `structInfo.keyType`)
+		end
+		if structInfo.valueType and not structInfo.valueType.isReady and not structInfo.valueType.seen[structInfo] then
+			!DEPEND_AND_RETURN(`struct`, DEPEND_TYPE_READY, `structInfo.valueType`)
+		end
+
+		markTypeAsReady(state, structInfo)
+		moveToNextRelevantPipe(state, struct)
+
+	elseif node.nodeType == !(AST_TYPE) then
+		local typeNode = node
+		local typeInfo = typeNode.representedType
+
+		if typeNode.kind == !(TYPE_KIND_SIMPLE_BUILTIN) then
+			moveToNextRelevantPipe(state, typeNode)
+
+		elseif typeNode.kind == !(TYPE_KIND_USER) then
+			if not typeInfo.isReady then
+				!DEPEND_AND_RETURN(`typeNode`, DEPEND_TYPE_READY, `typeInfo`)
+			end
+
+			moveToNextRelevantPipe(state, typeNode)
+
+		elseif typeNode.kind == !(TYPE_KIND_FUNCTION) then -- Extra data: Function signature.
+			local funcSig = typeInfo
+			if funcSig.isReady then
+				moveToNextRelevantPipe(state, typeNode)
+				return
+			end
+
+			for _, argTypeInfo in ipairs(funcSig.argumentTypesIn) do
+				if not argTypeInfo.isReady and not argTypeInfo.seen[funcSig] then
+					!DEPEND_AND_RETURN(`typeNode`, DEPEND_TYPE_READY, `argTypeInfo`)
+				end
+			end
+			for _, argTypeInfo in ipairs(funcSig.argumentTypesOut) do
+				if not argTypeInfo.isReady and not argTypeInfo.seen[funcSig] then
+					!DEPEND_AND_RETURN(`typeNode`, DEPEND_TYPE_READY, `argTypeInfo`)
+				end
+			end
+
+			markTypeAsReady(state, funcSig)
+			moveToNextRelevantPipe(state, typeNode)
+
+		elseif typeNode.kind == !(TYPE_KIND_ARRAY) then -- Extra data: Item type.
+			if typeInfo.isReady then
+				moveToNextRelevantPipe(state, typeNode)
+				return
+			end
+			if not typeInfo.itemType.isReady and not typeInfo.itemType.seen[typeInfo] then
+				!DEPEND_AND_RETURN(`typeNode`, DEPEND_TYPE_READY, `typeInfo.itemType`)
+			end
+
+			markTypeAsReady(state, typeInfo)
+			moveToNextRelevantPipe(state, typeNode)
+
+		elseif typeNode.kind == !(TYPE_KIND_COMPOUND) then -- Extra data: Types.
+			local compoundOrListSig = typeInfo
+			if compoundOrListSig.isReady then
+				moveToNextRelevantPipe(state, typeNode)
+				return
+			end
+
+			for _, itemType in ipairs(compoundOrListSig) do
+				if not itemType.isReady and not itemType.seen[compoundOrListSig] then
+					!DEPEND_AND_RETURN(`typeNode`, DEPEND_TYPE_READY, `itemType`)
+				end
+			end
+
+			markTypeAsReady(state, compoundOrListSig)
+			moveToNextRelevantPipe(state, typeNode)
+
+		else
+			errorInternal(state, typeNode, typeNode.kind)
+		end
+
+	--
+	-- Types.
+	--
+
+	-- Type marked ready from elsewhere.
+	elseif typeInfo.isReady then
+		moveToNextRelevantPipe(state, node)
+
+	elseif typeInfo.tag == !(TYPE_ARRAY) or typeInfo.tag == !(TYPE_VARARG) then
+		if not typeInfo.itemType.isReady and not typeInfo.itemType.seen[typeInfo] then
+			!DEPEND_AND_RETURN(`node`, DEPEND_TYPE_READY, `typeInfo.itemType`)
+		end
+
+		markTypeAsReady(state, typeInfo)
+		moveToNextRelevantPipe(state, node)
+
+	elseif typeInfo.tag == !(TYPE_COMPOUND) or typeInfo.tag == !(TYPE_LIST) then
+		local compoundOrListSig = typeInfo
+
+		for _, itemType in ipairs(compoundOrListSig) do
+			if not itemType.isReady and not itemType.seen[compoundOrListSig] then
+				!DEPEND_AND_RETURN(`node`, DEPEND_TYPE_READY, `itemType`)
+			end
+		end
+
+		markTypeAsReady(state, compoundOrListSig)
+		moveToNextRelevantPipe(state, node)
+
+	elseif typeInfo.tag == !(TYPE_FUNCTION) then
+		local funcSig = typeInfo
+
+		for _, argTypeInfo in ipairs(funcSig.argumentTypesIn) do
+			if not argTypeInfo.isReady and not argTypeInfo.seen[funcSig] then
+				!DEPEND_AND_RETURN(`node`, DEPEND_TYPE_READY, `argTypeInfo`)
+			end
+		end
+		for _, argTypeInfo in ipairs(funcSig.argumentTypesOut) do
+			if not argTypeInfo.isReady and not argTypeInfo.seen[funcSig] then
+				!DEPEND_AND_RETURN(`node`, DEPEND_TYPE_READY, `argTypeInfo`)
+			end
+		end
+
+		markTypeAsReady(state, funcSig)
+		moveToNextRelevantPipe(state, node)
+
+	else
+		!DEPEND_AND_RETURN(`node`, DEPEND_TYPE_READY, `typeInfo`)
+	end
+end
+
+

@@ -16,6 +16,8 @@
 	maybeWriteProgram
 
 --============================================================]]
+!recordLineNumber(@file, @line)
+
 !(
 local VERSION = "0.1.0"
 
@@ -34,17 +36,12 @@ Options:
 
 local DISABLE_STDOUT_BUFFER = 1==1 -- Note: Slows down all printing.
 
-local EXTRA_STATS                  = 1==0 -- Pipe cycles and more.
-local COUNT_LOC_PER_FILE           = 1==0
-local COUNT_TOKEN_REUSES           = 1==0
-local FUNCTION_TO_MEASURE_CALLS_ON = ""--`inferIdentifierOrVararg` -- Also see profiler*() in functions.luapart. (The two features are not compatible.)
+local EXTRA_STATS                  = DEBUG and 1==0 -- Pipe cycles and more.
+local COUNT_LOC_PER_FILE           = DEBUG and 1==0
+local COUNT_TOKEN_REUSES           = DEBUG and 1==0
+local FUNCTION_TO_MEASURE_CALLS_ON = not DEBUG and "" or ""--`inferIdentifierOrVararg` -- Also see profiler*() in functions.luapart. (The two features are not compatible.)
 
-if not DEBUG then
-	EXTRA_STATS                  = false
-	COUNT_LOC_PER_FILE           = false
-	COUNT_TOKEN_REUSES           = false
-	FUNCTION_TO_MEASURE_CALLS_ON = ""
-end
+local DEBUG_MAX_CYCLES = 50--1000
 )
 
 local args = arg
@@ -77,8 +74,7 @@ do
 	setfenv(1, compilerEnvironment)
 end
 
-local gotCriticalError = false
-local allStates        = {}
+local allStates = {}
 
 local loaders = {
 	!-- We want the resulting Glóa compiler to be a single file, so we use @insert instead of requiring modules here. Note: The order matters!
@@ -89,12 +85,14 @@ local loaders = {
 	function() !(do) @insert "parser.luapart" !(end) end,
 	function() !(do) @insert "pipes.luapart" !(end) end,
 	function() !(do) @insert "typer.luapart" !(end) end,
+	function() !(do) @insert "ready.luapart" !(end) end,
 	function() !(do) @insert "emitter.luapart" !(end) end,
 	function() !(do) @insert "runner.luapart" !(end) end,
 	function() !(do) @insert "messenger.luapart" !(end) end,
 	function() !(do) @insert "compilerApi.luapart" !(end) end,
 	function() !(do) @insert "programWriter.luapart" !(end) end,
 }
+!recordLineNumber(@file, @line)
 
 local function runCompiler()
 	!if DISABLE_STDOUT_BUFFER then
@@ -402,7 +400,7 @@ local function runCompiler()
 		state.settings          = settings
 
 		!if DEBUG then
-			if debug_onlyInferTypes then  state.finalPipe = !(PIPE_INFER)  end
+			if debug_onlyInferTypes then  state.finalPipe = !(PIPE_READY)  end
 		!end
 
 		table.insert(allStates, state)
@@ -462,6 +460,7 @@ local function runCompiler()
 
 		local insert              = table.insert
 		local inferNode           = inferNode
+		local handleTypeReadyPipe = handleTypeReadyPipe
 		local emitNode            = emitNode
 		local fulfillDependencies = fulfillDependencies
 
@@ -526,7 +525,12 @@ local function runCompiler()
 					elseif queued.pipe > !(PIPE_EMIT) then
 						fulfillDependencies(state, queued, !(DEPEND_NODE_INFERRED))
 						fulfillDependencies(state, queued, !(DEPEND_NODE_PASSED_INFER))
+						fulfillDependencies(state, queued, !(DEPEND_NODE_PASSED_READY))
 						fulfillDependencies(state, queued, !(DEPEND_NODE_PASSED_EMIT))
+					elseif queued.pipe > !(PIPE_READY) then
+						fulfillDependencies(state, queued, !(DEPEND_NODE_INFERRED))
+						fulfillDependencies(state, queued, !(DEPEND_NODE_PASSED_INFER))
+						fulfillDependencies(state, queued, !(DEPEND_NODE_PASSED_READY))
 					elseif queued.pipe > !(PIPE_INFER) then
 						fulfillDependencies(state, queued, !(DEPEND_NODE_INFERRED))
 						fulfillDependencies(state, queued, !(DEPEND_NODE_PASSED_INFER))
@@ -545,11 +549,32 @@ local function runCompiler()
 					end
 					--]]
 
+					!if DEBUG and 1==0 then
+						if queued.pipe == !(PIPE_INFER) and queued.node.inferredType and not queued.node.inferredType.isReady then
+							where(state, queued.node, "Not ready!")
+						end
+					!end
+
+				elseif queued.pipe == !(PIPE_READY) then
+					!!(DID_SOMETHING)
+					handleTypeReadyPipe(state, queued.node)
+
+					if not (queued.waiters and queued.waiters[1]) then
+						-- void
+					elseif queued.pipe > !(PIPE_EMIT) then
+						fulfillDependencies(state, queued, !(DEPEND_NODE_PASSED_READY))
+						fulfillDependencies(state, queued, !(DEPEND_NODE_PASSED_EMIT))
+					elseif queued.pipe > !(PIPE_READY) then
+						fulfillDependencies(state, queued, !(DEPEND_NODE_PASSED_READY))
+					end
+
 				elseif queued.pipe == !(PIPE_EMIT) then
 					!!(DID_SOMETHING)
 					emitNode(state, queued.node)
 
-					if queued.pipe > !(PIPE_EMIT) then
+					if not (queued.waiters and queued.waiters[1]) then
+						-- void
+					elseif queued.pipe > !(PIPE_EMIT) then
 						fulfillDependencies(state, queued, !(DEPEND_NODE_PASSED_EMIT))
 					end
 				end
@@ -618,19 +643,22 @@ local function runCompiler()
 				`
 
 				if dependType == !(DEPEND_DECLARATION) then
-					if dependency.extraData then
-						if findPublicDeclarationInScope(state, dependency.extraData, dependency.dependOn) then
+					if dependency.extraData--[[scope]] then
+						if findPublicDeclarationInScope(state, dependency.extraData--[[scope]], dependency.dependOn--[[name]]) then
 							!!(DEPENDENCY_FULFILLED)
 						end
 					else
 						-- @Speed: Only call findDeclaration() if it's reported that a declaration with the awaited name has been added to the tree.
-						if findDeclaration(state, queued.node, dependency.dependOn) then
+						if findDeclaration(state, queued.node, dependency.dependOn--[[name]]) then
 							!!(DEPENDENCY_FULFILLED)
 						end
 					end
 				elseif dependType == !(DEPEND_MEMBER_DECLARATION) then
-					if findMemberDeclaration(state, dependency.extraData, dependency.dependOn) then
+					local scope = dependency.extraData
+					if findMemberDeclaration(state, scope, dependency.dependOn--[[name]]) then
 						!!(DEPENDENCY_FULFILLED)
+					elseif scope.nodeType == !(AST_STRUCT) and scope.representedType and scope.representedType.hasMembers then
+						!!(DEPENDENCY_FULFILLED) -- This should eventually lead to an error if the struct isn't table-like with string keys.
 					end
 
 				elseif dependType == !(DEPEND_HAS_DECLARATION) then
@@ -648,8 +676,17 @@ local function runCompiler()
 						!!(DEPENDENCY_FULFILLED)
 					end
 
+				elseif dependType == !(DEPEND_TYPE_READY) then
+					if dependency.dependOn.isReady then
+						!!(DEPENDENCY_FULFILLED)
+					end
 				elseif dependType == !(DEPEND_STRUCT_MEMBERS_READY) then
 					if dependency.dependOn.hasMembers then
+						!!(DEPENDENCY_FULFILLED)
+					end
+
+				elseif dependType == !(DEPEND_NODE_PASSED_READY) then
+					if dependency.dependOn.pipe > !(PIPE_READY) then
 						!!(DEPENDENCY_FULFILLED)
 					end
 
@@ -683,7 +720,7 @@ local function runCompiler()
 
 		!if DEBUG then
 			-- Guard against an infinite loop.
-			if state.pipeCycles == 1000 then  errorPipesAreInfiniteLooping(state, !!(FINAL_PIPE))  end
+			if state.pipeCycles == !(DEBUG_MAX_CYCLES) then  errorPipesAreInfiniteLooping(state, !!(FINAL_PIPE))  end
 		!end
 
 		return false
@@ -966,6 +1003,8 @@ local function runCompiler()
 	exit()
 end
 
+local gotCriticalError = false
+
 -- compilerErrorHandler( err [, level=1 ] )
 function _G.compilerErrorHandler(err, level)
 	level = (level or 1)+1
@@ -981,10 +1020,16 @@ function _G.compilerErrorHandler(err, level)
 	local line1        = traceback:match"\n(\t[^\n]*)"
 	local isInUserCode = false
 
+	-- Is the error in user code?
 	if line1 then
-		local luaLocation, filepath, ln, message = line1:match"^\t(([^:]+):(%d+)): (.+)"
+		!local linePat1 = "^\t((?[^:]+):(%d+)): (.+)"
+		!local linePat2 = "^\t((%a:?[^:]+):(%d+)): (.+)"
 
-		local state = itemWith1(allStates, "runnerPath", filepath)
+		local                 luaLocation, filepath, ln, message = line1:match!(linePat1)
+		if not filepath then  luaLocation, filepath, ln, message = line1:match!(linePat2)  end
+
+		local state = filepath and itemWith1(allStates, "runnerPath", filepath)
+
 		if state then
 			local lineMappings = state.runnerLineMappings
 			ln                 = tonumber(ln)
@@ -992,15 +1037,18 @@ function _G.compilerErrorHandler(err, level)
 		end
 	end
 
-	io.stderr:write("\n")
-
+	-- Print message.
 	local lastWasIsCompiler = false
 
-	for line in traceback:gmatch"[^\n]+" do
-		local luaLocation, filepath, ln, message = line:match"^\t(([^:]+):(%d+)): (.+)"
-		local written = false
+	io.stderr:write("\n")
 
-		local state = itemWith1(allStates, "runnerPath", filepath)
+	for line in traceback:gmatch"[^\n]+" do
+		local                 luaLocation, filepath, ln, message = line:match!(linePat1)
+		if not filepath then  luaLocation, filepath, ln, message = line:match!(linePat2)  end
+
+		local written = false
+		local state   = filepath and itemWith1(allStates, "runnerPath", filepath)
+
 		if state then
 			local lineMappings = state.runnerLineMappings
 			ln                 = tonumber(ln)
@@ -1023,6 +1071,13 @@ function _G.compilerErrorHandler(err, level)
 			lastWasIsCompiler = false
 
 		elseif not (isInUserCode and line:find"^\t") then
+			!if DEBUG and 1==1 then
+				if filepath == COMPILER_PATH then
+					ln           = tonumber(ln)
+					filepath, ln = tryToFixLocationForCompilerError(filepath, ln)
+					line         = F("\t%s:%d: %s", filepath, ln, message)
+				end
+			!end
 			io.stderr:write(line, "\n")
 			lastWasIsCompiler = false
 
@@ -1036,6 +1091,10 @@ function _G.compilerErrorHandler(err, level)
 	io.stderr:write("\n")
 	exit(1) -- Don't use exitFailure()! :ExitFailureOverride
 end
+
+!if DEBUG then
+	_G.compilerLineNumbers = !(getLineNumbers())
+!end
 
 -- runCompiler() -- DEBUG
 local ok = xpcall(runCompiler, compilerErrorHandler)

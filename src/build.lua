@@ -59,6 +59,7 @@ exec lua "$0" "$@"
 --=  - No forward declarations.
 --=
 --============================================================]]
+
 ]====]
 
 local buildStartTime = os.clock()
@@ -148,6 +149,26 @@ end
 local postInserts = {}
 function pp.metaEnvironment.preprocessorOutputAtDuringPost(label, lua)
 	postInserts[label] = lua
+end
+
+local compilerLineNumbers = {--[[ { sourcePath=path, sourceLine=lineNumber, outputLine=lineNumber }, ... ]]}
+function pp.metaEnvironment.recordLineNumber(path, ln)
+	if not path:find("/", 1, true) then
+		path = "src/"..path
+	end
+	table.insert(compilerLineNumbers, {
+		sourcePath  = path,
+		sourceLine  = ln,
+		outputLine  = pp.getCurrentLineNumberInOutput(),
+		-- metaLine = debug.getinfo(2, "l").currentline,
+	})
+end
+function pp.metaEnvironment.getLineNumbers() -- Must only be called once!
+	local headerLineCount = select(2, COMPILER_HEADER:gsub("\n", "%0")) + 1
+	for _, lnInfo in ipairs(compilerLineNumbers) do
+		lnInfo.outputLine = headerLineCount + #luaSegments + lnInfo.outputLine -- Assume one extra line per luaSegment.
+	end
+	return compilerLineNumbers
 end
 
 local function profilerMaybeModifyFunction(func, name)
@@ -318,12 +339,15 @@ local function maybeAddProfilerStuff(lua)
 	return lua
 end
 
-assert(pp.processFile{
+local pathMeta = pathGloaOut:gsub("%.%w+$", ".meta%0")
+
+local lua = assert(pp.processFile{
 	pathIn          = DIR_HERE.."/main.lua2p",
 	pathOut         = pathGloaOut,
-	pathMeta        = pathGloaOut:gsub("%.%w+$", ".meta%0"),
+	pathMeta        = pathMeta,
 
-	debug           = false,
+	debug           = debugMode and 1==0,
+	addLineNumbers  = debugMode and 1==1,
 	backtickStrings = true,
 	canOutputNil    = false,
 
@@ -343,7 +367,7 @@ assert(pp.processFile{
 
 		lua = maybeAddProfilerStuff(lua)
 
-		return COMPILER_HEADER.."\n"..lua
+		return COMPILER_HEADER .. lua
 	end,
 
 	onError = function(err)
