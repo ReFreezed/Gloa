@@ -1752,6 +1752,26 @@ local function getArgumentNodeForError(callOrReturnOrOther, valueIndex, valueExp
 		or  astGetExpressionVisuallyFurthestToTheLeft(valueExpr)
 end
 
+-- wantEnumAndGotLiteralOfCorrectType, isCompatible, compatibilityScore = checkForLiteralVsEnumSituation( valueExpression, valueTypeInfo, typeInfoToMatch )
+local function checkForLiteralVsEnumSituation(valueExpr, valueTypeInfo, typeInfoToMatch)
+	if typeInfoToMatch.tag ~= !(TYPE_ENUM)   then  return false, false, 0  end
+	if valueExpr.nodeType  ~= !(AST_LITERAL) then  return false, false, 0  end
+
+	-- No need to call isTypeCompatibleWith() because enum member types are always simple, and we don't want e.g. Type to cast to int.
+	if valueTypeInfo ~= typeInfoToMatch.memberTypeInfo then  return false, false, 0  end
+
+	for _, decl in ipairs(typeInfoToMatch.astNode.declarations) do
+		!ASSERT("decl.value.nodeType == "..AST_LITERAL)
+
+		if decl.value.value == valueExpr.value then
+			-- typeError2(state, valueExpr, "This!", decl.value, "It's this!") -- DEBUG
+			return true, true, !(0x10000-1) -- The score is slightly lower than an exact type match.
+		end
+	end
+
+	return true, false, 0
+end
+
 -- doesMatch, compatibilityScore = checkIfValuesMatchArgumentTypes(
 --     state, callOrReturnOrOther, values, valueTypes, typeInfos,
 --     softCheck, calleeDeclarationForCurrentOverload=nil, argumentsNamed=nil
@@ -2028,17 +2048,29 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnOrOther, value
 
 			isCompatible, compatibilityScore = isTypeCompatibleWith(state, valueTypeInfoAdjusted, typeInfoToMatchAdjusted, strictTypeMatch, valueExpr)
 
+			local wantEnumAndGotLiteralOfCorrectType = false
+			if not isCompatible then
+				wantEnumAndGotLiteralOfCorrectType, isCompatible, compatibilityScore = checkForLiteralVsEnumSituation(valueExpr, valueTypeInfo, typeInfoToMatchAdjusted)
+			end
+
 			if not isCompatible then
 				if softCheck then  return false, 0  end
 				!ifDEBUG `astPrintTree(callOrReturnOrOther)`
-				typeError(
-					state, getArgumentNodeForError(callOrReturnOrOther, valueIndex, valueExpr),
-					"Type mismatch for %s #%d. (Wanted %s, got %s)",
-					(callOrReturnOrOther.nodeType == !(AST_CALL) and "argument") or (callOrReturnOrOther.nodeType == !(AST_RETURN) and "return value") or "value",
-					slot,
-					getFriendlyTypeInfoName(typeInfoToMatchAdjusted),
-					getFriendlyTypeInfoName(valueTypeInfoAdjusted)
-				)
+				if wantEnumAndGotLiteralOfCorrectType then
+					typeError2(state,
+						valueExpr,                       F("Enum '%s' has no value '%s'.", getFriendlyTypeInfoName(typeInfoToMatchAdjusted), valueToStringForMessage(valueExpr.value)),
+						typeInfoToMatchAdjusted.astNode, F("...here is the enum.")
+					)
+				else
+					typeError(
+						state, getArgumentNodeForError(callOrReturnOrOther, valueIndex, valueExpr),
+						"Type mismatch for %s #%d. (Wanted %s, got %s)",
+						(callOrReturnOrOther.nodeType == !(AST_CALL) and "argument") or (callOrReturnOrOther.nodeType == !(AST_RETURN) and "return value") or "value",
+						slot,
+						getFriendlyTypeInfoName(typeInfoToMatchAdjusted),
+						getFriendlyTypeInfoName(valueTypeInfoAdjusted)
+					)
+				end
 			end
 		end
 
@@ -2079,17 +2111,29 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnOrOther, value
 
 		local isCompatible, compatibilityScore = isTypeCompatibleWith(state, valueTypeInfoAdjusted, typeInfoToMatchAdjusted, strictTypeMatch, valueExpr)
 
+		local wantEnumAndGotLiteralOfCorrectType = false
+		if not isCompatible then
+			wantEnumAndGotLiteralOfCorrectType, isCompatible, compatibilityScore = checkForLiteralVsEnumSituation(valueExpr, valueTypeInfo, typeInfoToMatchAdjusted)
+		end
+
 		if not isCompatible then
 			if softCheck then  return false, 0  end
 			!ifDEBUG `astPrintTree(callOrReturnOrOther)`
-			typeError(
-				state, valueExpr,
-				"Type mismatch for argument #%d (%s). (Wanted %s, got %s)",
-				argIndex,
-				argNamed.key.name,
-				getFriendlyTypeInfoName(typeInfoToMatchAdjusted),
-				getFriendlyTypeInfoName(valueTypeInfoAdjusted)
-			)
+			if wantEnumAndGotLiteralOfCorrectType then
+				typeError2(state,
+					valueExpr,                       F("Enum '%s' has no value '%s'.", getFriendlyTypeInfoName(typeInfoToMatchAdjusted), valueToStringForMessage(valueExpr.value)),
+					typeInfoToMatchAdjusted.astNode, F("...here is the enum.")
+				)
+			else
+				typeError(
+					state, valueExpr,
+					"Type mismatch for argument #%d (%s). (Wanted %s, got %s)",
+					argIndex,
+					argNamed.key.name,
+					getFriendlyTypeInfoName(typeInfoToMatchAdjusted),
+					getFriendlyTypeInfoName(valueTypeInfoAdjusted)
+				)
+			end
 		end
 
 		compatibilityScoreSum = compatibilityScoreSum + compatibilityScore
@@ -2992,7 +3036,7 @@ end
 	local realArguments     = (call.isMethod and {callee, unpack(call.arguments)} or call.arguments)
 	-- local realArgumentTypes = {}
 
-	local realArgumentTypes = !!(STATIC{}) -- Not sure if actually faster.
+	local realArgumentTypes = !!(STATIC{}) -- Not sure if actually faster than making a new table every time.
 	for i = #realArgumentTypes, 1, -1 do
 		realArgumentTypes[i] = nil
 	end
