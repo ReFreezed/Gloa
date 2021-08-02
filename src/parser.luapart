@@ -1854,6 +1854,12 @@ local function parseAssignment(state, parent)
 
 	elseif tok2 and !!(IS_EXISTING_TOK(TOKEN_KEYWORD, "and","or")) and !!(IS_EXISTING_TOK(2, TOKEN_PUNCTUATION, "=")) then
 		!!(EAT_NEXT_TOKEN) -- '='
+
+		-- Make sure there's no space before '=' as that's a little ambiguous. ('+=' etc. don't allow any space before '='.)
+		if tok2.position1 ~= tok.position2 + 1 then
+			!ERROR_OR_RETURN_NIL `errorParsingAfterPrevious(state, "Did you mean '%s='?", tok.value)`
+		end
+
 		assignment.position        = tok.position1
 		assignment.line            = tok.line1
 		assignment.binaryOperation = tok.value
@@ -1942,12 +1948,16 @@ end
 end
 
 local function parseIfBranch(state, ifOrStaticIf, isFileScopeOrNamespace)
+	local tok = peekNextTok(state, 1)
 	local block
 
-	if isFileScopeOrNamespace then
-		!ASSERT("ifOrStaticIf.nodeType == "..AST_STATIC_IF)
+	if !!(IS_TOK(TOKEN_KEYWORD, "void")) then
+		!!(EAT_NEXT_TOKEN) -- 'void'
 
-		local tok = peekNextTok(state, 1)
+		block = astNewNode(AstBlock, tok, ifOrStaticIf)
+
+	elseif isFileScopeOrNamespace then
+		!ASSERT("ifOrStaticIf.nodeType == "..AST_STATIC_IF)
 
 		-- This block will never get inferred - it's just for storing statements we may potentially use.
 		-- (Should we have a dedicated node type for this? Probably not needed.)
@@ -2118,7 +2128,7 @@ end
 		!!(EAT_NEXT_TOKEN) -- 'return'
 
 		--
-		-- Note: Considering this following @Ambigous situation we have to check whether any values should be returned.
+		-- Note: Considering this following @Ambiguous situation we have to check whether any values should be returned.
 		-- As a bonus we also figure if we're even inside a function, though I'm not sure this'll work when we have static code. @Robustness
 		--
 		--   if x return
@@ -2264,7 +2274,14 @@ end
 		!!(EAT_NEXT_TOKEN) -- 'while'
 
 		!SET_OR_RETURN_FALSE `whileLoop.condition = parseExpression(state, whileLoop)`
-		!SET_OR_RETURN_FALSE `whileLoop.body      = parseBlockOrScopedStatement(state, whileLoop)`
+		tok                                       = peekNextTok(state, 1)
+
+		if !!(IS_TOK(TOKEN_KEYWORD, "void")) then
+			!!(EAT_NEXT_TOKEN) -- 'void'
+			whileLoop.body = astNewNode(AstBlock, tok, whileLoop)
+		else
+			!SET_OR_RETURN_FALSE `whileLoop.body = parseBlockOrScopedStatement(state, whileLoop)`
+		end
 
 		statement = whileLoop
 
@@ -2374,7 +2391,14 @@ end
 			!DO_OR_RETURN_FALSE `parseExpressionList(state, forLoop, forLoop.expressions, nil, false)`
 		end
 
-		!SET_OR_RETURN_FALSE `forLoop.body = parseBlockOrScopedStatement(state, forLoop)`
+		tok = peekNextTok(state, 1)
+
+		if !!(IS_TOK(TOKEN_KEYWORD, "void")) then
+			!!(EAT_NEXT_TOKEN) -- 'void'
+			forLoop.body = astNewNode(AstBlock, tok, forLoop)
+		else
+			!SET_OR_RETURN_FALSE `forLoop.body = parseBlockOrScopedStatement(state, forLoop)`
+		end
 		table.insert(forLoop.statementsStatic, forLoop.body)
 
 		statement = forLoop
@@ -2423,7 +2447,7 @@ end
 				and call.callee.nodeType == !(AST_CALL)
 				and astGetCalleeVisuallyFurthestToTheLeft(call).nodeType == !(AST_IDENTIFIER)
 			then
-				!ERROR_OR_RETURN_FALSE `errorParsing(state, statementStartToken, "Ambigous expression being called.")`
+				!ERROR_OR_RETURN_FALSE `errorParsing(state, statementStartToken, "Ambiguous expression being called.")`
 			end
 			--]]
 			statement = call
@@ -2954,7 +2978,7 @@ local function parseCallChain(state, parent, callee, isMethod)
 		elseif !!(IS_TOK(TOKEN_PUNCTUATION, "(")) then
 			local tokPrev = state.tokens[token-1]
 			if tok.line1 > (tokPrev.line2 or tokPrev.line1) then
-				!ERROR_OR_RETURN_NIL `errorParsingLast(state, "Ambigous syntax. (Is this a call or a new statement?)")`
+				!ERROR_OR_RETURN_NIL `errorParsingLast(state, "Ambiguous syntax. (Is this a call or a new statement?)")`
 			end
 
 			call = astNewNode(AstCall, tok, parent)
@@ -3166,7 +3190,7 @@ local function parseLambda(state, parent)
 			!!(IS_TOK(   TOKEN_PUNCTUATION, "(")) and
 			!!(IS_TOK(2, TOKEN_PUNCTUATION, ")"))
 		then
-			!ERROR_OR_RETURN_NIL `errorParsingNext(state, "Ambigous '()'. (Does the function return no values or does it return a function that takes no arguments?)")`
+			!ERROR_OR_RETURN_NIL `errorParsingNext(state, "Ambiguous '()'. (Does the function return no values or does it return a function that takes no arguments?)")`
 
 		-- (...) -> (name:type, ...)
 		elseif
@@ -4046,11 +4070,11 @@ end
 			local tok2 = peekNextTok(state, 2)
 
 			if tok and isTokenAssigning(tok) then
-				!ERROR_OR_RETURN_NIL `errorParsingAfterLast(state, "Expected an assignment target to the left of '%s'. Ambigous statement.", tok.value)`
+				!ERROR_OR_RETURN_NIL `errorParsingAfterLast(state, "Expected an assignment target to the left of '%s'. Ambiguous statement.", tok.value)`
 			elseif !!(IS_TOK(TOKEN_KEYWORD, "and","or")) and !!(IS_TOK(2, TOKEN_PUNCTUATION, "=")) then
-				!ERROR_OR_RETURN_NIL `errorParsingAfterLast(state, "Expected an assignment target to the left of '%s='. Ambigous statement.", tok.value)`
+				!ERROR_OR_RETURN_NIL `errorParsingAfterLast(state, "Expected an assignment target to the left of '%s='. Ambiguous statement.", tok.value)`
 			else
-				!ERROR_OR_RETURN_NIL `errorParsing(state, exprStartTok, "Ambigous statement.")`
+				!ERROR_OR_RETURN_NIL `errorParsing(state, exprStartTok, "Ambiguous statement.")`
 			end
 		end
 	end
