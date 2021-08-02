@@ -2705,52 +2705,6 @@ end
 
 		----------------------------------------------------------------
 
-		elseif !!(IS_TOK(TOKEN_KEYWORD, "export")) and not (
-			tok3
-			and tok2.type == !(TOKEN_IDENTIFIER)
-			and !!(IS_TOK(3, TOKEN_PUNCTUATION, ":",",","="))
-		) then
-			!!(EAT_NEXT_TOKEN) -- 'export'
-
-			if astIsOrIsInModule(scope) then
-				!ERROR_OR_RETURN_FALSE `errorParsingNext(state, "Cannot export namespaces from modules into global space.")`
-			end
-
-			!SET_OR_RETURN_FALSE `local import = parseExpression(state, scope, 1/0)`
-			if import.nodeType ~= !(AST_IMPORT) then
-				errorInternal(state, import, "@Incomplete: Support any expression after 'export'. (Currently supported are !import, !load and !self)")
-			end
-
-			import.exported = true
-
-			scope.imports = scope.imports or {}
-			table.insert(scope.statementsStatic, import)
-			table.insert(scope.imports,          import)
-
-		elseif !!(IS_TOK(TOKEN_KEYWORD, "export_value")) then
-			!!(EAT_NEXT_TOKEN) -- '!export_value'
-			if not isTopLevel then
-				!ERROR_OR_RETURN_FALSE `errorParsingNext(state, "Values must be exported directly from file scope.")`
-			end
-
-			local fileScope = scope
-			!ASSERT("fileScope.nodeType == "..AST_FILE_SCOPE)
-
-			if fileScope.isModule then
-				!ERROR_OR_RETURN_FALSE `errorParsingNext(state, "Cannot export values from modules.")`
-			end
-
-			if fileScope.valueToExport then
-				!ERROR_OR_RETURN_FALSE `
-					printerr()
-					parserMessage(io.stderr, state, state.tokens[state.nextToken], "Error", "Multiple exported values.")
-					parserMessage(io.stderr, state, fileScope.valueToExport,       "Info",  "...previous value is here.")
-					exitFailure()
-				`
-			end
-
-			!SET_OR_RETURN_FALSE `fileScope.valueToExport = parseExpression(state, fileScope)`
-
 		elseif !!(IS_TOK(TOKEN_KEYWORD, "local","export")) or (
 			!!(IS_TOK(   TOKEN_KEYWORD, "using")) and
 			!!(IS_TOK(2, TOKEN_KEYWORD, "local","export"))
@@ -2778,6 +2732,24 @@ end
 			scope.usings = scope.usings or {}
 			table.insert(scope.statementsStatic, using)
 			table.insert(scope.usings,           using)
+
+		elseif !!(IS_TOK(TOKEN_KEYWORD, "global")) then
+			!!(EAT_NEXT_TOKEN) -- 'global'
+
+			if astIsOrIsInModule(scope) then
+				!ERROR_OR_RETURN_FALSE `errorParsingNext(state, "Cannot export namespaces from modules into global space.")`
+			end
+
+			!SET_OR_RETURN_FALSE `local import = parseExpression(state, scope, 1/0)`
+			if import.nodeType ~= !(AST_IMPORT) then
+				errorInternal(state, import, "@Incomplete: Support any expression after 'global'. (Currently supported are !import, !load and !self)")
+			end
+
+			import.exported = true
+
+			scope.imports = scope.imports or {}
+			table.insert(scope.statementsStatic, import)
+			table.insert(scope.imports,          import)
 
 		elseif !!(IS_TOK(TOKEN_DIRECTIVE, "assert","print")) then
 			!SET_OR_RETURN_FALSE `local debugNode = parseDebugNode(state, scope)`
@@ -2845,6 +2817,30 @@ end
 				line                  = tok.line1,
 				trimmedInitialNewline = tok.extra,
 			})
+
+		elseif !!(IS_TOK(TOKEN_KEYWORD, "export_value")) then
+			!!(EAT_NEXT_TOKEN) -- '!export_value'
+			if not isTopLevel then
+				!ERROR_OR_RETURN_FALSE `errorParsingNext(state, "Values must be exported directly from file scope.")`
+			end
+
+			local fileScope = scope
+			!ASSERT("fileScope.nodeType == "..AST_FILE_SCOPE)
+
+			if fileScope.isModule then
+				!ERROR_OR_RETURN_FALSE `errorParsingNext(state, "Cannot export values from modules.")`
+			end
+
+			if fileScope.valueToExport then
+				!ERROR_OR_RETURN_FALSE `
+					printerr()
+					parserMessage(io.stderr, state, state.tokens[state.nextToken], "Error", "Multiple exported values.")
+					parserMessage(io.stderr, state, fileScope.valueToExport,       "Info",  "...previous value is here.")
+					exitFailure()
+				`
+			end
+
+			!SET_OR_RETURN_FALSE `fileScope.valueToExport = parseExpression(state, fileScope)`
 
 		----------------------------------------------------------------
 
