@@ -272,9 +272,11 @@ local function runCompiler()
 	}
 
 	!(
+	local nodeCountTemplate         = {}
 	local typeInfosTableTemplate    = {}
 	local constantsTableTemplate    = {}
 	local dependenciesTableTemplate = {}
+	for nodeType   = 1, #AST_NAMES         do  nodeCountTemplate[nodeType]           = 0   end
 	for tag        = 1, #TYPE_NAMES        do  typeInfosTableTemplate[tag]           = {}  end
 	for kind       = 1, #CONST_KIND_TITLES do  constantsTableTemplate[kind]          = {}  end
 	for dependType = 1, #DEPEND_TITLES     do  dependenciesTableTemplate[dependType] = {}  end
@@ -338,6 +340,7 @@ local function runCompiler()
 		{`queueWaitingMaxSize`,   0},
 		{`pipeCycles`,            0},
 		{`prioriyCount`,          0},
+		{`inferAttempts`,         nodeCountTemplate},
 
 		-- Typer:
 		{`lastTypeId`,                0},
@@ -878,24 +881,36 @@ local function runCompiler()
 				end
 
 				printf(
-					!((DEBUG and OK[incN()] or "").."Cycles:%d Updates:%d Prio:%d Queue:%d(a=%d,w=%d) Types:%d Consts:%d"),
+					"Cycles:%d Updates:%d Prio:%d Queue:%d(a=%d,w=%d) Types:%d Consts:%d",
 					state.pipeCycles,
 					state.queuedUpdates,
 					state.prioriyCount,
 					#state.allQueueds, state.queueActiveMaxSize, state.queueWaitingMaxSize,
 					#state.allTypeInfos, #state.constants
 				)
-				printf(
-					!((DEBUG and OK[incN()] or "").."Deps:%d (%s)"),
-					#state.allDependencies,
-					table.concat(depencyCountTexts, " ")
-				)
-				printf(
-					!((DEBUG and OK[incN()] or "").."Toks:%d TokReuses:%d"),
-					state.tokens.n, (state.tokens.reuseCount or -1)
-				)
+				printf("Deps:%d (%s)", #state.allDependencies, table.concat(depencyCountTexts, " ") )
+				printf("Toks:%d TokReuses:%d", state.tokens.n, (state.tokens.reuseCount or -1))
 
 				!if EXTRA_STATS then
+					-- Infer attempts.
+					local nodeTypes = getKeys(AST_NAMES)
+					table.sort(nodeTypes, function(a, b)
+						if state.inferAttempts[a] ~= state.inferAttempts[b] then  return state.inferAttempts[a] > state.inferAttempts[b]  end
+						return AST_NAMES[a] < AST_NAMES[b]
+					end)
+					local total = 0
+					for _, nodeType in ipairs(nodeTypes) do
+						total = total + state.inferAttempts[nodeType]
+					end
+					io.write("InferAttempts:", total, " (")
+					for i, nodeType in ipairs(nodeTypes) do
+						if state.inferAttempts[nodeType] > 0 then
+							io.write((i == 1 and "" or " "), AST_NAMES[nodeType], "=", state.inferAttempts[nodeType])
+						end
+					end
+					io.write(")\n")
+
+					-- Cycles.
 					print()
 
 					for cycle = 1, state.pipeCycles do
@@ -969,10 +984,13 @@ local function runCompiler()
 			if nodeCreationCounts[a] ~= nodeCreationCounts[b] then  return nodeCreationCounts[a] > nodeCreationCounts[b]  end
 			return a < b
 		end)
+		io.write("Nodes:")
 		for _, nodeType in ipairs(nodeTypes) do
-			printf(!((DEBUG and OK[incN()] or "").."Nodes %-6d %s"), nodeCreationCounts[nodeType], AST_NAMES[nodeType])
+			if nodeCreationCounts[nodeType] > 0 then
+				io.write(" ", AST_NAMES[nodeType], "=", nodeCreationCounts[nodeType])
+			end
 		end
-		print()
+		io.write("\n\n")
 	!end
 
 	!ifNotDEBUG`if not silent then`
