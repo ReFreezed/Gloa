@@ -13,8 +13,8 @@
 -- Moves
 ----------------------------------------------------------------
 
-move Drawable graphics
-move ByteData data
+-- move Drawable graphics
+-- move ByteData data
 
 
 
@@ -80,6 +80,10 @@ delete graphics.BlendMode.MULTIPLICATIVE
 delete graphics.BlendMode.PREMULTIPLIED
 delete graphics.BlendMode.SUBTRACTIVE
 
+rename graphics.CompareMode.NOTEQUAL NOT_EQUAL
+rename graphics.CompareMode.LEQUAL   LESS_OR_EQUAL
+rename graphics.CompareMode.GEQUAL   GREATER_OR_EQUAL
+
 rename graphics.GraphicsFeature.CLAMPZERO          CLAMP_ZERO
 rename graphics.GraphicsFeature.FULLNPOT           FULL_NPOT
 rename graphics.GraphicsFeature.HDRCANVAS          HDR_CANVAS
@@ -89,7 +93,6 @@ rename graphics.GraphicsFeature.PIXELEFFECT        PIXEL_EFFECT
 rename graphics.GraphicsFeature.PIXELSHADERHIGHP   PIXEL_SHADER_HIGH_P
 rename graphics.GraphicsFeature.SHADERDERIVATIVES  SHADER_DERIVATIVES
 
-rename graphics.GraphicsLimit.CANVASFSAA        CANVAS_FSAA
 rename graphics.GraphicsLimit.CANVASMSAA        CANVAS_MSAA
 rename graphics.GraphicsLimit.CUBETEXTURESIZE   CUBE_TEXTURE_SIZE
 rename graphics.GraphicsLimit.MULTICANVAS       MULTI_CANVAS
@@ -98,11 +101,20 @@ rename graphics.GraphicsLimit.TEXTURELAYERS     TEXTURE_LAYERS
 rename graphics.GraphicsLimit.TEXTURESIZE       TEXTURE_SIZE
 rename graphics.GraphicsLimit.VOLUMETEXTURESIZE VOLUME_TEXTURE_SIZE
 
+rename graphics.StencilAction.INCREMENTWRAP INCREMENT_WRAP
+rename graphics.StencilAction.DECREMENTWRAP DECREMENT_WRAP
+
 -- Avoid parsing error!
 rename graphics.TextureType.2D TWOD
 
 rename graphics.WrapMode.CLAMPZERO      CLAMP_ZERO
 rename graphics.WrapMode.MIRROREDREPEAT MIRRORED_REPEAT
+
+rename graphics.VertexWinding.CW  CLOCKWISE
+rename graphics.VertexWinding.CCW COUNTER_CLOCKWISE
+
+rename graphics.VertexAttributeStep.PERINSTANCE PER_INSTANCE
+rename graphics.VertexAttributeStep.PERVERTEX   PER_VERTEX
 
 rename joystick.GamepadAxis.LEFTX        LEFT_X
 rename joystick.GamepadAxis.LEFTY        LEFT_Y
@@ -139,22 +151,18 @@ rename mouse.CursorType.WAITARROW WAIT_ARROW
 
 rename system.PowerState.NOBATTERY NO_BATTERY
 
+rename window.DisplayOrientation.LANDSCAPEFLIPPED LANDSCAPE_FLIPPED
+rename window.DisplayOrientation.PORTRAITFLIPPED  PORTRAIT_FLIPPED
+
 
 
 -- Edits/additions
 ----------------------------------------------------------------
 
--- Missing from love_api:
-add Object  release :: (self:Object) -> (success:bool)                 !foreign method "release"
-add Object  type    :: (self:Object) -> (name:ObjectName)              !foreign method "type"
-add Object  typeOf  :: (self:Object, name:ObjectName) -> (isType:bool) !foreign method "typeOf"
-
--- Missing from love_api:
-add Data  clone         :: (self:Data) -> Data               !foreign method "clone"
-add Data  getFFIPointer :: (self:Data) -> !import"ffi".Cdata !foreign method "getFFIPointer"
-add Data  getPointer    :: (self:Data) -> Pointer            !foreign method "getPointer"
-add Data  getSize       :: (self:Data) -> int                !foreign method "getSize"
-add Data  getString     :: (self:Data) -> string             !foreign method "getString"
+delete Object.type
+add Object  type :: (self:Object) -> (name:ObjectName) !foreign method "type"
+delete Object.typeOf
+add Object  typeOf :: (self:Object, name:ObjectName) -> (isType:bool) !foreign method "typeOf"
 
 -- arg
 
@@ -273,9 +281,9 @@ settype audio.getRecordingDevices.devices []RecordingDevice
 
 delete data.compress
 delete data.decompress
-add data  export compress   :: (container:ContainerType, format:math.CompressedDataFormat, data:string|Data, level:int=-1) -> (compressedData:string|math.CompressedData) !foreign lua "love.data.compress"
-add data  export decompress :: (container:ContainerType, compressedData:math.CompressedData)                 -> (decompressedData:string|Data) !foreign lua "love.data.decompress"
-add data  export decompress :: (container:ContainerType, format:math.CompressedDataFormat, data:string|Data) -> (decompressedData:string|Data) !foreign lua "love.data.decompress"
+add data  export compress   :: (container:ContainerType, format:data.CompressedDataFormat, _data:string|Data, level:int=-1) -> (compressedData:string|data.CompressedData) !foreign lua "love.data.compress"
+add data  export decompress :: (container:ContainerType, compressedData:data.CompressedData)                  -> (decompressedData:string|Data) !foreign lua "love.data.decompress"
+add data  export decompress :: (container:ContainerType, format:data.CompressedDataFormat, _data:string|Data) -> (decompressedData:string|Data) !foreign lua "love.data.decompress"
 delete data.encode
 delete data.decode
 add data  export encode :: (container:ContainerType, format:EncodeFormat, data:string|Data, linelength:int=0) -> (encoded:string|ByteData) !foreign lua "love.data.encode"
@@ -303,8 +311,6 @@ add event  export quit :: (exitstatus:int=0) !foreign lua "love.event.quit"
 add event  export restart :: () !foreign lua "function() love.event.quit'restart' end"
 
 -- filesystem
-
-add filesystem  export DroppedFile :: !foreign struct { using File }
 
 delete filesystem.append
 add filesystem  export append :: (name:Filename, data:string|Data)           -> (success:bool, errormsg:string) !foreign lua "love.filesystem.append"
@@ -359,95 +365,20 @@ add filesystem  export setIdentity :: (name:Filename, appendToPath=false) !forei
 
 -- font
 
--- (See the generator script. All font stuff is missing from love_api for whatever reason.)
+delete font.newRasterizer
+add font  export newRasterizer :: (                              size:int=12, hinting:HintingMode=cast(HintingMode)"normal", dpiscale:int--[[Correct?]]=1--[[love.window.getDPIScale()]]) -> (rasterizer:Rasterizer) !foreign lua "love.font.newRasterizer"
+add font  export newRasterizer :: (filename:string,              size:int=12, hinting:HintingMode=cast(HintingMode)"normal", dpiscale:int--[[Correct?]]=1--[[love.window.getDPIScale()]]) -> (rasterizer:Rasterizer) !foreign lua "love.font.newRasterizer"
+add font  export newRasterizer :: (filename:string,              glyphs:string,                                              dpiscale:int--[[Correct?]]=1--[[love.window.getDPIScale()]]) -> (rasterizer:Rasterizer) !foreign lua "love.font.newRasterizer"
+add font  export newRasterizer :: (imageData:image.ImageData,    glyphs:string,                                              dpiscale:int--[[Correct?]]=1--[[love.window.getDPIScale()]]) -> (rasterizer:Rasterizer) !foreign lua "love.font.newRasterizer"
+add font  export newRasterizer :: (fileData:filesystem.FileData, size:int=12, hinting:HintingMode=cast(HintingMode)"normal", dpiscale:int--[[Correct?]]=1--[[love.window.getDPIScale()]]) -> (rasterizer:Rasterizer) !foreign lua "love.font.newRasterizer"
+
+delete font.Rasterizer.hasGlyphs
+add font.Rasterizer  hasGlyphs :: (self:Rasterizer, glyph,...:int|string) -> (hasGlyphs:bool) !foreign method "hasGlyphs"
 
 -- graphics
 
--- Missing from love_api:
-add graphics  export IndexDataType :: enum {
-	UINT16 :: "uint16",
-	UINT32 :: "uint32",
-}
-add graphics  export MipmapMode :: enum {
-	NONE   :: "none",
-	MANUAL :: "manual",
-	AUTO   :: "auto",
-}
-add graphics  export PixelFormat :: enum {
-	-- Normal color formats.
-	NORMAL           :: "normal",
-	R8               :: "r8",
-	RG8              :: "rg8",
-	RGBA8            :: "rgba8",
-	SRGBA8           :: "srgba8",
-	RGBA16           :: "rgba16",
-	R16F             :: "r16f",
-	RG16F            :: "rg16f",
-	RGBA16F          :: "rgba16f",
-	R32F             :: "r32f",
-	RG32F            :: "rg32f",
-	RGBA32F          :: "rgba32f",
-	RGBA4            :: "rgba4",
-	RGB5A1           :: "rgb5a1",
-	RGB565           :: "rgb565",
-	RGB10A2          :: "rgb10a2",
-	RG11B10F         :: "rg11b10f",
-	-- Depth/stencil formats.
-	STENCIL8         :: "stencil8",
-	DEPTH16          :: "depth16",
-	DEPTH24          :: "depth24",
-	DEPTH32F         :: "depth32f",
-	DEPTH24STENCIL8  :: "depth24stencil8",
-	DEPTH32FSTENCIL8 :: "depth32fstencil8",
-	-- Compressed formats, desktop GPUs.
-	DXT1             :: "DXT1",
-	DXT3             :: "DXT3",
-	DXT5             :: "DXT5",
-	BC4              :: "BC4",
-	BC4S             :: "BC4s",
-	BC5              :: "BC5",
-	BC5S             :: "BC5s",
-	BC6H             :: "BC6h",
-	BC6HS            :: "BC6hs",
-	BC7              :: "BC7",
-	-- Compressed formats, mobile GPUs.
-	ETC1             :: "ETC1",
-	ETC2RGB          :: "ETC2rgb",
-	ETC2RGBA         :: "ETC2rgba",
-	ETC2RGBA1        :: "ETC2rgba1",
-	EACR             :: "EACr",
-	EACRS            :: "EACrs",
-	EACRG            :: "EACrg",
-	EACRGS           :: "EACrgs",
-	PVR1RGB2         :: "PVR1rgb2",
-	PVR1RGB4         :: "PVR1rgb4",
-	PVR1RGBA2        :: "PVR1rgba2",
-	PVR1RGBA4        :: "PVR1rgba4",
-	ASTC4X4          :: "ASTC4x4",
-	ASTC5X4          :: "ASTC5x4",
-	ASTC5X5          :: "ASTC5x5",
-	ASTC6X5          :: "ASTC6x5",
-	ASTC6X6          :: "ASTC6x6",
-	ASTC8X5          :: "ASTC8x5",
-	ASTC8X6          :: "ASTC8x6",
-	ASTC8X8          :: "ASTC8x8",
-	ASTC10X5         :: "ASTC10x5",
-	ASTC10X6         :: "ASTC10x6",
-	ASTC10X8         :: "ASTC10x8",
-	ASTC10X10        :: "ASTC10x10",
-	ASTC12X10        :: "ASTC12x10",
-	ASTC12X12        :: "ASTC12x12",
-}
-add graphics  export CanvasFormat  :: PixelFormat
+add graphics  export CanvasFormat  :: image.PixelFormat
 add graphics  export TextureFormat :: CanvasFormat -- Is this correct? The wiki may be messed up.
-add graphics  export VertexAttributeStep :: enum {
-	PER_VERTEX   :: "pervertex",
-	PER_INSTANCE :: "perinstance",
-}
-add graphics  export VertexWinding :: enum {
-	CLOCKWISE         :: "cw",
-	COUNTER_CLOCKWISE :: "ccw",
-}
 
 delete graphics.Canvas.newImageData
 add graphics.Canvas  newImageData :: (self:Canvas)                                                   -> (data:image.ImageData) !foreign method "newImageData"
@@ -456,15 +387,10 @@ add graphics.Canvas  newImageData :: (self:Canvas, slice:int, mipmap:int, x,y:in
 delete graphics.Canvas.renderTo
 add graphics.Canvas  renderTo :: (self:Canvas, func:()) !foreign method "renderTo"
 
-delete graphics.Canvas.getFilter
-delete graphics.Canvas.setFilter
-add graphics.Canvas  getFilter :: (self:Canvas) -> (min,mag:FilterMode, anisotropy:int) !foreign method "getFilter"
-add graphics.Canvas  setFilter :: (self:Canvas, min,mag:FilterMode, anisotropy:int=1)   !foreign method "setFilter"
-
-delete graphics.Image.getFilter
-delete graphics.Image.setFilter
-add graphics.Image  getFilter :: (self:Image) -> (min,mag:FilterMode, anisotropy:int) !foreign method "getFilter"
-add graphics.Image  setFilter :: (self:Image, min,mag:FilterMode, anisotropy:int=1)   !foreign method "setFilter"
+delete graphics.Texture.getFilter
+delete graphics.Texture.setFilter
+add graphics.Texture  getFilter :: (self:Texture) -> (min,mag:FilterMode, anisotropy:int) !foreign method "getFilter"
+add graphics.Texture  setFilter :: (self:Texture, min,mag:FilterMode, anisotropy:int=1)   !foreign method "setFilter"
 
 delete graphics.Image.replacePixels
 add graphics.Image  replacePixels :: (self:Image, data:image.ImageData, slice:int, mipmap:int=1, x:int=0, y:int=0, reloadMipmaps:bool=false--[[true if image was created with mipmaps]]) !foreign method "replacePixels"
@@ -583,7 +509,7 @@ add graphics  export clear :: (clearColor:bool,        clearStencil:bool|int,   
 -- add graphics  export clear :: (color,...:[]float,      clearStencil:bool|int=true, clearDepth:bool|float=true) !foreign lua "love.graphics.clear"
 
 delete graphics.newCanvas
-add graphics  export CanvasSettings :: struct { type=TextureType.TWOD, format=PixelFormat.NORMAL, readable:bool|none=nil, msaa=0, dpiscale:int--[[Correct?]]|none=nil, mipmaps=CanvasMipmapMode.NONE }
+add graphics  export CanvasSettings :: struct { type=TextureType.TWOD, format=image.PixelFormat.NORMAL, readable:bool|none=nil, msaa=0, dpiscale:int--[[Correct?]]|none=nil, mipmaps=MipmapMode.NONE }
 add graphics  export newCanvas :: ()                                                      -> (canvas:Canvas) !foreign lua "love.graphics.newCanvas"
 add graphics  export newCanvas :: (width,height:int)                                      -> (canvas:Canvas) !foreign lua "love.graphics.newCanvas"
 add graphics  export newCanvas :: (width,height:int,             settings:CanvasSettings) -> (canvas:Canvas) !foreign lua "love.graphics.newCanvas"
@@ -686,11 +612,11 @@ settype graphics.Font.getWrap.wrappedtext []string
 settype graphics.Image.getFlags.flags ImageFlags
 settype graphics.discard.discardcolors []bool
 
-add graphics  export SupportedCanvasFormats    :: !foreign struct { !key: CanvasFormat,    !value: bool }
-add graphics  export SupportedPixelFormats     :: !foreign struct { !key: PixelFormat,     !value: bool }
-add graphics  export SupportedGraphicsFeatures :: !foreign struct { !key: GraphicsFeature, !value: bool }
-add graphics  export SupportedTextureTypes     :: !foreign struct { !key: TextureType,     !value: bool }
-add graphics  export SystemLimits              :: !foreign struct { !key: GraphicsLimit,   !value: int  }
+add graphics  export SupportedCanvasFormats    :: !foreign struct { !key: CanvasFormat,      !value: bool }
+add graphics  export SupportedPixelFormats     :: !foreign struct { !key: image.PixelFormat, !value: bool }
+add graphics  export SupportedGraphicsFeatures :: !foreign struct { !key: GraphicsFeature,   !value: bool }
+add graphics  export SupportedTextureTypes     :: !foreign struct { !key: TextureType,       !value: bool }
+add graphics  export SystemLimits              :: !foreign struct { !key: GraphicsLimit,     !value: int  }
 settype graphics.getCanvasFormats.formats     SupportedCanvasFormats
 settype graphics.getImageFormats.formats      SupportedPixelFormats
 settype graphics.getSupported.features        SupportedGraphicsFeatures
@@ -704,7 +630,7 @@ settype graphics.line.points      []float
 settype graphics.polygon.vertices []float
 
 -- Missing variant from love_api:
-add graphics.Quad  setViewport :: (self:Quad, x,y:float, w,h:float) !foreign method "setViewport"
+add graphics.Quad  setViewport :: (self:Quad, x,y:float, w,h:float) !foreign method "setViewport" -- Is this variant obsolete?
 
 add graphics  export pushAll :: () { push(StackType.ALL) }
 
@@ -722,8 +648,8 @@ add image.ImageData  mapPixel :: (self:ImageData, pixelFunction:_PixelFunction, 
 add image.ImageData  mapPixel :: (self:ImageData, x,y:int, width,height:int, pixelFunction:_PixelFunction) { self.mapPixel!(pixelFunction, x, y, width, height) }
 
 delete image.newImageData
-add image  export newImageData :: (width,height:int, format=graphics.PixelFormat.RGBA8)        -> (imageData:ImageData) !foreign lua "love.image.newImageData"
-add image  export newImageData :: (width,height:int, format:graphics.PixelFormat, data:string) -> (imageData:ImageData) !foreign lua "love.image.newImageData"
+add image  export newImageData :: (width,height:int, format=image.PixelFormat.RGBA8)        -> (imageData:ImageData) !foreign lua "love.image.newImageData"
+add image  export newImageData :: (width,height:int, format:image.PixelFormat, data:string) -> (imageData:ImageData) !foreign lua "love.image.newImageData"
 add image  export newImageData :: (width,height:int, data:string)                              -> (imageData:ImageData) !foreign lua "love.image.newImageData"
 add image  export newImageData :: (file:Filename|filesystem.FileData)                          -> (imageData:ImageData) !foreign lua "love.image.newImageData"
 
@@ -751,6 +677,10 @@ delete keyboard.isDown
 add keyboard  export isDown :: (key,...:KeyConstant) -> (anyDown:bool) !foreign lua "love.keyboard.isDown"
 
 -- math
+
+-- These are moved to data module.
+delete math.compress
+delete math.decompress
 
 delete math.Transform.getMatrix
 delete math.Transform.setMatrix
@@ -873,14 +803,6 @@ settype touch.getTouches.touches []LightUserdata
 
 -- window
 
--- Missing from love_api:
-add window  export DisplayOrientation :: enum {
-	LANDSCAPE         :: "landscape",
-	LANDSCAPE_FLIPPED :: "landscapeflipped",
-	PORTRAIT          :: "portrait",
-	PORTRAIT_FLIPPED  :: "portraitflipped",
-}
-
 delete window.getDisplayOrientation
 add window  export getDisplayOrientation :: ()          -> (orientation:DisplayOrientation) !foreign lua "love.window.getDisplayOrientation"
 add window  export getDisplayOrientation :: (index:int) -> (orientation:DisplayOrientation) !foreign lua "love.window.getDisplayOrientation"
@@ -903,21 +825,16 @@ settype window.showMessageBox.buttonlist MessageBoxButtons
 
 -- These also match direct sub-objects.
 numbertype object getVersion int
+numbertype object isVersionCompatible int
 numbertype object audio.getMaxSceneEffects int
 numbertype object audio.getMaxSourceEffects int
 numbertype object audio.Source.getAirAbsorption float
 numbertype object audio.Source.setAirAbsorption float
-numbertype object graphics.Canvas.getDimensions int
-numbertype object graphics.Canvas.getHeight int
-numbertype object graphics.Canvas.getWidth int
 numbertype object graphics.Font.getHeight int
 numbertype object graphics.Font.getLineHeight float
 numbertype object graphics.Font.getWidth int
 numbertype object graphics.Font.getWrap int
 numbertype object graphics.Font.setLineHeight float
-numbertype object graphics.Image.getDimensions int
-numbertype object graphics.Image.getHeight int
-numbertype object graphics.Image.getWidth int
 numbertype object graphics.Mesh.getDrawRange int
 numbertype object graphics.Mesh.setDrawRange int
 numbertype object graphics.Quad.getTextureDimensions float
@@ -928,6 +845,9 @@ numbertype object graphics.SpriteBatch.setBufferSize int
 numbertype object graphics.Text.getDimensions int
 numbertype object graphics.Text.getHeight int
 numbertype object graphics.Text.getWidth int
+numbertype object graphics.Texture.getDimensions int
+numbertype object graphics.Texture.getHeight int
+numbertype object graphics.Texture.getWidth int
 numbertype object graphics.Video.getDimensions int
 numbertype object graphics.Video.getHeight int
 numbertype object graphics.Video.getWidth int
@@ -1030,6 +950,7 @@ numbertype object window.getPosition int
 numbertype object window.setPosition int
 numbertype object window.getSafeArea int
 
+numbertype scope Data size int
 numbertype scope graphics.ParticleSystem size int
 numbertype scope graphics.ParticleSystem min float
 numbertype scope graphics.ParticleSystem max float
@@ -1108,6 +1029,17 @@ numbertype module love.data size int
 numbertype module love.data offset int
 numbertype module love.filesystem size int
 numbertype module love.filesystem pos int
+numbertype module love.font x int
+numbertype module love.font y int
+numbertype module love.font bx int
+numbertype module love.font by int
+numbertype module love.font glyph int
+numbertype module love.font glyphNumber int
+numbertype module love.font width int
+numbertype module love.font height int
+numbertype module love.font size int
+numbertype module love.font advance int
+numbertype module love.font extraSpacing int
 numbertype module love.graphics r float
 numbertype module love.graphics g float
 numbertype module love.graphics b float
@@ -1302,6 +1234,7 @@ joinargs localX localY
 joinargs low high
 joinargs lower upper
 joinargs lr lg lb
+joinargs major minor revision
 joinargs mask1 mask1
 joinargs max1 max2
 joinargs min mag
@@ -1309,6 +1242,7 @@ joinargs min max
 joinargs nx ny
 joinargs ox oy
 joinargs pixelcode vertexcode
+joinargs pixelwidth pixelheight
 joinargs px py
 joinargs r g b
 joinargs r g b a

@@ -206,6 +206,7 @@ local GLOA_KEYWORDS = {
 	["export_value"] = true,
 	["external"]     = true,
 	["for"]          = true,
+	["global"]       = true,
 	["if"]           = true,
 	["in"]           = true,
 	["inline"]       = true,

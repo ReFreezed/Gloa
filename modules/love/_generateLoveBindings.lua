@@ -2,7 +2,7 @@
 --=
 --=  LÖVE bindings generator for Glóa
 --=
---=  Depends on LÖVE-API (github.com/love2d-community/love-api)
+--=  Depends on LÖVE-API, 2021-08-02 (github.com/love2d-community/love-api)
 --=
 --=  Usage:
 --=  $ lua _generateLoveBindings.lua <loveApiDirectory>
@@ -66,6 +66,9 @@ local VALUES_TO_OUTPUT_AS_IS = {
 		setSpin                   = true,
 		setTangentialAcceleration = true,
 	},
+	horiz = { -- vert=horiz, depth=horiz
+		setWrap = true,
+	},
 }
 
 
@@ -85,6 +88,7 @@ local GLOA_KEYWORDS = {
 	["export_value"] = true,
 	["external"]     = true,
 	["for"]          = true,
+	["global"]       = true,
 	["if"]           = true,
 	["in"]           = true,
 	["inline"]       = true,
@@ -683,13 +687,10 @@ end
 local typeLocations = {
 	CanvasFormat        = "graphics",
 	DisplayOrientation  = "window",
-	DroppedFile         = "filesystem",
-	GlyphData           = "font",
 	HintingMode         = "font",
 	IndexDataType       = "graphics",
 	MipmapMode          = "graphics",
 	PixelFormat         = "graphics",
-	Rasterizer          = "font",
 	TextureFormat       = "graphics",
 	VertexAttributeStep = "graphics",
 	VertexWinding       = "graphics",
@@ -747,6 +748,9 @@ local state = {
 
 		elseif typeName == "light userdata" then
 			return "LightUserdata"
+
+		elseif typeName == "cdata" then
+			return '!import"ffi".Cdata'
 
 		elseif typeName == "number" then
 			local scopePath        = state:getScopePath()
@@ -838,9 +842,9 @@ local state = {
 
 		-- Some call.
 		elseif luaCodeValue:find"^%a.*%(.*%)$" then
-			if     typeName == "int"    then  state.file:write("0")
-			elseif typeName == "float"  then  state.file:write("0")
-			elseif typeName == "string" then  state.file:write('""')
+			if     typeName == "int"    or typeName == "int--[[Correct?]]"    then  state.file:write("0")
+			elseif typeName == "float"  or typeName == "float--[[Correct?]]"  then  state.file:write("0")
+			elseif typeName == "string" or typeName == "string--[[Correct?]]" then  state.file:write('""')
 			else errorInternal("Unhandled type '"..typeName..'".') end
 
 			state.file:write("--[[", luaCodeValue, "]]")
@@ -850,7 +854,7 @@ local state = {
 			state.file:write(luaCodeValue)
 
 		else
-			errorInternal(objectName.." "..luaCodeValue)
+			errorInternal(objectName..":"..typeName.."="..luaCodeValue)
 		end
 	end,
 
@@ -925,7 +929,7 @@ local state = {
 	getScopePath = function(state)
 		local scopeType = state.scopeStack[#state.scopeStack]
 		if scopeType == "struct" or scopeType == "enum" then
-			return (state.currentModule:gsub("^love%.?", "").."."..state.scopeNames[#state.scopeNames])
+			return ((state.currentModule.."."..state.scopeNames[#state.scopeNames]):gsub("^love%.", ""))
 		else
 			return (state.currentModule:gsub("^love%.?", ""))
 		end
@@ -938,34 +942,38 @@ state.file:write[[
 export Filename      :: string
 export Variant       :: string|int|float|bool|table|Object -- Functions and Lua userdata are not supported. Tables have to be "simple".
 export Color         :: []float
-export Pointer       :: !foreign struct {}
 export LightUserdata :: !foreign struct {} -- Actually a value (int) representing a pointer, but for the sake of type safety it's probably better to say it's its own type.
 ]]
 
+-- Define ObjectName enum.
 do
 	local EXTRA_OBJECT_NAMES = { -- Missing from love_api.
-		"DROPPED_FILE", "DroppedFile",
-		"GLYPH_DATA",   "GlyphData",
-		"RASTERIZER",   "Rasterizer",
+		-- "NOTHING_HERE", "NothingHere",
 	}
 
+	local typeInfos = {}
 	local names     = {}
 	local alignment = 0
 
+	for i, typeInfo in ipairs(loveApiExtra.types) do
+		typeInfos[i]    = typeInfo
+		names[typeInfo] = typeInfo.name:gsub("([a-z])([A-Z])", "%1_%2"):upper()
+		alignment       = math.max(alignment, #names[typeInfo])
+	end
 	for i = 1, #EXTRA_OBJECT_NAMES, 2 do
 		alignment = math.max(alignment, #EXTRA_OBJECT_NAMES[i])
 	end
-	for i, typeInfo in ipairs(loveApiExtra.types) do
-		names[i]  = typeInfo.name:gsub("([a-z])([A-Z])", "%1_%2"):upper()
-		alignment = math.max(alignment, #names[i])
-	end
+
+	table.sort(typeInfos, function(a, b)
+		return a.name < b.name
+	end)
 
 	state.file:write("\nexport ObjectName :: enum {\n")
+	for _, typeInfo in ipairs(typeInfos) do
+		state.file:write('\t', names[typeInfo], (" "):rep(alignment-#names[typeInfo]), ' :: "', typeInfo.name, '",\n')
+	end
 	for i = 1, #EXTRA_OBJECT_NAMES, 2 do
 		state.file:write('\t', EXTRA_OBJECT_NAMES[i], (" "):rep(alignment-#EXTRA_OBJECT_NAMES[i]), ' :: "', EXTRA_OBJECT_NAMES[i+1], '",\n')
-	end
-	for i, typeInfo in ipairs(loveApiExtra.types) do
-		state.file:write('\t', names[i], (" "):rep(alignment-#names[i]), ' :: "', typeInfo.name, '",\n')
 	end
 	state.file:write("}\n")
 end
@@ -977,49 +985,6 @@ state:addEditedDeclarations("")
 
 assert(state.scopeStack[1] == "file")
 assert(not state.scopeStack[2])
-
--- All font stuff is missing from love_api.
-state.file:write[[
-export font :: namespace {
-	export HintingMode :: enum {
-		NORMAL :: "normal",
-		LIGHT  :: "light",
-		MONO   :: "mono",
-		NONE   :: "none",
-	}
-
-	export GlyphData :: !foreign struct { using Data }
-
-	export Rasterizer :: !foreign struct {
-		using Object,
-
-		getAdvance :: (self:Rasterizer) -> (advance:int) !foreign method "getAdvance",
-		getAscent  :: (self:Rasterizer) -> (ascent:int)  !foreign method "getAscent",
-		getDescent :: (self:Rasterizer) -> (descent:int) !foreign method "getDescent",
-
-		getHeight     :: (self:Rasterizer) -> (height:int)     !foreign method "getHeight",
-		getLineHeight :: (self:Rasterizer) -> (lineHeight:int) !foreign method "getLineHeight", -- Is this actually a float?
-
-		getGlyphData :: (self:Rasterizer, glyph:string) -> (glyphData:GlyphData) !foreign method "getGlyphData",
-		getGlyphData :: (self:Rasterizer, glyph:int)    -> (glyphData:GlyphData) !foreign method "getGlyphData",
-
-		getGlyphCount :: (self:Rasterizer) -> (count:int) !foreign method "getGlyphCount",
-
-		hasGlyphs :: (self:Rasterizer, glyph,...:string) -> (hasGlyphs:bool) !foreign method "hasGlyphs",
-		hasGlyphs :: (self:Rasterizer, glyph,...:int)    -> (hasGlyphs:bool) !foreign method "hasGlyphs",
-	}
-
-	-- Do these actually exist?
-	-- export TrueTypeRasterizer :: !foreign struct { using Rasterizer }
-	-- export BMFontRasterizer   :: !foreign struct { using Rasterizer }
-
-	export newGlyphData :: (rasterizer:Rasterizer, glyph:int) -> (data:GlyphData) !foreign lua "love.font.newGlyphData"
-
-	export newRasterizer         :: (filename:Filename|filesystem.FileData)    -> (rasterizer:Rasterizer) !foreign lua "love.font.newRasterizer"
-	export newTrueTypeRasterizer :: (size:int, hintingMode:HintingMode)        -> (rasterizer:Rasterizer) !foreign lua "love.font.newTrueTypeRasterizer"
-	export newBMFontRasterizer   :: (imageData:image.ImageData, glyphs:string) -> (rasterizer:Rasterizer) !foreign lua "love.font.newBMFontRasterizer"
-}
-]]
 
 -- This is just missing from all documentation even though the default love.run() clearly uses it.
 state.file:write[[
