@@ -1132,37 +1132,38 @@ local function checkRedeclarationAndMaybeAddOverload(state, ident, decl, isMembe
 	end
 end
 
-local function inferIdentifierOrVararg(state, identOrVararg)
+local function inferIdentifierOrVarargOrBlank(state, identOrVarargOrBlank)
 	-- 1. Things to ignore.
-	if identOrVararg.kind == !(IDENT_KIND_IGNORE) then
-		moveToNextRelevantPipe(state, identOrVararg)
+	if identOrVarargOrBlank.kind == !(IDENT_KIND_IGNORE) then
+		moveToNextRelevantPipe(state, identOrVarargOrBlank)
 		return
 	end
 
-	local vararg         = identOrVararg.nodeType == !(AST_VARARG) and identOrVararg or nil
-	local ident          = not vararg                              and identOrVararg or nil
-	local decl           = identOrVararg.declaration
-	local parent         = identOrVararg.parent
+	local vararg         =                identOrVarargOrBlank.nodeType == !(AST_VARARG) and identOrVarargOrBlank or nil
+	local blank          = not vararg and identOrVarargOrBlank.nodeType == !(AST_BLANK)  and identOrVarargOrBlank or nil
+	local ident          = not (vararg or blank)                                         and identOrVarargOrBlank or nil
+	local decl           = identOrVarargOrBlank.declaration
+	local parent         = identOrVarargOrBlank.parent
 	local parentNodeType = parent.nodeType
 
 	-- 2. Loose identifier.
-	if identOrVararg.kind == !(IDENT_KIND_LOOSE) or identOrVararg.kind == !(IDENT_KIND_ASSIGNMENT) then
+	if identOrVarargOrBlank.kind == !(IDENT_KIND_LOOSE) or identOrVarargOrBlank.kind == !(IDENT_KIND_ASSIGNMENT) then
 		if not decl then
 			local using
-			decl, using = findDeclaration(state, identOrVararg, identOrVararg.name)
+			decl, using = findDeclaration(state, identOrVarargOrBlank, identOrVarargOrBlank.name)
 
 			if not decl then
-				!DEPEND_AND_RETURN(`identOrVararg`, DEPEND_DECLARATION, `identOrVararg.name`)
+				!DEPEND_AND_RETURN(`identOrVarargOrBlank`, DEPEND_DECLARATION, `identOrVarargOrBlank.name`)
 			end
 
-			identOrVararg.declaration = decl
-			identOrVararg.fromUsing   = using
-			fulfillDependencies(state, identOrVararg.queued, !(DEPEND_HAS_DECLARATION))
+			identOrVarargOrBlank.declaration = decl
+			identOrVarargOrBlank.fromUsing   = using
+			fulfillDependencies(state, identOrVarargOrBlank.queued, !(DEPEND_HAS_DECLARATION))
 		end
 
 		if not (
 			-- We don't care about polymorphism/overloads in these contexts:
-			vararg
+			vararg -- How about blanks?
 			or not decl.value
 			or (parentNodeType == !(AST_LOCATION))
 			or (parentNodeType == !(AST_CALL)        and ident == parent.callee)
@@ -1171,7 +1172,7 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 		) then
 			if isDeclarationConstant(decl) then
 				if not decl.inferredType then
-					!DEPEND_AND_RETURN(`identOrVararg`, DEPEND_NODE_INFERRED, `decl`) -- Needed for decl.overloadOf to be valid.
+					!DEPEND_AND_RETURN(`identOrVarargOrBlank`, DEPEND_NODE_INFERRED, `decl`) -- Needed for decl.overloadOf to be valid.
 				elseif not decl.overloadsLocked then
 					errorInternal(state, decl, "Overloads are not locked when they should.")
 				end
@@ -1212,16 +1213,16 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 
 		local typeInfo = decl.inferredType
 		if not typeInfo then
-			!DEPEND_AND_RETURN(`identOrVararg`, DEPEND_NODE_INFERRED, `decl`)
+			!DEPEND_AND_RETURN(`identOrVarargOrBlank`, DEPEND_NODE_INFERRED, `decl`)
 		end
 		if vararg and (vararg.surroundedByParentheses or not areMultipleValuesEnabledAtPosition(state, vararg)) then
 			vararg.surroundedByParentheses = true
 			typeInfo                       = adjustTypeToOne(state, vararg, typeInfo, true)
 		end
 
-		identOrVararg.inferredType = typeInfo
+		identOrVarargOrBlank.inferredType = typeInfo
 
-		if identOrVararg.fromUsing then
+		if identOrVarargOrBlank.fromUsing then
 			-- @Cleanup: Move this to simplifyExpressionIfConstant()?
 			!ASSERT `ident`
 			local access        = astNewNode(AstAccess, ident, parent)
@@ -1237,7 +1238,7 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 			-- Stay in PIPE_INFER.
 
 		else
-			moveToNextRelevantPipe(state, identOrVararg)
+			moveToNextRelevantPipe(state, identOrVarargOrBlank)
 			if
 				ident
 				and isDeclarationConstant(decl) and followIdentifiersToConstantValue(state, ident).nodeType ~= !(AST_TABLE) -- Not sure how robust this is. @Robustness
@@ -1248,7 +1249,7 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 
 		return
 
-	elseif identOrVararg.kind == !(IDENT_KIND_RELATIVE) then
+	elseif identOrVarargOrBlank.kind == !(IDENT_KIND_RELATIVE) then
 		!ASSERT `ident`
 
 		local typeInfo = getExpectedTypeInfo(state, ident, false, "identifier", ident)
@@ -1279,28 +1280,28 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 		return
 	end
 
-	!ASSERT("decl",                                                                          nil, `identOrVararg`)
-	!ASSERT("parentNodeType == "..AST_DECLARATION.." or parentNodeType == "..AST_ASSIGNMENT, nil, `identOrVararg`)
+	!ASSERT("decl",                                                                          nil, `identOrVarargOrBlank`)
+	!ASSERT("parentNodeType == "..AST_DECLARATION.." or parentNodeType == "..AST_ASSIGNMENT, nil, `identOrVarargOrBlank`)
 
 	-- 3. Assignment target in declaration (which is a copy of the identifier in the declaration).
-	if identOrVararg.kind == !(IDENT_KIND_DECLARATION_ASSIGNMENT) then
+	if identOrVarargOrBlank.kind == !(IDENT_KIND_DECLARATION_ASSIGNMENT) then
 		!ASSERT("parentNodeType == "..AST_ASSIGNMENT)
 
 		if not decl.inferredType then
-			!DEPEND_AND_RETURN_INTERNAL(`identOrVararg`, DEPEND_NODE_INFERRED, `decl`)
+			!DEPEND_AND_RETURN_INTERNAL(`identOrVarargOrBlank`, DEPEND_NODE_INFERRED, `decl`)
 		end
 
-		identOrVararg.inferredType = decl.inferredType
-		moveToNextRelevantPipe(state, identOrVararg)
+		identOrVarargOrBlank.inferredType = decl.inferredType
+		moveToNextRelevantPipe(state, identOrVarargOrBlank)
 		return
 	end
 
 	-- 4. At this point we're defining a declared identifier.
-	if identOrVararg.kind ~= !(IDENT_KIND_DECLARATION) then
-		errorInternal(state, identOrVararg, "Unexepected identifier kind '%s'.", (IDENT_KIND_TITLES[identOrVararg.kind] or "?"))
+	if identOrVarargOrBlank.kind ~= !(IDENT_KIND_DECLARATION) then
+		errorInternal(state, identOrVarargOrBlank, "Unexepected identifier kind '%s'.", (IDENT_KIND_TITLES[identOrVarargOrBlank.kind] or "?"))
 	end
 
-	local scope        = astFindParentScope(decl) or errorInternal(state, identOrVararg, "Could not find what scope '%s' is in.", identOrVararg.name)
+	local scope        = astFindParentScope(decl) or errorInternal(state, identOrVarargOrBlank, "Could not find what scope '%s' is in.", identOrVarargOrBlank.name)
 	local isEnumMember = scope.nodeType == !(AST_ENUM)
 	local isMember     = isEnumMember or scope.nodeType == !(AST_STRUCT)
 
@@ -1336,14 +1337,14 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 
 	local typeExpr = decl.type
 	if typeExpr and not typeExpr.inferredType then
-		!DEPEND_AND_RETURN(`identOrVararg`, DEPEND_NODE_INFERRED, `typeExpr`)
+		!DEPEND_AND_RETURN(`identOrVarargOrBlank`, DEPEND_NODE_INFERRED, `typeExpr`)
 	end
 
 	if isEnumMember then
 		local enum = scope
 		if not enum.representedType then
 			-- AstEnum is the only scope that gets inferred before its declarations.
-			!DEPEND_AND_RETURN(`identOrVararg`, DEPEND_NODE_INFERRED, `enum`)
+			!DEPEND_AND_RETURN(`identOrVarargOrBlank`, DEPEND_NODE_INFERRED, `enum`)
 		end
 	end
 
@@ -1352,17 +1353,17 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 		--[[ DEBUG
 		if valueExpr.nodeType == !(AST_LITERAL) then
 			print("====================")
-			astPrintTree(identOrVararg.parent)
-			where(state, identOrVararg)
+			astPrintTree(identOrVarargOrBlank.parent)
+			where(state, identOrVarargOrBlank)
 			astPrint(valueExpr)
 			where(state, valueExpr)
 		end
 		--]]
-		!DEPEND_AND_RETURN(`identOrVararg`, DEPEND_NODE_INFERRED, `valueExpr`)
+		!DEPEND_AND_RETURN(`identOrVarargOrBlank`, DEPEND_NODE_INFERRED, `valueExpr`)
 	end
 
 	--
-	-- No more dependencies for this identifier/vararg after this point!
+	-- No more dependencies for this identifier/vararg/blank after this point!
 	--
 
 	decl.overloadsLocked = true
@@ -1420,7 +1421,7 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 
 	-- Tell parents that this declaration exists so we can detect more cases of shadowing.
 	-- @Speed: Can we get rid of the whole declarationsInTree thing if we make overloads explicit? Not sure. 2021-07-24
-	if not (decl.isDocumentation or decl.canShadow or vararg or (isMember and decl.kind == !(DECL_KIND_LOCAL_VAR))) then
+	if not (decl.isDocumentation or decl.canShadow or vararg or blank or (isMember and decl.kind == !(DECL_KIND_LOCAL_VAR))) then
 		local parentScope = scope
 		local name        = ident.name
 
@@ -1454,7 +1455,7 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 		if decl.value then
 			typeInfo = valueExpr.inferredType
 		else
-			valueExpr, typeInfo = getAssignmentValue(state, ident, decl.assignment.values, decl.assignmentIndex, nil, nil, nil)
+			valueExpr, typeInfo = getAssignmentValue(state, ident, decl.assignment.values, decl.assignmentIndex, nil, nil, nil, false)
 		end
 		typeInfo = adjustTypeToOne(state, valueExpr, typeInfo, true)
 	end
@@ -1464,7 +1465,7 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 
 	-- Do extra stuff in constant declarations.
 	if isDeclarationConstant(decl) then
-		valueExpr       = valueExpr or getAssignmentValue(state, ident, decl.assignment.values, decl.assignmentIndex, nil, nil, nil)
+		valueExpr       = valueExpr or getAssignmentValue(state, ident, decl.assignment.values, decl.assignmentIndex, nil, nil, nil, false)
 		typeInfoForDecl = getTypeRepresentedByExpression(valueExpr)
 
 		if isEnumMember then
@@ -1510,36 +1511,51 @@ local function inferIdentifierOrVararg(state, identOrVararg)
 		end
 	end
 
-	identOrVararg.inferredType = typeInfo
-	decl.valueTypeInfo         = typeInfoForDecl -- May be nil.  @Cleanup: Move this and relevant code to nodeInferrers.AstDeclaration().
+	identOrVarargOrBlank.inferredType = typeInfo
+	decl.valueTypeInfo                = typeInfoForDecl -- May be nil.  @Cleanup: Move this and relevant code to nodeInferrers.AstDeclaration().
 
 	!if DEBUG then
 		if debug_onlyInferTypes then
-			io.write("DEFINE ", identOrVararg.name ,":", getFriendlyTypeInfoName(typeInfo), " (", DECL_KIND_TITLES[decl.kind], ")")
+			io.write("DEFINE ", identOrVarargOrBlank.name ,":", getFriendlyTypeInfoName(typeInfo), " (", DECL_KIND_TITLES[decl.kind], ")")
 			if typeInfoForDecl then  io.write(" (VALUE ", getFriendlyTypeInfoName(typeInfoForDecl), ")")  end
 			io.write(" IN ")
 			astPrint(astFindParentScope(decl))
 		end
 	!end
 
-	moveToNextRelevantPipe(state, identOrVararg)
+	moveToNextRelevantPipe(state, identOrVarargOrBlank)
 end
 
 !NODE_INFERRER `function nodeInferrers.AstIdentifier(state, ident)`
-	return (inferIdentifierOrVararg(state, ident))
+	return (inferIdentifierOrVarargOrBlank(state, ident))
 !NODE_INFERRER_END `end`
 !NODE_INFERRER `function nodeInferrers.AstVararg(state, vararg)`
-	return (inferIdentifierOrVararg(state, vararg))
+	return (inferIdentifierOrVarargOrBlank(state, vararg))
 !NODE_INFERRER_END `end`
 
 !NODE_INFERRER `function nodeInferrers.AstBlank(state, blank)`
 	if blank.parent.nodeType == !(AST_DECLARATION) then
+		-- @Cleanup: Move this stuff into inferIdentifierOrVarargOrBlank().
 		local decl = blank.parent
 
 		if not (decl.kind == !(DECL_KIND_LOCAL_VAR) --[[or decl.kind == !(DECL_KIND_READ_ONLY)]]) then
-			typeError(state, blank, "Blank names in declarations require the declarations to be declarations of local variables.")
+			typeError(state, blank, "Blank names in declarations require the declaration to declare a local variable.")
 		elseif not isScopeImperative(astFindParentScope(decl)) then
 			typeError(state, blank, "Blank names are only allowed in imperative contexts.")
+		end
+
+		inferIdentifierOrVarargOrBlank(state, blank)
+		if not blank.inferredType then  return  end
+
+		if decl.parent.nodeType == !(AST_BLOCK) then
+			if not decl.assignment then
+				typeError(state, blank, "Blank names in declarations require an assigment.")
+			end
+			local valueExpr = getAssignmentValue(state, blank, decl.assignment.values, decl.assignmentIndex, nil, nil, nil, false)
+			!ASSERT(`valueExpr.inferredType`, nil, `blank`)
+			if isExpressionConstant(state, valueExpr, true) then
+				typeError(state, valueExpr, "Values for blank names in declarations must not be constant.")
+			end
 		end
 
 	elseif blank.parent.nodeType == !(AST_ASSIGNMENT) then
@@ -1548,12 +1564,12 @@ end
 			typeError(state, blank, "Blank names cannot be used in assignments with binary operations. (The operation here is '%s')", assignment.binaryOperation)
 		end
 
+		blank.inferredType = state.builtinTypeInfos.any
+		moveToNextRelevantPipe(state, blank)
+
 	else
 		errorUnhandledNodeType(state, blank)
 	end
-
-	blank.inferredType = state.builtinTypeInfos.any
-	moveToNextRelevantPipe(state, blank)
 !NODE_INFERRER_END `end`
 
 !NODE_INFERRER `function nodeInferrers.AstType(state, typeNode)`
@@ -3160,9 +3176,9 @@ end
 !NODE_INFERRER_END `end`
 
 !NODE_INFERRER `function nodeInferrers.AstDeclaration(state, decl)`
-	local valueExpr     = getDeclarationValue(decl, true)
-	local isConst       = isDeclarationConstant(decl)
-	local identOrVararg = decl.name
+	local valueExpr            = getDeclarationValue(decl, true)
+	local isConst              = isDeclarationConstant(decl)
+	local identOrVarargOrBlank = decl.name
 
 	if valueExpr then
 		if valueExpr.nodeType == !(AST_TABLE) then
@@ -3176,13 +3192,13 @@ end
 		end
 
 		if isConst and valueExpr.nodeType == !(AST_STRUCT) or valueExpr.nodeType == !(AST_ENUM) then
-			valueExpr.representedType.name = identOrVararg.name
+			valueExpr.representedType.name = identOrVarargOrBlank.name
 		end
 	end
 
-	local typeInfo = identOrVararg.inferredType
+	local typeInfo = identOrVarargOrBlank.inferredType
 	if not typeInfo then
-		!DEPEND_AND_RETURN(`decl`, DEPEND_NODE_INFERRED, `identOrVararg`)
+		!DEPEND_AND_RETURN(`decl`, DEPEND_NODE_INFERRED, `identOrVarargOrBlank`)
 	end
 
 	if decl.notes then
@@ -3211,7 +3227,7 @@ end
 			-- void  Only compound types have a higher requirement on the value at the moment.
 		elseif isConst then
 			typeError(
-				state, identOrVararg,
+				state, identOrVarargOrBlank,
 				"Constants cannot be compound types. (Type is %s)",
 				getFriendlyTypeInfoName(typeInfoRepresented)
 			)
@@ -3219,7 +3235,7 @@ end
 			-- void  These never need a value.
 		elseif not valueExpr then
 			typeError(
-				state, identOrVararg,
+				state, identOrVarargOrBlank,
 				"An initial value is required for compound types. (Type is %s)",
 				getFriendlyTypeInfoName(typeInfoRepresented)
 			)
@@ -3255,9 +3271,9 @@ end
 		-- (Not needed for vararg as those only exist as arguments and don't have default values.
 		-- Also, this doesn't run for enum members as those declarations never have any specified types.)
 		--
-		if typeExpr and identOrVararg.nodeType ~= !(AST_VARARG) then
+		if typeExpr and identOrVarargOrBlank.nodeType ~= !(AST_VARARG) then
 			if decl.assignment then
-				getAssignmentValue(state, identOrVararg, decl.assignment.values, decl.assignmentIndex, typeInfo, nil, nil)
+				getAssignmentValue(state, identOrVarargOrBlank, decl.assignment.values, decl.assignmentIndex, typeInfo, nil, nil, false)
 
 			elseif not isTypeCompatibleWith(state, valueType, typeInfo, false, valueExpr) then -- Note: No need to call adjustTypeToOne() for valueExpr.
 				-- @UX: Use the same error message as getAssignmentValue().
@@ -3282,7 +3298,7 @@ end
 					state, lambda,
 					"Value for declared %s '%s' is not a constant expression. (Functions with captures are not constant.)",
 					(isConst and "constant" or "variable"),
-					identOrVararg.name
+					identOrVarargOrBlank.name
 				)
 
 			elseif dynExpr.nodeType == !(AST_FOREIGN) then
@@ -3303,7 +3319,7 @@ end
 					"%s for declared %s '%s' is not a constant expression.%s",
 					(dynExpr == valueExpr and "Value"    or "Sub-expression inside the value"),
 					(isConst              and "constant" or "variable"),
-					identOrVararg.name,
+					identOrVarargOrBlank.name,
 					(not isConst and isScopeDeclarative(scope) and " (All values in declarative scopes must be constant.)" or "")
 				)
 			end
@@ -3331,8 +3347,8 @@ end
 		-- Variables in foreign structs do not need initial values since those structs never get constructed locally anyway.
 		or isForeignVariableMember
 	) then
-		!ASSERT `not isConst` -- This should have been detected in inferIdentifierOrVararg() (I think).
-		typeError(state, identOrVararg, "Variables in type group '%s' must have a specified initial value.", TYPE_NAMES[typeInfo.tag])
+		!ASSERT `not isConst` -- This should have been detected in inferIdentifierOrVarargOrBlank() (I think).
+		typeError(state, identOrVarargOrBlank, "Variables in type group '%s' must have a specified initial value.", TYPE_NAMES[typeInfo.tag])
 	end
 
 	if decl.notes then
@@ -3361,7 +3377,7 @@ end
 		codeDecl.filepath       = decl.source.path
 		codeDecl.lineNumber     = decl.line
 		codeDecl.filePosition   = decl.position
-		codeDecl.name           = identOrVararg.name
+		codeDecl.name           = identOrVarargOrBlank.name
 		codeDecl.expressions[1] = nil -- @Incomplete: Generate child CodeNodes.
 		codeDecl.rootExpression = nil -- @Incomplete: Generate child CodeNodes.
 		codeDecl.isConstant     = isConst
@@ -4817,7 +4833,7 @@ end
 
 	if not isEnumMemberDecl then
 		for i, targetExpr in ipairs(assignment.targets) do
-			getAssignmentValue(state, targetExpr, assignment.values, i, targetExpr.inferredType, assignment.binaryOperation, nil)
+			getAssignmentValue(state, targetExpr, assignment.values, i, targetExpr.inferredType, assignment.binaryOperation, nil, false)
 		end
 	end
 
@@ -5720,7 +5736,7 @@ end
 			!ASSERT `#names >= 1`
 			!ASSERT `values[1]`
 
-			local iterExpr, iterType = getAssignmentValue(state, forLoop, values, 1, nil, nil, "loop value")
+			local iterExpr, iterType = getAssignmentValue(state, forLoop, values, 1, nil, nil, "loop value", false)
 			if iterType.tag ~= !(TYPE_FUNCTION) then
 				typeError(state, iterExpr, "For loop: Expected a function. (Got %s)", getFriendlyTypeInfoName(iterType))
 			end
@@ -6988,7 +7004,7 @@ end
 
 
 
--- expression, typeInfo = getAssignmentValue( state, assignmentTarget, values, valueIndex, expectedTypeInfo=any, extraBinaryOperation="", targetTerm="assignment target" [, noError=false ] )
+-- expression, typeInfo = getAssignmentValue( state, assignmentTarget, values, valueIndex, expectedTypeInfo=any, extraBinaryOperation="", targetTerm="assignment target", noError=false )
 -- Note: Vararg node/type may be returned.
 function _G.getAssignmentValue(state, targetExpr, values, i, typeInfoExpected, binOp, targetTerm, noError)
 	!(
@@ -7880,8 +7896,8 @@ end
 local function getExpectedTypeInfoUsingContents(state, node, strict, expectantTerm, nodeForError)
 	!(
 	local NO_EXPECTATION = 'typeError(state, nodeForError, "Could not determine the type of this %s.", expectantTerm)'
-	if DEBUG then
-		NO_EXPECTATION = 'astPrintTree(node) ; '..NO_EXPECTATION
+	if DEBUG and 1==1 then
+		NO_EXPECTATION = "astPrintTree(state.globalScope) ; "..NO_EXPECTATION
 	end
 	)
 
