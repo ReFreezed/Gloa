@@ -3320,13 +3320,24 @@ end
 				getAssignmentValue(state, identOrVarargOrBlank, decl.assignment.values, decl.assignmentIndex, typeInfo, nil, nil, false)
 
 			elseif not isTypeCompatibleWith(state, valueType, typeInfo, false, valueExpr) then -- Note: No need to call adjustTypeToOne() for valueExpr.
-				-- @UX: Use the same error message as getAssignmentValue().
-				typeError(
-					state, valueExpr, "Value type mismatch for assignment target #%d. (Wanted %s, got %s)",
-					decl.assignmentIndex,
-					getFriendlyTypeInfoName(typeInfo),
-					getFriendlyTypeInfoName(valueType)
-				)
+				local wantEnumAndGotLiteralOfCorrectType, isCompatible = checkForLiteralVsEnumSituation(valueExpr, typeInfo)
+
+				if isCompatible then
+					-- void
+				elseif wantEnumAndGotLiteralOfCorrectType then
+					typeError2(state,
+						valueExpr,        F("Enum '%s' has no value '%s'.", getFriendlyTypeInfoName(typeInfo), valueToStringForMessage(valueExpr.value)),
+						typeInfo.astNode, F("...here is the enum.")
+					)
+				else
+					-- @UX: Use the same error message as getAssignmentValue().
+					typeError(
+						state, valueExpr, "Value type mismatch for assignment target #%d. (Wanted %s, got %s)",
+						decl.assignmentIndex,
+						getFriendlyTypeInfoName(typeInfo),
+						getFriendlyTypeInfoName(valueType)
+					)
+				end
 			end
 		end
 
@@ -4838,7 +4849,10 @@ end
 			local decl     = findDeclarationInEnumForValue(state, enumInfo.astNode, expr)
 
 			if not decl then
-				typeError(state, expr, "This value is not valid for enum '%s'.", getFriendlyTypeInfoName(castType))
+				typeError2(state,
+					expr,             F("Enum '%s' has no value '%s'.", getFriendlyTypeInfoName(enumInfo), valueToStringForMessage(expr.value)),
+					enumInfo.astNode, F("...here is the enum.")
+				)
 			end
 		end
 

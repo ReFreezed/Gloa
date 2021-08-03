@@ -832,13 +832,12 @@ local state = {
 			local s          = assert(loadstring("return"..luaCodeValue))()
 			local sFormatted = F("%q", s)
 
-			if luaCodeValue == "'false'" and objectName == "setRelative" then
-				state.file:write("false") -- This was an error on the LÖVE wiki and thus in love_api.
-			elseif typeName == "string" then
-				state.file:write(sFormatted) -- Assume the Lua string formatting is compatible with Glóa.
-			else
-				state.file:write("cast(", typeName, ")", sFormatted) -- @Incomplete: Handle enums better. (Remember to handle renames!)
-			end
+			state.file:write(sFormatted)
+			-- if typeName == "string" then
+			-- 	state.file:write(sFormatted) -- Assume the Lua string formatting is compatible with Glóa.
+			-- else
+			-- 	state.file:write(sFormatted) -- @Incomplete: Handle enums better. (Remember to handle renames!)
+			-- end
 
 		-- Some call.
 		elseif luaCodeValue:find"^%a.*%(.*%)$" then
