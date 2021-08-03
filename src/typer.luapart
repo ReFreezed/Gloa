@@ -7073,7 +7073,11 @@ function _G.getAssignmentValue(state, targetExpr, values, i, typeInfoExpected, b
 
 	local _CHECK_TYPE_COMPATABILITY_AND_MAYBE_RETURN = `
 		if binOp == "" then
-			if isTypeCompatibleWith(state, $valueTypeInfoAdjusted, typeInfoExpected, false, $valueExpr) then  return $valueExpr, $valueTypeInfo  end
+			local isCompatible = isTypeCompatibleWith(state, $valueTypeInfoAdjusted, typeInfoExpected, false, $valueExpr)
+			if isCompatible then  return $valueExpr, $valueTypeInfo  end
+
+			wantEnumAndGotLiteralOfCorrectType, isCompatible = checkForLiteralVsEnumSituation($valueExpr, typeInfoExpected)
+			if isCompatible then  return $valueExpr, typeInfoExpected  end
 
 		else
 			$valueTypeInfoAdjusted = checkBinaryOperation(
@@ -7085,7 +7089,19 @@ function _G.getAssignmentValue(state, targetExpr, values, i, typeInfoExpected, b
 				true
 			) or errorInternal()
 
-			if not isTypeCompatibleWith(state, $valueTypeInfoAdjusted, typeInfoExpected, false, $valueExpr) then
+			local isCompatible = isTypeCompatibleWith(state, $valueTypeInfoAdjusted, typeInfoExpected, false, $valueExpr)
+			if not isCompatible then
+				wantEnumAndGotLiteralOfCorrectType, isCompatible = checkForLiteralVsEnumSituation($valueExpr, typeInfoExpected)
+			end
+
+			if isCompatible then
+				-- void
+			elseif wantEnumAndGotLiteralOfCorrectType then
+				typeError2(state,
+					$valueExpr,               F("Enum '%s' has no value '%s'.", getFriendlyTypeInfoName(typeInfoExpected), valueToStringForMessage($valueExpr.value)),
+					typeInfoExpected.astNode, F("...here is the enum.")
+				)
+			else
 				typeError(
 					state, targetExpr,
 					"Type mismatch between %s #%d%s (%s) and result of binary operation (%s) (%s).",
@@ -7130,20 +7146,28 @@ function _G.getAssignmentValue(state, targetExpr, values, i, typeInfoExpected, b
 
 		if not typeInfoExpected then  return valueExpr, valueTypeInfo  end
 
-		local valueTypeInfoAdjusted = adjustTypeToOne(state, valueExpr, valueTypeInfo, true)
+		local valueTypeInfoAdjusted              = adjustTypeToOne(state, valueExpr, valueTypeInfo, true)
+		local wantEnumAndGotLiteralOfCorrectType = false
 		!CHECK_TYPE_COMPATABILITY_AND_MAYBE_RETURN(`valueExpr`, `valueTypeInfo`, `valueTypeInfoAdjusted`)
 
-		local messageFormat
-			=   valueTypeInfoAdjusted.tag == !(TYPE_FUNCTION) and typeInfoExpected.tag == !(TYPE_FUNCTION)
-			and "Function signature is different from %s #%d%s. (Wanted %s, got %s)"
-			or  "Value type mismatch for %s #%d%s. (Wanted %s, got %s)"
-
-		typeError(
-			state, valueExpr, messageFormat,
-			targetTerm, i, !!(TARGET_NAME),
-			getFriendlyTypeInfoName(typeInfoExpected),
-			getFriendlyTypeInfoName(valueTypeInfoAdjusted)
-		)
+		if wantEnumAndGotLiteralOfCorrectType then
+			typeError2(state,
+				valueExpr,                F("Enum '%s' has no value '%s'.", getFriendlyTypeInfoName(typeInfoExpected), valueToStringForMessage(valueExpr.value)),
+				typeInfoExpected.astNode, F("...here is the enum.")
+			)
+		else
+			local messageFormat = (
+				valueTypeInfoAdjusted.tag == !(TYPE_FUNCTION) and typeInfoExpected.tag == !(TYPE_FUNCTION)
+				and "Function signature is different from %s #%d%s. (Wanted %s, got %s)"
+				or  "Value type mismatch for %s #%d%s. (Wanted %s, got %s)"
+			)
+			typeError(
+				state, valueExpr, messageFormat,
+				targetTerm, i, !!(TARGET_NAME),
+				getFriendlyTypeInfoName(typeInfoExpected),
+				getFriendlyTypeInfoName(valueTypeInfoAdjusted)
+			)
+		end
 	end
 
 	valueExpr = values[#values]
@@ -7179,7 +7203,8 @@ function _G.getAssignmentValue(state, targetExpr, values, i, typeInfoExpected, b
 
 		if not typeInfoExpected then  return call, typeInfoForOutArg  end
 
-		local typeInfoForOutArgAdjusted = adjustTypeToOne(state, call, typeInfoForOutArg, true)
+		local typeInfoForOutArgAdjusted          = adjustTypeToOne(state, call, typeInfoForOutArg, true)
+		local wantEnumAndGotLiteralOfCorrectType = false -- Not actually used in this branch.
 		!CHECK_TYPE_COMPATABILITY_AND_MAYBE_RETURN(`call`, `typeInfoForOutArg`, `typeInfoForOutArgAdjusted`)
 
 		local calleeName = (call.callee.nodeType == !(AST_IDENTIFIER) and " of '"..call.callee.name.."'" or "")
