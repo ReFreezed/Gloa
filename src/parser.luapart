@@ -321,7 +321,7 @@ _G.!structAst"AstArguments:_AstNode"{
 _G.!structAst"AstDeclaration:_AstNode"{
 	_overrides = {{`nodeType`,AST_DECLARATION}},
 	{`type`,                 nil, ast="node"},  -- AstType  If this is nil then the type is inferred from the value.
-	{`value`,                nil, ast="node"},  -- AstExpression  Either this or assignment should be set, or neither for getting the default value for the type.
+	{`value`,                nil, ast="node"},  -- AstExpression  Either this or assignment should be set, or neither for getting the default value for the type. This node is used in static context.
 	{`name`,                 nil, ast="node"},  -- AstIdentifier|AstVararg|AstBlank
 	{`notes`,                nil, ast="array"}, -- []AstExpression  Is set when needed.
 
@@ -538,7 +538,7 @@ do
 			errorInternal(2, "No parent.")
 		end
 
-		serialN = serialN+1
+		serialN = serialN + 1
 
 		local node    = nodeConstructor()
 		node.s        = serialN
@@ -547,15 +547,17 @@ do
 		node.position = tokOrSourceNode.position1 or tokOrSourceNode.position
 		node.line     = tokOrSourceNode.line1     or tokOrSourceNode.line
 
-		--[[
-		if
-			false
-			-- or serialN == 22
-			or parent and parent.s == 21
-		then
-			errorInternal("DEBUG")
-		end
-		--]]
+		!if DEBUG and 1==0 then
+			-- Who made us?!
+			if false
+				or serialN == 487
+				-- or parent and parent.s == 21
+			then
+				print("astNewNode", node.s, AST_NAMES[node.nodeType])
+				printTraceback()
+				-- errorInternal("DEBUG")
+			end
+		!end
 
 		!if EXTRA_STATS then
 			nodeCreationCounts[node.nodeType] = nodeCreationCounts[node.nodeType] + 1
@@ -4352,6 +4354,7 @@ do
 				if decl.addedByPolymorph then  write(" (addedByPolymorph)")  end
 				if decl.assignment       then  write(" (assignment ", decl.assignment.s, " i=", decl.assignmentIndex, ")")  end
 				write(" (", (DECL_KIND_TITLES[decl.kind] or "?"))
+				if decl.inferredType     then  write(", type=", getFriendlyTypeInfoName(decl.inferredType))  end
 				if decl.valueTypeInfo    then  write(", typeRepresented=", getFriendlyTypeInfoName(decl.valueTypeInfo))  end
 				if decl.overloadOf       then  write(", overloads=", #decl.overloadOf.overloads, (decl.overloadOf == decl and "(base)" or ""))  end
 				write(")")
@@ -5181,7 +5184,6 @@ do
 	}
 
 	-- copy, copies = astCopy( node [, tokOrSourceNode=auto, parent=node.parent ] )
-	-- copy, copies = astCopy( node [, token=auto,           parent=node.parent ] ) -- @Obsolete
 	-- copies = { [node1]=copy1, ... }
 	-- Note: Copies the whole tree. We also don't touch any queued.
 	function _G.astCopy(node, tokOrSourceNode, parent)
@@ -5200,7 +5202,6 @@ do
 	local DUMMY = {}
 
 	-- copy = astCopyIdentifier( identifier [, tokOrSourceNode=auto, parent=identifier.parent, identKind=identifier.kind ] )
-	-- copy = astCopyIdentifier( identifier [, token=auto,           parent=identifier.parent, identKind=identifier.kind ] ) -- @Obsolete
 	function _G.astCopyIdentifier(ident, tokOrSourceNode, parent, identKind)
 		local copy = COPIERS[!(AST_IDENTIFIER)](ident, tokOrSourceNode, (parent or ident.parent), DUMMY)
 
@@ -5277,7 +5278,6 @@ end
 
 
 -- literal = newLiteral( parent, tokOrSourceNode, literalType, value [, typeInfo ] )
--- literal = newLiteral( parent, token,           literalType, value [, typeInfo ] ) -- @Obsolete
 function _G.newLiteral(parent, tokOrSourceNode, literalType, value, typeInfo)
 	local literal        = astNewNode(AstLiteral, tokOrSourceNode, parent)
 	literal.literalType  = literalType

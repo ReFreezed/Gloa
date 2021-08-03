@@ -809,7 +809,8 @@ end
 
 
 function _G.getFriendlyTypeInfoName(typeInfo)
-	local name = ""
+	!local APPEND_ID = DEBUG and 1==1
+	local  name      = ""
 
 	if typeInfo.tag == !(TYPE_STRUCT) then
 		local structInfo = typeInfo
@@ -823,7 +824,11 @@ function _G.getFriendlyTypeInfoName(typeInfo)
 				for argIndex, declBaked in ipairs(struct.bakeDeclarations) do
 					local valueExpr = declBaked.value
 
-					if valueExpr.nodeType == !(AST_LITERAL) then
+					if valueExpr.nodeType == !(AST_IDENTIFIER) and declBaked.inferredType.tag == !(TYPE_ENUM) then
+						local enumInfo   = declBaked.inferredType
+						params[argIndex] = (enumInfo.name ~= "" and enumInfo.name or !(TYPE_NAMES[TYPE_ENUM])) .. "." .. valueExpr.name
+
+					elseif valueExpr.nodeType == !(AST_LITERAL) then
 						local literal    = valueExpr
 						params[argIndex] = literal.literalType == !(LITERAL_STRING) and F("%q", literal.value) or tostring(literal.value)
 
@@ -909,7 +914,7 @@ function _G.getFriendlyTypeInfoName(typeInfo)
 		name = TYPE_NAMES[typeInfo.tag] or errorInternal("%d", typeInfo.tag)
 	end
 
-	-- !(if DEBUG then)  name = name.."@"..typeInfo.id  !(end)
+	!(if APPEND_ID then)  name = name .. "@" .. typeInfo.id  !(end)
 
 	return name
 end
@@ -1761,7 +1766,7 @@ local function checkForLiteralVsEnumSituation(valueExpr, typeInfoToMatch)
 	if valueExpr.inferredType ~= typeInfoToMatch.memberTypeInfo then  return false, false, 0  end
 
 	for _, decl in ipairs(typeInfoToMatch.astNode.declarations) do
-		!ASSERT("decl.value.nodeType == "..AST_LITERAL)
+		!ASSERT("decl.value.nodeType == "..AST_LITERAL, nil, `decl.value`)
 
 		if decl.value.value == valueExpr.value then
 			-- typeError2(state, valueExpr, "This!", decl.value, "It's this!") -- DEBUG
@@ -2434,7 +2439,7 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 	morphDecl.value                   = morphLambda
 
 	-- Don't keep copies of previous polymorphs we've made - that would quickly create a mess!
-	-- (@Speed: Don't even copy them in the first place.)
+	-- (@Speed: Don't even copy them in the first place!)
 	do
 		morphLambda.polymorphs = nil
 
@@ -2758,7 +2763,7 @@ local function handlePolymorphicStruct(state, call)
 	end
 	for _, argNamed in ipairs(call.argumentsNamed) do
 		if not isExpressionConstant(state, argNamed.value, false) then
-			typeError(state, astGetExpressionVisuallyFurthestToTheLeft(argNamed.value), "Struct argument #%d is not constant.", argNamed.argumentIndex)
+			typeError(state, astGetExpressionVisuallyFurthestToTheLeft(argNamed.value), "Struct argument #%d (%s) is not constant.", argNamed.argumentIndex, argNamed.key.name)
 		end
 	end
 
@@ -2798,18 +2803,8 @@ local function handlePolymorphicStruct(state, call)
 				valueExpr      = argNamed and argNamed.value or struct.bakeDeclarations[argIndex].value
 			end
 
-			if valueExpr.nodeType ~= valueBaked.nodeType then
+			if not areConstantTreesEqual(state, valueExpr, valueBaked) then
 				isMatch = false ; break
-			elseif valueExpr.nodeType == !(AST_LITERAL) then
-				if valueExpr.value ~= valueBaked.value then -- Note: We don't need to check the literalType.
-					isMatch = false ; break
-				end
-			elseif valueExpr.nodeType == !(AST_TYPE) then
-				if valueExpr.representedType ~= valueBaked.representedType then
-					isMatch = false ; break
-				end
-			else
-				errorUnhandledNodeType(state, valueExpr)
 			end
 		end
 
@@ -2845,7 +2840,7 @@ local function handlePolymorphicStruct(state, call)
 	morphDecl.value                   = morphStruct
 
 	-- Don't keep copies of previous polymorphs we've made - that would quickly create a mess!
-	-- (@Speed: Don't even copy them in the first place.)
+	-- (@Speed: Don't even copy them in the first place!)
 	do
 		morphStruct.polymorphs = nil
 
@@ -2870,6 +2865,7 @@ local function handlePolymorphicStruct(state, call)
 		if valueExpr then -- valueExpr is nil for optional arguments.
 			declBaked.value = astCopy(valueExpr, nil, declBaked) -- Overwrite any old value expression.
 		end
+
 		declBaked.checkedRedeclaration = true -- @Hack to prevent redeclaration errors between polymorphed struct and base struct.
 	end
 
@@ -3395,6 +3391,22 @@ end
 			end
 		end
 
+		--
+		-- Not sure if this enum value check/replacement should be exactly here.
+		--
+		-- Note that we only get here in static context, but we probably don't need to
+		-- do anything for values in imperative-context variable declarations anyway.
+		--
+		if typeInfo.tag == !(TYPE_ENUM) and scope.nodeType ~= !(AST_ENUM) and (valueExpr.nodeType == !(AST_LITERAL) or valueExpr.nodeType == !(AST_TYPE)) then
+			local enumInfo = typeInfo
+			local decl     = findDeclarationInEnumForValue(state, enumInfo.astNode, valueExpr) or errorInternal(state, valueExpr)
+			local ident    = astCopyIdentifier(decl.name, valueExpr, decl, !(IDENT_KIND_LOOSE))
+
+			replaceQueuedNodeAndUnqueueOldTree(state, valueExpr, ident)
+			moveToNextRelevantPipe(state, ident, !(PIPE_INFER)) -- Will ident be in a good pipe? It'll probably end up in PIPE_READY which seems right. 2021-08-03
+			valueExpr = ident
+		end
+
 	elseif not (
 		doesTypeHaveAnyDefaultValue(typeInfo)
 		-- Ignore missing values for arguments (which are then required arguments).
@@ -3416,6 +3428,13 @@ end
 	end
 
 	moveToNextRelevantPipe(state, decl)
+
+	!if DEBUG and 1==0 then
+		if decl.s == 450 then
+			astPrintTree(decl)
+			where(state, decl, "Declaration inferred.")
+		end
+	!end
 
 	if scope.nodeType == !(AST_FILE_SCOPE) and state.sendMessages then
 		local message = newMessage(!(MESSAGE_CODE_TYPECHECKED))
@@ -3950,7 +3969,10 @@ end
 		local nodeType  = valueExpr.nodeType
 		local replacement
 
-		if !!(CONST_SET{ AST_LITERAL, AST_FOREIGN })[nodeType] then
+		if memberValueType.tag == !(TYPE_ENUM) then -- For enum values we check the type, but for all other nodes we check the nodeType. Is this exception fine? @Robustness
+			replacement = astCopyIdentifier(constDecl.name, access.member, nil, !(IDENT_KIND_LOOSE))
+
+		elseif !!(CONST_SET{ AST_LITERAL, AST_FOREIGN })[nodeType] then
 			replacement = astCopy(valueExpr, access.member)
 
 		elseif nodeType == !(AST_TYPE) then
