@@ -1641,9 +1641,9 @@ end
 		end
 
 		-- Note: It's ok that these share the same table!
-		local typeInfos  = {}        -- Keys are numbers.
-		local typeIds    = typeInfos -- Keys are AstNode.
-		local duplicates = typeInfos -- Keys are TypeInfo.
+		local typeInfos  = {}        -- Keys are sequence numbers, values are TypeInfo.
+		local typeIds    = typeInfos -- Keys are AstNode, values are type IDs.
+		local duplicates = typeInfos -- Keys are TypeInfo, values are source expressions.
 
 		local isFromCompound = {}
 
@@ -1651,18 +1651,18 @@ end
 			!(
 			local _ERROR_DUPLICATE_TYPE = `
 				printerr()
-				typeMessage(io.stderr, state, typeExpr, "Error", "Duplicate type specified in $siteTitle. (%s)", getFriendlyTypeInfoName($typeInfoVar))
-				if isFromCompound[$typeInfoVar] then
-					typeMessage(io.stderr, state, duplicates[$typeInfoVar], "Info", "...this sub-compound type contains the same type.")
+				typeMessage(io.stderr, state, typeExpr, "Error", "Duplicate type specified in $siteName. (%s)", getFriendlyTypeInfoName($typeInfo))
+				if isFromCompound[$typeInfo] then
+					typeMessage(io.stderr, state, duplicates[$typeInfo], "Info", "...this sub-compound type contains the same type.")
 				else
-					typeMessage(io.stderr, state, duplicates[$typeInfoVar], "Info", "...this is the same type.")
+					typeMessage(io.stderr, state, duplicates[$typeInfo], "Info", "...this is the same type.")
 				end
 				exitFailure()
 			`
-			local function ERROR_DUPLICATE_TYPE(siteTitle, typeInfoVar)
+			local function ERROR_DUPLICATE_TYPE(siteName, typeInfoVar)
 				local lua = templateToLua(_ERROR_DUPLICATE_TYPE, {
-					siteTitle   = siteTitle,
-					typeInfoVar = typeInfoVar,
+					siteName = siteName,
+					typeInfo = typeInfoVar,
 				})
 				__LUA(lua)
 			end
@@ -1670,26 +1670,41 @@ end
 
 			local componentType = requireTypeRepresentedByExpression(state, typeExpr)
 
-			-- @Incomplete: Handle this situation: local s: enum string{V}|string = ""
-
 			if componentType.tag == !(TYPE_COMPOUND) then
 				-- Unpack the sub-compound type so we don't end up with compound types of other compound types.
 				local compound = componentType
 
 				for _, compoundItem in ipairs(compound) do
 					if duplicates[compoundItem] then
-						!ERROR_DUPLICATE_TYPE("compound type (through sub-compound type)", `compoundItem`)
+						-- if compoundItem.tag ~= !(TYPE_ENUM) and getTypeRepresentedByExpression(duplicates[compoundItem]).tag == !(TYPE_ENUM) then -- @Incomplete: duplicates[compoundItem] is (or may be?) a compound type - we have to go deeper! (Can we?)
+						-- 	!ERROR_DUPLICATE_TYPE("compound type (through enum member type in sub-compound type)", `compoundItem`)
+						-- else
+							!ERROR_DUPLICATE_TYPE("compound type (through sub-compound type)", `compoundItem`)
+						-- end
+					-- elseif compoundItem.tag == !(TYPE_ENUM) and duplicates[compoundItem.memberTypeInfo] then
+					-- 	!ERROR_DUPLICATE_TYPE("compound type (through enum member type in sub-compound type)", `compoundItem.memberTypeInfo`)
 					end
 
 					table.insert(typeInfos, compoundItem)
 					typeIds[typeExpr]            = compoundItem.id
 					duplicates[compoundItem]     = typeExpr -- @UX: Should we ignore duplicate nil types?
 					isFromCompound[compoundItem] = true
+
+					-- if compoundItem.tag == !(TYPE_ENUM) then
+					-- 	duplicates[compoundItem.memberTypeInfo]     = typeExpr -- Not sure if this is actually a good rule. What about int|float compounds?
+					-- 	isFromCompound[compoundItem.memberTypeInfo] = true
+					-- end
 				end
 
 			else
 				if duplicates[componentType] then
-					!ERROR_DUPLICATE_TYPE("compound type", `componentType`)
+					-- if componentType.tag ~= !(TYPE_ENUM) and getTypeRepresentedByExpression(duplicates[componentType]).tag == !(TYPE_ENUM) then
+					-- 	!ERROR_DUPLICATE_TYPE("compound type (through enum member type)", `componentType`)
+					-- else
+						!ERROR_DUPLICATE_TYPE("compound type", `componentType`)
+					-- end
+				-- elseif componentType.tag == !(TYPE_ENUM) and duplicates[componentType.memberTypeInfo] then
+				-- 	!ERROR_DUPLICATE_TYPE("compound type (through enum member type)", `componentType.memberTypeInfo`)
 				elseif componentType.tag == !(TYPE_ANY) then
 					typeError(state, typeExpr, "Cannot include 'any' in compound types.")
 				end
@@ -1697,6 +1712,10 @@ end
 				table.insert(typeInfos, componentType)
 				typeIds[typeExpr]         = componentType.id
 				duplicates[componentType] = typeExpr -- @UX: Should we ignore duplicate nil types?
+
+				-- if componentType.tag == !(TYPE_ENUM) then
+				-- 	duplicates[componentType.memberTypeInfo] = typeExpr -- Not sure if this is actually a good rule. What about int|float compounds?
+				-- end
 			end
 		end
 
