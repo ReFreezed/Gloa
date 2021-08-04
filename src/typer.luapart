@@ -1649,7 +1649,7 @@ end
 
 		for _, typeExpr in ipairs(typeNode.components) do
 			!(
-			local TEMPLATE_ERROR_DUPLICATE_TYPE = `
+			local _ERROR_DUPLICATE_TYPE = `
 				printerr()
 				typeMessage(io.stderr, state, typeExpr, "Error", "Duplicate type specified in $siteTitle. (%s)", getFriendlyTypeInfoName($typeInfoVar))
 				if isFromCompound[$typeInfoVar] then
@@ -1660,7 +1660,7 @@ end
 				exitFailure()
 			`
 			local function ERROR_DUPLICATE_TYPE(siteTitle, typeInfoVar)
-				local lua = templateToLua(TEMPLATE_ERROR_DUPLICATE_TYPE, {
+				local lua = templateToLua(_ERROR_DUPLICATE_TYPE, {
 					siteTitle   = siteTitle,
 					typeInfoVar = typeInfoVar,
 				})
@@ -1669,6 +1669,8 @@ end
 			)
 
 			local componentType = requireTypeRepresentedByExpression(state, typeExpr)
+
+			-- @Incomplete: Handle this situation: local s: enum string{V}|string = ""
 
 			if componentType.tag == !(TYPE_COMPOUND) then
 				-- Unpack the sub-compound type so we don't end up with compound types of other compound types.
@@ -1779,9 +1781,10 @@ end
 
 -- doesMatch, compatibilityScore = checkIfValuesMatchArgumentTypes(
 --     state, callOrReturnOrOther, values, valueTypes, typeInfos,
---     softCheck, calleeDeclarationForCurrentOverload=nil, argumentsNamed=nil
+--     softCheck, calleeDeclarationForCurrentOverload=nil, argumentsNamed=nil, strict
 -- )
-local function checkIfValuesMatchArgumentTypes(state, callOrReturnOrOther, values, valueTypes, typeInfos, softCheck, calleeDecl, argsNamed)
+-- The strict flag is for polymorphic and overloaded calls.
+local function checkIfValuesMatchArgumentTypes(state, callOrReturnOrOther, values, valueTypes, typeInfos, softCheck, calleeDecl, argsNamed, strict)
 	--[[
 		Situations:
 
@@ -2054,7 +2057,7 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnOrOther, value
 			isCompatible, compatibilityScore = isTypeCompatibleWith(state, valueTypeInfoAdjusted, typeInfoToMatchAdjusted, strictTypeMatch, valueExpr)
 
 			local wantEnumAndGotLiteralOfCorrectType = false
-			if not isCompatible then
+			if not isCompatible and not strict then
 				wantEnumAndGotLiteralOfCorrectType, isCompatible, compatibilityScore = checkForLiteralVsEnumSituation(valueExpr, typeInfoToMatchAdjusted)
 			end
 
@@ -2117,7 +2120,7 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnOrOther, value
 		local isCompatible, compatibilityScore = isTypeCompatibleWith(state, valueTypeInfoAdjusted, typeInfoToMatchAdjusted, strictTypeMatch, valueExpr)
 
 		local wantEnumAndGotLiteralOfCorrectType = false
-		if not isCompatible then
+		if not isCompatible and not strict then
 			wantEnumAndGotLiteralOfCorrectType, isCompatible, compatibilityScore = checkForLiteralVsEnumSituation(valueExpr, typeInfoToMatchAdjusted)
 		end
 
@@ -2235,7 +2238,7 @@ local function getMatchingFunctions(state, call, realArguments, realArgumentType
 
 		local doesMatch, compatibilityScore = checkIfValuesMatchArgumentTypes(
 			state, call, realArguments, realArgumentTypes, funcSig.argumentTypesIn,
-			true, decl, call.argumentsNamed
+			true, decl, call.argumentsNamed, true
 		)
 		if doesMatch then
 			matches = matches or {}
@@ -2332,7 +2335,7 @@ local function handlePolymorphicCall(state, call, calleeTypeInfo, realArguments,
 
 	checkIfValuesMatchArgumentTypes( -- Basically checks everything but placeholders.
 		state, call, realArguments, realArgumentTypes, calleeTypeInfo.argumentTypesIn,
-		false, nil, call.argumentsNamed
+		false, nil, call.argumentsNamed, false
 	)
 
 	-- Prepare for auto-bake stuff.
@@ -3086,7 +3089,7 @@ end
 	-- Plain call.
 	checkIfValuesMatchArgumentTypes(
 		state, call, realArguments, realArgumentTypes, funcSig.argumentTypesIn,
-		false, nil, call.argumentsNamed
+		false, nil, call.argumentsNamed, false
 	)
 
 	-- Make sure foreign function calls don't have gaps among the arguments as
@@ -3210,7 +3213,7 @@ end
 
 	checkIfValuesMatchArgumentTypes(
 		state, returnNode, returnNode.values, typeInfos, lambda.inferredType.argumentTypesOut,
-		false, nil, nil
+		false, nil, nil, false
 	)
 	moveToNextRelevantPipe(state, returnNode)
 !NODE_INFERRER_END `end`
@@ -5226,28 +5229,40 @@ end
 
 		elseif expr.replacing.nodeType == !(AST_BINARY) then
 			local binary = expr.replacing
+			local l      = binary.left
+			local r      = binary.right
 
-			local l
-				=  binary.left.nodeType == !(AST_LITERAL) and (binary.left.literalType == !(LITERAL_STRING) and F("'%s'", binary.left.value) or tostring(binary.left.value))
-				or binary.left.nodeType == !(AST_TYPE)    and getFriendlyTypeInfoName(binary.left.representedType)
-				or nil
+			local textL = (
+				!local e = `l`
+				!!(e).nodeType == !(AST_LITERAL)    and (!!(e).literalType == !(LITERAL_STRING) and F("'%s'", !!(e).value) or tostring(!!(e).value)) or
+				!!(e).nodeType == !(AST_TYPE)       and getFriendlyTypeInfoName(!!(e).representedType) or
+				!!(e).nodeType == !(AST_IDENTIFIER) and !!(e).declaration.overloadOf and !!(e).name.."#overload"..(indexOf(!!(e).declaration.overloadOf.overloads, !!(e).declaration) or "?") or
+				!!(e).nodeType == !(AST_IDENTIFIER) and !!(e).declaration.addedByPolymorph and !!(e).declaration.value.nodeType == !(AST_LAMBDA) and !!(e).name.."#poly"..(indexOf(!!(e).declaration.value.polymorphSourceLambda.polymorphs, !!(e).declaration) or "?").."#"..getFriendlyTypeInfoName(!!(e).inferredType) or
+				nil
+			)
+			local textR = (
+				!local e = `r`
+				!!(e).nodeType == !(AST_LITERAL)    and (!!(e).literalType == !(LITERAL_STRING) and F("'%s'", !!(e).value) or tostring(!!(e).value)) or
+				!!(e).nodeType == !(AST_TYPE)       and getFriendlyTypeInfoName(!!(e).representedType) or
+				!!(e).nodeType == !(AST_IDENTIFIER) and !!(e).declaration.overloadOf and !!(e).name.."#overload"..(indexOf(!!(e).declaration.overloadOf.overloads, !!(e).declaration) or "?") or
+				!!(e).nodeType == !(AST_IDENTIFIER) and !!(e).declaration.addedByPolymorph and !!(e).declaration.value.nodeType == !(AST_LAMBDA) and !!(e).name.."#poly"..(indexOf(!!(e).declaration.value.polymorphSourceLambda.polymorphs, !!(e).declaration) or "?").."#"..getFriendlyTypeInfoName(!!(e).inferredType) or
+				nil
+			)
 
-			local r
-				=  binary.right.nodeType == !(AST_LITERAL) and (binary.right.literalType == !(LITERAL_STRING) and F("'%s'", binary.right.value) or tostring(binary.right.value))
-				or binary.right.nodeType == !(AST_TYPE)    and getFriendlyTypeInfoName(binary.right.representedType)
-				or nil
+			if textL and textR then
+				if textL == textR then
+					typeError(state, binary, "Binary assertion failed! (Both sides are %s)", textL)
+				else
+					typeError(state, binary, "Binary assertion failed! (Left is %s, right is %s)", textL, textR)
+				end
 
-			if l and r then
-				typeError(state, binary, "Binary assertion failed! (Left is %s, right is %s)", l, r)
-
-			!if DEBUG and 1==1 then -- I don't think we can get only one of 'l' or 'r'. 2021-07-17
-			elseif l then
-				typeError(state, binary, "Binary assertion failed! (Left is %s)", l)
-			elseif r then
-				typeError(state, binary, "Binary assertion failed! (Right is %s)", r)
-			!end
+			elseif textL then
+				typeError(state, binary, "Binary assertion failed! (Left is %s)", textL)
+			elseif textR then
+				typeError(state, binary, "Binary assertion failed! (Right is %s)", textR)
 
 			else
+				!ifDEBUG `astPrintTree(binary)`
 				typeError(state, binary, "Binary assertion failed!")
 			end
 
@@ -5900,7 +5915,7 @@ end
 				--
 				checkIfValuesMatchArgumentTypes(
 					state, forLoop, values, valueTypesForIter, {valueTypesForIter[1], unpack(iterArgsIn)},
-					false, nil, nil
+					false, nil, nil, false
 				)
 			end
 

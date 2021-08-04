@@ -2178,7 +2178,8 @@ local testLiteralToEnumCasts :: () {
 		local f :: ()    -> E { return "v" }
 		local f :: (e:E) -> E { return "v" }
 		f()
-		f("v")
+		f(E.V)
+		-- f("v") -- This would be an error because 'f' is overloaded and we have to be more strict.
 	}
 
 	-- Assignments.
@@ -2196,7 +2197,8 @@ local testLiteralToEnumCasts :: () {
 	}
 	do {
 		local E :: enum { V::"v" }
-		local e: E = "v"
+		local e1: E : "v"
+		local e2: E = "v"
 	}
 
 	-- Struct arguments.
@@ -2228,5 +2230,31 @@ local testLiteralToEnumCasts :: () {
 		!assert type_of(b1.e) == E
 		!assert type_of(b2.e) == E
 		!assert type_of(b3.e) == E
+	}
+
+	-- Polymorphic functions.
+	do {
+		local E :: enum { A::"a", B::"b" }
+		local f :: ($e:E) {}
+		!assert variant_of(f(E.A)) == variant_of(f("a"))
+		!assert variant_of(f("b")) == variant_of(f(E.B))
+	}
+	do {
+		local E  :: enum { V::"v" }
+		local f1 :: (e:$T) {}
+		local f2 :: (e:$T) {}
+		!assert variant_of(f1(E.V)) ~= variant_of(f1("v"))
+		!assert variant_of(f2("v")) ~= variant_of(f2(E.V))
+	}
+
+	-- Overloads.
+	do {
+		local E  :: enum { V::"v" }
+		local f1 :: (s:string) {}
+		local f2 :: (s:string) {}
+		local f1 :: (e:E) {}
+		local f2 :: (e:E) {}
+		!assert variant_of(f1(E.V)) ~= variant_of(f1("v"))
+		!assert variant_of(f2("v")) ~= variant_of(f2(E.V))
 	}
 }
