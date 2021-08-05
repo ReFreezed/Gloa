@@ -867,8 +867,8 @@ function _G.getFriendlyTypeInfoName(typeInfo)
 		end
 
 		name = typeTextsOut[1]
-			and F("function(%s)->(%s)", table.concat(typeTextsIn), table.concat(typeTextsOut, ","))
-			or  F("function(%s)->void", table.concat(typeTextsIn))
+			and F("function%s(%s)->(%s)", (funcSig.isPolymorphic and ".poly" or ""), table.concat(typeTextsIn), table.concat(typeTextsOut, ","))
+			or  F("function%s(%s)->void", (funcSig.isPolymorphic and ".poly" or ""), table.concat(typeTextsIn))
 
 	elseif typeInfo.tag == !(TYPE_COMPOUND) then
 		local compound  = typeInfo
@@ -1244,9 +1244,10 @@ local function inferIdentifierOrVarargOrBlank(state, identOrVarargOrBlank)
 
 		else
 			moveToNextRelevantPipe(state, identOrVarargOrBlank)
+
 			if
 				ident
-				and isDeclarationConstant(decl) and followIdentifiersToConstantValue(state, ident).nodeType ~= !(AST_TABLE) -- Not sure how robust this is. @Robustness
+				and isDeclarationConstant(decl) and followIdentifiersToConstantValue(state, ident).nodeType ~= !(AST_TABLE) -- Not sure how robust this condition is. @Robustness
 			then
 				simplifyExpressionIfConstant(state, ident)
 			end
@@ -1377,8 +1378,47 @@ local function inferIdentifierOrVarargOrBlank(state, identOrVarargOrBlank)
 	--   local func :: () {}
 	--   local func :: (n:int=0) {}
 	--   func() -- First or second?
+	-- (I don't think this chack is really needed here as we get an error when calling the overloaded name
+	-- if there are argument matching issues. Let's just look for identical signatures. 2021-08-05)
 	if decl.overloadOf == decl then
 		for i = 1, #decl.overloads-1 do
+			local decl1     = decl.overloads[i]
+			local funcSig1  = decl1.value.inferredType
+			local argTypes1 = funcSig1.argumentTypesIn
+
+			for i = i+1, #decl.overloads do
+				local decl2     = decl.overloads[i]
+				local funcSig2  = decl2.value.inferredType
+				local argTypes2 = funcSig2.argumentTypesIn
+				local identical
+
+				if funcSig1 == funcSig2 then
+					identical = true
+
+				elseif #argTypes1 ~= #argTypes2 then
+					identical = false
+
+				else
+					identical = true
+
+					for argIndex = 1, #argTypes1 do
+						if argTypes1[argIndex] ~= argTypes2[argIndex] then
+							identical = false
+							break
+						end
+					end
+				end
+
+				if identical then
+					local identEarly, identLate = getEarlyAndLateForRedeclarationError(state, decl1.name, decl2.name)
+					typeError2(state,
+						identLate,  F("Call signatures for function overloads for '%s' are identical. (%s)", ident.name, getFriendlyTypeInfoName(funcSig1)),
+						identEarly, F("...here is the other function.")
+					)
+				end
+			end
+
+			--[[
 			local decl1     = decl.overloads[i]
 			local lambda1   = followIdentifiersToConstantValue(state, decl1.value)
 			local args1     = lambda1.argumentsIn and lambda1.argumentsIn.arguments
@@ -1421,6 +1461,7 @@ local function inferIdentifierOrVarargOrBlank(state, identOrVarargOrBlank)
 					if not (argTypeInfo1 and argTypeInfo1 == argTypeInfo2) then  break  end
 				end
 			end
+			--]]
 		end
 	end
 
@@ -1784,14 +1825,19 @@ local function checkForLiteralVsEnumSituation(valueExpr, typeInfoToMatch)
 	if valueExpr.nodeType  ~= !(AST_LITERAL) then  return false, false, 0  end
 
 	-- No need to call isTypeCompatibleWith() because enum member types are always simple, and we don't want e.g. Type to cast to int.
-	if valueExpr.inferredType ~= typeInfoToMatch.memberTypeInfo then  return false, false, 0  end
+	if not (
+		valueExpr.inferredType == typeInfoToMatch.memberTypeInfo
+		or (valueExpr.literalType == !(LITERAL_INTEGER) and typeInfoToMatch.memberTypeInfo.tag == !(TYPE_FLOAT)) -- Integer literals should always be able to pass as float literals.
+	) then
+		return false, false, 0
+	end
 
 	for _, decl in ipairs(typeInfoToMatch.astNode.declarations) do
 		!ASSERT("decl.value.nodeType == "..AST_LITERAL, nil, `decl.value`)
 
 		if decl.value.value == valueExpr.value then
 			-- typeError2(state, valueExpr, "This!", decl.value, "It's this!") -- DEBUG
-			return true, true, !(0x10000-1) -- The score is slightly lower than an exact type match.
+			return true, true, !(TYPE_COMPATABILITY_INDIRECT)
 		end
 	end
 
@@ -2012,10 +2058,15 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnOrOther, value
 					local argsIn    = constLambda.polymorphSourceLambda.argumentsIn
 					argsIn          = argsIn and argsIn.arguments
 					local arg       = argsIn and (argsIn[$argIndex] or argsIn[#argsIn]) or errorInternal(state, valueExpr)
-					strictTypeMatch = arg.hasPlaceholders or arg.autobake ~= $AUTOBAKE_DISABLED
+					strictTypeMatch = (arg.hasPlaceholders or arg.autobake ~= $AUTOBAKE_DISABLED) and $STRICT_TYPE_MATCH_YES or $STRICT_TYPE_MATCH_NO
 				end
 			`,
-			{AUTOBAKE_DISABLED=AUTOBAKE_DISABLED, argIndex=argIndexCode}
+			{
+				AUTOBAKE_DISABLED     = AUTOBAKE_DISABLED,
+				STRICT_TYPE_MATCH_NO  = STRICT_TYPE_MATCH_NO,
+				STRICT_TYPE_MATCH_YES = STRICT_TYPE_MATCH_YES,
+				argIndex              = argIndexCode,
+			}
 		))
 	end
 	)
@@ -2044,7 +2095,7 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnOrOther, value
 			local valueTypeInfoAdjusted    = adjustTypeToOne(state, valueExpr,           valueTypeInfo, adjustVarargToIncludeNil) -- We have a value with a type.
 			local typeInfoToMatchAdjusted  = adjustTypeToOne(state, callOrReturnOrOther, typeInfoToMatch)                         -- We want a specific type.
 
-			local strictTypeMatch = false
+			local strictTypeMatch = !(STRICT_TYPE_MATCH_NO)
 			!SET_STRICT_TYPE_MATCH_FLAG(`typeInfoIndex`)
 
 			isCompatible, compatibilityScore = isTypeCompatibleWith(state, valueTypeInfoAdjusted, typeInfoToMatchAdjusted, strictTypeMatch, valueExpr)
@@ -2070,7 +2121,7 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnOrOther, value
 			local valueTypeInfoAdjusted    = adjustTypeToOne(state, valueExpr,           valueTypeInfo, adjustVarargToIncludeNil) -- We have a value with a type.
 			local typeInfoToMatchAdjusted  = adjustTypeToOne(state, callOrReturnOrOther, typeInfoToMatch)                         -- We want a specific type.
 
-			local strictTypeMatch = false
+			local strictTypeMatch = !(STRICT_TYPE_MATCH_NO)
 			!SET_STRICT_TYPE_MATCH_FLAG(`typeInfoIndex`)
 
 			isCompatible, compatibilityScore = isTypeCompatibleWith(state, valueTypeInfoAdjusted, typeInfoToMatchAdjusted, strictTypeMatch, valueExpr)
@@ -2133,7 +2184,7 @@ local function checkIfValuesMatchArgumentTypes(state, callOrReturnOrOther, value
 		local valueTypeInfoAdjusted   = adjustTypeToOne(state, valueExpr,           valueTypeInfo,   true)
 		local typeInfoToMatchAdjusted = adjustTypeToOne(state, callOrReturnOrOther, typeInfoToMatch, true)
 
-		local strictTypeMatch = false
+		local strictTypeMatch = !(STRICT_TYPE_MATCH_NO)
 		!SET_STRICT_TYPE_MATCH_FLAG(`argIndex`)
 
 		local isCompatible, compatibilityScore = isTypeCompatibleWith(state, valueTypeInfoAdjusted, typeInfoToMatchAdjusted, strictTypeMatch, valueExpr)
@@ -2279,18 +2330,29 @@ local function getBestMatchOrTriggerError(state, call, matches, matchTerm, error
 		return matches[1].declaration
 	end
 
+	!ifDEBUG `astPrintTree(state.globalScope)`
 	!TRACE()
 	printerr()
-	typeMessage(io.stderr, state, call.callee, "Error", errorTextOnDraw)
+	!ifDEBUG    `typeMessage(io.stderr, state, call.callee, "Error", "%s (highscore=%s)", errorTextOnDraw, highscore)`
+	!ifNotDEBUG `typeMessage(io.stderr, state, call.callee, "Error", "%s",                errorTextOnDraw           )`
 
 	for i, matchData in ipairs(matches) do
-		if matchData.score < highscore then  break  end
+		!ifNotDEBUG `if matchData.score < highscore then  break  end`
 
-		typeMessage(
-			io.stderr, state, matchData.declaration.name,
-			"Info", "...%s #%d: %s",
-			matchTerm, i, getFriendlyTypeInfoName(matchData.declaration.inferredType)
-		)
+		!if DEBUG then
+			typeMessage(
+				io.stderr, state, matchData.declaration.name,
+				"Info", "...%s #%d: %s (score=%s)",
+				matchTerm, i, getFriendlyTypeInfoName(matchData.declaration.inferredType),
+				(matchData.score == highscore and "high" or matchData.score)
+			)
+		!else
+			typeMessage(
+				io.stderr, state, matchData.declaration.name,
+				"Info", "...%s #%d: %s",
+				matchTerm, i, getFriendlyTypeInfoName(matchData.declaration.inferredType)
+			)
+		!end
 	end
 
 	exitFailure()
@@ -2723,9 +2785,19 @@ local function handleOverloadedCall(state, call, realArguments, realArgumentType
 	local matchingOverloads = getMatchingFunctions(state, call, realArguments, realArgumentTypes, declBase.overloads)
 
 	if not matchingOverloads then
+		local params
+		local argTypeTexts = {}
+
+		for i, argTypeInfo in ipairs(realArgumentTypes) do
+			if i > 1 then  table.insert(argTypeTexts, ",")  end
+			table.insert(argTypeTexts, getFriendlyTypeInfoName(argTypeInfo))
+		end
+
+		argTypeTexts[1] = argTypeTexts[1] or "void"
+
 		!TRACE()
 		printerr()
-		typeMessage(io.stderr, state, ident, "Error", "Did not find any matching overload to call.") -- @UX: Show expected signature.
+		typeMessage(io.stderr, state, ident, "Error", "Did not find any matching overload to call. (Arguments: %s)", table.concat(argTypeTexts))
 		for i, declOverload in ipairs(declBase.overloads) do
 			typeMessage(io.stderr, state, declOverload.name, "Info", "...overload #%d: %s", i, getFriendlyTypeInfoName(declOverload.inferredType))
 		end
@@ -3237,6 +3309,23 @@ end
 	moveToNextRelevantPipe(state, returnNode)
 !NODE_INFERRER_END `end`
 
+-- valueExpression|replacementIdentifier = maybeReplaceValueExpressionWithEnumValueIdentifier( state, valueExpression, targetTypeInfo )
+local function maybeReplaceValueExpressionWithEnumValueIdentifier(state, valueExpr, typeInfo)
+	if typeInfo.tag ~= !(TYPE_ENUM) then  return valueExpr  end
+
+	if not (valueExpr.nodeType == !(AST_LITERAL) or valueExpr.nodeType == !(AST_TYPE)) then
+		return valueExpr
+	end
+
+	local enumInfo = typeInfo
+	local decl     = findDeclarationInEnumForValue(state, enumInfo.astNode, valueExpr) or errorInternal(state, valueExpr)
+	local ident    = astCopyIdentifier(decl.name, valueExpr, decl, !(IDENT_KIND_LOOSE))
+
+	replaceQueuedNodeAndUnqueueOldTree(state, valueExpr, ident)
+	moveToNextRelevantPipe(state, ident, !(PIPE_INFER)) -- Will ident be in a good pipe? It'll probably end up in PIPE_READY which seems right. 2021-08-03
+	return ident
+end
+
 !NODE_INFERRER `function nodeInferrers.AstDeclaration(state, decl)`
 	local valueExpr            = getDeclarationValue(decl, true)
 	local isConst              = isDeclarationConstant(decl)
@@ -3337,7 +3426,7 @@ end
 			if decl.assignment then
 				getAssignmentValue(state, identOrVarargOrBlank, decl.assignment.values, decl.assignmentIndex, typeInfo, nil, nil, false)
 
-			elseif not isTypeCompatibleWith(state, valueType, typeInfo, false, valueExpr) then -- Note: No need to call adjustTypeToOne() for valueExpr.
+			elseif not isTypeCompatibleWith(state, valueType, typeInfo, !(STRICT_TYPE_MATCH_NO), valueExpr) then -- Note: No need to call adjustTypeToOne() for valueExpr.
 				local wantEnumAndGotLiteralOfCorrectType, isCompatible = checkForLiteralVsEnumSituation(valueExpr, typeInfo)
 
 				if isCompatible then
@@ -3419,14 +3508,8 @@ end
 		-- Note that we only get here in static context, but we probably don't need to
 		-- do anything for values in imperative-context variable declarations anyway.
 		--
-		if typeInfo.tag == !(TYPE_ENUM) and scope.nodeType ~= !(AST_ENUM) and (valueExpr.nodeType == !(AST_LITERAL) or valueExpr.nodeType == !(AST_TYPE)) then
-			local enumInfo = typeInfo
-			local decl     = findDeclarationInEnumForValue(state, enumInfo.astNode, valueExpr) or errorInternal(state, valueExpr)
-			local ident    = astCopyIdentifier(decl.name, valueExpr, decl, !(IDENT_KIND_LOOSE))
-
-			replaceQueuedNodeAndUnqueueOldTree(state, valueExpr, ident)
-			moveToNextRelevantPipe(state, ident, !(PIPE_INFER)) -- Will ident be in a good pipe? It'll probably end up in PIPE_READY which seems right. 2021-08-03
-			valueExpr = ident
+		if scope.nodeType ~= !(AST_ENUM) then
+			--[[valueExpr = ]]maybeReplaceValueExpressionWithEnumValueIdentifier(state, valueExpr, typeInfo)
 		end
 
 	elseif not (
@@ -3782,7 +3865,7 @@ function _G.validateStructKey(state, dependent, keyExpr, structInfo, isLvalue)
 	if structInfo.kind == !(STRUCT_KIND_TABLE) then
 		if not structInfo.hasMembers then
 			!DEPEND_AND_RETURN(`dependent`, DEPEND_STRUCT_MEMBERS_READY, `structInfo`, nil, `nil`) --
-		elseif not isTypeCompatibleWith(state, keyExprType, structInfo.keyType, false, keyExpr) then
+		elseif not isTypeCompatibleWith(state, keyExprType, structInfo.keyType, !(STRICT_TYPE_MATCH_NO), keyExpr) then
 			if memberName ~= "" then
 				!!(STRUCT_ERROR_NO_SUCH_MEMBER)
 			else
@@ -4224,7 +4307,7 @@ local function validateIndiciesInArrayLikeConstructor(state, tableNode, itemType
 		-- void
 
 	elseif trailingExpr.nodeType == !(AST_VARARG) then
-		if not isTypeCompatibleWith(state, trailingExpr.inferredType.itemType, itemType, false, trailingExpr) then
+		if not isTypeCompatibleWith(state, trailingExpr.inferredType.itemType, itemType, !(STRICT_TYPE_MATCH_NO), trailingExpr) then
 			typeError(
 				state, trailingExpr,
 				"Array item type mismatch for vararg. (Wanted %s, got %s)",
@@ -4240,7 +4323,7 @@ local function validateIndiciesInArrayLikeConstructor(state, tableNode, itemType
 		for i, argTypeInfo in ipairs(argTypesOut) do
 			argTypeInfo = adjustTypeToOne(state, call, argTypeInfo)
 
-			if not isTypeCompatibleWith(state, argTypeInfo, itemType, false, trailingExpr) then
+			if not isTypeCompatibleWith(state, argTypeInfo, itemType, !(STRICT_TYPE_MATCH_NO), trailingExpr) then
 				typeError(
 					state, call,
 					"Array item type mismatch for return value #%d from call. (Wanted %s, got %s)",
@@ -4274,7 +4357,7 @@ local function inferTableArray(state, tableNode, arraySig)
 		local itemTypeInfo = itemExpr.inferredType
 
 		if itemTypeInfo then
-			if not isTypeCompatibleWith(state, adjustTypeToOne(state, itemExpr, itemTypeInfo, true), arraySig.itemType, false, itemExpr) then
+			if not isTypeCompatibleWith(state, adjustTypeToOne(state, itemExpr, itemTypeInfo, true), arraySig.itemType, !(STRICT_TYPE_MATCH_NO), itemExpr) then
 				typeError(
 					state, astGetExpressionVisuallyFurthestToTheLeft(itemExpr),
 					"Array item type mismatch. (Wanted %s, got %s)",
@@ -4330,7 +4413,7 @@ local function inferTableStruct(state, tableNode, structInfo)
 		local fieldValueType = fieldValue.inferredType
 
 		if fieldValueType then
-			if not isTypeCompatibleWith(state, adjustTypeToOne(state, fieldValue, fieldValueType, true), memberValueType, false, fieldValue) then
+			if not isTypeCompatibleWith(state, adjustTypeToOne(state, fieldValue, fieldValueType, true), memberValueType, !(STRICT_TYPE_MATCH_NO), fieldValue) then
 				typeError(
 					state, astGetExpressionVisuallyFurthestToTheLeft(fieldValue),
 					"Type mismatch for %s. (Wanted %s, got %s)",
@@ -4674,7 +4757,7 @@ end
 
 	local call = variant.call
 	if call.nodeType == !(AST_TYPE) then
-		typeError(state, astGetExpressionVisuallyFurthestToTheLeft(call), "Expected a function call. (This is a type)")
+		typeError(state, astGetExpressionVisuallyFurthestToTheLeft(call), "Expected a function call. (This is a type.)")
 	elseif call.nodeType ~= !(AST_CALL) then
 		typeError(state, astGetExpressionVisuallyFurthestToTheLeft(call), "Expected a function call.")
 	end
@@ -4848,7 +4931,7 @@ end
 
 	elseif
 		-- Compatible types.
-		(exprTypeTag == !(TYPE_ANY) or isTypeCompatibleWith(state, exprType, castType, false, expr))
+		(exprTypeTag == !(TYPE_ANY) or isTypeCompatibleWith(state, exprType, castType, !(STRICT_TYPE_MATCH_NO), expr))
 		-- float <-> int
 		or (isTypeNumeric(castType) and isTypeNumeric(exprType))
 		-- Struct to substruct.
@@ -5532,7 +5615,7 @@ end
 			-- void
 		elseif not isExpressionConstant(state, case.value, true) then
 			typeError(state, astGetExpressionVisuallyFurthestToTheLeft(case.value), "Case expression must be constant.")
-		elseif not isTypeCompatibleWith(state, case.value.inferredType, typeInfo, false, case.value) then
+		elseif not isTypeCompatibleWith(state, case.value.inferredType, typeInfo, !(STRICT_TYPE_MATCH_NO), case.value) then
 			typeError(
 				state, case.value,
 				"Case type mismatch. (Wanted %s, got %s)",
@@ -5760,7 +5843,7 @@ end
 							"Default iterators for structs must take exactly two values - the struct instance and a control value. (This returns %d)",
 							#iterTypeInfo.argumentTypesOut
 						)
-					elseif not isTypeCompatibleWith(state, structInfo, iterTypeInfo.argumentTypesIn[1], false, objExpr) then
+					elseif not isTypeCompatibleWith(state, structInfo, iterTypeInfo.argumentTypesIn[1], !(STRICT_TYPE_MATCH_NO), objExpr) then
 						typeError(
 							state, iterLambda.argumentsIn.arguments[1],
 							"The default iterator must take %s as the first argument. (This is %s)",
@@ -5894,7 +5977,7 @@ end
 				local stateExpr, stateTypeInfo = getAssignmentValue(state, forLoop, values, 2, nil, nil, "loop value", true)
 				local initExpr,  initTypeInfo  = getAssignmentValue(state, forLoop, values, 3, nil, nil, "loop value", true)
 
-				if stateExpr and not isTypeCompatibleWith(state, adjustTypeToOne(state, stateExpr, stateTypeInfo, true), iterArgsIn[1], false, stateExpr) then
+				if stateExpr and not isTypeCompatibleWith(state, adjustTypeToOne(state, stateExpr, stateTypeInfo, true), iterArgsIn[1], !(STRICT_TYPE_MATCH_NO), stateExpr) then
 					typeError(
 						state, stateExpr,
 						"For loop: Type mismatch for iterator state (value #2). (Wanted %s, got %s)",
@@ -5902,7 +5985,7 @@ end
 						getFriendlyTypeInfoName(adjustTypeToOne(state, stateExpr, stateTypeInfo, true))
 					)
 				end
-				if initExpr and not isTypeCompatibleWith(state, adjustTypeToOne(state, initExpr, initTypeInfo, true), iterArgsIn[2], false, initExpr) then
+				if initExpr and not isTypeCompatibleWith(state, adjustTypeToOne(state, initExpr, initTypeInfo, true), iterArgsIn[2], !(STRICT_TYPE_MATCH_NO), initExpr) then
 					typeError(
 						state, initExpr,
 						"For loop: Type mismatch for initial control value (value #3). (Wanted %s, got %s)",
@@ -6380,7 +6463,7 @@ end
 			typeError(state, valueExpr, "Enum values cannot be foreign.")
 		elseif not isExpressionConstant(state, valueExpr, false) then
 			typeError(state, valueExpr, "Enum value is not constant.")
-		elseif not isTypeCompatibleWith(state, valueExpr.inferredType, enumMemberInfo, false, valueExpr) then
+		elseif not isTypeCompatibleWith(state, valueExpr.inferredType, enumMemberInfo, !(STRICT_TYPE_MATCH_NO), valueExpr) then
 			typeError(state, valueExpr,
 				"Value type mismatch for '%s'. (Wanted %s, got %s)",
 				decl.name.name,
@@ -7143,7 +7226,7 @@ function _G.getAssignmentValue(state, targetExpr, values, i, typeInfoExpected, b
 
 	local _CHECK_TYPE_COMPATABILITY_AND_MAYBE_RETURN = `
 		if binOp == "" then
-			local isCompatible = isTypeCompatibleWith(state, $valueTypeInfoAdjusted, typeInfoExpected, false, $valueExpr)
+			local isCompatible = isTypeCompatibleWith(state, $valueTypeInfoAdjusted, typeInfoExpected, $STRICT_TYPE_MATCH_NO, $valueExpr)
 			if isCompatible then  return $valueExpr, $valueTypeInfo  end
 
 			wantEnumAndGotLiteralOfCorrectType, isCompatible = checkForLiteralVsEnumSituation($valueExpr, typeInfoExpected)
@@ -7159,7 +7242,7 @@ function _G.getAssignmentValue(state, targetExpr, values, i, typeInfoExpected, b
 				true
 			) or errorInternal()
 
-			local isCompatible = isTypeCompatibleWith(state, $valueTypeInfoAdjusted, typeInfoExpected, false, $valueExpr)
+			local isCompatible = isTypeCompatibleWith(state, $valueTypeInfoAdjusted, typeInfoExpected, $STRICT_TYPE_MATCH_NO, $valueExpr)
 			if not isCompatible then
 				wantEnumAndGotLiteralOfCorrectType, isCompatible = checkForLiteralVsEnumSituation($valueExpr, typeInfoExpected)
 			end
@@ -7185,6 +7268,7 @@ function _G.getAssignmentValue(state, targetExpr, values, i, typeInfoExpected, b
 	`
 	local function CHECK_TYPE_COMPATABILITY_AND_MAYBE_RETURN(valueExprVar, typeInfoVar, typeInfoAdjustedVar)
 		local lua = templateToLua(_CHECK_TYPE_COMPATABILITY_AND_MAYBE_RETURN, {
+			STRICT_TYPE_MATCH_NO  = STRICT_TYPE_MATCH_NO,
 			valueExpr             = valueExprVar,
 			valueTypeInfo         = typeInfoVar,
 			valueTypeInfoAdjusted = typeInfoAdjustedVar,
@@ -7470,7 +7554,7 @@ local function simplifyCast(state, cast)
 		moveToNextRelevantPipe(state, literal, !(PIPE_INFER))
 
 	-- enum -> enumMemberType (int, float, string, bool or Type)
-	elseif exprTypeInfo.tag == !(TYPE_ENUM) and isTypeCompatibleWith(state, exprTypeInfo.memberTypeInfo, castTypeInfo, false, cast.expression) then
+	elseif exprTypeInfo.tag == !(TYPE_ENUM) and isTypeCompatibleWith(state, exprTypeInfo.memberTypeInfo, castTypeInfo, !(STRICT_TYPE_MATCH_NO), cast.expression) then
 		local castIsDirect = (castTypeInfo == exprTypeInfo.memberTypeInfo)
 
 		local enumInfo = exprTypeInfo
@@ -7825,6 +7909,7 @@ function _G.simplifyExpressionIfConstant(state, expr)
 		-- has been simplified into a literal if it wasn't a literal to begin with.
 		local literal = decl.value
 		if literal.nodeType ~= !(AST_LITERAL) then
+			-- astPrintTree(state.globalScope)
 			errorInternal(state, literal)
 		end
 
@@ -7876,89 +7961,92 @@ function _G.isTypePublic(typeInfo)
 	return true
 end
 
--- isCompatible, compatibilityScore = isTypeCompatibleWith( state, typeToCheck, otherType, strictTypeMatch, nodeForError )
 --
--- strictTypeMatch ought to be set for arguments of morphed polymorphic functions that were baked or came from a placeholder argument.
+-- isCompatible, compatibilityScore = isTypeCompatibleWith( state, typeToCheck, otherType, strictTypeMatch, nodeForError )
+-- strictTypeMatch                  = STRICT_TYPE_MATCH_NO | STRICT_TYPE_MATCH_YES
+--
+-- strictTypeMatch ought to be yes for arguments of morphed polymorphic functions that were baked or came from a placeholder argument.
 -- (Not sure if the baked state matter - maybe just the placeholder state.)
 --
 function _G.isTypeCompatibleWith(state, typeToCheck, otherType, strictTypeMatch, nodeForError)
 	!ASSERT `type(typeToCheck)     == "table"`
 	!ASSERT `type(otherType)       == "table"`
-	!ASSERT `type(strictTypeMatch) == "boolean"`
+	!ASSERT `type(strictTypeMatch) == "number"`
 	!ASSERT `type(nodeForError)    == "table"`
 
-	!local SCORE = 0x10000
-	if typeToCheck == otherType then  return true, !(SCORE)  end
+	if typeToCheck == otherType then  return true, !(TYPE_COMPATABILITY_SAME)  end
+
+	local typeToCheckTag = typeToCheck.tag
+	local otherTypeTag   = otherType.tag
 
 	-- Namespaces are never compatible with anything but themselves as they're not allowed in most places.
-	if typeToCheck.tag == !(TYPE_NAMESPACE) or otherType.tag == !(TYPE_NAMESPACE) then  return false, 0  end
+	if typeToCheckTag == !(TYPE_NAMESPACE) or otherTypeTag == !(TYPE_NAMESPACE) then  return false, 0  end
 
 	-- Placeholders cannot actually be checked - we just say they are compatible with
 	-- everything (except namespaces) until the situation is handled elsewhere.
-	!local SCORE = .1
-	if typeToCheck.tag == !(TYPE_PLACEHOLDER) or otherType.tag == !(TYPE_PLACEHOLDER) then  return true, !(SCORE)  end
+	if typeToCheckTag == !(TYPE_PLACEHOLDER) or otherTypeTag == !(TYPE_PLACEHOLDER) then  return true, !(TYPE_COMPATABILITY_LOWEST)  end
 
 	-- Everything is compatible with the 'any' type. The user better know what they're doing!
-	!local SCORE = 0x1
-	if otherType.tag == !(TYPE_ANY) then  return true, !(SCORE)  end
+	if otherTypeTag == !(TYPE_ANY) then  return true, !(TYPE_COMPATABILITY_ANY)  end
 
-	if not strictTypeMatch then
+	if strictTypeMatch == !(STRICT_TYPE_MATCH_NO) then
 		-- Ints are always compatible with floats (but the opposite is false).
 		-- This should be safe as all numbers are 64-bit floats in Lua 5.1 (I think).
-		!local SCORE = 0x1000
-		if typeToCheck.tag == !(TYPE_INT) and otherType.tag == !(TYPE_FLOAT) then  return true, !(SCORE)  end
+		if typeToCheckTag == !(TYPE_INT) and otherTypeTag == !(TYPE_FLOAT) then  return true, !(TYPE_COMPATABILITY_COMPATIBLE)  end
 
 		-- Substructs are compatible with base structs.
-		!local SCORE = 0x1000
-		if typeToCheck.tag == !(TYPE_STRUCT) and otherType.tag == !(TYPE_STRUCT) then
-			if doesStructInherit(typeToCheck, otherType) then  return true, !(SCORE)  end
+		if typeToCheckTag == !(TYPE_STRUCT) and otherTypeTag == !(TYPE_STRUCT) then
+			if doesStructInherit(typeToCheck, otherType) then  return true, !(TYPE_COMPATABILITY_COMPATIBLE)  end
 			return false, 0
 		end
 
 		-- Structs and arrays are outputted as tables in Lua, so they are always compatible with tables in Glóa.
-		!local SCORE = 0x10
-		if otherType.tag == !(TYPE_TABLE) and !!(CONST_SET{ TYPE_STRUCT, TYPE_ARRAY })[typeToCheck.tag] then
-			return true, !(SCORE)
+		if otherTypeTag == !(TYPE_TABLE) and !!(CONST_SET{ TYPE_STRUCT, TYPE_ARRAY })[typeToCheckTag] then
+			return true, !(TYPE_COMPATABILITY_SAME_IN_LUA)
 		end
 
-		!local SCORE = 0x100
-		if typeToCheck.tag == !(TYPE_COMPOUND) then
+		-- Enums are compatible with their member types.
+		if typeToCheckTag == !(TYPE_ENUM) then
+			local isCompatible, compatibilityScore = isTypeCompatibleWith(state, typeToCheck.memberTypeInfo, otherType, !(STRICT_TYPE_MATCH_NO), nodeForError)
+			return isCompatible, compatibilityScore*!(TYPE_COMPATABILITY_INDIRECT/TYPE_COMPATABILITY_SAME)
+		end
+
+		if typeToCheckTag == !(TYPE_COMPOUND) then
 			-- All compound items has to match the target. (If only one item matches, an explicit cast is needed.)
 			local compoundToCheck = typeToCheck
 			for _, compoundItemToCheck in ipairs(compoundToCheck) do
-				if not isTypeCompatibleWith(state, compoundItemToCheck, otherType, false, nodeForError) then  return false, 0  end
+				if not isTypeCompatibleWith(state, compoundItemToCheck, otherType, !(STRICT_TYPE_MATCH_NO), nodeForError) then  return false, 0  end
 			end
-			return true, !(SCORE)
+			return true, !(TYPE_COMPATABILITY_COMPOUND)
 		end
 
-		!local SCORE = 0x100
-		if otherType.tag == !(TYPE_COMPOUND) then
+		if otherTypeTag == !(TYPE_COMPOUND) then
 			-- typeToCheck has to match at least one compound item.
 			local otherCompound = otherType
 			for _, otherCompoundItem in ipairs(otherCompound) do
-				if isTypeCompatibleWith(state, typeToCheck, otherCompoundItem, false, nodeForError) then  return true, !(SCORE)  end
+				if isTypeCompatibleWith(state, typeToCheck, otherCompoundItem, !(STRICT_TYPE_MATCH_NO), nodeForError) then  return true, !(TYPE_COMPATABILITY_COMPOUND)  end
 			end
 			return false, 0
 		end
 	end
 
 	-- Array compatability completely depends on the item type.
-	if otherType.tag == !(TYPE_ARRAY) then
-		if typeToCheck.tag == !(TYPE_ARRAY) then
+	if otherTypeTag == !(TYPE_ARRAY) then
+		if typeToCheckTag == !(TYPE_ARRAY) then
 			!if DEBUG then
 				if not typeToCheck.itemType then  errorInternal(state, nodeForError, getFriendlyTypeInfoName(typeToCheck))  end
 				if not otherType.itemType   then  errorInternal(state, nodeForError, getFriendlyTypeInfoName(otherType))    end
 			!end
-			!ifDEBUG `local isCompatible, compatibilityScore = isTypeCompatibleWith(state, typeToCheck.itemType, otherType.itemType, strictTypeMatch, nodeForError) ; return isCompatible, compatibilityScore`
-			!ifNotDEBUG                                `return isTypeCompatibleWith(state, typeToCheck.itemType, otherType.itemType, strictTypeMatch, nodeForError)`
+			local isCompatible, compatibilityScore = isTypeCompatibleWith(state, typeToCheck.itemType, otherType.itemType, strictTypeMatch, nodeForError)
+			return isCompatible, compatibilityScore
 
-		elseif typeToCheck.tag == !(TYPE_STRUCT) and typeToCheck.kind == !(STRUCT_KIND_ARRAY) then -- We allow array-like structs even if strictTypeMatch is set.
+		elseif typeToCheckTag == !(TYPE_STRUCT) and typeToCheck.kind == !(STRUCT_KIND_ARRAY) then -- We allow array-like structs even if strictTypeMatch is yes.
 			!if DEBUG then
 				if not typeToCheck.valueType then  errorInternal(state, nodeForError, getFriendlyTypeInfoName(typeToCheck))  end
 				if not otherType.itemType    then  errorInternal(state, nodeForError, getFriendlyTypeInfoName(otherType))    end
 			!end
-			!ifDEBUG `local isCompatible, compatibilityScore = isTypeCompatibleWith(state, typeToCheck.valueType, otherType.itemType, strictTypeMatch, nodeForError) ; return isCompatible, compatibilityScore`
-			!ifNotDEBUG                                `return isTypeCompatibleWith(state, typeToCheck.valueType, otherType.itemType, strictTypeMatch, nodeForError)`
+			local isCompatible, compatibilityScore = isTypeCompatibleWith(state, typeToCheck.valueType, otherType.itemType, strictTypeMatch, nodeForError)
+			return isCompatible, compatibilityScore
 		end
 
 		return false, 0
