@@ -46,16 +46,16 @@ local MAX_ERRORS_MESSAGES = !(DEBUG and 20 or 4) -- @Incomplete: Make this a com
 	{`traceback`,  not DEPENDENCY_TRACK_TRACEBACK and STRUCT_FIELD_IGNORE or nil}, -- For debugging.
 }
 
--- addDependency( state, dependent, isInternal, DEPEND_DECLARATION,          name [, scope ] )
--- addDependency( state, dependent, isInternal, DEPEND_MEMBER_DECLARATION,   name, scope )
--- addDependency( state, dependent, isInternal, DEPEND_HAS_DECLARATION,      identifier )
--- addDependency( state, dependent, isInternal, DEPEND_NODE_INFERRED,        astNode )
--- addDependency( state, dependent, isInternal, DEPEND_NODE_PASSED_INFER,    astNode )
--- addDependency( state, dependent, isInternal, DEPEND_NODE_PASSED_READY,    astNode )
--- addDependency( state, dependent, isInternal, DEPEND_NODE_PASSED_EMIT,     astNode )
--- addDependency( state, dependent, isInternal, DEPEND_TYPE_READY,           typeInfo )
--- addDependency( state, dependent, isInternal, DEPEND_STRUCT_MEMBERS_READY, structInfo )
--- addDependency( state, dependent, isInternal, DEPEND_CONSTANT_READY,       constant )
+-- addDependency( state, dependent, isInternal, DEPEND_DECLARATION,        name [, scope ] )
+-- addDependency( state, dependent, isInternal, DEPEND_MEMBER_DECLARATION, name, scope )
+-- addDependency( state, dependent, isInternal, DEPEND_HAS_DECLARATION,    identifier )
+-- addDependency( state, dependent, isInternal, DEPEND_NODE_INFERRED,      astNode )
+-- addDependency( state, dependent, isInternal, DEPEND_NODE_PASSED_INFER,  astNode )
+-- addDependency( state, dependent, isInternal, DEPEND_NODE_PASSED_READY,  astNode )
+-- addDependency( state, dependent, isInternal, DEPEND_NODE_PASSED_EMIT,   astNode )
+-- addDependency( state, dependent, isInternal, DEPEND_TYPE_READY,         typeInfo )
+-- addDependency( state, dependent, isInternal, DEPEND_TYPE_MEMBERS_READY, structInfo|enumInfo )
+-- addDependency( state, dependent, isInternal, DEPEND_CONSTANT_READY,     constant )
 function _G.addDependency(state, dependent, isInternal, dependType, dependOn, extraData)
 	!if DEBUG and 1==0 then
 		if dependType == !(DEPEND_DECLARATION) then
@@ -64,7 +64,7 @@ function _G.addDependency(state, dependent, isInternal, dependType, dependOn, ex
 		elseif dependType == !(DEPEND_MEMBER_DECLARATION) then
 			!ASSERT `type(dependOn)  == "string"`
 			!ASSERT `type(extraData) == "table"`
-		elseif !!(CONST_SET{ DEPEND_HAS_DECLARATION, DEPEND_NODE_INFERRED, DEPEND_NODE_PASSED_INFER, DEPEND_NODE_PASSED_READY, DEPEND_NODE_PASSED_EMIT, DEPEND_TYPE_READY, DEPEND_STRUCT_MEMBERS_READY, DEPEND_CONSTANT_READY })[dependType] then
+		elseif !!(CONST_SET{ DEPEND_HAS_DECLARATION, DEPEND_NODE_INFERRED, DEPEND_NODE_PASSED_INFER, DEPEND_NODE_PASSED_READY, DEPEND_NODE_PASSED_EMIT, DEPEND_TYPE_READY, DEPEND_TYPE_MEMBERS_READY, DEPEND_CONSTANT_READY })[dependType] then
 			!ASSERT `type(dependOn)  == "table"`
 		else
 			errorInternal("%d", dependType)
@@ -128,8 +128,8 @@ function _G.addDependency(state, dependent, isInternal, dependType, dependOn, ex
 	if dependOnIsNode then
 		dependOn.waiters = dependOn.waiters or {}
 		table.insert(dependOn.waiters, dependency)
-	elseif dependType == !(DEPEND_STRUCT_MEMBERS_READY) then
-		!ASSERT("dependOn.tag == "..TYPE_STRUCT)
+	elseif dependType == !(DEPEND_TYPE_MEMBERS_READY) then
+		!ASSERT("dependOn.tag == "..TYPE_STRUCT.." or dependOn.tag == "..TYPE_ENUM)
 		local structQueued   = dependOn.astNode.queued
 		structQueued.waiters = structQueued.waiters or {}
 		table.insert(structQueued.waiters, dependency)
@@ -147,22 +147,22 @@ function _G.addDependency(state, dependent, isInternal, dependType, dependOn, ex
 			astPrint(dependent)
 
 			io.write("    ON ", DEPEND_TITLES[dependType], " ")
-			if     dependType == !(DEPEND_DECLARATION)          then  print(dependOn)
-			elseif dependType == !(DEPEND_MEMBER_DECLARATION)   then  print(dependOn)
-			elseif dependType == !(DEPEND_HAS_DECLARATION)      then  astPrint(dependOn.node)
-			elseif dependType == !(DEPEND_NODE_INFERRED)        then  astPrint(dependOn.node)
-			elseif dependType == !(DEPEND_NODE_PASSED_INFER)    then  astPrint(dependOn.node)
-			elseif dependType == !(DEPEND_NODE_PASSED_READY)    then  astPrint(dependOn.node)
-			elseif dependType == !(DEPEND_NODE_PASSED_EMIT)     then  astPrint(dependOn.node)
-			elseif dependType == !(DEPEND_TYPE_READY)           then  print(getFriendlyTypeInfoName(dependOn))
-			elseif dependType == !(DEPEND_STRUCT_MEMBERS_READY) then  print(getFriendlyTypeInfoName(dependOn))
-			elseif dependType == !(DEPEND_CONSTANT_READY)       then  print(getFriendlyTypeInfoName(dependOn.valueType), tostring(dependOn.value))
+			if     dependType == !(DEPEND_DECLARATION)        then  print(dependOn)
+			elseif dependType == !(DEPEND_MEMBER_DECLARATION) then  print(dependOn)
+			elseif dependType == !(DEPEND_HAS_DECLARATION)    then  astPrint(dependOn.node)
+			elseif dependType == !(DEPEND_NODE_INFERRED)      then  astPrint(dependOn.node)
+			elseif dependType == !(DEPEND_NODE_PASSED_INFER)  then  astPrint(dependOn.node)
+			elseif dependType == !(DEPEND_NODE_PASSED_READY)  then  astPrint(dependOn.node)
+			elseif dependType == !(DEPEND_NODE_PASSED_EMIT)   then  astPrint(dependOn.node)
+			elseif dependType == !(DEPEND_TYPE_READY)         then  print(getFriendlyTypeInfoName(dependOn))
+			elseif dependType == !(DEPEND_TYPE_MEMBERS_READY) then  print(getFriendlyTypeInfoName(dependOn))
+			elseif dependType == !(DEPEND_CONSTANT_READY)     then  print(getFriendlyTypeInfoName(dependOn.valueType), tostring(dependOn.value))
 			else                                                      print("? ("..tostring(dependOn)..")")  end
 		end
 	!end
 
 	!if DEBUG and 1==0 then
-		if dependType == !(DEPEND_STRUCT_MEMBERS_READY) and dependent.node.s == 67793 then
+		if dependType == !(DEPEND_TYPE_MEMBERS_READY) and dependent.node.s == 67793 then
 			print(debug.traceback("HERE"))
 		end
 	!end
@@ -768,12 +768,10 @@ function _G.errorPipesAreStuck(state)
 
 				if queued.waitingOn.extraData then
 					scope = queued.waitingOn.extraData
-					if scope.nodeType == !(AST_STRUCT) and not scope.representedType.hasMembers then  ignore = true  end -- Better to report the next issue, probably.
+					if (scope.nodeType == !(AST_STRUCT) or scope.nodeType == !(AST_ENUM)) and not scope.representedType.hasMembers then  ignore = true  end -- Better to report the next issue, probably.
 				elseif tag == !(TYPE_NAMESPACE) then
 					scope = scopeType.scope
-				elseif tag == !(TYPE_ENUM) then
-					scope = scopeType.astNode
-				elseif tag == !(TYPE_STRUCT) then
+				elseif tag == !(TYPE_STRUCT) or tag == !(TYPE_ENUM) then
 					scope = scopeType.astNode
 					if not scopeType.hasMembers then  ignore = true  end -- Better to report the next issue, probably.
 				else
@@ -890,18 +888,18 @@ function _G.errorPipesAreStuck(state)
 	!!(REPORT_FINAL)
 	--]]
 
-	-- [[ Report things waiting for all struct members to be ready.
+	-- [[ Report things waiting for all struct/enum members to be ready.
 	local queueds = findQueueds(function(queued, node, dependency, dependOn)
-		return dependency.dependType == !(DEPEND_STRUCT_MEMBERS_READY)
+		return dependency.dependType == !(DEPEND_TYPE_MEMBERS_READY)
 	end)
 	for _, queued in ipairs(queueds) do
-		local structInfo = queued.waitingOn.dependOn
+		local typeInfo = queued.waitingOn.dependOn
 		!!(REPORT_START)
 		printerr()
-		!ifDEBUG`astPrint(structInfo.astNode)`
-		typeMessage(io.stderr, state, structInfo.astNode, "Error", "Failed generating member info for this struct.")
+		!ifDEBUG`astPrint(typeInfo.astNode)`
+		typeMessage(io.stderr, state, typeInfo.astNode, "Error", "Failed generating member info for this %s.", (typeInfo.tag == !(TYPE_STRUCT) and "struct" or "enum"))
 		!ifDEBUG`astPrint(queued.node)`
-		typeMessage(io.stderr, state, queued.node,        "Info",  "...this thing is waiting for the members to be ready.")
+		typeMessage(io.stderr, state, queued.node,      "Info",  "...this thing is waiting for the members to be ready.")
 		exitFailure()
 		!!(REPORT_END)
 	end
@@ -1109,15 +1107,15 @@ function _G.outputDependencyGraph(state)
 
 					elseif dependency.dependType == !(DEPEND_TYPE_READY) then
 						local typeInfo = dependency.dependOn
-						if typeInfo.tag == !(TYPE_STRUCT) or typeInfo.tag == !(TYPE_STRUCT) then
+						if typeInfo.tag == !(TYPE_STRUCT) or typeInfo.tag == !(TYPE_ENUM) then
 							maybeDeclareNode(typeInfo.astNode)
 						else
 							-- void
 						end
 
-					elseif dependency.dependType == !(DEPEND_STRUCT_MEMBERS_READY) then
-						local structInfo = dependency.dependOn
-						maybeDeclareNode(structInfo.astNode)
+					elseif dependency.dependType == !(DEPEND_TYPE_MEMBERS_READY) then
+						local typeInfo = dependency.dependOn
+						maybeDeclareNode(typeInfo.astNode)
 
 					elseif dependency.dependType == !(DEPEND_CONSTANT_READY) then
 						local const = dependency.dependOn
@@ -1149,7 +1147,7 @@ function _G.outputDependencyGraph(state)
 
 					elseif dependency.dependType == !(DEPEND_TYPE_READY) then
 						local typeInfo = dependency.dependOn
-						if typeInfo.tag == !(TYPE_STRUCT) or typeInfo.tag == !(TYPE_STRUCT) then
+						if typeInfo.tag == !(TYPE_STRUCT) or typeInfo.tag == !(TYPE_ENUM) then
 							writeNodeId(typeInfo.astNode)
 						else
 							local name = getFriendlyTypeInfoName(typeInfo):gsub("[()]", !!(CONST{
@@ -1159,9 +1157,9 @@ function _G.outputDependencyGraph(state)
 							file:write("(Type ", name, ")")
 						end
 
-					elseif dependency.dependType == !(DEPEND_STRUCT_MEMBERS_READY) then
-						local structInfo = dependency.dependOn
-						writeNodeId(structInfo.astNode)
+					elseif dependency.dependType == !(DEPEND_TYPE_MEMBERS_READY) then
+						local typeInfo = dependency.dependOn
+						writeNodeId(typeInfo.astNode)
 
 					elseif dependency.dependType == !(DEPEND_CONSTANT_READY) then
 						local const = dependency.dependOn

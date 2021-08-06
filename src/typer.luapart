@@ -115,10 +115,14 @@ local !struct"TypeInfoEnumMember"{
 }
 local !structTypeInfo"TypeInfoEnum:_TypeInfo"{
 	_overrides={{`tag`,TYPE_ENUM}},
+
 	{`astNode`,        nil}, -- AstEnum
 	{`name`,           ""},
+
 	{`memberTypeInfo`, nil}, -- Must be one of these primitive types: int, string, Type, bool or float.
+
 	{`members`,        {}},  -- []TypeInfoEnumMember
+	{`hasMembers`,    false}, -- @Cleanup: Can we remove this and rely on isReady? I think so. 2021-07-29 (Or maybe not? 2021-07-30)
 }
 
 local !structTypeInfo"TypeInfoNamespace:_TypeInfo"{
@@ -1351,6 +1355,8 @@ local function inferIdentifierOrVarargOrBlank(state, identOrVarargOrBlank)
 		if not enum.representedType then
 			-- AstEnum is the only scope that gets inferred before its declarations.
 			!DEPEND_AND_RETURN(`identOrVarargOrBlank`, DEPEND_NODE_INFERRED, `enum`)
+		elseif not enum.representedType.memberTypeInfo then
+			!DEPEND_AND_RETURN(`identOrVarargOrBlank`, DEPEND_TYPE_MEMBERS_READY, `enum.representedType`)
 		end
 	end
 
@@ -1520,7 +1526,7 @@ local function inferIdentifierOrVarargOrBlank(state, identOrVarargOrBlank)
 			local enumInfo = enum.representedType
 			typeInfo       = enumInfo -- Kind of a @Hack, but maybe it's fine for enum members!
 
-			if enumInfo.memberTypeInfo.tag == !(TYPE_TYPE) then
+			if enumInfo.memberTypeInfo.tag == !(TYPE_TYPE) and followIdentifiersToConstantValue(state, valueExpr).nodeType ~= !(AST_FOREIGN) then
 				-- This means you can for example say: local myVar: MyEnum.MY_TYPE
 				assert(typeInfoForDecl)
 			end
@@ -1533,7 +1539,7 @@ local function inferIdentifierOrVarargOrBlank(state, identOrVarargOrBlank)
 				errorInternal(state, valueExpr, "Missing what type this constant expression represents.")
 			end
 
-		elseif tag == !(TYPE_ENUM) then -- @Robustness: Actually detect whether we have a type enum and include it here above.
+		elseif tag == !(TYPE_ENUM) then -- @Robustness: Actually detect whether we have a type enum and include it here above. (Isn't that what we're doing? 2021-08-06)
 			-- void  For now we may or may not have a type enum and typeInfoForDecl.
 
 		elseif tag == !(TYPE_PLACEHOLDER) then
@@ -3098,7 +3104,7 @@ end
 
 		-- We have to wait for the members for inherited declarations to be available.
 		if not structInfo.hasMembers then
-			!DEPEND_AND_RETURN(`call`, DEPEND_STRUCT_MEMBERS_READY, `structInfo`)
+			!DEPEND_AND_RETURN(`call`, DEPEND_TYPE_MEMBERS_READY, `structInfo`)
 		end
 
 		local decl = findMemberDeclaration(state, structInfo.astNode, "!call")
@@ -3864,7 +3870,7 @@ function _G.validateStructKey(state, dependent, keyExpr, structInfo, isLvalue)
 
 	if structInfo.kind == !(STRUCT_KIND_TABLE) then
 		if not structInfo.hasMembers then
-			!DEPEND_AND_RETURN(`dependent`, DEPEND_STRUCT_MEMBERS_READY, `structInfo`, nil, `nil`) --
+			!DEPEND_AND_RETURN(`dependent`, DEPEND_TYPE_MEMBERS_READY, `structInfo`, nil, `nil`)
 		elseif not isTypeCompatibleWith(state, keyExprType, structInfo.keyType, !(STRICT_TYPE_MATCH_NO), keyExpr) then
 			if memberName ~= "" then
 				!!(STRUCT_ERROR_NO_SUCH_MEMBER)
@@ -3893,7 +3899,7 @@ function _G.validateStructKey(state, dependent, keyExpr, structInfo, isLvalue)
 		!!(STRUCT_ERROR_NO_SUCH_MEMBER)
 
 	elseif not structInfo.hasMembers then
-		!DEPEND_AND_RETURN(`dependent`, DEPEND_STRUCT_MEMBERS_READY, `structInfo`, nil, `nil`) -- Make sure structInfo.kind is fully known.
+		!DEPEND_AND_RETURN(`dependent`, DEPEND_TYPE_MEMBERS_READY, `structInfo`, nil, `nil`) -- Make sure structInfo.kind is fully known.
 
 	else
 		!ASSERT("structInfo.kind == "..STRUCT_KIND_NORMAL)
@@ -4618,7 +4624,7 @@ end
 			)
 
 		elseif not argType1.astNode.isForeign and not argType1.hasMembers then
-			!DEPEND_AND_RETURN(`lambda`, DEPEND_STRUCT_MEMBERS_READY, `argType1`) -- We need this for isForeign to be valid.
+			!DEPEND_AND_RETURN(`lambda`, DEPEND_TYPE_MEMBERS_READY, `argType1`) -- We need this for isForeign to be valid.
 
 		elseif not argType1.astNode.isForeign then
 			typeError2(state,
@@ -5818,7 +5824,7 @@ end
 
 				-- We have to wait for the members for inherited declarations to be available.
 				if not structInfo.hasMembers then
-					!DEPEND_AND_RETURN(`forLoop`, DEPEND_STRUCT_MEMBERS_READY, `structInfo`)
+					!DEPEND_AND_RETURN(`forLoop`, DEPEND_TYPE_MEMBERS_READY, `structInfo`)
 				end
 
 				local decl = findMemberDeclaration(state, structInfo.astNode, "!iterator")
@@ -6164,7 +6170,7 @@ end
 		struct.inferredType    = state.builtinTypeInfos.Type
 
 		structInfo.hasMembers = true -- Probably doesn't matter.
-		fulfillDependencies(state, struct.queued, !(DEPEND_STRUCT_MEMBERS_READY))
+		fulfillDependencies(state, struct.queued, !(DEPEND_TYPE_MEMBERS_READY))
 
 		markTypeAsReady(state, structInfo)
 
@@ -6218,7 +6224,7 @@ end
 				typeError(state, typeExpr, "Expected the type of a struct to inherit members from.")
 			end
 			if not structInfoToInherit.hasMembers then
-				!DEPEND_AND_RETURN(`struct`, DEPEND_STRUCT_MEMBERS_READY, `structInfoToInherit`)
+				!DEPEND_AND_RETURN(`struct`, DEPEND_TYPE_MEMBERS_READY, `structInfoToInherit`)
 			end
 			if doesStructInherit(structInfoToInherit, structInfo) then
 				typeError(state, typeExpr, "Struct is trying to inherit members from itself.")
@@ -6390,7 +6396,7 @@ end
 	end
 
 	structInfo.hasMembers = true
-	fulfillDependencies(state, struct.queued, !(DEPEND_STRUCT_MEMBERS_READY))
+	fulfillDependencies(state, struct.queued, !(DEPEND_TYPE_MEMBERS_READY))
 
 	if allAreReady then
 		markTypeAsReady(state, structInfo)
@@ -6423,6 +6429,23 @@ end
 !NODE_INFERRER_END `end`
 
 !NODE_INFERRER `function nodeInferrers.AstEnum(state, enum)`
+	-- Start by creating a TypeInfoEnum that others can grab a reference to right away (before any members are ready).
+	local enumInfo = enum.representedType
+
+	if not enumInfo then
+		enumInfo         = newTypeInfo(state, TypeInfoEnum)
+		enumInfo.astNode = enum
+
+		-- Note: We don't populate enumInfo.members just yet. (Is this gonna a problem?)
+
+		table.insert(state.allTypeInfos,                    enumInfo)
+		table.insert(state.allTypeInfosByTag[!(TYPE_ENUM)], enumInfo)
+
+		enum.representedType = enumInfo
+		enum.inferredType    = state.builtinTypeInfos.Type
+	end
+
+	-- Wait for contents to infer.
 	for _, statement in ipairs(enum.statementsStatic) do
 		if statement.nodeType == !(AST_DECLARATION) then
 			local decl = statement
@@ -6436,8 +6459,11 @@ end
 		end
 	end
 
-	assert(enum.declarations[1]) -- This should have been caught during parsing.
+	--
+	-- No more dependencies for this enum after this point!
+	--
 
+	!ASSERT `enum.declarations[1]` -- This should have been caught during parsing.
 	local enumMemberInfo
 
 	if enum.memberType then
@@ -6451,17 +6477,13 @@ end
 		end
 	end
 
-	local enumInfo          = newTypeInfo(state, TypeInfoEnum)
-	enumInfo.astNode        = enum
 	enumInfo.memberTypeInfo = enumMemberInfo or errorInternal()
+	seeType(enumInfo, enumMemberInfo)
 
 	for i, decl in ipairs(enum.declarations) do
 		local valueExpr = decl.value
 
-		if valueExpr.nodeType == !(AST_FOREIGN) then
-			-- @UX @Bug: This should be possible but something swaps the enum type with the member type somewhere.
-			typeError(state, valueExpr, "Enum values cannot be foreign.")
-		elseif not isExpressionConstant(state, valueExpr, false) then
+		if not isExpressionConstant(state, valueExpr, true) then
 			typeError(state, valueExpr, "Enum value is not constant.")
 		elseif not isTypeCompatibleWith(state, valueExpr.inferredType, enumMemberInfo, !(STRICT_TYPE_MATCH_NO), valueExpr) then
 			typeError(state, valueExpr,
@@ -6472,21 +6494,15 @@ end
 			)
 		end
 
-		-- Note: valueExpr may not be a constant expression, but the
-		-- declaration will check that after this enum gets inferred.
-
 		local member        = TypeInfoEnumMember()
 		member.name         = decl.name.name
 		enumInfo.members[i] = member
 	end
 
-	table.insert(state.allTypeInfos,                    enumInfo)
-	table.insert(state.allTypeInfosByTag[!(TYPE_ENUM)], enumInfo)
-	seeType(enumInfo, enumMemberInfo)
-	markTypeAsReady(state, enumInfo) -- This is ok because the member type is always a built-in.
+	enumInfo.hasMembers = true
+	fulfillDependencies(state, enum.queued, !(DEPEND_TYPE_MEMBERS_READY))
 
-	enum.representedType = enumInfo
-	enum.inferredType    = state.builtinTypeInfos.Type
+	markTypeAsReady(state, enumInfo) -- This is always ok because the member type is always a built-in.
 
 	moveToNextRelevantPipe(state, enum)
 !NODE_INFERRER_END `end`
@@ -8317,7 +8333,7 @@ function _G.getExpectedTypeInfo(state, node, strict, expectantTerm, nodeForError
 
 			local structInfo = tableNode.inferredType
 			if not structInfo.hasMembers then
-				!DEPEND_AND_RETURN(`node`, DEPEND_STRUCT_MEMBERS_READY, `structInfo`, nil, `nil`)
+				!DEPEND_AND_RETURN(`node`, DEPEND_TYPE_MEMBERS_READY, `structInfo`, nil, `nil`)
 			end
 
 			local memberLiteral = tableField.key
@@ -8338,7 +8354,7 @@ function _G.getExpectedTypeInfo(state, node, strict, expectantTerm, nodeForError
 			return member.typeInfo
 
 		else
-			errorInternal(getFriendlyTypeInfoName(tableNode.inferredType))
+			errorInternal(state, tableNode, getFriendlyTypeInfoName(tableNode.inferredType))
 		end
 
 	elseif parentNodeType == !(AST_RETURN) then
@@ -8439,7 +8455,7 @@ function _G.getExpectedTypeInfo(state, node, strict, expectantTerm, nodeForError
 		elseif objType.tag == !(TYPE_STRUCT) then
 			local structInfo = objType
 			if not structInfo.hasMembers then
-				!DEPEND_AND_RETURN(`node`, DEPEND_STRUCT_MEMBERS_READY, `structInfo`, nil, `nil`)
+				!DEPEND_AND_RETURN(`node`, DEPEND_TYPE_MEMBERS_READY, `structInfo`, nil, `nil`)
 			end
 
 			if structInfo.kind == !(STRUCT_KIND_ARRAY) then
