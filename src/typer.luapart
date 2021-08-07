@@ -4931,7 +4931,9 @@ end
 			-- nodes somewhere safe?
 			moveToNextRelevantPipe(state, cast)
 		else
-			cast.queued.pipe = expr.queued.pipe -- @Cleanup: Maybe cutOutPartOfNodeTree()/replaceQueuedNode() should do this (or maybe we just keep the wrong queued in cutOutPartOfNodeTree()).
+			-- @Cleanup: Maybe cutOutPartOfNodeTree()/replaceQueuedNode() should update the pipe (or maybe
+			-- we just keep the wrong queued in cutOutPartOfNodeTree()). :PipeTransferWhenReplacing
+			cast.queued.pipe = expr.queued.pipe
 			cutOutPartOfNodeTree(state, cast, expr)
 		end
 		return
@@ -5600,9 +5602,21 @@ end
 		)
 	end
 
-	moveToNextRelevantPipe(state, conditional)
+	-- Simplify branch if possible.
+	if cond.nodeType == !(AST_LITERAL) then
+		!ASSERT("cond.literalType == "..LITERAL_BOOLEAN) -- The value should have casted if it wasn't a boolean to begin with.
 
-	-- @Optimize: Remove/replace the branch if the condition is statically known.
+		local replacement       = cond.value and branchTrue or branchFalse
+		conditional.queued.pipe = replacement.queued.pipe -- :PipeTransferWhenReplacing
+		cutOutPartOfNodeTree(state, conditional, replacement)
+
+		if replacement.inferredType ~= conditional.inferredType then
+			wrapInImplicitCast(state, replacement, conditional.inferredType, true) -- We should only get here in the float vs. int situation.
+		end
+
+	else
+		moveToNextRelevantPipe(state, conditional)
+	end
 !NODE_INFERRER_END `end`
 
 !NODE_INFERRER `function nodeInferrers.AstSwitch(state, switch)`
@@ -8603,7 +8617,7 @@ function _G.wrapInImplicitCast(state, nodeToWrap, resultingTypeInfo, addToInferP
 	local cast        = astNewNode(AstCast, nodeToWrap, nodeToWrap.parent)
 	cast.isImplicit   = true
 	cast.inferredType = resultingTypeInfo
-	pokeAndQueueUnqueuedNodeIntoTree(state, nodeToWrap, cast, cast,"expression", (addToInferPipe and !(PIPE_INFER) or !(PIPE_DONE)))
+	pokeAndQueueUnqueuedNodeIntoTree(state, nodeToWrap, cast, cast,"expression", (addToInferPipe and !(PIPE_INFER) or !(PIPE_READY)))
 	return cast
 end
 
