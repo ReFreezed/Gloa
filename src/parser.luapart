@@ -400,7 +400,7 @@ _G.!structAst"AstFileScope:_AstScope"{
 	_overrides = {{`nodeType`,AST_FILE_SCOPE}},
 	_scopeType = "declarative",
 	{`valueToExport`, nil, ast="node"}, -- Used when outputting a Lua module.
-	{`path`,          ""},
+	{`path`,          ""},              -- @Cleanup: Can we remove this in favor of node.source.path?
 	{`isModule`,      false},
 	{`moduleName`,    ""},
 }
@@ -592,8 +592,8 @@ local      EAT_NEXT_TOKEN = `state.nextToken = state.nextToken + 1` -- This macr
 local PUT_BACK_LAST_TOKEN = `state.nextToken = state.nextToken - 1`
 local     PEEK_LAST_TOKEN = `state.tokens[state.nextToken-1]`
 
--- lua = IS_TOK         ( [ localTokNum, ] tokenType, tokenValue1, ... )
--- lua = IS_EXISTING_TOK( [ localTokNum, ] tokenType, tokenValue1, ... )
+-- lua = IS_TOK         ( [ localTokNum, ] tokenType [, tokenValue1, ... ] )
+-- lua = IS_EXISTING_TOK( [ localTokNum, ] tokenType [, tokenValue1, ... ] )
 local function IS_TOK(localTokNum, tokType, tokValue1, ...)
 	if type(tokType) ~= "number" then
 		return IS_TOK(nil, localTokNum, tokType, tokValue1, ...)
@@ -601,17 +601,9 @@ local function IS_TOK(localTokNum, tokType, tokValue1, ...)
 
 	local localSuffix = localTokNum and F("%d", localTokNum) or ""
 
-	if ... then
-		return F(
-			"(tok%s and tok%s.type == %s and %s[tok%s.value])",
-			localSuffix, localSuffix, toLua(tokType), CONST_SET{tokValue1,...}, localSuffix
-		)
-	else
-		return F(
-			"(tok%s and tok%s.type == %s and tok%s.value == %s)",
-			localSuffix, localSuffix, toLua(tokType), localSuffix, toLua(tokValue1)
-		)
-	end
+	if     ...       then  return F("(tok%s and tok%s.type == %s and %s[tok%s.value])",   localSuffix, localSuffix, toLua(tokType), CONST_SET{tokValue1,...}, localSuffix)
+	elseif tokValue1 then  return F("(tok%s and tok%s.type == %s and tok%s.value == %s)", localSuffix, localSuffix, toLua(tokType), localSuffix, toLua(tokValue1))
+	else                   return F("(tok%s and tok%s.type == %s)",                       localSuffix, localSuffix, toLua(tokType), localSuffix)  end
 end
 local function IS_EXISTING_TOK(localTokNum, tokType, tokValue1, ...)
 	if type(tokType) ~= "number" then
@@ -620,17 +612,9 @@ local function IS_EXISTING_TOK(localTokNum, tokType, tokValue1, ...)
 
 	local localSuffix = localTokNum and F("%d", localTokNum) or ""
 
-	if ... then
-		return F(
-			"(tok%s.type == %s and %s[tok%s.value])",
-			localSuffix, toLua(tokType), CONST_SET{tokValue1,...}, localSuffix
-		)
-	else
-		return F(
-			"(tok%s.type == %s and tok%s.value == %s)",
-			localSuffix, toLua(tokType), localSuffix, toLua(tokValue1)
-		)
-	end
+	if     ...       then  return F("(tok%s.type == %s and %s[tok%s.value])",   localSuffix, toLua(tokType), CONST_SET{tokValue1,...}, localSuffix)
+	elseif tokValue1 then  return F("(tok%s.type == %s and tok%s.value == %s)", localSuffix, toLua(tokType), localSuffix, toLua(tokValue1))
+	else                   return F("(tok%s.type == %s)",                       localSuffix, toLua(tokType), localSuffix)  end
 end
 )
 
@@ -659,7 +643,7 @@ end
 
 local function parseIdentifier(state, parent)
 	local tok, token = eatNextTok(state)
-	if tok.type ~= !(TOKEN_IDENTIFIER) then
+	if not !!(IS_TOK(TOKEN_IDENTIFIER)) then
 		!ERROR_OR_RETURN_NIL `errorParsingLast(state, "Expected an identifier.")`
 	end
 
@@ -670,10 +654,8 @@ local function parseIdentifier(state, parent)
 end
 
 local function parseUsing(state, parent)
-	local tok, token = eatNextTok(state)
-	if not !!(IS_TOK(TOKEN_KEYWORD, "using")) then
-		!ERROR_OR_RETURN_NIL `errorParsingLast(state, "Expected 'using'.")`
-	end
+	local tok = eatNextTok(state) -- 'using'
+	!ASSERT(IS_TOK(TOKEN_KEYWORD, "using"))
 
 	local using                          = astNewNode(AstUsing, tok, parent)
 	!SET_OR_RETURN_NIL `using.expression = parseExpression(state, using)`
@@ -717,7 +699,7 @@ local function parseTable(state, parent)
 		local tok, token = peekNextTok(state, 1)
 
 		if not tok then
-			!ERROR_OR_RETURN_NIL `errorParsing(state, tableNode, "Unfinished table.")`
+			!ERROR_OR_RETURN_NIL `errorParsing(state, tableNode, "Unfinished table.")` -- We probably don't ever get here because of the quick bracket check.
 		elseif !!(IS_EXISTING_TOK(TOKEN_PUNCTUATION, "}")) then
 			!!(EAT_NEXT_TOKEN) -- '}'
 			break
@@ -740,7 +722,7 @@ local function parseTable(state, parent)
 
 			tok = eatNextTok(state)
 			if not !!(IS_TOK(TOKEN_PUNCTUATION, "=")) then
-				!ERROR_OR_RETURN_NIL `errorParsingAfterPrevious(state, "Expected '='.")`
+				!ERROR_OR_RETURN_NIL `errorParsingAfterPrevious(state, "Expected '=' after the key.")`
 			end
 
 		-- k=v
@@ -873,7 +855,7 @@ local function parseArguments(state, parent, isInput, allowVoid)
 		!!(EAT_NEXT_TOKEN) -- 'void'
 
 		if not allowVoid then
-			!ERROR_OR_RETURN_NIL `errorParsingLast(state, "Cannot use 'void' here.")`
+			!ERROR_OR_RETURN_NIL `errorParsingLast(state, "Cannot use 'void' here.")` -- We currently never get here. 2021-08-06
 		end
 
 		return args
@@ -988,11 +970,16 @@ local function parseArguments(state, parent, isInput, allowVoid)
 				!!(EAT_NEXT_TOKEN) -- ','
 				-- Continue the loop.
 			else
-				!ERROR_OR_RETURN_NIL `errorParsingAfterLast(state, "Expected ':'.")`
+				!ERROR_OR_RETURN_NIL `errorParsingAfterLast(state, "Expected ':' after argument names.")`
 			end
 
 			if gotVararg then
-				!ERROR_OR_RETURN_NIL `errorParsingLast(state, "Vararg must be the last argument.")`
+				tok = peekNextTok(state, 1)
+				if !!(IS_TOK(TOKEN_PUNCTUATION, "...")) then
+					!ERROR_OR_RETURN_NIL `errorParsingNext(state, "Only one vararg allowed.")`
+				else
+					!ERROR_OR_RETURN_NIL `errorParsingLast(state, "Vararg must be the last argument.")`
+				end
 			end
 		end
 
@@ -1071,7 +1058,7 @@ local function parseArguments(state, parent, isInput, allowVoid)
 				local decl = arg.declaration
 
 				if decl.name.nodeType == !(AST_VARARG) then
-					!ERROR_OR_RETURN_NIL `errorParsingNext(state, "Varargs cannot have default values.")`
+					!ERROR_OR_RETURN_NIL `errorParsingLast(state, "Varargs cannot have default values.")`
 				else
 					assert(decl.name.nodeType == !(AST_IDENTIFIER) or decl.name.nodeType == !(AST_BLANK))
 				end
@@ -1112,7 +1099,7 @@ local function parseArguments(state, parent, isInput, allowVoid)
 				if argsInGroup[1].declaration.canShadow then
 					!ERROR_OR_RETURN_NIL `errorParsingLast(state, "Duplicate !shadow.")`
 				elseif not isInput then
-					!ERROR_OR_RETURN_NIL `errorParsingLast(state, "!shadow does nothing for return arguments.")`
+					!ERROR_OR_RETURN_NIL `errorParsingLast(state, "!shadow does nothing for return values.")`
 				end
 				for _, arg in ipairsN(argsInGroup) do
 					arg.declaration.canShadow = true
@@ -1124,7 +1111,7 @@ local function parseArguments(state, parent, isInput, allowVoid)
 				if lastArg.isRequired then
 					!ERROR_OR_RETURN_NIL `errorParsingLast(state, "Duplicate !must.")`
 				elseif isInput then
-					!ERROR_OR_RETURN_NIL `errorParsingLast(state, "!must can only be used for return arguments.")`
+					!ERROR_OR_RETURN_NIL `errorParsingLast(state, "!must can only be used for return values.")`
 				end
 				lastArg.isRequired = true -- We update isRequired for all arguments below.
 
@@ -1144,7 +1131,12 @@ local function parseArguments(state, parent, isInput, allowVoid)
 		end
 
 		if gotVararg then
-			!ERROR_OR_RETURN_NIL `errorParsingLast(state, "Vararg must be the last argument.")`
+			tok = peekNextTok(state, 1)
+			if !!(IS_TOK(TOKEN_PUNCTUATION, "...")) then
+				!ERROR_OR_RETURN_NIL `errorParsingNext(state, "Only one vararg allowed.")`
+			else
+				!ERROR_OR_RETURN_NIL `errorParsingLast(state, "Vararg must be the last argument.")`
+			end
 		end
 	end
 
@@ -1213,7 +1205,12 @@ local function parseNamelessOutputArguments(state, parent)
 		end
 
 		if decl.name.nodeType == !(AST_VARARG) then
-			!ERROR_OR_RETURN_NIL `errorParsingLast(state, "Vararg must be the last argument.")`
+			tok = peekNextTok(state, 1)
+			if !!(IS_TOK(TOKEN_PUNCTUATION, "...")) then
+				!ERROR_OR_RETURN_NIL `errorParsingNext(state, "Only one vararg allowed.")`
+			else
+				!ERROR_OR_RETURN_NIL `errorParsingLast(state, "Vararg must be the last argument.")`
+			end
 		end
 	end
 
@@ -1294,17 +1291,17 @@ local function parseStruct(state, parent)
 
 		tok = eatNextTok(state)
 		if not !!(IS_TOK(TOKEN_PUNCTUATION, ")")) then
-			!ERROR_OR_RETURN_NIL `errorParsingAfterPrevious(state, "Expected ')'.")`
+			!ERROR_OR_RETURN_NIL `errorParsingAfterPrevious(state, "Expected ')' to end argument list.")`
 		end
 
 		tok = eatNextTok(state)
 	end
 
 	if not !!(IS_TOK(TOKEN_PUNCTUATION, "{")) then
-		!ERROR_OR_RETURN_NIL `errorParsingAfterPrevious(state, "Expected '{'.")`
+		!ERROR_OR_RETURN_NIL `errorParsingAfterPrevious(state, "Expected '{' to start struct body.")`
 	end
 
-	-- local takenNames = {} -- Doesn't work because of overloads!
+	-- local takenNames = {} -- Doesn't work because of overloads! We have to do this after types have been inferred.
 
 	-- Note: We allow a trailing comma/semicolon after the last member.
 	while true do
@@ -1341,7 +1338,7 @@ local function parseStruct(state, parent)
 
 			tok = eatNextTok(state)
 			if not !!(IS_TOK(TOKEN_PUNCTUATION, ":")) then
-				!ERROR_OR_RETURN_NIL `errorParsingAfterPrevious(state, "Expected ':'.")`
+				!ERROR_OR_RETURN_NIL `errorParsingAfterPrevious(state, "Expected ':' after '!%s'.", what)`
 			end
 
 			if struct[fieldName] then
@@ -1387,7 +1384,7 @@ local function parseStruct(state, parent)
 		elseif !!(IS_TOK(TOKEN_PUNCTUATION, "}")) then
 			break
 		else
-			!ERROR_OR_RETURN_NIL `errorParsingAfter(state, token-1, "Expected '}'.")`
+			!ERROR_OR_RETURN_NIL `errorParsingAfter(state, token-1, "Expected '}' to end struct.")`
 		end
 	end
 
@@ -1415,11 +1412,11 @@ local function parseEnum(state, parent)
 		then
 			!ERROR_OR_RETURN_NIL `errorParsingLast(state, "Supported enum member types are: int, string, Type, bool, float")`
 		else
-			!ERROR_OR_RETURN_NIL `errorParsingAfterPrevious(state, "Expected '{'.")`
+			!ERROR_OR_RETURN_NIL `errorParsingAfterPrevious(state, "Expected '{' to start enum body.")`
 		end
 	end
 
-	-- local takenNames = {} -- Doesn't work because of overloads!
+	local takenNames = {}
 
 	-- Note: We allow a trailing comma/semicolon after the members.
 	while true do
@@ -1433,22 +1430,22 @@ local function parseEnum(state, parent)
 		local parsedDecl = getLast(enum.declarations)
 		!DO_OR_RETURN_FALSE `parseNotes(state, parsedDecl)`
 
-		-- if takenNames[parsedDecl.name.name] then
-		-- 	!ERROR_OR_RETURN_NIL `
-		-- 		printerr()
-		-- 		parserMessage(io.stderr, state, parsedDecl,                       "Error", "Duplicate member '%s' in enum.", parsedDecl.name.name)
-		-- 		parserMessage(io.stderr, state, takenNames[parsedDecl.name.name], "Info",  "...previous declaration here.")
-		-- 		exitFailure()
-		-- 	`
-		-- end
-		-- takenNames[parsedDecl.name.name] = parsedDecl
+		if takenNames[parsedDecl.name.name] then
+			!ERROR_OR_RETURN_NIL `
+				printerr()
+				parserMessage(io.stderr, state, parsedDecl,                       "Error", "Duplicate member '%s' in enum.", parsedDecl.name.name)
+				parserMessage(io.stderr, state, takenNames[parsedDecl.name.name], "Info",  "...previous declaration here.")
+				exitFailure()
+			`
+		end
+		takenNames[parsedDecl.name.name] = parsedDecl
 
 		if maybeMoreStatements then
 			-- Continue the loop.
 		elseif !!(IS_TOK(TOKEN_PUNCTUATION, "}")) then
 			break
 		else
-			!ERROR_OR_RETURN_NIL `errorParsingAfter(state, token-1, "Expected '}'.")`
+			!ERROR_OR_RETURN_NIL `errorParsingAfter(state, token-1, "Expected '}' to end enum.")`
 		end
 
 		tok = peekNextTok(state, 1)
@@ -1463,7 +1460,7 @@ local function parseEnum(state, parent)
 end
 
 -- success = parseDeclarationStatement( compilationState, parentScope, inImperativeScope [, declarationType=DECLARATION_NORMAL ] )
--- declarationType = DECLARATION_NORMAL|DECLARATION_STRUCT|DECLARATION_ENUM
+-- declarationType = DECLARATION_NORMAL | DECLARATION_STRUCT | DECLARATION_ENUM
 !FILE_LOCAL `function parseDeclarationStatement(state, scope, imperative, declType)`
 	--[[
 	local a := 0        -- Variable, inferred type.
@@ -1499,8 +1496,8 @@ end
 	if declType == !(DECLARATION_NORMAL) then
 		tok = eatNextTok(state)
 
-		if not (tok and tok.type == !(TOKEN_KEYWORD)) then
-			!ERROR_OR_RETURN_FALSE `errorParsingLast(state, "Expected 'local'.")`
+		if not !!(IS_TOK(TOKEN_KEYWORD)) then
+			!ERROR_OR_RETURN_FALSE `errorParsingLast(state, "Expected 'local'.")` -- I don't think we ever get here. 2021-08-07
 		elseif tok.value == "local" then
 			declKind = !(DECL_KIND_LOCAL_VAR)
 		elseif tok.value == "export" then
@@ -1510,7 +1507,7 @@ end
 		-- elseif tok.value == "read_only" then
 		-- 	declKind = !(DECL_KIND_READ_ONLY)
 		else
-			!ERROR_OR_RETURN_FALSE `errorParsingLast(state, "Expected 'local'.")`
+			!ERROR_OR_RETURN_FALSE `errorParsingLast(state, "Expected 'local'.")` -- I don't think we ever get here. 2021-08-07
 		end
 
 	else
@@ -1518,7 +1515,7 @@ end
 	end
 
 	local nameListStartToken = state.nextToken
-	-- local takenNames      = {} -- @Incomplete: Use this? Or is this a copypaste error? 2021-07-22
+	-- local takenNames      = {} -- @Incomplete: Use this? Or is this a copypaste error? 2021-07-22 (Probably the latter.)
 
 	if declType == !(DECLARATION_NORMAL) then
 		!DO_OR_RETURN_FALSE `parseNameList(state, scope, declNames, declNamesFromBefore, true)` -- Note: We update parent here below.
@@ -1537,6 +1534,8 @@ end
 	else
 		tok = peekNextTok(state, 1)
 		if not tok then
+			-- We shouldn't get here because struct/enum declarations are always surrounded
+			-- by {}, and the bracket quick check should detect missing end brackets.
 			!ERROR_OR_RETURN_FALSE `errorParsingNext(state, "Expected an identifier in declaration.")`
 		end
 
@@ -1599,7 +1598,7 @@ end
 		-- void
 
 	else
-		!ERROR_OR_RETURN_FALSE `errorParsingAfterLast(state, "Expected ':' or '='.")`
+		!ERROR_OR_RETURN_FALSE `errorParsingAfterLast(state, "Expected ':' or '=' in declaration.")`
 	end
 
 	tok = peekNextTok(state, 1)
@@ -1724,7 +1723,7 @@ end
 		elseif declType == !(DECLARATION_STRUCT) then
 			!ERROR_OR_RETURN_FALSE `errorParsingLast(state, "Struct members cannot be marked as shadows.")`
 		elseif declType == !(DECLARATION_STRUCT) then
-			!ERROR_OR_RETURN_FALSE `errorParsingLast(state, "Enum members cannot be marked as shadows.")`
+			!ERROR_OR_RETURN_FALSE `errorParsingLast(state, "Enum members cannot be marked as shadows.")` -- We should never get here because enum members must be constant, and we already detect that.
 		elseif declType ~= !(DECLARATION_NORMAL) then
 			errorInternal(declType)
 		end
@@ -1746,7 +1745,7 @@ end
 				nameCount, (nameCount == 1 and "" or "s"), valueCount
 			)`
 
-		elseif isConst and valueCount < nameCount then
+		elseif isConst and valueCount < nameCount then -- I think we already detect this earlier in non-imperative context. 2021-08-07
 			!ERROR_OR_RETURN_FALSE `errorParsingAfterLast(
 				state,
 				"No value for '%s'. Each constant must have it's own value. (Expected %d values, got %d)",
@@ -1842,7 +1841,8 @@ local function parseAssignment(state, parent)
 		elseif expr.nodeType == !(AST_ACCESS) then
 			-- void
 		else
-			!ERROR_OR_RETURN_NIL `errorParsing(state, expr, "Expected assignment target expression to resolve into a variable or namespace access.")`
+			-- parseExpressionList() already reports this error (though the message isn't great). 2021-08-07 @Cleanup
+			!ERROR_OR_RETURN_NIL `errorParsing(state, expr, "Expected assignment target expression to resolve into a variable or lookup.")`
 		end
 	end
 
@@ -1912,9 +1912,14 @@ end
 
 			!SET_OR_RETURN_FALSE `identOrBlank = parseIdentifier(state, parent)`
 			if takenNames[identOrBlank.name] then
-				!ERROR_OR_RETURN_FALSE `errorParsingLast(state, "Duplicate name '%s'.", identOrBlank.name)`
+				!ERROR_OR_RETURN_FALSE `
+					printerr()
+					parserMessage(io.stderr, state, state.tokens[state.nextToken-1], "Error", "Duplicate name '%s'.", identOrBlank.name)
+					parserMessage(io.stderr, state, takenNames[identOrBlank.name],   "Info",  "...name was previously used here.")
+					exitFailure()
+				`
 			end
-			takenNames[identOrBlank.name] = true
+			takenNames[identOrBlank.name] = identOrBlank
 
 			if fromBefore then
 				namesFromBefore[identOrBlank.name] = true
@@ -1937,8 +1942,8 @@ end
 
 !FILE_LOCAL `function parseDebugNode(state, parent)`
 	local tok = eatNextTok(state)
-	if tok.type ~= !(TOKEN_DIRECTIVE) then
-		!ERROR_OR_RETURN_NIL `errorParsingLast(state, "Expected a directive.")`
+	if not !!(IS_TOK(TOKEN_DIRECTIVE)) then
+		!ERROR_OR_RETURN_NIL `errorParsingLast(state, "Internal compiler error: Expected a directive.")` -- The caller messed up.
 	end
 
 	local debugNode  = astNewNode(AstDebug, tok, parent)
@@ -2050,6 +2055,7 @@ local function parseSwitch(state, parent, statementStartToken, valueExpr, comple
 		elseif not !!(IS_TOK(TOKEN_KEYWORD, "case")) then
 			!ERROR_OR_RETURN_NIL `errorParsingLast(state, "Expected 'case' or '}'.")`
 		elseif gotDefault then
+			-- @UX @Polish: Different message if there are two defaults.
 			!ERROR_OR_RETURN_NIL `errorParsing(state, lastCaseToken, "The default case must be last.")`
 		end
 
@@ -2067,7 +2073,7 @@ local function parseSwitch(state, parent, statementStartToken, valueExpr, comple
 
 		tok = eatNextTok(state)
 		if not !!(IS_TOK(TOKEN_PUNCTUATION, ":")) then
-			!ERROR_OR_RETURN_NIL `errorParsingAfterPrevious(state, "Expected ':'.")`
+			!ERROR_OR_RETURN_NIL `errorParsingAfterPrevious(state, "Expected ':' after the case.")`
 		end
 
 		tok = peekNextTok(state, 1)
@@ -2086,6 +2092,7 @@ local function parseSwitch(state, parent, statementStartToken, valueExpr, comple
 				if !!(IS_TOK(TOKEN_KEYWORD, "case")) or !!(IS_TOK(TOKEN_PUNCTUATION, "}")) then
 					break
 				elseif !!(IS_TOK(TOKEN_DIRECTIVE, "through")) then
+					-- @Incomplete: Support !through after other statements. (ProgramWriter needs to get better!)
 					!ERROR_OR_RETURN_NIL `errorParsingNext(state, "!through must currently be right after 'case'.")`
 				end
 				!DO_OR_RETURN_NIL `parseOneStatementButSometimesMoreAndAddToBlock(state, case.body)`
@@ -2172,6 +2179,12 @@ end
 
 			!SET_OR_RETURN_FALSE `local loopNameIdent = parseIdentifier(state, breakOrContinue)`
 
+			tok = eatNextTok(state)
+
+			if not !!(IS_TOK(TOKEN_PUNCTUATION, ")")) then
+				!ERROR_OR_RETURN_FALSE `errorParsingAfterPrevious(state, "Expected ')' in %s expression.", keyword)`
+			end
+
 			local loopName    = loopNameIdent.name
 			local loopClosest = loopOrLambda
 
@@ -2206,13 +2219,7 @@ end
 			until not loopOrLambda
 
 			if not loopOrLambda or loopOrLambda.nodeType == !(AST_LAMBDA) then
-				!ERROR_OR_RETURN_FALSE `errorParsingLast(state, "Could not find what loop '%s' refers to.", loopName)`
-			end
-
-			tok = eatNextTok(state)
-
-			if not !!(IS_TOK(TOKEN_PUNCTUATION, ")")) then
-				!ERROR_OR_RETURN_FALSE `errorParsingAfterPrevious(state, "Expected ')'.")`
+				!ERROR_OR_RETURN_FALSE `errorParsing(state, loopNameIdent, "Could not find what loop '%s' refers to.", loopName)`
 			end
 
 		elseif isContinue then
@@ -2242,12 +2249,12 @@ end
 
 		tok = eatNextTok(state)
 		if not !!(IS_TOK(TOKEN_PUNCTUATION, "==")) then
-			!ERROR_OR_RETURN_FALSE `errorParsingLast(state, "Expected '=='.")`
+			!ERROR_OR_RETURN_FALSE `errorParsingAfterPrevious(state, "Expected '==' in switch statement.")`
 		end
 
 		tok = eatNextTok(state)
 		if not !!(IS_TOK(TOKEN_PUNCTUATION, "{")) then
-			!ERROR_OR_RETURN_FALSE `errorParsingLast(state, "Expected '{'.")`
+			!ERROR_OR_RETURN_FALSE `errorParsingLast(state, "Expected '{'.")` -- We probably never get here because the == would be part of a binary expression.
 		end
 
 		!SET_OR_RETURN_FALSE `statement = parseSwitch(state, block, statementStartToken, expr, true)`
@@ -2293,6 +2300,8 @@ end
 		!!(EAT_NEXT_TOKEN) -- 'for'
 		tok = peekNextTok(state, 1)
 
+		local tokAfterKeyword = tok
+
 		-- FOR_SHORT  for < [ v1, ... : ] obj
 		if !!(IS_TOK(TOKEN_PUNCTUATION, "<")) then
 			!!(EAT_NEXT_TOKEN) -- '<'
@@ -2327,11 +2336,11 @@ end
 			forLoop.forType = !(FOR_SHORT)
 			twoParter       = false
 		else
-			!ERROR_OR_RETURN_FALSE `errorParsing(state, forLoop, "Could not determine what kind of 'for' statement this is.")`
+			!ERROR_OR_RETURN_FALSE `errorParsing(state, forLoop, "Could not determine what kind of 'for' statement this is.")` -- Not sure we ever actually get here.
 		end
 
 		if forLoop.reverse and forLoop.forType ~= !(FOR_SHORT) then
-			!ERROR_OR_RETURN_FALSE `errorParsing(state, forLoop, "Only short-form 'for' loops support the reverse operator.")` -- @Incomplete: Point at the '<' right after 'for'.
+			!ERROR_OR_RETURN_FALSE `errorParsing(state, tokAfterKeyword, "Only short-form 'for' loops support the reverse operator.")`
 		end
 
 		if forLoop.forType == !(FOR_NUMERIC) then
@@ -2356,7 +2365,6 @@ end
 
 			if #forLoop.expressions < 2 then
 				!ERROR_OR_RETURN_FALSE `errorParsingAfterLast(state, "Expected 2 or 3 parameters for the numeric 'for' loop.")`
-
 			elseif #forLoop.expressions > 3 then
 				!ERROR_OR_RETURN_FALSE `errorParsing(state, forLoop.expressions[4], "Expected 2 or 3 parameters for the numeric 'for' loop.")` -- @Incomplete: Point at the ',' right before.
 			end
@@ -2514,7 +2522,7 @@ local function parseBlockStatements(state, block)
 		tok = peekNextTok(state, 1)
 
 		if not tok then
-			!ERROR_OR_RETURN_FALSE `errorParsing(state, block, "Unfinished block.")`
+			!ERROR_OR_RETURN_FALSE `errorParsing(state, block, "Unfinished block.")` -- We probably don't ever get here because of the quick bracket check.
 
 		elseif !!(IS_EXISTING_TOK(TOKEN_PUNCTUATION, "}")) then
 			!!(EAT_NEXT_TOKEN) -- '}'
@@ -2540,8 +2548,8 @@ local function parseBlockStatements(state, block)
 
 				local extra
 					=  lastNodeType ~= !(AST_RETURN) and ""
-					or getLambda(block).argumentsOut and " (Note: The function has return arguments.)"
-					or                                   " (Note: The function has no return arguments.)"
+					or getLambda(block).argumentsOut and " (Note: The function has return values.)"
+					or                                   " (Note: The function has no return values.)"
 
 				!ERROR_OR_RETURN_FALSE `errorParsing(state, state.nextToken, "Unreachable code after %s statement.%s", nodeTitle, extra)`
 			end
@@ -2590,15 +2598,17 @@ local function parseImportOrLoad(state, parent)
 	elseif !!(IS_TOK(TOKEN_DIRECTIVE, "load")) then
 		import.isLoad = true
 		if astIsOrIsInModule(import.parent) then
-			!ERROR_OR_RETURN_NIL `errorParsingNext(state, "Modules cannot use !load.")`
+			!ERROR_OR_RETURN_NIL `errorParsingLast(state, "Modules cannot use !load.")`
 		end
 	else
-		!ERROR_OR_RETURN_NIL `errorParsingLast(state, "Expected '!load' or '!import'.")`
+		!ERROR_OR_RETURN_NIL `errorParsingLast(state, "Internal compiler error: Expected '!load' or '!import'.")` -- The caller messed up.
 	end
 
-	local tok = eatNextTok(state)
-	if not (tok and tok.type == !(TOKEN_STRING)) then
-		!ERROR_OR_RETURN_NIL `errorParsingLast(state, "Expected a string.")`
+	local keyword = tok.value
+
+	tok = eatNextTok(state)
+	if not !!(IS_TOK(TOKEN_STRING)) then
+		!ERROR_OR_RETURN_NIL `errorParsingLast(state, "Expected a string after '!%s'.", keyword)`
 	end
 	import.importName = tok.value:gsub("\\", "/") -- Normalize paths.
 
@@ -2608,7 +2618,7 @@ end
 !FILE_LOCAL `function parseRun(state, parent, mustBeExpression)`
 	local tok = eatNextTok(state)
 	if not !!(IS_TOK(TOKEN_DIRECTIVE, "run")) then
-		!ERROR_OR_RETURN_NIL `errorParsingLast(state, "Expected '!run'.")`
+		!ERROR_OR_RETURN_NIL `errorParsingLast(state, "Internal compiler error: Expected '!run'.")` -- The caller messed up.
 	end
 
 	local runNode  = astNewNode(AstRun,    tok, parent)
@@ -2718,6 +2728,7 @@ end
 			!!(IS_TOK(2, TOKEN_KEYWORD, "static"))
 		) then
 			if tok.value == "using" then  eatNextTok(state)  end
+			-- @UX: Maybe this should just be a warning and we parse a local instead.
 			!ERROR_OR_RETURN_FALSE `errorParsingNext(state, "Static variables cannot be declared in file scope or in namespaces.")`
 
 		elseif !!(IS_TOK(TOKEN_DIRECTIVE, "import","load")) then
@@ -2739,7 +2750,7 @@ end
 			!!(EAT_NEXT_TOKEN) -- 'global'
 
 			if astIsOrIsInModule(scope) then
-				!ERROR_OR_RETURN_FALSE `errorParsingNext(state, "Cannot export namespaces from modules into global space.")`
+				!ERROR_OR_RETURN_FALSE `errorParsingLast(state, "Cannot export namespaces from modules into global space.")`
 			end
 
 			!SET_OR_RETURN_FALSE `local import = parseExpression(state, scope, 1/0)`
@@ -2768,7 +2779,7 @@ end
 		elseif !!(IS_TOK(TOKEN_DIRECTIVE, "preload")) then
 			!!(EAT_NEXT_TOKEN) -- '!preload'
 			if not isTopLevel then
-				!ERROR_OR_RETURN_FALSE `errorParsingNext(state, "!preload statements are only supported directly in file-scope.")`
+				!ERROR_OR_RETURN_FALSE `errorParsingLast(state, "!preload statements are only supported directly in file-scope.")`
 			end
 
 			local forCompiletime = false
@@ -2784,7 +2795,7 @@ end
 			end
 
 			tok = eatNextTok(state)
-			if not (tok and tok.type == !(TOKEN_STRING)) then
+			if not !!(IS_TOK(TOKEN_STRING)) then
 				!ERROR_OR_RETURN_FALSE `errorParsingLast(state, "Expected a string containing Lua code.")`
 			end
 
@@ -2823,7 +2834,7 @@ end
 		elseif !!(IS_TOK(TOKEN_KEYWORD, "export_value")) then
 			!!(EAT_NEXT_TOKEN) -- '!export_value'
 			if not isTopLevel then
-				!ERROR_OR_RETURN_FALSE `errorParsingNext(state, "Values must be exported directly from file scope.")`
+				!ERROR_OR_RETURN_FALSE `errorParsingLast(state, "Values must be exported directly from file scope.")`
 			end
 
 			local fileScope = scope
@@ -2856,14 +2867,15 @@ end
 		elseif not (isTopLevel or singleStatement) and !!(IS_TOK(TOKEN_PUNCTUATION, "}")) then
 			!!(EAT_NEXT_TOKEN) -- '}'
 			break
+		elseif !!(IS_TOK(TOKEN_DUMMY)) then
+			!!(EAT_NEXT_TOKEN) -- dummy token
+			break
 		else
-			!if DEBUG then
-				print(TOKEN_TITLES[state.tokens[state.nextToken].type])
-			!end
+			!ifDEBUG `print(TOKEN_TITLES[state.tokens[state.nextToken].type])`
 			if isTopLevel or singleStatement then
 				!ERROR_OR_RETURN_FALSE `errorParsingNext(state, "Expected file-level declaration.")`
 			else
-				!ERROR_OR_RETURN_FALSE `errorParsingNext(state, "Expected '}'.")`
+				!ERROR_OR_RETURN_FALSE `errorParsingNext(state, "Expected declaration or '}'.")`
 			end
 		end
 
@@ -2891,12 +2903,10 @@ local function parseFileScope(state, parent, path, isModule, moduleName)
 		!ASSERT `parent == globalScope`
 
 		if globalScope.fileScopeWithValueToExport then
-			local valueToExport = globalScope.fileScopeWithValueToExport.valueToExport
-
 			!ERROR_OR_RETURN_NIL `
 				printerr()
-				parserMessage(io.stderr, state, state.tokens[state.nextToken], "Error", "Multiple exported values across multiple files.")
-				parserMessage(io.stderr, state, valueToExport,                 "Info",  "...previous value is here.")
+				parserMessage(io.stderr, state, fileScope.valueToExport,                              "Error", "Multiple exported values across multiple files.")
+				parserMessage(io.stderr, state, globalScope.fileScopeWithValueToExport.valueToExport, "Info",  "...previous value is here.")
 				exitFailure()
 			`
 		end
@@ -2990,12 +3000,12 @@ local function parseCallChain(state, parent, callee, isMethod)
 
 				tok = eatNextTok(state)
 				if not !!(IS_TOK(TOKEN_PUNCTUATION, ")")) then
-					!ERROR_OR_RETURN_NIL `errorParsingAfterPrevious(state, "Expected ')' or ','.")`
+					!ERROR_OR_RETURN_NIL `errorParsingAfterPrevious(state, "Expected ')' or ',' in call.")`
 				end
 			end
 
 		else
-			!ERROR_OR_RETURN_NIL `errorParsingLast(state, "Expected '('.")`
+			!ERROR_OR_RETURN_NIL `errorParsingLast(state, "Expected '('.")` -- Not sure we ever get here.
 		end
 
 		callee.parent = call
@@ -3034,14 +3044,14 @@ local function parseLambda(state, parent)
 
 		tok = eatNextTok(state)
 		if not !!(IS_TOK(TOKEN_PUNCTUATION, "]")) then
-			!ERROR_OR_RETURN_NIL `errorParsingAfterPrevious(state, "Expected ']'.")`
+			!ERROR_OR_RETURN_NIL `errorParsingAfterPrevious(state, "Expected ']' after captures.")`
 		end
 	end
 
 	-- Input arguments.
 	tok = eatNextTok(state)
 	if not !!(IS_TOK(TOKEN_PUNCTUATION, "(")) then
-		!ERROR_OR_RETURN_NIL `errorParsingAfterPrevious(state, "Expected '('.")`
+		!ERROR_OR_RETURN_NIL `errorParsingAfterPrevious(state, "Expected '(' to start argument list.")`
 	end
 
 	local callerLocationNode = nil
@@ -3064,7 +3074,7 @@ local function parseLambda(state, parent)
 					local loc = node
 					if loc.ofCaller then
 						lambda.wantCallerLocation = true
-						callerLocationNode        = loc
+						callerLocationNode        = callerLocationNode or loc
 					end
 					return
 				end
@@ -3150,7 +3160,7 @@ local function parseLambda(state, parent)
 
 		tok = eatNextTok(state)
 		if not !!(IS_TOK(TOKEN_PUNCTUATION, ")")) then
-			!ERROR_OR_RETURN_NIL `errorParsingAfterPrevious(state, "Expected ')'.")`
+			!ERROR_OR_RETURN_NIL `errorParsingAfterPrevious(state, "Expected ')' to end argument list.")`
 		end
 	end
 
@@ -3197,6 +3207,7 @@ local function parseLambda(state, parent)
 			and (
 				tok2.type == !(TOKEN_IDENTIFIER)
 				or !!(IS_TOK(2, TOKEN_PUNCTUATION, "...","_","$")) -- '$' is just for a better error message. Output arguments cannot be baked.
+				or !!(IS_TOK(2, TOKEN_KEYWORD,     "using"      )) -- This is just for a better error message. Output arguments cannot have using.
 			)
 		then
 			!!(EAT_NEXT_TOKEN) -- '('
@@ -3207,7 +3218,7 @@ local function parseLambda(state, parent)
 
 			tok = eatNextTok(state)
 			if not !!(IS_TOK(TOKEN_PUNCTUATION, ")")) then
-				!ERROR_OR_RETURN_NIL `errorParsingAfterPrevious(state, "Expected ')'.")`
+				!ERROR_OR_RETURN_NIL `errorParsingAfterPrevious(state, "Expected ')' to end argument list.")`
 			end
 
 			-- If the return type is a function signature, i.e. () -> () -> ...
@@ -3256,7 +3267,7 @@ local function parseLambda(state, parent)
 		table.insert(lambda.statementsStatic, block)
 
 		tok = eatNextTok(state)
-		if not (tok and tok.type == !(TOKEN_IDENTIFIER)) then
+		if not !!(IS_TOK(TOKEN_IDENTIFIER)) then
 			!ERROR_OR_RETURN_NIL `errorParsingLast(state, "Expected foreign source. (Valid values: lua, method, compiler)")`
 		elseif not !!(CONST_SET{"lua","method","compiler"})[tok.value] then
 			!ERROR_OR_RETURN_NIL `errorParsingLast(state, "Invalid source '%s'. (Valid values: lua, method, compiler)", tok.value)`
@@ -3264,7 +3275,7 @@ local function parseLambda(state, parent)
 		lambda.foreignSource = tok.value
 
 		tok = peekNextTok(state, 1)
-		if tok and tok.type == !(TOKEN_STRING) then
+		if !!(IS_TOK(TOKEN_STRING)) then
 			!!(EAT_NEXT_TOKEN) -- the string
 			lambda.foreignSourceName = newLiteral(lambda, tok, !(LITERAL_STRING), tok.value)
 		else
@@ -3275,11 +3286,11 @@ local function parseLambda(state, parent)
 		lambda.bodyEndDummy = astNewNode(AstDummy, state.tokens[state.nextToken-1])
 
 	elseif !!(IS_TOK(TOKEN_DIRECTIVE, "body_text")) then
-		!!(EAT_NEXT_TOKEN) -- 'body_text'
+		!!(EAT_NEXT_TOKEN) -- '!body_text'
 
 		tok = eatNextTok(state)
 		if not !!(IS_TOK(TOKEN_PUNCTUATION, "{")) then
-			!ERROR_OR_RETURN_NIL `errorParsingAfterPrevious(state, "Expected '{'.")`
+			!ERROR_OR_RETURN_NIL `errorParsingAfterPrevious(state, "Expected '{' after '!body_text'.")`
 		end
 
 		do
@@ -3435,14 +3446,14 @@ do
 
 		local tok = eatNextTok(state)
 		if not !!(IS_TOK(TOKEN_PUNCTUATION, "(")) then
-			!ERROR_OR_RETURN_NIL `errorParsingAfterPrevious(state, "Expected '('.")`
+			!ERROR_OR_RETURN_NIL `errorParsingAfterPrevious(state, "Expected '(' after 'cast'.")`
 		end
 
 		!SET_OR_RETURN_NIL `cast.targetType = parseExpression(state, cast)`
 
 		tok = eatNextTok(state)
 		if not !!(IS_TOK(TOKEN_PUNCTUATION, ")")) then
-			!ERROR_OR_RETURN_NIL `errorParsingAfterPrevious(state, "Expected ')'.")`
+			!ERROR_OR_RETURN_NIL `errorParsingAfterPrevious(state, "Expected ')' in cast.")`
 		end
 
 		!SET_OR_RETURN_NIL `cast.expression = parseExpression(state, cast, OPERATOR_PRECEDENCE.cast)`
@@ -3499,14 +3510,14 @@ do
 
 		local tok = eatNextTok(state)
 		if not !!(IS_TOK(TOKEN_PUNCTUATION, "(")) then
-			!ERROR_OR_RETURN_NIL `errorParsingAfterPrevious(state, "Expected '('.")`
+			!ERROR_OR_RETURN_NIL `errorParsingAfterPrevious(state, "Expected '(' after 'type_of'.")`
 		end
 
 		!SET_OR_RETURN_NIL `typeOf.expression = parseExpression(state, typeOf)`
 
 		tok = eatNextTok(state)
 		if not !!(IS_TOK(TOKEN_PUNCTUATION, ")")) then
-			!ERROR_OR_RETURN_NIL `errorParsingAfterPrevious(state, "Expected ')'.")`
+			!ERROR_OR_RETURN_NIL `errorParsingAfterPrevious(state, "Expected ')' to end type_of() expression.")`
 		end
 
 		return typeOf
@@ -3518,7 +3529,7 @@ do
 
 		local tok = eatNextTok(state)
 		if not !!(IS_TOK(TOKEN_PUNCTUATION, "(")) then
-			!ERROR_OR_RETURN_NIL `errorParsingAfterPrevious(state, "Expected '('.")`
+			!ERROR_OR_RETURN_NIL `errorParsingAfterPrevious(state, "Expected '(' after 'variant_of'.")`
 		end
 
 		local expressionStartTok = peekNextTok(state, 1)
@@ -3526,9 +3537,9 @@ do
 
 		tok = eatNextTok(state)
 		if not !!(IS_TOK(TOKEN_PUNCTUATION, ")")) then
-			!ERROR_OR_RETURN_NIL `errorParsingAfterPrevious(state, "Expected ')'.")`
+			!ERROR_OR_RETURN_NIL `errorParsingAfterPrevious(state, "Expected ')' to end variant_of() expression.")`
 		elseif variant.call.nodeType ~= !(AST_CALL) then
-			!ERROR_OR_RETURN_NIL `errorParsing(state, expressionStartTok, "Expected a call.")`
+			!ERROR_OR_RETURN_NIL `errorParsing(state, expressionStartTok, "Expected a call for variant_of().")`
 		end
 
 		return variant
@@ -3545,7 +3556,7 @@ do
 		local tok = eatNextTok(state)
 
 		if not (tok and tok.type == !(TOKEN_STRING)) then
-			!ERROR_OR_RETURN_NIL `errorParsingLast(state, "Expected a string.")`
+			!ERROR_OR_RETURN_NIL `errorParsingLast(state, "Expected a string after '!char'.")`
 		elseif tok.value == "" then
 			!ERROR_OR_RETURN_NIL `errorParsingLast(state, "Expected a UTF-8 character in the string.")`
 		elseif tok.value:find!("^"..UTF8_CHARACTER_PATTERN.."$") then
@@ -3597,7 +3608,7 @@ do
 	expressionParserByKeySymbol["namespace"] = function(state, exprStartTok, parent)
 		local tok = eatNextTok(state)
 		if not !!(IS_TOK(TOKEN_PUNCTUATION, "{")) then
-			!ERROR_OR_RETURN_NIL `errorParsingAfterPrevious(state, "Expected '{'.")`
+			!ERROR_OR_RETURN_NIL `errorParsingAfterPrevious(state, "Expected '{' after 'namespace'.")`
 		end
 
 		local namespace = astNewNode(AstNamespace, exprStartTok, parent)
@@ -3612,14 +3623,14 @@ do
 
 		local tok = eatNextTok(state)
 		if not !!(IS_TOK(TOKEN_PUNCTUATION, "(")) then
-			!ERROR_OR_RETURN_NIL `errorParsingAfterPrevious(state, "Expected '('.")`
+			!ERROR_OR_RETURN_NIL `errorParsingAfterPrevious(state, "Expected '(' after 'type_info'.")`
 		end
 
 		!SET_OR_RETURN_NIL `typeInfoNode.expression = parseExpression(state, typeInfoNode)`
 
 		tok = eatNextTok(state)
 		if not !!(IS_TOK(TOKEN_PUNCTUATION, ")")) then
-			!ERROR_OR_RETURN_NIL `errorParsingAfterPrevious(state, "Expected ')'.")`
+			!ERROR_OR_RETURN_NIL `errorParsingAfterPrevious(state, "Expected ')' to end type_info() expression.")`
 		end
 
 		return typeInfoNode
@@ -3631,7 +3642,7 @@ do
 
 		local tok = eatNextTok(state)
 		if not !!(IS_TOK(TOKEN_PUNCTUATION, "(")) then
-			!ERROR_OR_RETURN_NIL `errorParsingAfterPrevious(state, "Expected '('.")`
+			!ERROR_OR_RETURN_NIL `errorParsingAfterPrevious(state, "Expected '(' after 'location'.")`
 		end
 
 		tok = peekNextTok(state, 1)
@@ -3641,7 +3652,7 @@ do
 
 		tok = eatNextTok(state)
 		if not !!(IS_TOK(TOKEN_PUNCTUATION, ")")) then
-			!ERROR_OR_RETURN_NIL `errorParsingAfterPrevious(state, "Expected ')'.")`
+			!ERROR_OR_RETURN_NIL `errorParsingAfterPrevious(state, "Expected ')' to end location() expression.")`
 		end
 
 		return loc
@@ -3650,8 +3661,8 @@ do
 	-- Compiler value.
 	expressionParserByDirective["compiler"] = function(state, exprStartTok, parent)
 		local tok = eatNextTok(state)
-		if not (tok and tok.type == !(TOKEN_STRING)) then
-			!ERROR_OR_RETURN_NIL `errorParsingLast(state, "Expected the name of a compiler-provided value.")`
+		if not !!(IS_TOK(TOKEN_STRING)) then
+			!ERROR_OR_RETURN_NIL `errorParsingLast(state, "Expected a string with the name of a compiler-provided value.")`
 		end
 
 		local tokValue = tok.value
@@ -3675,11 +3686,11 @@ do
 		elseif tokValue == "typeTagVararg"      then  return newLiteral(parent, exprStartTok, !(LITERAL_INTEGER), !(TYPE_VARARG))
 		elseif tokValue == "typeTagVoid"        then  return newLiteral(parent, exprStartTok, !(LITERAL_INTEGER), !(TYPE_VOID))
 		else
-			!ERROR_OR_RETURN_NIL `errorParsingLast(state, "There is no compiler-provided value named '%s'.", tokValue)`
+			!ERROR_OR_RETURN_NIL `errorParsingLast(state, "There is no compiler-provided value named '%s'.", valueToStringForMessage(tokValue))`
 		end
 	end
 
-	-- Blank (invalid).
+	-- Blank (invalid expression).
 	expressionParserByKeySymbol["_"] = function(state, exprStartTok, parent)
 		!ERROR_OR_RETURN_NIL `errorParsingLast(state, "Invalid place for a blank name.")`
 	end
@@ -3743,15 +3754,15 @@ do
 
 			if !!(CONST_SET{ AST_CALL, AST_VARARG })[expr.nodeType] then
 				-- This is so we know whether to adjust the return values to one or not in certain situations.
-				-- Note: Functions with a return argument after the first one marked as #must cannot have their
-				-- return arguments adjusted to one.
+				-- Note: Functions with a return value after the first one marked as #must cannot have their
+				-- return values adjusted to one.
 				expr.surroundedByParentheses = true
 			end
 
 			local tok = eatNextTok(state)
 
 			if not !!(IS_TOK(TOKEN_PUNCTUATION, ")")) then
-				!ERROR_OR_RETURN_NIL `errorParsingAfterPrevious(state, "Expected ')'.")`
+				!ERROR_OR_RETURN_NIL `errorParsingAfterPrevious(state, "Expected ')' to end parenthesis expression.")`
 			end
 
 			--[[ @Incomplete :ParenthesesAmbiguityError
@@ -3941,7 +3952,7 @@ end
 
 			tok = eatNextTok(state)
 			if not !!(IS_TOK(TOKEN_PUNCTUATION,  "]")) then
-				!ERROR_OR_RETURN_NIL `errorParsingLast(state, "Expected ']'.")`
+				!ERROR_OR_RETURN_NIL `errorParsingAfterPrevious(state, "Expected ']' to end lookup.")`
 			end
 
 			expr.parent = access
@@ -3965,8 +3976,8 @@ end
 		then
 			tok = !!(PEEK_LAST_TOKEN)
 
-			if not (tok and tok.type == !(TOKEN_IDENTIFIER)) then
-				!ERROR_OR_RETURN_NIL `errorParsingNext(state, "Expected a method name before this.")` -- @Incomplete: Don't require an identifier specifically.
+			if not !!(IS_TOK(TOKEN_IDENTIFIER)) then
+				!ERROR_OR_RETURN_NIL `errorParsingNext(state, "Expected a method name before this.")` -- @Incomplete: Don't require an identifier specifically. o["m"]!() should work.
 			elseif not thisCanBeMethodCall then
 				!ERROR_OR_RETURN_NIL `errorParsingLast(state, "Expected an object to call a method on.")`
 			end
@@ -4043,7 +4054,7 @@ end
 
 			tok = eatNextTok(state)
 			if not !!(IS_TOK(TOKEN_PUNCTUATION, ":")) then
-				!ERROR_OR_RETURN_NIL `errorParsingLast(state, "Expected ':'.")`
+				!ERROR_OR_RETURN_NIL `errorParsingLast(state, "Expected ':' in ternary conditional.")`
 			end
 
 			!SET_OR_RETURN_NIL `conditional.branchFalse = parseExpression(state, conditional, OPERATOR_PRECEDENCE.conditional-1)` -- The -1 makes this right-associative.
@@ -4072,7 +4083,7 @@ end
 			elseif !!(IS_TOK(TOKEN_KEYWORD, "and","or")) and !!(IS_TOK(2, TOKEN_PUNCTUATION, "=")) then
 				!ERROR_OR_RETURN_NIL `errorParsingAfterLast(state, "Expected an assignment target to the left of '%s='. Ambiguous statement.", tok.value)`
 			else
-				!ERROR_OR_RETURN_NIL `errorParsing(state, exprStartTok, "Ambiguous statement.")`
+				!ERROR_OR_RETURN_NIL `errorParsing(state, exprStartTok, "Ambiguous part of statement.")`
 			end
 		end
 	end
@@ -4120,7 +4131,7 @@ end
 
 -- parserMessage     ( [ outputFile=io.stdout, ] compilationState, tok|node, label, formatString, ... )
 -- parserMessageAfter( [ outputFile=io.stdout, ] compilationState, tok,      label, formatString, ... )
--- parserMessageLine ( [ outputFile=io.stdout, ] compilationState, tok,      label, formatString, ... )
+-- parserMessageLine ( [ outputFile=io.stdout, ] compilationState, tok|node, label, formatString, ... )
 function _G.parserMessage(file, state, tokOrNode, label, s, ...)
 	if type(file) ~= "userdata" then  return parserMessage(io.stdout, file, state, tokOrNode, label, s, ...)  end
 	reportMessageInFile(file, tokOrNode.source.string, tokOrNode.source.path, (tokOrNode.position1 or tokOrNode.position), label, "Parser", s, ...)
@@ -4129,9 +4140,9 @@ function _G.parserMessageAfter(file, state, tok, label, s, ...)
 	if type(file) ~= "userdata" then  return parserMessageAfter(io.stdout, file, state, tok, label, s, ...)  end
 	reportMessageInFile(file, tok.source.string, tok.source.path, tok.position2+1, label, "Parser", s, ...)
 end
-function _G.parserMessageLine(file, state, tok, label, s, ...)
-	if type(file) ~= "userdata" then  return parserMessageLine(io.stdout, file, state, tok, label, s, ...)  end
-	reportMessageOnLine(file, tok.source.path, tok.line1, label, "Parser", s, ...)
+function _G.parserMessageLine(file, state, tokOrNode, label, s, ...)
+	if type(file) ~= "userdata" then  return parserMessageLine(io.stdout, file, state, tokOrNode, label, s, ...)  end
+	reportMessageOnLine(file, tokOrNode.source.path, (tokOrNode.line1 or tokOrNode.line), label, "Parser", s, ...)
 end
 
 -- errorParsingAfter( compilationState, token, formatString, ... )

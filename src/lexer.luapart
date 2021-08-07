@@ -89,7 +89,7 @@ local DIRECTIVE_WORDS = Set{
 	"key",            -- For table-like structs. (Related to !value)
 	"load",           -- For loading Glóa files by path. (Related to !import)
 	"location",       -- For getting a source code location.
-	"must",           -- For return arguments that must be received by the caller (e.g. file handles).
+	"must",           -- For return values that must be received by the caller (e.g. file handles).
 	"preload",        -- For running Lua code before any Glóa code runs.
 	"print",          -- For printing out what some expression refers to during compilation. (For debugging)
 	"run",            -- For running code at compile-time.
@@ -652,10 +652,12 @@ local function tokenize(state, sourceInfo, lnStart, increaseTotalLineCount)
 	end
 end
 
-function _G.insertNewToken(tokens, tokType, tokValue, sourceInfo)
-	!ASSERT `sourceInfo`
+function _G.insertNewToken(tokens, tokType, tokValue, sourceInfo, atEnd)
+	!ASSERT `type(sourceInfo) == "table"`
 
 	local nextUnused = tokens.nextUnused
+	local pos        = atEnd and (tokens[tokens.n].position2+1)                     or 1
+	local ln         = atEnd and (tokens[tokens.n].line2 or tokens[tokens.n].line1) or 1
 	local tok
 
 	if nextUnused <= tokens.lastUnused then
@@ -666,9 +668,9 @@ function _G.insertNewToken(tokens, tokType, tokValue, sourceInfo)
 		tok.value     = tokValue
 		tok.extra     = nil
 		tok.source    = sourceInfo
-		tok.position1 = 1
-		tok.position2 = 1
-		tok.line1     = 1
+		tok.position1 = pos
+		tok.position2 = pos
+		tok.line1     = ln
 		tok.line2     = nil
 
 		!if COUNT_TOKEN_REUSES then
@@ -681,16 +683,15 @@ function _G.insertNewToken(tokens, tokType, tokValue, sourceInfo)
 			value     = tokValue,
 			-- extra  = nil,
 			source    = sourceInfo,
-			position1 = 1,
-			position2 = 1,
-			line1     = 1,
+			position1 = pos,
+			position2 = pos,
+			line1     = ln,
 			-- line2  = nil,
 		}
 	end
 
-	local count   = tokens.n + 1
-	tokens.n      = count
-	tokens[count] = tok
+	tokens.n         = tokens.n + 1
+	tokens[tokens.n] = tok
 end
 
 function _G.markTokensAsUnused(state)
