@@ -23,7 +23,7 @@
 	inferNode, queueForReinfer
 	isExpressionConstant, isExpressionExactlyOneValue
 	isScope, isScopeDeclarative, isScopeImperative
-	isTypeSimple, isTypeNumeric, isTypeTableLike, isTypePublic, isTypeCompatibleWith, doesStructInherit, adjustTypeToOne, compareIdsOfTypes
+	isTypeSimple, isTypeNumeric, isTypeTableLike, isTypePublic, isTypeCompatibleWith, isAnyTypeCompatibleWith, doesStructInherit, adjustTypeToOne, compareIdsOfTypes
 	newTypeInfo, markTypeAsReady, seeType, seeMultipleTypes, isTypeBuiltin, getTypeInfo*
 	prepareToRun
 	simplifyExpressionIfConstant, simplifyTypeExpression
@@ -6441,10 +6441,29 @@ end
 	end
 
 	if structInfo.keyType then
+		if (structInfo.members[1] or struct.declarations[1]) and isAnyTypeCompatibleWith(state, structInfo.keyType, state.builtinTypeInfos.string, !(STRICT_TYPE_MATCH_NO), typeSourceNodeK) then
+			-- Note: We trigger this error for static members too, not just dynamic, as some lookups would otherwise be ambiguous.
+			typeError(
+				state, typeSourceNodeK,
+				"Table-like structs with keys of string compatible types (%s here) cannot also have members as that would create ambiguity in some cases.%s",
+				getFriendlyTypeInfoName(structInfo.keyType),
+				(struct.polymorphSourceStruct and " (Note that arguments to polymorphic structs become static members.)" or "")
+			)
+		elseif structInfo.keyType.tag == !(TYPE_NONE) then
+			typeError(state, typeSourceNodeK, "!key type cannot be 'none'.")
+		elseif structInfo.keyType.tag == !(TYPE_COMPOUND) and indexWith1(structInfo.keyType, "tag", !(TYPE_NONE)) then
+			typeError(state, typeSourceNodeK, "!key type cannot contain 'none'. (Type is %s)", getFriendlyTypeInfoName(structInfo.keyType))
+		end
 		seeType(structInfo, structInfo.keyType)
 		allAreReady = allAreReady and structInfo.keyType.isReady
 	end
+
 	if structInfo.valueType then
+		if structInfo.valueType.tag == !(TYPE_NONE) then
+			typeError(state, typeSourceNodeV, "!value type cannot be 'none'.")
+		elseif structInfo.valueType.tag == !(TYPE_COMPOUND) and indexWith1(structInfo.valueType, "tag", !(TYPE_NONE)) then
+			typeError(state, typeSourceNodeV, "!value type cannot contain 'none'. (Type is %s)", getFriendlyTypeInfoName(structInfo.valueType))
+		end
 		seeType(structInfo, structInfo.valueType)
 		allAreReady = allAreReady and structInfo.valueType.isReady
 	end
@@ -6454,29 +6473,6 @@ end
 
 	if allAreReady then
 		markTypeAsReady(state, structInfo)
-	end
-
-	if structInfo.keyType then
-		if (structInfo.members[1] or struct.declarations[1]) and (structInfo.keyType.tag == !(TYPE_STRING) or structInfo.keyType.tag == !(TYPE_ANY)) then
-			-- Note: We trigger this error for static members too, not just dynamic, as some lookups would otherwise be ambiguous.
-			typeError(
-				state, typeSourceNodeK,
-				"Table-like structs with keys of type '%s' cannot also have members as that would create ambiguity in some cases.%s",
-				(structInfo.keyType.tag == !(TYPE_STRING) and "string" or "any"),
-				(struct.polymorphSourceStruct and " (Note that arguments to polymorphic structs become static members.)" or "")
-			)
-		elseif structInfo.keyType.tag == !(TYPE_NONE) then
-			typeError(state, typeSourceNodeK, "!key type cannot be 'none'.")
-		elseif structInfo.keyType.tag == !(TYPE_COMPOUND) and indexWith1(structInfo.keyType, "tag", !(TYPE_NONE)) then
-			typeError(state, typeSourceNodeK, "!key type cannot contain 'none'. (Type is %s)", getFriendlyTypeInfoName(structInfo.keyType))
-		end
-	end
-	if structInfo.valueType then
-		if structInfo.valueType.tag == !(TYPE_NONE) then
-			typeError(state, typeSourceNodeV, "!value type cannot be 'none'.")
-		elseif structInfo.valueType.tag == !(TYPE_COMPOUND) and indexWith1(structInfo.valueType, "tag", !(TYPE_NONE)) then
-			typeError(state, typeSourceNodeV, "!value type cannot contain 'none'. (Type is %s)", getFriendlyTypeInfoName(structInfo.valueType))
-		end
 	end
 
 	moveToNextRelevantPipe(state, struct)
@@ -8037,7 +8033,8 @@ function _G.isTypePublic(typeInfo)
 end
 
 --
--- isCompatible, compatibilityScore = isTypeCompatibleWith( state, typeToCheck, otherType, strictTypeMatch, nodeForError )
+-- isCompatible, compatibilityScore = isTypeCompatibleWith   ( state, typeToCheck, otherType, strictTypeMatch, nodeForError )
+-- isCompatible                     = isAnyTypeCompatibleWith( state, typeToCheck, otherType, strictTypeMatch, nodeForError ) -- If typeToCheck is an enum, check each compound item.
 -- strictTypeMatch                  = STRICT_TYPE_MATCH_NO | STRICT_TYPE_MATCH_YES
 --
 -- strictTypeMatch ought to be yes for arguments of morphed polymorphic functions that were baked or came from a placeholder argument.
@@ -8128,6 +8125,17 @@ function _G.isTypeCompatibleWith(state, typeToCheck, otherType, strictTypeMatch,
 	end
 
 	return false, 0
+end
+
+function _G.isAnyTypeCompatibleWith(state, typeToCheck, otherType, strictTypeMatch, nodeForError)
+	if typeToCheck.tag == !(TYPE_COMPOUND) then
+		for _, compoundItem in ipairs(typeToCheck) do
+			if isTypeCompatibleWith(state, compoundItem, otherType, strictTypeMatch, nodeForError) then  return true  end
+		end
+		return false
+	else
+		return (isTypeCompatibleWith(state, typeToCheck, otherType, strictTypeMatch, nodeForError))
+	end
 end
 
 function _G.doesStructInherit(structInfoToCheck, otherStructInfo)
