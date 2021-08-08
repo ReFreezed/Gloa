@@ -4312,10 +4312,11 @@ do
 		else
 			printed[node] = true
 
+			if node.inferredType then  write(" (type=", getFriendlyTypeInfoName(node.inferredType), ")")  end
+
 			if node.nodeType == !(AST_IDENTIFIER) then
 				local ident = node
 				write(" (", (ident.name ~= "" and ident.name or "<unnamed>"), ", kind=", (IDENT_KIND_TITLES[ident.kind] or "?"))
-				if ident.inferredType then  write(", type=", getFriendlyTypeInfoName(ident.inferredType))  end
 				if ident.inferredType and getTypeRepresentedByExpression(ident) then  write(", typeRepresented=", getFriendlyTypeInfoName(getTypeRepresentedByExpression(ident)))  end
 				if ident.declaration  then  write(", decl=", ident.declaration.s)  end
 				write(")\n")
@@ -4350,7 +4351,7 @@ do
 				write(
 					access.member and (
 						(access.member.nodeType == !(AST_LITERAL) and tostring(access.member.value))
-						or (access.inferredType and getFriendlyTypeInfoName(access.member.inferredType))
+						or (access.member.inferredType and getFriendlyTypeInfoName(access.member.inferredType))
 					)
 					or "?"
 				)
@@ -4365,7 +4366,6 @@ do
 				if decl.addedByPolymorph then  write(" (addedByPolymorph)")  end
 				if decl.assignment       then  write(" (assignment ", decl.assignment.s, " i=", decl.assignmentIndex, ")")  end
 				write(" (", (DECL_KIND_TITLES[decl.kind] or "?"))
-				if decl.inferredType     then  write(", type=", getFriendlyTypeInfoName(decl.inferredType))  end
 				if decl.valueTypeInfo    then  write(", typeRepresented=", getFriendlyTypeInfoName(decl.valueTypeInfo))  end
 				if decl.overloadOf then
 					for i, declOverload in ipairs(decl.overloadOf.overloads) do
@@ -4383,7 +4383,6 @@ do
 
 			elseif node.nodeType == !(AST_TABLE) then
 				local tableNode = node
-				if tableNode.inferredType then  write(" (type=", getFriendlyTypeInfoName(tableNode.inferredType), ")")  end
 				!!(CHILD_PRINT_START)
 				for i, tableField in ipairs(tableNode.fields) do
 					if tableField.key   then  printNode(tableField.key,   indent+1, printed, printChildren, i.."K")  end
@@ -4469,7 +4468,6 @@ do
 
 			elseif node.nodeType == !(AST_CAST) then
 				local cast = node
-				if cast.inferredType then  write(" (", getFriendlyTypeInfoName(cast.inferredType), ")")  end
 				!!(CHILD_PRINT_START)
 				if cast.targetType then  printNode(cast.targetType, indent+1, printed, printChildren)  end
 				if cast.expression then  printNode(cast.expression, indent+1, printed, printChildren)  end
@@ -4537,7 +4535,6 @@ do
 
 			elseif node.nodeType == !(AST_FOREIGN) then
 				local foreign = node
-				if foreign.inferredType then  write(" (", getFriendlyTypeInfoName(foreign.inferredType), ")")  end
 				write(" (", foreign.foreignSource, ")")
 				!!(CHILD_PRINT_START)
 				if foreign.foreignSourceName then  printNode(foreign.foreignSourceName, indent+1, printed, printChildren)  end
@@ -4618,9 +4615,7 @@ do
 
 				elseif node.nodeType == !(AST_NAMESPACE) then
 					local namespace = node
-					if namespace.inferredType then
-						write(" (typeRepresented=", getFriendlyTypeInfoName(namespace.inferredType), ")")
-					elseif namespace.namespaceReferenceNode then
+					if not namespace.inferredType and namespace.namespaceReferenceNode then
 						write(" (reference=", namespace.namespaceReferenceNode.s, ")")
 					end
 

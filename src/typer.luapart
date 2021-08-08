@@ -759,17 +759,21 @@ end
 
 
 
--- declaration = findInferredPreloadDeclaration( state, dependent, name, tag )
--- Returns nil if waiting.
-function _G.findInferredPreloadDeclaration(state, dependent, name, tag)
+-- declaration = findInferredPreloadDeclaration( state, dependent, name, tag, waitIfNotInferred )
+-- Returns nil if the declaration is not inferred, and if waitIfNotInferred is set, the dependent is now waiting.
+function _G.findInferredPreloadDeclaration(state, dependent, name, tag, waitIfNotInferred)
 	local module = itemWith2(state.globalScope.fileScopes, "isModule",true, "moduleName","preload")
 		or errorInternal(2, state, dependent, "'preload' module not loaded.")
 
 	local decl = findPublicDeclarationInScope(state, module, name)
 		or errorInternal(2, state, dependent, "No declaration '%s' in 'preload' module.", name)
 
-	if not decl.inferredType then
+	if decl.inferredType then
+		-- void
+	elseif waitIfNotInferred then
 		!DEPEND_AND_RETURN(`dependent`, DEPEND_NODE_INFERRED, `decl`, `nil`)
+	else
+		return nil
 	end
 
 	!ASSERT(`decl.valueTypeInfo`,            nil, `decl`)
@@ -4066,6 +4070,39 @@ end
 
 			access.inferredType = memberValueType
 			moveToNextRelevantPipe(state, access)
+
+			-- @Hack for accessing !location() members statically. @Speed
+			-- @Incomplete: We need this for type_info() as well!
+			-- Note: Values here must be the same as the location's constant!
+			if access.member.nodeType == !(AST_LITERAL) and isExpressionConstant(state, access.object, false) then
+				local locTypeDecl = findInferredPreloadDeclaration(state, l, "SourceCodeLocation", !(TYPE_STRUCT), false) -- @Speed: Cache!
+
+				if locTypeDecl and typeObject == locTypeDecl.valueTypeInfo then
+					local loc            = followIdentifiersToConstantValue(state, access.object)
+					local literal        = astNewNode(AstLiteral, access, access.parent)
+					literal.inferredType = memberValueType
+
+					if access.member.value == "filePath" then
+						literal.literalType  = !(LITERAL_STRING)
+						literal.value        = loc.target.source.path
+
+					elseif access.member.value == "lineNumber" then
+						literal.literalType  = !(LITERAL_INTEGER)
+						literal.value        = loc.target.line
+
+					elseif access.member.value == "position" then
+						literal.literalType  = !(LITERAL_INTEGER)
+						literal.value        = loc.target.position
+
+					else
+						errorInternal(state, access.member, "Unhandled member '%s' for !location().", access.member.value)
+					end
+
+					replaceQueuedNodeAndUnqueueOldTree(state, access, literal)
+					moveToNextRelevantPipe(state, literal, !(PIPE_INFER))
+				end
+			end
+
 			return
 		end
 
@@ -4852,7 +4889,7 @@ end
 
 	!ASSERT `typeInfoStructName`
 
-	local decl = findInferredPreloadDeclaration(state, typeInfoNode, typeInfoStructName, !(TYPE_STRUCT)) -- @Speed: Cache 'decl'.
+	local decl = findInferredPreloadDeclaration(state, typeInfoNode, typeInfoStructName, !(TYPE_STRUCT), true) -- @Speed: Cache 'decl'.
 	if not decl then  return  end
 
 	typeInfoNode.valueTypeInfo = typeRepresented
@@ -4866,7 +4903,7 @@ end
 		!DEPEND_AND_RETURN(`loc`, DEPEND_NODE_INFERRED, `target`)
 	end
 
-	local decl = findInferredPreloadDeclaration(state, loc, "SourceCodeLocation", !(TYPE_STRUCT)) -- @Speed: Cache 'decl'.
+	local decl = findInferredPreloadDeclaration(state, loc, "SourceCodeLocation", !(TYPE_STRUCT), true) -- @Speed: Cache 'decl'.
 	if not decl then  return  end
 
 	if not target then
@@ -5324,13 +5361,12 @@ end
 		end
 
 		if not isExpressionConstant(state, expr, true) then
-			typeError(state, astGetExpressionVisuallyFurthestToTheLeft(expr), "Expression is not constant.")
+			local _, dynExpr = isExpressionConstant(state, expr, true)
+			typeError(state, dynExpr, "Expression is not constant.")
 
 		elseif not isExpressionConstant(state, expr, false) then
-			while expr.nodeType == !(AST_CAST) do
-				expr = expr.expression
-			end
-			typeError(state, expr, "Cannot statically assert foreign values as they are not known at compile-time.")
+			local _, foreign = isExpressionConstant(state, expr, false)
+			typeError(state, foreign, "Cannot statically assert foreign values as they are not known at compile-time.")
 
 		elseif not (expr.nodeType == !(AST_LITERAL) and expr.literalType == !(LITERAL_BOOLEAN)) then
 			errorInternal(state, astGetExpressionVisuallyFurthestToTheLeft(expr), "Constant expression did not result in a boolean literal.")
@@ -7132,6 +7168,7 @@ local ALWAYS_CONST = !(Set{
 	AST_VARIANT_OF, -- The resulting reference will always be constant.
 	AST_STRUCT, AST_ENUM,    -- Structs and enums are types (which are constant).
 	AST_TYPE,   AST_TYPE_OF, -- All types are constant, just like literals.
+	AST_LOCATION,
 })
 local NEVER_CONST = !(Set{
 	AST_CALL,
@@ -7218,11 +7255,6 @@ function _G.isExpressionConstant(state, expr, foreignIsConst)
 		local foreign = expr
 		if foreignIsConst then  return true, nil  end
 		return false, foreign
-
-	elseif nodeType == !(AST_LOCATION) then
-		local loc = expr
-		if loc.ofCaller then  return true, nil  end
-		return false, loc -- @Incomplete: Make !location() a constant expression (that can be simplified).
 
 	else
 		errorUnhandledNodeType(state, expr)
@@ -7850,6 +7882,15 @@ local function simplifyBinary(state, binary)
 			!ASSERT("type(l.value) == type(r.value)")
 			valueL = l.value
 			valueR = r.value
+
+		elseif
+			l.inferredType.tag == !(TYPE_STRUCT)
+			and findInferredPreloadDeclaration(state, l, "SourceCodeLocation", !(TYPE_STRUCT), false) -- @Speed: Cache!
+			and l.inferredType == findInferredPreloadDeclaration(state, l, "SourceCodeLocation", !(TYPE_STRUCT), false).valueTypeInfo
+		then
+			!ASSERT("r.inferredType == l.inferredType")
+			valueL = followIdentifiersToConstantValue(state, l).target
+			valueR = followIdentifiersToConstantValue(state, r).target
 
 		else
 			-- @Robustness: This is probably not fool proof as fallback here.
