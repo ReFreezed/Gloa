@@ -212,6 +212,7 @@ local GLOA_KEYWORDS = {
 	["inline"]       = true,
 	["local"]        = true,
 	["namespace"]    = true,
+	["no_inline"]    = true,
 	["not"]          = true,
 	["or"]           = true,
 	["return"]       = true,

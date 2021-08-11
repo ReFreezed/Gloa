@@ -683,159 +683,280 @@ local function isStructMemberDefaultValueNil(state, struct, memberName, nodeForE
 	end
 end
 
+local function isNameAllocated(state, writer, localsStack, localName)
+	if state.topScopeNames[localName] then  return true  end
+
+	for _, locals in ipairs(localsStack) do
+		if locals[localName] then  return true  end
+	end
+
+	if localName:find"^_AWBO_" then  return true  end -- Assignment with binary operation.
+
+	return false
+end
+
+local function allocateName(state, writer, localsStack, name, n, shortPrefix, longInfix)
+	local localName
+
+	if name == "_" then
+		localName = "_"
+	elseif outputDebugInfo then
+		localName = unicodeToLuaIdentifier(name)
+		if isNameAllocated(state, writer, localsStack, localName) then
+			localName = localName .. longInfix .. n
+		end
+	else
+		localName = shortPrefix .. n
+	end
+
+	localsStack[1][localName] = true
+
+	return localName, n+1
+end
+local function allocateLocalName(state, writer, localsStack, name, n)
+	return allocateName(state, writer, localsStack, name, n, "L", "_L")
+end
+local function allocateArgumentName(state, writer, localsStack, name, n)
+	return allocateName(state, writer, localsStack, name, n, "A", "_A")
+end
+
+local function writeNormalCall(state, writer, indent, nextLocalN, localsStack, call)
+	local file                 = writer.file
+	local callee               = call.callee
+	local callingForeignMethod = false
+
+	addLineMapping(state, writer, call)
+
+	if call.surroundedByParentheses then  file:write("(")  end
+
+	-- Write callee and handle method calls.
+	if callee.nodeType == !(AST_IDENTIFIER) and isDeclarationConstant(callee.declaration) then
+		local ident = callee
+		local decl  = ident.declaration
+		local const = decl.valueConstant
+
+		!if DEBUG then
+			if not const then
+				if decl.value then  astPrintTree(decl.value)  end
+				errorInternal(state, decl, "Missing constant object.")
+			end
+		!end
+
+		if const.valueType.tag == !(TYPE_FUNCTION) and const.value.bodyIsForeign and const.value.foreignSource == "method" then
+			callingForeignMethod = true
+			local argExpr        = call.arguments[1] or errorInternal(state, call)
+
+			if argExpr.nodeType == !(AST_IDENTIFIER) then
+				-- Note: It doesn't matter if argExpr a reference to a constant or not since it's be an object reference
+				-- either way (unless the type inference borked and argExpr somehow isn't a struct instance).
+				writeExpression(state, writer, indent, nextLocalN, localsStack, argExpr)
+
+			elseif argExpr.nodeType == !(AST_ACCESS) then
+				-- Table lookups have precedence over method calls in Lua.
+				writeExpression(state, writer, indent, nextLocalN, localsStack, argExpr)
+
+			else
+				-- I think the parenthesis here is needed since argExpr (or shouldOperationHaveSurroundingParentheses())
+				-- will think it's part of a comma-separated list between the parenthesis of the call.
+				file:write("(")
+				writeExpression(state, writer, indent, nextLocalN, localsStack, argExpr)
+				file:write(")")
+			end
+
+			local lambda = const.value
+			file:write(":", lambda.foreignSourceName.value)
+			if outputDebugInfo and lambda.foreignSourceName.value ~= ident.name then
+				file:write(formatInfoComment(ident.name)) -- Not sure this is that helpful...
+			end
+
+		else
+			writeConstantValueOrReference(state, writer, const, ident)
+		end
+
+	else
+		writeExpression(state, writer, indent, nextLocalN, localsStack, callee)
+	end
+
+	file:write("(")
+	local first = true
+
+	-- Write given sequential arguments.
+	!local MAYBE_WRITE_COMMA = trimTemplate`
+		if not first then  file:write(", ")  end
+		first = false
+	`
+
+	for i = (callingForeignMethod and 2 or 1), #call.arguments do
+		!!(MAYBE_WRITE_COMMA)
+		writeExpression(state, writer, indent, nextLocalN, localsStack, call.arguments[i])
+	end
+
+	-- Write given named arguments and handle default values.
+	local lambda = getDataForHandlingMissingArguments(state, callee)
+
+	if lambda then
+		local lastValue = getLast(call.arguments)
+
+		local lastValueIsList = (lastValue ~= nil and (
+			(
+				lastValue.inferredType.tag == !(TYPE_VARARG)
+				and not lastValue.surroundedByParentheses
+			)
+			or (
+				lastValue.inferredType.tag == !(TYPE_LIST)
+				and not lastValue.surroundedByParentheses
+				and lastValue.inferredType[2] ~= nil
+			)
+		))
+
+		if lastValueIsList then
+			local argTypesIn         = lambda.inferredType.argumentTypesIn
+			local isVararg           = getLast(argTypesIn).tag == !(TYPE_VARARG)
+			local lastNonVarargIndex = #argTypesIn - (isVararg and 1 or 0)
+			local lastNonVarargType  = argTypesIn[lastNonVarargIndex]
+
+			--[[
+			local lastValueListSize = 0
+			if not lastValueIsList then
+				-- void
+			elseif lastValue.inferredType.tag == !(TYPE_VARARG) then
+				lastValueListSize    = 1/0
+			else
+				local lastArgOutType = getLast(lastValue.inferredType) or errorInternal(state, lastValue)
+				lastValueListSize    = lastArgOutType.tag == !(TYPE_VARARG) and 1/0 or #lastValue.inferredType
+			end
+			--]]
+
+			if not isVararg and not lastNonVarargType.isRequired --[[and lastNonVarargIndex > #call.arguments-1+lastValueListSize]] then
+				-- :DisallowListAsLastValueToFunctionWithOptionalArguments
+				nodeError(state, call, "ProgramWriter", "@Incomplete: Handle optional arguments if the last argument in a call is a list of values.")
+			end
+		end
+
+		local argsIn = lambda.argumentsIn.arguments
+
+		for argIndex = #call.arguments+1, #argsIn do
+			local argNamed  = itemWith1(call.argumentsNamed, "argumentIndex", argIndex)
+			local valueExpr = argNamed and argNamed.value or argsIn[argIndex].declaration.value
+
+			if not valueExpr then
+				-- Varargs are optional but have no default value (or zero default values since it's technically a list).
+				-- !ASSERT(`not argsIn[argIndex+1]`, nil, `call`) -- This assert is not correct if the last call argument is another call that returns values before the vararg.
+				break
+
+			elseif argNamed then
+				!!(MAYBE_WRITE_COMMA)
+				writeExpression(state, writer, indent, nextLocalN, localsStack, valueExpr)
+
+			elseif lambda.bodyIsForeign then
+				-- Don't write default values for foreign functions. This gives the foreign site control over
+				-- what the actual default values should be no matter what the local !foreign declaration says.
+				break
+
+			elseif valueExpr.nodeType == !(AST_LOCATION) and valueExpr.ofCaller then
+				local const = call.locationConstant or errorInternal(state, call, "Missing caller location data.")
+				!!(MAYBE_WRITE_COMMA)
+				writeConstantValueOrReference(state, writer, const, valueExpr)
+
+			else
+				!!(MAYBE_WRITE_COMMA)
+				writeExpression(state, writer, indent, nextLocalN, localsStack, valueExpr)
+			end
+		end
+	end
+
+	file:write(")")
+
+	if call.surroundedByParentheses then  file:write(")")  end
+end
+
+local function writeInlineCallStatement(state, writer, indent, nextLocalN, localsStack, call)
+	-- @Incomplete: Detect recursion!
+	if call.isMethod then  errorInternal(state, call, "@Incomplete: Inline method calls.")  end
+
+	if call.parent.nodeType ~= !(AST_BLOCK) then
+		-- @UX: It would be good to detect this error earlier.
+		nodeError(state, call, "ProgramWriter", "Inline calls only supported at statement level.") -- :InlineCallsInMorePlaces
+	end
+	if lambda.argumentsOut then
+		errorInternal(state, call, "@Incomplete: Handle return values when inlining.")
+	end
+
+	--[[
+		-- Example...
+
+		-- In:
+		local func :: inline (x,y:int) -> int {
+			x *= 2
+			return x + y
+		}
+		local x = 99
+		local y = func(x+1, 6)
+
+		-- Out:
+		local x = 99
+		local y
+		do
+			local x2, y2 = x+1, 6
+			x2 = x2 * 2
+			y  = x2 + y2
+		end
+	]]
+
+	local file      = writer.file
+	local lambda    = call.callee.declaration.valueConstant.value
+	local indentStr = ("\t"):rep(indent)
+
+	file:write(indentStr, "do")
+	writeEol(state, writer)
+
+	-- Write arguments.
+	if lambda.argumentsIn then
+		-- @Incomplete: Push localsStack here? It'd be nice to share push with the writeBlock() below.
+		addLineMapping(state, writer, call)
+		file:write(indentStr, "\tlocal ")
+
+		for i, arg in ipairs(lambda.argumentsIn.arguments) do
+			local decl                 = arg.declaration
+			local identOrVarargOrBlank = decl.name
+
+			if identOrVarargOrBlank.nodeType == !(AST_VARARG) then
+				errorInternal(state, call, "@Incomplete: Inline vararg.")
+			end
+
+			if i > 1 then  file:write(", ")  end
+
+			decl.localName, nextLocalN = allocateLocalName(state, writer, localsStack, decl.name.name, nextLocalN) -- May overwrite old localName. I think that's fine.
+			writeIdentifierName(state, writer, identOrVarargOrBlank)
+		end
+
+		file:write(" = ")
+
+		-- @Incomplete: Optional arguments.
+		for i, argExpr in ipairs(call.arguments) do
+			if i > 1 then  file:write(", ")  end
+			writeExpression(state, writer, indent, nextLocalN, localsStack, argExpr)
+		end
+
+		file:write(";") -- This removes ambiguity is some cases.
+		writeEol(state, writer)
+	end
+
+	addLineMapping(state, writer, call)
+	writeBlock(state, writer, indent+1, nextLocalN, localsStack, lambda.body, false)
+
+	file:write(indentStr, "end")
+	writeEol(state, writer)
+end
+
 function _G.writeExpression(state, writer, indent, nextLocalN, localsStack, expr)
 	!ASSERT(`expr.inferredType`, nil, `expr`)
 	local file = writer.file
 
 	if expr.nodeType == !(AST_CALL) then
-		local call   = expr
-		local callee = call.callee
-
-		local callingForeignMethod = false
-
-		addLineMapping(state, writer, call)
-
-		if call.surroundedByParentheses then  file:write("(")  end
-
-		-- Write callee and handle method calls.
-		if callee.nodeType == !(AST_IDENTIFIER) and isDeclarationConstant(callee.declaration) then
-			local ident = callee
-			local decl  = ident.declaration
-			local const = decl.valueConstant
-
-			!if DEBUG then
-				if not const then
-					if decl.value then  astPrintTree(decl.value)  end
-					errorInternal(state, decl, "Missing constant object.")
-				end
-			!end
-
-			if const.valueType.tag == !(TYPE_FUNCTION) and const.value.bodyIsForeign and const.value.foreignSource == "method" then
-				callingForeignMethod = true
-				local argExpr        = call.arguments[1] or errorInternal(state, call)
-
-				if argExpr.nodeType == !(AST_IDENTIFIER) then
-					-- Note: It doesn't matter if argExpr a reference to a constant or not since it's be an object reference
-					-- either way (unless the type inference borked and argExpr somehow isn't a struct instance).
-					writeExpression(state, writer, indent, nextLocalN, localsStack, argExpr)
-
-				elseif argExpr.nodeType == !(AST_ACCESS) then
-					-- Table lookups have precedence over method calls in Lua.
-					writeExpression(state, writer, indent, nextLocalN, localsStack, argExpr)
-
-				else
-					-- I think the parenthesis here is needed since argExpr (or shouldOperationHaveSurroundingParentheses())
-					-- will think it's part of a comma-separated list between the parenthesis of the call.
-					file:write("(")
-					writeExpression(state, writer, indent, nextLocalN, localsStack, argExpr)
-					file:write(")")
-				end
-
-				local lambda = const.value
-				file:write(":", lambda.foreignSourceName.value)
-				if outputDebugInfo and lambda.foreignSourceName.value ~= ident.name then
-					file:write(formatInfoComment(ident.name)) -- Not sure this is that helpful...
-				end
-
-			else
-				writeConstantValueOrReference(state, writer, const, ident)
-			end
-
-		else
-			writeExpression(state, writer, indent, nextLocalN, localsStack, callee)
-		end
-
-		file:write("(")
-		local first = true
-
-		-- Write given sequential arguments.
-		!local MAYBE_WRITE_COMMA = trimTemplate`
-			if not first then  file:write(", ")  end
-			first = false
-		`
-
-		for i = (callingForeignMethod and 2 or 1), #call.arguments do
-			!!(MAYBE_WRITE_COMMA)
-			writeExpression(state, writer, indent, nextLocalN, localsStack, call.arguments[i])
-		end
-
-		-- Write given named arguments and handle default values.
-		local lambda = getDataForHandlingMissingArguments(state, callee)
-
-		if lambda then
-			local lastValue = getLast(call.arguments)
-
-			local lastValueIsList = (lastValue ~= nil and (
-				(
-					lastValue.inferredType.tag == !(TYPE_VARARG)
-					and not lastValue.surroundedByParentheses
-				)
-				or (
-					lastValue.inferredType.tag == !(TYPE_LIST)
-					and not lastValue.surroundedByParentheses
-					and lastValue.inferredType[2] ~= nil
-				)
-			))
-
-			if lastValueIsList then
-				local argTypesIn         = lambda.inferredType.argumentTypesIn
-				local isVararg           = getLast(argTypesIn).tag == !(TYPE_VARARG)
-				local lastNonVarargIndex = #argTypesIn - (isVararg and 1 or 0)
-				local lastNonVarargType  = argTypesIn[lastNonVarargIndex]
-
-				--[[
-				local lastValueListSize = 0
-				if not lastValueIsList then
-					-- void
-				elseif lastValue.inferredType.tag == !(TYPE_VARARG) then
-					lastValueListSize    = 1/0
-				else
-					local lastArgOutType = getLast(lastValue.inferredType) or errorInternal(state, lastValue)
-					lastValueListSize    = lastArgOutType.tag == !(TYPE_VARARG) and 1/0 or #lastValue.inferredType
-				end
-				--]]
-
-				if not isVararg and not lastNonVarargType.isRequired --[[and lastNonVarargIndex > #call.arguments-1+lastValueListSize]] then
-					-- :DisallowListAsLastValueToFunctionWithOptionalArguments
-					nodeError(state, call, "ProgramWriter", "@Incomplete: Handle optional arguments if the last argument in a call is a list of values.")
-				end
-			end
-
-			local argsIn = lambda.argumentsIn.arguments
-
-			for argIndex = #call.arguments+1, #argsIn do
-				local argNamed  = itemWith1(call.argumentsNamed, "argumentIndex", argIndex)
-				local valueExpr = argNamed and argNamed.value or argsIn[argIndex].declaration.value
-
-				if not valueExpr then
-					-- Varargs are optional but have no default value (or zero default values since it's technically a list).
-					-- !ASSERT(`not argsIn[argIndex+1]`, nil, `call`) -- This assert is not correct if the last call argument is another call that returns values before the vararg.
-					break
-
-				elseif argNamed then
-					!!(MAYBE_WRITE_COMMA)
-					writeExpression(state, writer, indent, nextLocalN, localsStack, valueExpr)
-
-				elseif lambda.bodyIsForeign then
-					-- Don't write default values for foreign functions. This gives the foreign site control over
-					-- what the actual default values should be no matter what the local !foreign declaration says.
-					break
-
-				elseif valueExpr.nodeType == !(AST_LOCATION) and valueExpr.ofCaller then
-					local const = call.locationConstant or errorInternal(state, call, "Missing caller location data.")
-					!!(MAYBE_WRITE_COMMA)
-					writeConstantValueOrReference(state, writer, const, valueExpr)
-
-				else
-					!!(MAYBE_WRITE_COMMA)
-					writeExpression(state, writer, indent, nextLocalN, localsStack, valueExpr)
-				end
-			end
-		end
-
-		file:write(")")
-
-		if call.surroundedByParentheses then  file:write(")")  end
+		local call = expr
+		assert(call.inline ~= !(INLINE_YES)) -- :InlineCallsInMorePlaces
+		writeNormalCall(state, writer, indent, nextLocalN, localsStack, call)
 
 	elseif expr.nodeType == !(AST_UNARY) then
 		local unary = expr
@@ -1168,43 +1289,6 @@ function _G.writeDefaultValueForType(state, writer, indent, nextLocalN, localsSt
 	end
 end
 
-local function isNameAllocated(state, writer, localsStack, localName)
-	if state.topScopeNames[localName] then  return true  end
-
-	for _, locals in ipairs(localsStack) do
-		if locals[localName] then  return true  end
-	end
-
-	if localName:find"^_AWBO_" then  return true  end -- Assignment with binary operation.
-
-	return false
-end
-
-local function allocateName(state, writer, localsStack, name, n, shortPrefix, longInfix)
-	local localName
-
-	if name == "_" then
-		localName = "_"
-	elseif outputDebugInfo then
-		localName = unicodeToLuaIdentifier(name)
-		if isNameAllocated(state, writer, localsStack, localName) then
-			localName = localName .. longInfix .. n
-		end
-	else
-		localName = shortPrefix .. n
-	end
-
-	localsStack[1][localName] = true
-
-	return localName, n+1
-end
-local function allocateLocalName(state, writer, localsStack, name, n)
-	return allocateName(state, writer, localsStack, name, n, "L", "_L")
-end
-local function allocateArgumentName(state, writer, localsStack, name, n)
-	return allocateName(state, writer, localsStack, name, n, "A", "_A")
-end
-
 local function writeDefers(state, writer, indent, nextLocalN, localsStack, indentStr, defers)
 	if not defers[1] then  return  end
 
@@ -1218,11 +1302,11 @@ local function writeDefers(state, writer, indent, nextLocalN, localsStack, inden
 		then
 			writer.file:write(indentStr, "do")
 			writeEol(state, writer)
-			writeBlock(state, writer, indent+1, nextLocalN, localsStack, block, false, nil)
+			writeBlock(state, writer, indent+1, nextLocalN, localsStack, block, false)
 			writer.file:write(indentStr, "end")
 			writeEol(state, writer)
 		else
-			writeBlock(state, writer, indent, nextLocalN, localsStack, block, false, nil)
+			writeBlock(state, writer, indent, nextLocalN, localsStack, block, false)
 		end
 	end
 
@@ -1290,7 +1374,7 @@ local function writeLoopBodyAndFooter(state, writer, loop, indent, nextLocalN, l
 	writer.loopDeferIndices[writer.loopDepth] = #writer.deferStack+1
 
 	if not (loop.hasNamedJumps or loopStack[1]) then
-		writeBlock(state, writer, indent+1, nextLocalN, localsStack, loop.body, false, siblings, siblingIndex)
+		writeBlock(state, writer, indent+1, nextLocalN, localsStack, loop.body, false)
 		file:write(indentStr, "end") ; writeEol(state, writer)
 
 		writer.loopDeferIndices[writer.loopDepth] = nil
@@ -1307,7 +1391,7 @@ local function writeLoopBodyAndFooter(state, writer, loop, indent, nextLocalN, l
 	table.insert(loopStack, loop)
 
 	local prevContinueDepth = writer.continueDepth
-	writeBlock(state, writer, indent+1, nextLocalN, localsStack, loop.body, false, siblings, siblingIndex)
+	writeBlock(state, writer, indent+1, nextLocalN, localsStack, loop.body, false)
 
 	file:write(indentStr, "end") ; writeEol(state, writer)
 
@@ -1345,7 +1429,7 @@ local function doesContinueCrossNode(state, node)
 	end
 end
 
-function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, isElseif, nextStatementInParent)
+function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, isElseif)
 	!ASSERT `not block[1]`
 
 	local file      = writer.file
@@ -1682,7 +1766,7 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 			writeEol(state, writer)
 
 			local prevContinueDepth = writer.continueDepth
-			writeBlock(state, writer, indent+1, nextLocalN, localsStack, innerBlock, false, block.statementsDynamic, statementIndex)
+			writeBlock(state, writer, indent+1, nextLocalN, localsStack, innerBlock, false)
 
 			file:write(indentStr, "end") ; writeEol(state, writer)
 			indent, indentStr = handleContinueAfterBlock(state, writer, parentContinueDepth, prevContinueDepth, block.statementsDynamic, statementIndex, indent, indentStr)
@@ -1700,7 +1784,7 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 			writeEol(state, writer)
 
 			local prevContinueDepth = writer.continueDepth
-			writeBlock(state, writer, indent+1, nextLocalN, localsStack, ifBranch.branchTrue, false, block.statementsDynamic, statementIndex)
+			writeBlock(state, writer, indent+1, nextLocalN, localsStack, ifBranch.branchTrue, false)
 
 			local maxContinue1   = writer.continueDepth
 			writer.continueDepth = prevContinueDepth
@@ -1710,12 +1794,12 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 
 			elseif not ifBranch.branchFalse.statementsDynamic[2] and ifBranch.branchFalse.statementsDynamic[1].nodeType == !(AST_IF) and not doesContinueCrossNode(state, ifBranch) then
 				file:write(indentStr, "else") -- This will be followed by "if"
-				writeBlock(state, writer, indent, nextLocalN, localsStack, ifBranch.branchFalse, true, block.statementsDynamic, statementIndex)
+				writeBlock(state, writer, indent, nextLocalN, localsStack, ifBranch.branchFalse, true)
 
 			else
 				file:write(indentStr, "else")
 				writeEol(state, writer)
-				writeBlock(state, writer, indent+1, nextLocalN, localsStack, ifBranch.branchFalse, false, block.statementsDynamic, statementIndex)
+				writeBlock(state, writer, indent+1, nextLocalN, localsStack, ifBranch.branchFalse, false)
 			end
 
 			writer.continueDepth = math.max(maxContinue1, writer.continueDepth)
@@ -1936,7 +2020,7 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 							file:write(indentStr, "else")
 						end
 						writeEol(state, writer)
-						writeBlock(state, writer, indent+1, nextLocalN, localsStack, case.body, false, block.statementsDynamic, statementIndex)
+						writeBlock(state, writer, indent+1, nextLocalN, localsStack, case.body, false)
 
 						maxContinueDepth     = math.max(maxContinueDepth, writer.continueDepth)
 						writer.continueDepth = prevContinueDepth
@@ -1950,6 +2034,11 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 				file:write(indentStr, "end") ; writeEol(state, writer)
 				indent, indentStr = handleContinueAfterBlock(state, writer, parentContinueDepth, prevContinueDepth, block.statementsDynamic, statementIndex, indent, indentStr)
 			end
+
+		----------------------------------------------------------------
+		elseif nodeType == !(AST_CALL) and statement.inline == !(INLINE_YES) then -- @Incomplete: Handle INLINE_MAY in some intelligent way.
+			local call = statement
+			writeInlineCallStatement(state, writer, indent, nextLocalN, localsStack, call)
 
 		----------------------------------------------------------------
 		else
@@ -2074,7 +2163,7 @@ function _G.writeFunction(state, writer, indent, nextLocalN, localsStack, lambda
 	writeEol(state, writer)
 
 	if lambda.body.statementsDynamic[1] then
-		writeBlock(state, writer, indent+1, nextLocalN, localsStack, lambda.body, false, nil)
+		writeBlock(state, writer, indent+1, nextLocalN, localsStack, lambda.body, false)
 	elseif outputDebugInfo then
 		file:write(indentStr, "\t-- Empty function.")
 		writeEol(state, writer)

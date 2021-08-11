@@ -3243,6 +3243,27 @@ end
 		typeInfo                     = adjustTypeToOne(state, call, listSig, true)
 	end
 
+	-- Handle inlining.
+	if constLambda then
+		if call.inline == !(INLINE_MAY) then
+			if constLambda.inline ~= !(INLINE_MAY) then
+				call.inline = constLambda.inline
+			end
+		elseif call.inline == !(INLINE_YES) then
+			if constLambda.bodyIsForeign then
+				-- We allow no_inline because it's effectively a no-op for foreign function calls. Maybe we should emit a warning.
+				typeError(state, callee, "Cannot inline calls to foreign functions.")
+			end
+		end
+		-- call.inline may be INLINE_MAY at this point.
+	else
+		if call.inline == !(INLINE_YES) then
+			-- We allow no_inline because it's effectively a no-op for variable function calls. Maybe we should emit a warning.
+			typeError(state, callee, "Can only inline calls to function constants.")
+		end
+		call.inline = !(INLINE_NO) -- Make sure call.inline isn't INLINE_MAY.
+	end
+
 	-- Handle !must.
 	if
 		constLambda
@@ -5755,7 +5776,7 @@ local function addDeclarationInForLoop(state, forLoop, name, sourceNode, isImpli
 end
 
 !NODE_INFERRER `function nodeInferrers.AstFor(state, forLoop)`
-	if not forLoop.declarations[1] then
+	if not forLoop.body.queued then
 		local names  = forLoop.names
 		local values = forLoop.expressions
 
@@ -5842,8 +5863,8 @@ end
 				if names[3] then
 					typeError(state, names[3], "For loop: Too many names for short-form array loop. (Expected at most a value name and an index name.)")
 				end
-				local name1       = (names[1] and names[1].name ) or "it"
-				local name2       = (names[2] and names[2].name ) or "itIndex"
+				local name1       = (names[1] and names[1].name) or "it"
+				local name2       = (names[2] and names[2].name) or "itIndex"
 				local sourceNode1 = names[1] or forLoop
 				local sourceNode2 = names[2] or forLoop
 				addDeclarationInForLoop(state, forLoop, name2, sourceNode2, names[2]==nil, state.builtinTypeInfos.int)
@@ -5854,8 +5875,8 @@ end
 				if names[3] then
 					typeError(state, names[3], "For loop: Too many names for short-form vararg loop. (Expected at most a value name and an index name.)")
 				end
-				local name1       = (names[1] and names[1].name ) or "it"
-				local name2       = (names[2] and names[2].name ) or "itIndex"
+				local name1       = (names[1] and names[1].name) or "it"
+				local name2       = (names[2] and names[2].name) or "itIndex"
 				local sourceNode1 = names[1] or forLoop
 				local sourceNode2 = names[2] or forLoop
 				addDeclarationInForLoop(state, forLoop, name2, sourceNode2, names[2]==nil, state.builtinTypeInfos.int)
@@ -5865,8 +5886,8 @@ end
 				if names[3] then
 					typeError(state, names[3], "For loop: Too many names for short-form table loop. (Expected at most a value name and a key name.)")
 				end
-				local name1       = (names[1] and names[1].name ) or "it"
-				local name2       = (names[2] and names[2].name ) or "itIndex"
+				local name1       = (names[1] and names[1].name) or "it"
+				local name2       = (names[2] and names[2].name) or "itIndex"
 				local sourceNode1 = names[1] or forLoop
 				local sourceNode2 = names[2] or forLoop
 				local typeInfo    = state.builtinTypeInfos.any
@@ -5876,7 +5897,8 @@ end
 			elseif objType.tag == !(TYPE_STRUCT) then
 				local structInfo = objType
 
-				-- We have to wait for the members for inherited declarations to be available.
+				-- We have to wait for the members for inherited declarations (including '!iterator') to be available.
+				-- @Incomplete: Maybe don't wait if '!iterator' is not inherited.
 				if not structInfo.hasMembers then
 					!DEPEND_AND_RETURN(`forLoop`, DEPEND_TYPE_MEMBERS_READY, `structInfo`)
 				end
@@ -5954,8 +5976,8 @@ end
 					if names[3] then
 						typeError(state, names[3], "For loop: Too many names for short-form array loop. (Expected at most a value name and an index name.)")
 					end
-					local name1       = (names[1] and names[1].name ) or "it"
-					local name2       = (names[2] and names[2].name ) or "itIndex"
+					local name1       = (names[1] and names[1].name) or "it"
+					local name2       = (names[2] and names[2].name) or "itIndex"
 					local sourceNode1 = names[1] or forLoop
 					local sourceNode2 = names[2] or forLoop
 					addDeclarationInForLoop(state, forLoop, name2, sourceNode2, names[2]==nil, state.builtinTypeInfos.int)

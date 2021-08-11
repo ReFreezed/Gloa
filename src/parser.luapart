@@ -212,6 +212,7 @@ _G.!structAst"AstCall:_AstExpression"{
 	{`argumentsNamed`,          {},  ast="fields"}, -- []KeyValuePair   @Speed: Only set this when needed.
 	{`isMethod`,                false},
 	{`surroundedByParentheses`, false},
+	{`inline`,                  INLINE_MAY},
 	-- Type phase:
 	{`wantLocation`,            false}, -- Set if the called function has wantCallerLocation set (i.e. !caller_location is used somewhere).
 	-- Emit phase:
@@ -415,7 +416,7 @@ _G.!structAst"AstFor:_AstScope"{
 	_scopeType = "imperative",
 	{`expressions`,   {},  ast="array"},   -- []AstExpression  @Cleanup: Move these into AstFor.statementsDynamic?
 	{`names`,         {},  ast=nil    },   -- []AstIdentifier  These are never inferred, but instead copied to declarations. @Cleanup: Can we get rid of this in favor of the copy we currently make?
-	{`forType`,       FOR_NUMERIC},        -- @Cleanup: Rename to "kind"?
+	{`forType`,       FOR_NUMERIC},        -- @Cleanup: Rename to "kind" or "forKind"?
 	{`body`,          nil, astRef="node"}, -- AstBlock
 	{`reverse`,       false},
 	{`hasNamedJumps`, false},
@@ -457,6 +458,7 @@ _G.!structAst"AstLambda:_AstScopeExpression"{
 	{`argumentsIn`,       nil, astRef="node"}, -- AstArguments  Is set when needed.
 	{`argumentsOut`,      nil, astRef="node"}, -- AstArguments  Is set when needed.
 	{`takingVararg`,      false},
+	{`inline`,            INLINE_MAY},
 
 	{`body`,              nil, astRef="node"}, -- AstBlock  (If this is nil then the lambda is a function signature. If bodyIsForeign is set then this is a dummy block.)
 	{`bodyIsForeign`,     false},              -- @Cleanup: Use AstForeign instead of all this stuff.
@@ -2319,19 +2321,19 @@ end
 		-- FOR_ITERATOR  for v1, ... in iter [, state [, init ] ]
 		if !!(IS_TOK(TOKEN_KEYWORD, "in")) then
 			forLoop.forType = !(FOR_ITERATOR)
-		-- FOR_SHORT  for [ < ] v1, ... : obj
+		-- FOR_SHORT     for [ < ] v1, ... : obj
 		elseif !!(IS_TOK(TOKEN_PUNCTUATION, ":")) then
 			forLoop.forType = !(FOR_SHORT)
 			twoParter       = true
-		-- FOR_NUMERIC  for i = start, end [, step ]
+		-- FOR_NUMERIC   for i = start, end [, step ]
 		elseif !!(IS_TOK(TOKEN_PUNCTUATION, "=")) then
 			forLoop.forType = !(FOR_NUMERIC)
 			twoParter       = true
-		-- FOR_NUMERIC  for start, end [, step ]
+		-- FOR_NUMERIC   for start, end [, step ]
 		elseif #exprListWeMayOrMayNotUse >= 2 then -- If more than 3 arguments are specified then we'll get an error later.
 			forLoop.forType = !(FOR_NUMERIC)
 			twoParter       = false
-		-- FOR_SHORT  for [ < ] obj
+		-- FOR_SHORT     for [ < ] obj
 		elseif #exprListWeMayOrMayNotUse == 1 then
 			forLoop.forType = !(FOR_SHORT)
 			twoParter       = false
@@ -2962,7 +2964,7 @@ function _G.parseGlobalScope(state, firstFilePath)
 	return globalScope
 end
 
--- call = parseCallChain( compilationState, parent [, callee=theFollowingIdentifier, isMethod=false ] )
+-- call = parseCallChain( compilationState, parent, callee=theFollowingIdentifier, isMethod )
 local function parseCallChain(state, parent, callee, isMethod)
 	if not callee then
 		!SET_OR_RETURN_NIL `callee = parseIdentifier(state, parent)` -- We'll update the parent in a moment.
@@ -3005,7 +3007,7 @@ local function parseCallChain(state, parent, callee, isMethod)
 			end
 
 		else
-			!ERROR_OR_RETURN_NIL `errorParsingLast(state, "Expected '('.")` -- Not sure we ever get here.
+			!ERROR_OR_RETURN_NIL `errorParsingAfterPrevious(state, "Expected '(' to start call arguments.")` -- We may get here for inline calls.
 		end
 
 		callee.parent = call
@@ -3027,8 +3029,19 @@ end
 local function parseLambda(state, parent)
 	local lambda = astNewNode(AstLambda, state.tokens[state.nextToken], parent)
 
-	-- Captures.
+	-- Inline.
 	local tok = peekNextTok(state, 1)
+
+	if !!(IS_TOK(TOKEN_KEYWORD, "inline")) then
+		!!(EAT_NEXT_TOKEN) -- 'inline'
+		lambda.inline = !(INLINE_YES)
+	elseif !!(IS_TOK(TOKEN_KEYWORD, "no_inline")) then
+		!!(EAT_NEXT_TOKEN) -- 'no_inline'
+		lambda.inline = !(INLINE_NO)
+	end
+
+	-- Captures.
+	tok = peekNextTok(state, 1)
 
 	if !!(IS_TOK(TOKEN_PUNCTUATION, "[")) then
 		!!(EAT_NEXT_TOKEN) -- '['
@@ -3332,10 +3345,26 @@ local function parseLambda(state, parent)
 		lambda.bodyEndDummy = astNewNode(AstDummy, state.tokens[state.nextToken-1]) -- Dummy value that shouldn't be used since there's no body. (Maybe we can even leave it nil.)
 	end
 
-	if lambda.polymorphs and not lambda.body then
+	-- Combination errors.
+
+	if lambda.inline ~= !(INLINE_MAY) and not lambda.body then
+		local inlineText = (lambda.inline == !(INLINE_YES)) and "inline" or "no-inline"
+		!ERROR_OR_RETURN_NIL `errorParsingAfterLast(state, "Expected a body for %s marked function.", inlineText)`
+
+	elseif lambda.inline == !(INLINE_YES) and (lambda.captures or lambda.captureAll) then
+		-- We do allow no_inline because it's effectively a no-op for variables (including variable functions). Maybe we should emit a warning.
+		!ERROR_OR_RETURN_NIL `errorParsing(state, lambda, "Inline marked functions cannot have captures.")`
+
+	elseif lambda.inline == !(INLINE_YES) and lambda.bodyIsForeign then
+		-- We do allow no_inline because it's effectively a no-op for foreign functions. Maybe we should emit a warning.
+		!ERROR_OR_RETURN_NIL `errorParsing(state, lambda, "Foreign functions cannot be inlined.")`
+
+	elseif lambda.polymorphs and not lambda.body then
 		!ERROR_OR_RETURN_NIL `errorParsing(state, lambda, "Types of functions cannot be polymorphic - only functions themselves can.")`
+
 	elseif (lambda.captures or lambda.captureAll) and not lambda.body then
 		!ERROR_OR_RETURN_NIL `errorParsingAfterLast(state, "Expected a body for function with captures.")`
+
 	elseif (lambda.captures or lambda.captureAll) and lambda.bodyIsForeign then
 		!ERROR_OR_RETURN_NIL `errorParsing(state, lambda, "Foreign functions cannot have captures.")`
 	end
@@ -3777,10 +3806,10 @@ do
 
 	-- Array type or capturing lambda.
 	expressionParserByKeySymbol["["] = function(state, exprStartTok, parent)
-		local tok2 = peekNextTok(state, 1)
+		local tok = peekNextTok(state, 1)
 
 		-- Array type.
-		if !!(IS_TOK(2, TOKEN_PUNCTUATION, "]")) then
+		if !!(IS_TOK(TOKEN_PUNCTUATION, "]")) then
 			!!(EAT_NEXT_TOKEN) -- ']'
 
 			local typeNode = astNewNode(AstType, exprStartTok, parent)
@@ -3822,6 +3851,52 @@ do
 			return typeNode
 		end
 	!end
+
+	-- Inline call or lambda.
+	expressionParserByKeySymbol["inline"] = function(state, exprStartTok, parent)
+		local tok = peekNextTok(state, 1)
+
+		if !!(IS_TOK(TOKEN_IDENTIFIER)) then
+			if parent.nodeType ~= !(AST_BLOCK) then
+				-- :InlineCallsInMorePlaces
+				-- @Incomplete: Ability to inline calls in assignments/declarations.
+				-- @Incomplete: Ability to inline calls anywhere. (Oh man...)
+				!ERROR_OR_RETURN_NIL `errorParsingLast(state, "Only call statements can be inlined currently.")`
+			end
+			-- Note: The above is not a perfect check at all. There may be a
+			-- long call chain after this, and there may be other bad stuff
+			-- happening. We'll have to do more validation after parsing.
+
+			!SET_OR_RETURN_NIL `local call = parseCallChain(state, parent, nil, false)`
+			call.inline                    = !(INLINE_YES)
+			return call
+
+		elseif !!(IS_TOK(TOKEN_PUNCTUATION, "(","[")) then
+			!!(PUT_BACK_LAST_TOKEN)
+			!SET_OR_RETURN_NIL `local lambda = parseLambda(state, parent)`
+			return lambda
+
+		else
+			!ERROR_OR_RETURN_NIL `errorParsingNext(state, "Expected an identifier or a function after 'inline'.")`
+		end
+	end
+	expressionParserByKeySymbol["no_inline"] = function(state, exprStartTok, parent)
+		local tok = peekNextTok(state, 1)
+
+		if !!(IS_TOK(TOKEN_IDENTIFIER)) then
+			!SET_OR_RETURN_NIL `local call = parseCallChain(state, parent, nil, false)`
+			call.inline                    = !(INLINE_NO)
+			return call
+
+		elseif !!(IS_TOK(TOKEN_PUNCTUATION, "(","[")) then
+			!!(PUT_BACK_LAST_TOKEN)
+			!SET_OR_RETURN_NIL `local lambda = parseLambda(state, parent)`
+			return lambda
+
+		else
+			!ERROR_OR_RETURN_NIL `errorParsingNext(state, "Expected an identifier or a function after 'inline'.")`
+		end
+	end
 end
 
 -- expression = parseExpression( compilationState, parent [, previousOperatorPrecedence, expectLvalue=false ] )
