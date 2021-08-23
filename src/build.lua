@@ -141,6 +141,9 @@ pp.metaEnvironment.GRAPHVIZ_PATH        = pathGraphviz
 
 pp.metaEnvironment.RUNTIME_ERROR_PREFIX = debugMode and runtimeErrorPrefix or ""
 
+local parser                 = require"lib.dumbParser"
+pp.metaEnvironment.luaParser = parser
+
 local luaSegments = {}
 function pp.metaEnvironment.preprocessorOutputAtTopOfFile(lua)
 	table.insert(luaSegments, lua)
@@ -153,9 +156,6 @@ end
 
 local compilerLineNumbers = {--[[ { sourcePath=path, sourceLine=lineNumber, outputLine=lineNumber }, ... ]]}
 function pp.metaEnvironment.recordLineNumber(path, ln)
-	if not path:find("/", 1, true) then
-		path = "src/"..path
-	end
 	table.insert(compilerLineNumbers, {
 		sourcePath  = path,
 		sourceLine  = ln,
@@ -182,18 +182,16 @@ local function profilerMaybeModifyFunction(func, name)
 	if name:find"[Ee]rror"                      then  return  end
 	if name:find"[Aa]ssert"                     then  return  end
 
-	local parser = require"lib.dumbParser"
-
 	do
-		local blockToInsert                      = parser.newNode("block")
-		blockToInsert.statements[1]              = parser.newNode("call")
-		blockToInsert.statements[1].callee       = parser.newNode("identifier", "staticProfilerPush")
-		blockToInsert.statements[1].arguments[1] = parser.newNode("literal", name)
+		local blockToInsert                      = parser.newNodeFast("block")
+		blockToInsert.statements[1]              = parser.newNodeFast("call")
+		blockToInsert.statements[1].callee       = parser.newNodeFast("identifier", "staticProfilerPush")
+		blockToInsert.statements[1].arguments[1] = parser.newNodeFast("literal", name)
 		table.insert(func.body.statements, 1, blockToInsert)
 	end
 
 	if func.body.statements[#func.body.statements].type ~= "return" then
-		table.insert(func.body.statements, parser.newNode("return"))
+		table.insert(func.body.statements, parser.newNodeFast("return"))
 	end
 
 	parser.traverseTree(func.body, function(node, parent, container, k)
@@ -202,10 +200,10 @@ local function profilerMaybeModifyFunction(func, name)
 
 		local returnNode = node
 
-		local replacementBlock                      = parser.newNode("block")
-		replacementBlock.statements[1]              = parser.newNode("call")
-		replacementBlock.statements[1].callee       = parser.newNode("identifier", "staticProfilerPop")
-		replacementBlock.statements[1].arguments[1] = parser.newNode("literal", name)
+		local replacementBlock                      = parser.newNodeFast("block")
+		replacementBlock.statements[1]              = parser.newNodeFast("call")
+		replacementBlock.statements[1].callee       = parser.newNodeFast("identifier", "staticProfilerPop")
+		replacementBlock.statements[1].arguments[1] = parser.newNodeFast("literal", name)
 		replacementBlock.statements[2]              = returnNode
 
 		container[k] = replacementBlock
@@ -215,8 +213,6 @@ end
 
 local function maybeAddProfilerStuff(lua)
 	if STATIC_PROFILER then
-		local parser = require"lib.dumbParser"
-
 		local time = os.clock()
 		local ast  = assert(parser.parse(lua, "@lua"))
 		print("Profiler: parse", os.clock()-time)
@@ -260,8 +256,6 @@ local function maybeAddProfilerStuff(lua)
 		file:write(lua)
 		file:close()
 
-		local parser = require"lib.dumbParser"
-
 		local time = os.clock()
 		local ast  = assert(parser.parse(lua, "@lua"))
 		print("Profiler: parse", os.clock()-time)
@@ -271,9 +265,9 @@ local function maybeAddProfilerStuff(lua)
 		parser.traverseTree(ast, function(tableNode, parent, container, k)
 			if tableNode.type ~= "table" then  return  end
 
-			local call        = parser.newNode("call")
-			call.callee       = parser.newNode("identifier", "TABLE")
-			call.arguments[1] = parser.newNode("literal", tableNode.line)
+			local call        = parser.newNodeFast("call")
+			call.callee       = parser.newNodeFast("identifier", "TABLE")
+			call.arguments[1] = parser.newNodeFast("literal", tableNode.line)
 			call.arguments[2] = tableNode
 			container[k]      = call
 		end)
@@ -352,7 +346,7 @@ local lua = assert(pp.processFile{
 	onInsert = function(path)
 		if not silent then  print("Inserting "..path)  end
 
-		return assert(pp.getFileContents(DIR_HERE.."/"..path))
+		return assert(pp.getFileContents(DIR_HERE.."/../"..path))
 	end,
 
 	onAfterMeta = function(lua)

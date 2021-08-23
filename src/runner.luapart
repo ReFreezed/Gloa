@@ -9,7 +9,7 @@
 --=
 --==============================================================
 
-	runnerConvertBufferToChunk, runnerRunBufferAsChunk
+	runnerConvertCurrentOutputToChunk, runnerRunCurrentOutputAsChunkIfNotEmpty
 	runnerSetup
 
 --============================================================]]
@@ -17,7 +17,7 @@
 
 
 
--- Note: runnerRunBufferAsChunk() needs to be called at some point after this!
+-- Note: runnerRunCurrentOutputAsChunkIfNotEmpty() needs to be called at some point after this!
 function _G.runnerSetup(state)
 	local writer = state.runnerWriter
 	if writer then  return  end
@@ -27,9 +27,9 @@ function _G.runnerSetup(state)
 		assert(os.remove(state.runnerPath))
 	end
 
-	writer             = WriterState()
-	writer.file        = newVirtualFile()
-	state.runnerWriter = writer
+	writer                  = WriterState()
+	writer.luaMainChunkBody = !!(LUA_STATEMENT"do end")
+	state.runnerWriter      = writer
 
 	--[[ Should we copy these fields so the user can do pairs(_G) in !preload blocks?
 	for k, v in pairs(DEFAULT_GLOBALS) do
@@ -62,14 +62,15 @@ function _G.runnerSetup(state)
 		end
 	end
 
-	writeCompilerSymbols(state, writer, nil)
+	writeCompilerSymbols(state, writer, writer.luaMainChunkBody, nil)
 end
 
 
 
-function _G.runnerConvertBufferToChunk(state)
-	local file = state.runnerWriter.file
-	local lua  = file:getBuffer()
+local function runnerConvertCurrentOutputToChunk(state)
+	local writer            = state.runnerWriter
+	local lua               = createLuaOutput(writer, state.runnerWrittenLines+1)
+	writer.luaMainChunkBody = !!(LUA_STATEMENT"do end")
 
 	local debugFile = assert(io.open(state.runnerPath, "a")) -- @Speed: Can we keep this file open?
 	debugFile:write(lua)
@@ -80,18 +81,16 @@ function _G.runnerConvertBufferToChunk(state)
 		-- astPrintTree(state.globalScope)
 		errorInternal("%s", err)
 	end
-
-	file:clearBuffer()
 	setfenv(chunk, state.runnerEnvironment)
 
-	state.runnerWrittenLines = state.runnerWriter.currentOutputLine-1
+	state.runnerWrittenLines = state.runnerWrittenLines + countString(lua, "\n", true)
 	return chunk
 end
 
-function _G.runnerRunBufferAsChunk(state)
-	if state.runnerWriter.file:isBufferEmpty() then  return  end
+function _G.runnerRunCurrentOutputAsChunkIfNotEmpty(state)
+	if not state.runnerWriter.luaMainChunkBody.statements[1] then  return  end
 
-	local chunk = runnerConvertBufferToChunk(state)
+	local chunk = runnerConvertCurrentOutputToChunk(state)
 	chunk()
 end
 

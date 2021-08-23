@@ -12,10 +12,12 @@
 
 !(
 -- CONST, CONST_SET
+-- countString, countSubString
 -- F, getByte, BYTE
 -- ifDEBUG, ifNotDEBUG, ASSERT, TRACE, debugger
 -- incN, N
 -- indexOf, itemWith1
+-- LUA_BLOCK, LUA_STATEMENT, LUA_EXPRESSION, luaAstRemoveMeta
 -- outputCommaSeparatedValues
 -- preprocessorOutputAtTopOfFile, preprocessorOutputAtDuringPost
 -- Set
@@ -558,7 +560,7 @@ end
 
 function _G.debugger()
 	if DEBUGGER then
-		local lua = @insert "debugger.luapart"
+		local lua = @insert "src/debugger.luapart"
 		lua = "--[[ Debugger: ]]"..lua:gsub("%-%-%[%[.-%]%]", ""):gsub("%-%-[^\n]+", ""):gsub("[\n\t]+", " "):gsub("   +", "  ")
 		__LUA(lua)
 	end
@@ -763,6 +765,83 @@ function _G.UNINDENT(s)
 	local tabs = s:match"^\t*()" - 1
 	local pat  = "%f[^%z\n]" .. ("\t?"):rep(tabs)
 	return (s:gsub(pat, ""))
+end
+
+
+
+function _G.luaAstRemoveMeta(node)
+	luaParser.traverseTree(node, function(node)
+		node.id           = DEBUG and -node.id or nil
+		node.sourceString = nil
+		node.sourcePath   = nil
+		node.token        = nil
+		node.line         = nil
+		node.position     = nil
+	end)
+	return node
+end
+
+-- luaAstString = LUA_BLOCK( lua [, processor ] )
+-- processor    = function( luaBlock )
+function _G.LUA_BLOCK(lua, processor)
+	local luaBlock = assert(luaParser.parse(lua))
+
+	if processor then  processor(luaBlock)  end
+
+	return toLua(luaAstRemoveMeta(luaBlock))
+end
+
+-- luaAstString = LUA_STATEMENT( lua [, processor ] )
+-- processor    = function( luaStatement )
+function _G.LUA_STATEMENT(lua, processor)
+	local luaBlock     = assert(luaParser.parse(lua))
+	local luaStatement = luaBlock.statements[1] or error("No statements: "..lua)
+
+	if luaBlock.statements[2] then  error("More than one statement (got "..#luaBlock.statements.."): "..lua)  end
+	if processor              then  processor(luaStatement)                  end
+
+	return toLua(luaAstRemoveMeta(luaStatement))
+end
+
+-- luaAstString = LUA_EXPRESSION( lua [, processor ] )
+-- processor    = function( luaExpression )
+function _G.LUA_EXPRESSION(lua, processor)
+	local luaExpr = assert(luaParser.parseExpression(lua))
+
+	if processor then  processor(luaExpr)  end
+
+	return toLua(luaAstRemoveMeta(luaExpr))
+end
+
+
+
+-- count = countString( haystack, needle [, plain=false ] )
+function _G.countString(haystack, needle, plain)
+	local count      = 0
+	local pos        = 1
+	local stringFind = string.find
+
+	while true do
+		local _, i2 = stringFind(haystack, needle, pos, plain)
+		if not i2 then  return count  end
+
+		count = count + 1
+		pos   = i2    + 1
+	end
+end
+
+-- count = countSubString( haystack, startPosition, endPosition, needle [, plain=false ] )
+function _G.countSubString(haystack, pos, posEnd, needle, plain)
+	local count      = 0
+	local stringFind = string.find
+
+	while true do
+		local _, i2 = stringFind(haystack, needle, pos, plain)
+		if not i2 or i2 > posEnd then  return count  end
+
+		count = count + 1
+		pos   = i2    + 1
+	end
 end
 )
 

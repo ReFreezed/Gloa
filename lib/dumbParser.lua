@@ -6,7 +6,7 @@
 --=  Tokenize Lua code or create ASTs (Abstract Syntax Trees)
 --=  and convert the data back to Lua.
 --=
---=  Version: 2.0 (2021-06-19)
+--=  Version: 2.0.1-dev
 --=
 --=  License: MIT (see the bottom of this file)
 --=  Website: http://luaparser.refreezed.com/
@@ -53,8 +53,9 @@ print(lua)
 
 tokenize, tokenizeFile
 newToken, concatTokens
-parse, parseFile
-newNode, cloneNode, cloneTree, getChild, setChild, addChild, removeChild
+parse, parseExpression, parseFile
+newNode, newNodeFast, cloneNode, cloneTree, getChild, setChild, addChild, removeChild
+validateTree
 traverseTree, traverseTreeReverse
 updateReferences
 simplify, optimize, minify
@@ -63,12 +64,13 @@ printTokens, printNode, printTree
 formatMessage
 
 tokenize()
-	tokens, error = parser.tokenize( luaString [, pathForErrorMessages="?" ] )
+	tokens = parser.tokenize( luaString [, pathForErrorMessages="?" ] )
+	tokens = parser.tokenize( luaString [, keepWhitespaceTokens=false, pathForErrorMessages="?" ] )
 	Convert a Lua string into an array of tokens. (See below for more info.)
 	Returns nil and a message on error.
 
 tokenizeFile()
-	tokens, error = parser.tokenizeFile( path )
+	tokens = parser.tokenizeFile( path [, keepWhitespaceTokens=false ] )
 	Convert the contents of a file into an array of tokens. (See below for more info.) Uses io.open().
 	Returns nil and a message on error.
 
@@ -81,19 +83,29 @@ concatTokens()
 	Concatenate tokens. Whitespace is added between tokens when necessary.
 
 parse()
-	astNode, error = parser.parse( tokens )
-	astNode, error = parser.parse( luaString [, pathForErrorMessages="?" ] )
-	Convert tokens or Lua code into an AST. (See below for more info.)
+	astNode = parser.parse( tokens )
+	astNode = parser.parse( luaString [, pathForErrorMessages="?" ] )
+	Convert tokens or Lua code into an AST representing a block of code. (See below for more info.)
+	Returns nil and a message on error.
+
+parseExpression()
+	astNode = parser.parseExpression( tokens )
+	astNode = parser.parseExpression( luaString [, pathForErrorMessages="?" ] )
+	Convert tokens or Lua code into an AST representing a value expression. (See below for more info.)
 	Returns nil and a message on error.
 
 parseFile()
-	astNode, error = parser.parseFile( path )
+	astNode = parser.parseFile( path )
 	Convert a Lua file into an AST. (See below for more info.) Uses io.open().
 	Returns nil and a message on error.
 
 newNode()
 	astNode = parser.newNode( nodeType, arguments... )
 	Create a new AST node. (Search for 'NodeCreation' for more info.)
+
+newNodeFast()
+	astNode = parser.newNodeFast( nodeType, arguments... )
+	Same as newNode() but without any validation. (Search for 'NodeCreation' for more info.)
 
 cloneNode()
 	astNode = parser.cloneNode( astNode )
@@ -110,7 +122,7 @@ getChild()
 	tableFieldKey = "key"|"value"
 	Get a child node. (Search for 'NodeFields' for field names.)
 
-	The result is the same as doing this, but with more error checking:
+	The result is the same as doing the following, but with more error checking:
 	childNode = astNode[fieldName]
 	childNode = astNode[fieldName][index]
 	childNode = astNode[fieldName][index][tableFieldKey]
@@ -122,7 +134,7 @@ setChild()
 	tableFieldKey = "key"|"value"
 	Set a child node. (Search for 'NodeFields' for field names.)
 
-	The result is the same as doing this, but with more error checking:
+	The result is the same as doing the following, but with more error checking:
 	astNode[fieldName]                       = childNode
 	astNode[fieldName][index]                = childNode
 	astNode[fieldName][index][tableFieldKey] = childNode
@@ -132,7 +144,7 @@ addChild()
 	parser.addChild( astNode, fieldName, [ index=atEnd, ] keyNode, valueNode ) -- If the node field is a table field array.
 	Add a child node to an array field. (Search for 'NodeFields' for field names.)
 
-	The result is the same as doing this, but with more error checking:
+	The result is the same as doing the following, but with more error checking:
 	table.insert(astNode[fieldName], index, childNode)
 	table.insert(astNode[fieldName], index, {key=keyNode, value=valueNode, generatedKey=false})
 
@@ -140,8 +152,13 @@ removeChild()
 	parser.removeChild( astNode, fieldName [, index=last ] )
 	Remove a child node from an array field. (Search for 'NodeFields' for field names.)
 
-	The result is the same as doing this, but with more error checking:
+	The result is the same as doing the following, but with more error checking:
 	table.remove(astNode[fieldName], index)
+
+validateTree()
+	isValid, errorMessages = validateTree( astNode )
+	Check for errors in an AST (e.g. missing condition expressions for if statements).
+	errorMessages is a multi-line string if isValid is false.
 
 traverseTree()
 	didStop = parser.traverseTree( astNode, [ leavesFirst=false, ] callback [, topNodeParent=nil, topNodeContainer=nil, topNodeKey=nil ] )
@@ -186,8 +203,10 @@ minify()
 	Note: References may be out-of-date after calling this.
 
 toLua()
-	luaString, error = parser.toLua( astNode [, prettyOuput=false ] )
-	Convert an AST to Lua. Returns nil and a message on error.
+	luaString    = parser.toLua( astNode [, prettyOuput=false, nodeCallback ] )
+	nodeCallback = function( node, outputBuffer )
+	Convert an AST to Lua, optionally call a function on each node before they are turned into Lua.
+	Returns nil and a message on error.
 
 printTokens()
 	parser.printTokens( tokens )
@@ -310,6 +329,7 @@ Token types:
 	"number"      -- Number literal.
 	"punctuation" -- Any punctuation, e.g. ".." or "(".
 	"string"      -- String value.
+	"whitespace"  -- Sequence of whitespace characters.
 
 
 4 - AST
@@ -391,12 +411,17 @@ Special number notation rules.
 
 --============================================================]]
 
-local PARSER_VERSION = "2.0.0"
+local PARSER_VERSION = "2.0.1-dev"
 
-local NORMALIZE_MINUS_ZERO
+local NORMALIZE_MINUS_ZERO, HANDLE_ENV
 do
 	local n              = 0
 	NORMALIZE_MINUS_ZERO = tostring(-n) == "0"
+end
+do
+	local pcall = pcall
+	local _ENV  = nil
+	HANDLE_ENV  = not pcall(function() local x = _G end)
 end
 
 local assert       = assert
@@ -462,7 +487,7 @@ local indexOf, itemWith1, lastItemWith1
 local ipairsr
 local isToken, isTokenType, isTokenAnyValue
 local mayNodeBeInvolvedInJump, mayAnyNodeBeInvolvedInJump
-local parse, parseFile
+local parse, parseExpression, parseFile
 local printNode, printTree
 local printTokens
 local removeUnordered, removeItemUnordered
@@ -470,6 +495,7 @@ local tokenize, tokenizeFile
 local toLua
 local traverseTree, traverseTreeReverse
 local updateReferences
+local validateTree
 local where
 
 local parser
@@ -521,6 +547,9 @@ local OPERATOR_PRECEDENCE = {
 	unary   = 11, -- "-", "not", "#", "~"
 	["^"]   = 12,
 }
+
+local EXPRESSION_NODES = newSet{ "binary", "call", "function", "identifier", "literal", "lookup", "table", "unary", "vararg" }
+local STATEMENT_NODES  = newSet{ "assignment", "block", "break", "call", "declaration", "for", "goto", "if", "label", "repeat", "return", "while" }
 
 local TOKEN_BYTES = {
 	NAME_START      = newCharSet"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_",
@@ -600,7 +629,7 @@ local function AstLiteral (token,v)return populateCommonNodeFields(token,{
 })end
 local function AstTable (token)return populateCommonNodeFields(token,{
 	type        = "table",
-	fields      = {},    -- Array of {key=expression, value=expression, generatedKey=bool}. generatedKey is true for implicit keys (i.e. {x,y}) and false for explicit keys (i.e. {a=x,b=y}). Note that the state of generatedKey affects the output of toLua()!
+	fields      = {},    -- Array of {key=expression, value=expression, generatedKey=bool}. generatedKey is true for implicit keys (i.e. {x,y}) and false for explicit keys (i.e. {a=x,b=y}). Note that the state of generatedKey affects the output of toLua()! 'key' may be nil if generatedKey is true.
 })end
 local function AstLookup (token)return populateCommonNodeFields(token,{
 	type        = "lookup",
@@ -1087,10 +1116,17 @@ do
 		return tableConcat(buffer)
 	end
 
-	-- tokens, error = tokenize( luaString [, pathForErrorMessages="?" ] )
-	function tokenize(s, path)
-		assertArg1("tokenize", 1, s,    "string")
-		assertArg2("tokenize", 2, path, "string","nil")
+	-- tokens, error = tokenize( luaString [, keepWhitespaceTokens=false ] [, pathForErrorMessages="?" ] )
+	function tokenize(s, keepWhitespaceTokens, path)
+		assertArg1("tokenize", 1, s, "string")
+
+		if type(keepWhitespaceTokens) == "string" then
+			path                 = keepWhitespaceTokens
+			keepWhitespaceTokens = false
+		else
+			assertArg2("tokenize", 2, keepWhitespaceTokens, "boolean","nil")
+			assertArg2("tokenize", 3, path,                 "string","nil")
+		end
 
 		if stringFind(s, "\r", 1, true) then
 			s = stringGsub(s, "\r\n?", "\n")
@@ -1123,9 +1159,33 @@ do
 		local NUM_DEC               = NUMERAL_PATTERNS.DEC
 
 		while true do
-			local i1, i2 = stringFind(s, "^%s+", ptr)
+			local i1, i2 = stringFind(s, "^[ \t\n]+", ptr)
+
 			if i1 then
-				ln  = ln + countSubString(s, i1, i2, "\n", true)
+				if keepWhitespaceTokens then
+					local lnStart = ln
+					local tokRepr = stringSub(s, i1, i2)
+					ln            = ln + countString(tokRepr, "\n", true)
+					count         = count + 1
+
+					tokens[count] = {
+						type           = "whitespace",
+						value          = tokRepr,
+						representation = tokRepr,
+
+						sourceString   = s,
+						sourcePath     = path,
+
+						lineStart      = lnStart,
+						lineEnd        = ln,
+						positionStart  = i1,
+						positionEnd    = i2,
+					}
+
+				else
+					ln = ln + countSubString(s, i1, i2, "\n", true)
+				end
+
 				ptr = i2 + 1
 			end
 
@@ -1390,9 +1450,10 @@ do
 	end
 end
 
--- tokens, error = tokenizeFile( path )
-function tokenizeFile(path)
-	assertArg1("tokenizeFile", 1, path, "string")
+-- tokens, error = tokenizeFile( path [, keepWhitespaceTokens=false ] )
+function tokenizeFile(path, keepWhitespaceTokens)
+	assertArg1("tokenizeFile", 1, path,                 "string")
+	assertArg2("tokenizeFile", 2, keepWhitespaceTokens, "boolean","nil")
 
 	local file, err = ioOpen(path, "r")
 	if not file then  return nil, err  end
@@ -1400,7 +1461,7 @@ function tokenizeFile(path)
 	local s = file:read("*a")
 	file:close()
 
-	return tokenize(s, path)
+	return tokenize(s, (keepWhitespaceTokens or false), path)
 end
 
 --
@@ -1412,6 +1473,7 @@ end
 -- token = newToken( "number",      number )
 -- token = newToken( "punctuation", punctuationString )
 -- token = newToken( "string",      stringValue )
+-- token = newToken( "whitespace",  contents )
 --
 local function newToken(tokType, tokValue)
 	local tokRepr
@@ -1463,6 +1525,12 @@ local function newToken(tokType, tokValue)
 		else
 			tokRepr = F("--%s\n", tokValue)
 		end
+
+	elseif tokType == "whitespace" then
+		if type(tokValue) ~= "string"       then  errorf(2, "Expected string value for 'whitespace' token. (Got %s)", type(tokValue))  end
+		if tokValue == ""                   then  errorf(2, "Value is empty.")  end -- Having a token that is zero characters long would be weird, so we disallow it.
+		if stringFind(tokValue, "[^ \t\n]") then  errorf(2, "Value has non-whitespace characters.")  end
+		tokRepr = tokValue
 
 	else
 		errorf(2, "Invalid token type '%s'.", tostring(tokType))
@@ -1533,7 +1601,7 @@ end
 
 
 
-local parseExpression, parseExpressionList, parseFunctionParametersAndBody, parseBlock
+local parseExpressionInternal, parseExpressionList, parseFunctionParametersAndBody, parseBlock
 
 local function parseIdentifier(tokens, tok) --> ident, token, error
 	if not isTokenType(tokens[tok], "identifier") then
@@ -1606,7 +1674,7 @@ local function parseTable(tokens, tokStart) --> tableNode, token, error
 		elseif isToken(tokens[tok], "punctuation", "[") then
 			tok = tok + 1 -- '['
 
-			local keyExpr, tokNext, err = parseExpression(tokens, tok, 0)
+			local keyExpr, tokNext, err = parseExpressionInternal(tokens, tok, 0)
 			if not keyExpr then  return nil, tok, err  end
 			tok = tokNext
 
@@ -1620,7 +1688,7 @@ local function parseTable(tokens, tokStart) --> tableNode, token, error
 			end
 			tok = tok + 1 -- '='
 
-			local valueExpr, tokNext, err = parseExpression(tokens, tok, 0)
+			local valueExpr, tokNext, err = parseExpressionInternal(tokens, tok, 0)
 			if not valueExpr then  return nil, tok, err  end
 			tok = tokNext
 
@@ -1636,7 +1704,7 @@ local function parseTable(tokens, tokStart) --> tableNode, token, error
 			end
 			tok = tok + 1 -- '='
 
-			local valueExpr, tokNext, err = parseExpression(tokens, tok, 0)
+			local valueExpr, tokNext, err = parseExpressionInternal(tokens, tok, 0)
 			if not valueExpr then  return nil, tok, err  end
 			tok = tokNext
 
@@ -1647,7 +1715,7 @@ local function parseTable(tokens, tokStart) --> tableNode, token, error
 			generatedIndex = generatedIndex + 1
 			local keyExpr  = AstLiteral(tokens[tok], generatedIndex)
 
-			local valueExpr, tokNext, err = parseExpression(tokens, tok, 0)
+			local valueExpr, tokNext, err = parseExpressionInternal(tokens, tok, 0)
 			if not valueExpr then  return nil, tok, err  end
 			tok = tokNext
 
@@ -1675,7 +1743,7 @@ local function parseTable(tokens, tokStart) --> tableNode, token, error
 	return tableNode, tok
 end
 
-function parseExpression(tokens, tokStart, lastPrecedence) --> expression, token, error
+function parseExpressionInternal(tokens, tokStart, lastPrecedence) --> expression, token, error
 	local tok                  = tokStart
 	local canParseLookupOrCall = false
 	local currentToken         = tokens[tok]
@@ -1722,7 +1790,7 @@ function parseExpression(tokens, tokStart, lastPrecedence) --> expression, token
 		local unary = AstUnary(currentToken, currentToken.value)
 		tok         = tok + 1 -- operator
 
-		local subExpr, tokNext, err = parseExpression(tokens, tok, OPERATOR_PRECEDENCE.unary-1)
+		local subExpr, tokNext, err = parseExpressionInternal(tokens, tok, OPERATOR_PRECEDENCE.unary-1)
 		if not subExpr then  return nil, tok, err  end
 		unary.expression = subExpr
 		tok              = tokNext
@@ -1766,7 +1834,7 @@ function parseExpression(tokens, tokStart, lastPrecedence) --> expression, token
 	elseif isToken(currentToken, "punctuation", "(") then
 		tok = tok + 1 -- '('
 
-		local _expr, tokNext, err = parseExpression(tokens, tok, 0)
+		local _expr, tokNext, err = parseExpressionInternal(tokens, tok, 0)
 		if not _expr then  return nil, tok, err  end
 		tok = tokNext
 
@@ -1809,7 +1877,7 @@ function parseExpression(tokens, tokStart, lastPrecedence) --> expression, token
 
 			local lhsExpr = expr
 
-			local rhsExpr, tokNext, err = parseExpression(tokens, tok, OPERATOR_PRECEDENCE[binary.operator] + (rightAssociative and -1 or 0))
+			local rhsExpr, tokNext, err = parseExpressionInternal(tokens, tok, OPERATOR_PRECEDENCE[binary.operator] + (rightAssociative and -1 or 0))
 			if not rhsExpr then  return nil, tok, err  end
 			tok = tokNext
 
@@ -1860,7 +1928,7 @@ function parseExpression(tokens, tokStart, lastPrecedence) --> expression, token
 			local lookup = AstLookup(currentToken)
 			tok          = tok + 1 -- '['
 
-			local memberExpr, tokNext, err = parseExpression(tokens, tok, 0)
+			local memberExpr, tokNext, err = parseExpressionInternal(tokens, tok, 0)
 			if not memberExpr then  return nil, tok, err  end
 			tok = tokNext
 
@@ -1991,7 +2059,7 @@ end
 
 function parseExpressionList(tokens, tok, expressions) --> success, token, error
 	while true do
-		local expr, tokNext, err = parseExpression(tokens, tok, 0)
+		local expr, tokNext, err = parseExpressionInternal(tokens, tok, 0)
 		if not expr then  return false, tok, err  end
 		tok = tokNext
 
@@ -2085,7 +2153,7 @@ local function parseOneOrPossiblyMoreStatements(tokens, tokStart, statements) --
 		local whileLoop = AstWhile(currentToken)
 		tok             = tok + 1 -- 'while'
 
-		local expr, tokNext, err = parseExpression(tokens, tok, 0)
+		local expr, tokNext, err = parseExpressionInternal(tokens, tok, 0)
 		if not expr then  return false, tok, err  end
 		whileLoop.condition = expr
 		tok                 = tokNext
@@ -2124,7 +2192,7 @@ local function parseOneOrPossiblyMoreStatements(tokens, tokStart, statements) --
 		end
 		tok = tok + 1 -- 'until'
 
-		local expr, tokNext, err = parseExpression(tokens, tok, 0)
+		local expr, tokNext, err = parseExpressionInternal(tokens, tok, 0)
 		if not expr then  return false, tok, err  end
 		repeatLoop.condition = expr
 		tok                  = tokNext
@@ -2137,7 +2205,7 @@ local function parseOneOrPossiblyMoreStatements(tokens, tokStart, statements) --
 		local ifNode = AstIf(currentToken)
 		tok          = tok + 1 -- 'if'
 
-		local expr, tokNext, err = parseExpression(tokens, tok, 0)
+		local expr, tokNext, err = parseExpressionInternal(tokens, tok, 0)
 		if not expr then  return false, tok, err  end
 		ifNode.condition = expr
 		tok              = tokNext
@@ -2161,7 +2229,7 @@ local function parseOneOrPossiblyMoreStatements(tokens, tokStart, statements) --
 			ifNodeLeaf.bodyFalse.statements[1] = AstIf   (tokens[tok])
 			ifNodeLeaf                         = ifNodeLeaf.bodyFalse.statements[1]
 
-			local expr, tokNext, err = parseExpression(tokens, tok, 0)
+			local expr, tokNext, err = parseExpressionInternal(tokens, tok, 0)
 			if not expr then  return false, tok, err  end
 			ifNodeLeaf.condition = expr
 			tok                  = tokNext
@@ -2403,7 +2471,11 @@ local function parseOneOrPossiblyMoreStatements(tokens, tokStart, statements) --
 		local returnNode = AstReturn(currentToken)
 		tok              = tok + 1 -- 'return'
 
-		if tokens[tok] and not ((isTokenType(tokens[tok], "keyword") and isTokenAnyValue(tokens[tok], BLOCK_END_TOKEN_TYPES)) or isToken(tokens[tok], "punctuation", ";")) then
+		if tokens[tok] and not (
+			(isTokenType(tokens[tok], "keyword") and isTokenAnyValue(tokens[tok], BLOCK_END_TOKEN_TYPES))
+			or isToken(tokens[tok], "punctuation", ";")
+			or isTokenType(tokens[tok], "end")
+		) then
 			local ok, tokNext, err = parseExpressionList(tokens, tok, returnNode.values)
 			if not ok then  return false, tok, err  end
 			tok = tokNext
@@ -2416,7 +2488,7 @@ local function parseOneOrPossiblyMoreStatements(tokens, tokStart, statements) --
 		return false, tok, ""
 
 	else
-		local lookahead, tokNext, err = parseExpression(tokens, tok, 0)
+		local lookahead, tokNext, err = parseExpressionInternal(tokens, tok, 0)
 		if not lookahead then  return false, tok, err  end
 
 		if lookahead.type == "call" then
@@ -2505,8 +2577,8 @@ function parseBlock(tokens, tok, blockTok, stopAtEndKeyword) --> block, token, e
 	return block, tok
 end
 
--- block, error = tokensToAst( tokens )
-local function tokensToAst(tokens)
+-- block, error = tokensToAst( tokens, asBlock )
+local function tokensToAst(tokens, asBlock)
 	local tokensPurged = {}
 	local count        = 0
 
@@ -2530,8 +2602,11 @@ local function tokensToAst(tokens)
 		}
 	end
 
+	-- Remove useless tokens.
 	for tok = 1, #tokens do
-		if tokens[tok].type ~= "comment" then
+		local tokType = tokens[tok].type
+
+		if not (tokType == "comment" or tokType == "whitespace") then
 			count               = count + 1
 			tokensPurged[count] = tokens[tok]
 		end
@@ -2561,10 +2636,15 @@ local function tokensToAst(tokens)
 
 	statementErrorReported = false
 
-	local block, _, err = parseBlock(tokensPurged, 2, 2, false)
-	if not block then  return nil, err  end
+	local ast, _, err
+	if asBlock then
+		ast, _, err = parseBlock(tokensPurged, 2, 2, false)
+	else
+		ast, _, err = parseExpressionInternal(tokensPurged, 2, 0)
+	end
+	if not ast then  return nil, err  end
 
-	return block
+	return ast
 end
 
 -- ast, error = parse( tokens )
@@ -2576,7 +2656,7 @@ function parse(luaOrTokens, path)
 	if type(luaOrTokens) == "table" then
 		assertArg1("parse", 2, path, "nil")
 
-		return tokensToAst(luaOrTokens)
+		return tokensToAst(luaOrTokens, true)
 
 	-- ast, error = parse( luaString, pathForErrorMessages )
 	else
@@ -2589,7 +2669,33 @@ function parse(luaOrTokens, path)
 		local tokens, err = tokenize(luaOrTokens, path)
 		if not tokens then  return nil, err  end
 
-		return tokensToAst(tokens)
+		return tokensToAst(tokens, true)
+	end
+end
+
+-- ast, error = parseExpression( tokens )
+-- ast, error = parseExpression( luaString [, pathForErrorMessages="?" ] )
+function parseExpression(luaOrTokens, path)
+	assertArg2("parseExpression", 1, luaOrTokens, "string","table")
+
+	-- ast, error = parseExpression( tokens )
+	if type(luaOrTokens) == "table" then
+		assertArg1("parseExpression", 2, path, "nil")
+
+		return tokensToAst(luaOrTokens, false)
+
+	-- ast, error = parseExpression( luaString, pathForErrorMessages )
+	else
+		if path == nil then
+			path = "?"
+		else
+			assertArg1("parseExpression", 2, path, "string")
+		end
+
+		local tokens, err = tokenize(luaOrTokens, path)
+		if not tokens then  return nil, err  end
+
+		return tokensToAst(tokens, false)
 	end
 end
 
@@ -2600,8 +2706,141 @@ function parseFile(path)
 	local tokens, err = tokenizeFile(path)
 	if not tokens then  return nil, err  end
 
-	return tokensToAst(tokens)
+	return tokensToAst(tokens, true)
 end
+
+
+
+local nodeConstructors = {
+	["vararg"]      = function()  return AstVararg     (nil)  end,
+	["table"]       = function()  return AstTable      (nil)  end,
+	["lookup"]      = function()  return AstLookup     (nil)  end,
+	["call"]        = function()  return AstCall       (nil)  end,
+	["function"]    = function()  return AstFunction   (nil)  end,
+	["break"]       = function()  return AstBreak      (nil)  end,
+	["return"]      = function()  return AstReturn     (nil)  end,
+	["block"]       = function()  return AstBlock      (nil)  end,
+	["declaration"] = function()  return AstDeclaration(nil)  end,
+	["assignment"]  = function()  return AstAssignment (nil)  end,
+	["if"]          = function()  return AstIf         (nil)  end,
+	["while"]       = function()  return AstWhile      (nil)  end,
+	["repeat"]      = function()  return AstRepeat     (nil)  end,
+
+	["identifier"] = function(argCount, name, attribute)
+		if argCount == 0 then
+			errorf(3, "Missing name argument for identifier.")
+		elseif type(name) ~= "string" then
+			errorf(3, "Invalid name argument value type '%s'. (Expected string)", type(name))
+		elseif not stringFind(name, "^[%a_][%w_]*$") or KEYWORDS[name] then
+			errorf(3, "Invalid identifier name '%s'.", name)
+		end
+
+		if attribute == nil or attribute == "" then
+			-- void
+		elseif type(attribute) ~= "string" then
+			errorf(3, "Invalid attribute argument value type '%s'. (Expected string)", type(attribute))
+		elseif not (attribute == "close" or attribute == "const") then
+			errorf(3, "Invalid attribute name '%s'. (Must be 'close' or 'const'.)", attribute)
+		end
+
+		local ident     = AstIdentifier(nil, name)
+		ident.attribute = attribute or ""
+		return ident
+	end,
+
+	["label"] = function(argCount, name)
+		if argCount == 0 then
+			errorf(3, "Missing name argument for label.")
+		elseif type(name) ~= "string" then
+			errorf(3, "Invalid name argument value type '%s'. (Expected string)", type(name))
+		elseif not stringFind(name, "^[%a_][%w_]*$") or KEYWORDS[name] then
+			errorf(3, "Invalid label name '%s'.", name)
+		end
+
+		return AstLabel(nil, name)
+	end,
+
+	["goto"] = function(argCount, name)
+		if argCount == 0 then
+			errorf(3, "Missing label name argument for goto.")
+		elseif type(name) ~= "string" then
+			errorf(3, "Invalid label name argument value type '%s'. (Expected string)", type(name))
+		elseif not stringFind(name, "^[%a_][%w_]*$") or KEYWORDS[name] then
+			errorf(3, "Invalid label name '%s'.", name)
+		end
+
+		return AstGoto(nil, name)
+	end,
+
+	["literal"] = function(argCount, value)
+		if argCount == 0 then
+			errorf(3, "Missing value argument for literal.")
+		elseif not (type(value) == "number" or type(value) == "string" or type(value) == "boolean" or type(value) == "nil") then
+			errorf(3, "Invalid literal value type '%s'. (Expected number, string, boolean or nil)", type(value))
+		end
+
+		return AstLiteral(nil, value)
+	end,
+
+	["unary"] = function(argCount, op)
+		if argCount == 0 then
+			errorf(3, "Missing operator argument for unary expression.")
+		elseif not OPERATORS_UNARY[op] then
+			errorf(3, "Invalid unary operator '%s'.", tostring(op))
+		end
+
+		return AstUnary(nil, op)
+	end,
+
+	["binary"] = function(argCount, op)
+		if argCount == 0 then
+			errorf(3, "Missing operator argument for binary expression.")
+		elseif not OPERATORS_BINARY[op] then
+			errorf(3, "Invalid binary operator '%s'.", tostring(op))
+		end
+
+		return AstBinary(nil, op)
+	end,
+
+	["for"] = function(argCount, kind)
+		if argCount == 0 then
+			errorf(3, "Missing kind argument for 'for' loop.")
+		elseif not (kind == "numeric" or kind == "generic") then
+			errorf(3, "Invalid for loop kind '%s'. (Must be 'numeric' or 'generic')", tostring(kind))
+		end
+
+		return AstFor(nil, kind)
+	end,
+}
+
+local nodeConstructorsFast = {
+	["vararg"]      = function()  return AstVararg     (nil)  end,
+	["table"]       = function()  return AstTable      (nil)  end,
+	["lookup"]      = function()  return AstLookup     (nil)  end,
+	["call"]        = function()  return AstCall       (nil)  end,
+	["function"]    = function()  return AstFunction   (nil)  end,
+	["break"]       = function()  return AstBreak      (nil)  end,
+	["return"]      = function()  return AstReturn     (nil)  end,
+	["block"]       = function()  return AstBlock      (nil)  end,
+	["declaration"] = function()  return AstDeclaration(nil)  end,
+	["assignment"]  = function()  return AstAssignment (nil)  end,
+	["if"]          = function()  return AstIf         (nil)  end,
+	["while"]       = function()  return AstWhile      (nil)  end,
+	["repeat"]      = function()  return AstRepeat     (nil)  end,
+
+	["label"]       = function(name)   return AstLabel  (nil, name)   end,
+	["goto"]        = function(name)   return AstGoto   (nil, name)   end,
+	["literal"]     = function(value)  return AstLiteral(nil, value)  end,
+	["unary"]       = function(op)     return AstUnary  (nil, op)     end,
+	["binary"]      = function(op)     return AstBinary (nil, op)     end,
+	["for"]         = function(kind)   return AstFor    (nil, kind)   end,
+
+	["identifier"] = function(name, attribute)
+		local ident     = AstIdentifier(nil, name)
+		ident.attribute = attribute or ""
+		return ident
+	end,
+}
 
 
 
@@ -2632,126 +2871,14 @@ end
 -- Search for 'NodeFields' for each node's fields.
 --
 local function newNode(nodeType, ...)
-	local node
-
-	if     nodeType == "vararg"      then  node = AstVararg(nil)
-	elseif nodeType == "table"       then  node = AstTable(nil)
-	elseif nodeType == "lookup"      then  node = AstLookup(nil)
-	elseif nodeType == "call"        then  node = AstCall(nil)
-	elseif nodeType == "function"    then  node = AstFunction(nil)
-	elseif nodeType == "break"       then  node = AstBreak(nil)
-	elseif nodeType == "return"      then  node = AstReturn(nil)
-	elseif nodeType == "block"       then  node = AstBlock(nil)
-	elseif nodeType == "declaration" then  node = AstDeclaration(nil)
-	elseif nodeType == "assignment"  then  node = AstAssignment(nil)
-	elseif nodeType == "if"          then  node = AstIf(nil)
-	elseif nodeType == "while"       then  node = AstWhile(nil)
-	elseif nodeType == "repeat"      then  node = AstRepeat(nil)
-
-	elseif nodeType == "identifier" then
-		if select("#", ...) == 0 then
-			errorf(2, "Missing name argument for identifier.")
-		end
-
-		local name, attribute = ...
-
-		if type(name) ~= "string" then
-			errorf(2, "Invalid name argument value type '%s'. (Expected string)", type(name))
-		elseif not stringFind(name, "^[%a_][%w_]*$") or KEYWORDS[name] then
-			errorf(2, "Invalid identifier name '%s'.", name)
-		end
-
-		if attribute == nil or attribute == "" then
-			-- void
-		elseif type(attribute) ~= "string" then
-			errorf(2, "Invalid attribute argument value type '%s'. (Expected string)", type(attribute))
-		elseif not (attribute == "close" or attribute == "const") then
-			errorf(2, "Invalid attribute name '%s'. (Must be 'close' or 'const'.)", attribute)
-		end
-
-		node           = AstIdentifier(nil, name)
-		node.attribute = attribute or ""
-
-	elseif nodeType == "label" then
-		if select("#", ...) == 0 then
-			errorf(2, "Missing name argument for label.")
-		end
-
-		local name = ...
-		if type(name) ~= "string" then
-			errorf(2, "Invalid name argument value type '%s'. (Expected string)", type(name))
-		elseif not stringFind(name, "^[%a_][%w_]*$") or KEYWORDS[name] then
-			errorf(2, "Invalid label name '%s'.", name)
-		end
-
-		node = AstLabel(nil, name)
-
-	elseif nodeType == "goto" then
-		if select("#", ...) == 0 then
-			errorf(2, "Missing label name argument for goto.")
-		end
-
-		local name = ...
-		if type(name) ~= "string" then
-			errorf(2, "Invalid label name argument value type '%s'. (Expected string)", type(name))
-		elseif not stringFind(name, "^[%a_][%w_]*$") or KEYWORDS[name] then
-			errorf(2, "Invalid label name '%s'.", name)
-		end
-
-		node = AstGoto(nil, name)
-
-	elseif nodeType == "literal" then
-		if select("#", ...) == 0 then
-			errorf(2, "Missing value argument for literal.")
-		end
-
-		local value = ...
-		if not (type(value) == "number" or type(value) == "string" or type(value) == "boolean" or type(value) == "nil") then
-			errorf(2, "Invalid literal value type '%s'. (Expected number, string, boolean or nil)", type(value))
-		end
-
-		node = AstLiteral(nil, value)
-
-	elseif nodeType == "unary" then
-		if select("#", ...) == 0 then
-			errorf(2, "Missing operator argument for unary expression.")
-		end
-
-		local op = ...
-		if not OPERATORS_UNARY[op] then
-			errorf(2, "Invalid unary operator '%s'.", tostring(op))
-		end
-
-		node = AstUnary(nil, op)
-
-	elseif nodeType == "binary" then
-		if select("#", ...) == 0 then
-			errorf(2, "Missing operator argument for binary expression.")
-		end
-
-		local op = ...
-		if not OPERATORS_BINARY[op] then
-			errorf(2, "Invalid binary operator '%s'.", tostring(op))
-		end
-
-		node = AstBinary(nil, op)
-
-	elseif nodeType == "for" then
-		if select("#", ...) == 0 then
-			errorf(2, "Missing kind argument for 'for' loop.")
-		end
-
-		local kind = ...
-		if not (kind == "numeric" or kind == "generic") then
-			errorf(2, "Invalid for loop kind '%s'. (Must be 'numeric' or 'generic')", tostring(kind))
-		end
-
-		node = AstFor(nil, kind)
-
+	if nodeConstructors[nodeType] then
+		return (nodeConstructors[nodeType](select("#", ...), ...))
 	else
 		errorf(2, "Invalid node type '%s'.", tostring(nodeType))
 	end
-	return node
+end
+local function newNodeFast(nodeType, ...)
+	return nodeConstructorsFast[nodeType](...)
 end
 
 local cloneNodeArrayAndChildren
@@ -2817,8 +2944,8 @@ local function cloneNodeAndMaybeChildren(node, cloneChildren)
 		clone = AstFunction(nil)
 
 		if cloneChildren then
-			clone.body = node.body and cloneNodeAndMaybeChildren(node.body, true)
 			cloneNodeArrayAndChildren(clone.parameters, node.parameters)
+			clone.body = node.body and cloneNodeAndMaybeChildren(node.body, true)
 		end
 
 	elseif nodeType == "return" then
@@ -3013,8 +3140,7 @@ do
 		indent = indent+1
 
 		if key ~= nil then
-			ioWrite(tostring(key))
-			ioWrite(" ")
+			ioWrite(tostring(key), " ")
 		end
 
 		_printNode(node)
@@ -3023,8 +3149,13 @@ do
 
 		if nodeType == "table" then
 			for i, tableField in ipairs(node.fields) do
-				if tableField.key   then  _printTree(tableField.key,   indent, i..(tableField.generatedKey and "KEYGEN" or "KEY   "))  end
-				if tableField.value then  _printTree(tableField.value, indent, i..(                                        "VALUE "))  end
+				if tableField.key then
+					_printTree(tableField.key, indent, i..(tableField.generatedKey and "KEYGEN" or "KEY   "))
+				elseif tableField.generatedKey then
+					for i = 1, indent do  ioWrite(parser.indentation)  end
+					ioWrite(i, "KEYGEN -\n")
+				end
+				if tableField.value then  _printTree(tableField.value, indent, i.."VALUE ")  end
 			end
 
 		elseif nodeType == "lookup" then
@@ -4604,9 +4735,14 @@ end
 
 local generateName
 do
-	local BANK_LETTERS  = "etaoinshrdlcumwfgypbvkxjqz_ETAOINSHRDLCUMWFGYPBVKXJQZ" -- http://en.wikipedia.org/wiki/Letter_frequencies
-	local BANK_ALPHANUM = "etaoinshrdlcumwfgypbvkxjqz_ETAOINSHRDLCUMWFGYPBVKXJQZ0123456789"
-	local cache         = {}
+	local BANK_LETTERS  = "etaoinshrdlcumwfgypbvkxjqzETAOINSHRDLCUMWFGYPBVKXJQZ" -- http://en.wikipedia.org/wiki/Letter_frequencies
+	local BANK_ALPHANUM = "etaoinshrdlcumwfgypbvkxjqzETAOINSHRDLCUMWFGYPBVKXJQZ0123456789"
+
+	local ILLEGAL_NAMES = {}
+	for name in pairs(KEYWORDS) do  ILLEGAL_NAMES[name] = true  end
+	if HANDLE_ENV             then  ILLEGAL_NAMES._ENV  = true  end
+
+	local cache = {}
 
 	function generateName(nameGeneration)
 		if not cache[nameGeneration] then
@@ -4623,7 +4759,12 @@ do
 				if nameGeneration == 0 then  break  end
 			end
 
-			cache[nameGeneration] = stringChar(tableUnpack(charBytes))
+			local name = stringChar(tableUnpack(charBytes))
+			if ILLEGAL_NAMES[name] then
+				-- We will probably realistically never get here, partially because of the limited amount of locals and upvalues Lua allows.
+				name = name.."_"
+			end
+			cache[nameGeneration] = name
 		end
 
 		return cache[nameGeneration]
@@ -4696,43 +4837,50 @@ local function minify(node, optimize)
 	for _, declIdent in ipairs(allDeclIdents) do
 		local newName
 
-		for nameGeneration = 1, 1/0 do
-			newName         = generateName(nameGeneration)
-			local collision = false
+		if declIdent.name == "_ENV" and HANDLE_ENV then
+			-- There are probably some cases where we can safely rename _ENV,
+			-- but it's likely not worth the effort to detect that.
+			newName = "_ENV"
 
-			for _, watcherIdent in ipairs(declIdentWatchers[declIdent]) do
-				local watcherDeclIdent = watcherIdent.declaration
+		else
+			for nameGeneration = 1, 1/0 do
+				newName         = generateName(nameGeneration)
+				local collision = false
 
-				-- Local watcher.
-				if watcherDeclIdent then
-					if renamed[watcherDeclIdent] and watcherDeclIdent.name == newName then
+				for _, watcherIdent in ipairs(declIdentWatchers[declIdent]) do
+					local watcherDeclIdent = watcherIdent.declaration
+
+					-- Local watcher.
+					if watcherDeclIdent then
+						if renamed[watcherDeclIdent] and watcherDeclIdent.name == newName then
+							collision = true
+							break
+						end
+
+					-- Global watcher.
+					elseif watcherIdent.name == newName then
 						collision = true
 						break
 					end
+				end--for declIdentWatchers
 
-				-- Global watcher.
-				elseif watcherIdent.name == newName then
-					collision = true
+				--[[ :SortBeforeRename
+				if not collision and remoteWatchers[declIdent] then
+					for _, watcherDeclIdent in ipairs(remoteWatchers[declIdent]) do
+						if watcherDeclIdent.name == newName then
+							collision = true
+							break
+						end
+					end
+				end
+				--]]
+
+				if not collision then
+					maxNameGeneration = mathMax(maxNameGeneration, nameGeneration)
 					break
 				end
-			end--for declIdentWatchers
-
-			--[[ :SortBeforeRename
-			if not collision and remoteWatchers[declIdent] then
-				for _, watcherDeclIdent in ipairs(remoteWatchers[declIdent]) do
-					if watcherDeclIdent.name == newName then
-						collision = true
-						break
-					end
-				end
-			end
-			--]]
-
-			if not collision then
-				maxNameGeneration = mathMax(maxNameGeneration, nameGeneration)
-				break
-			end
-		end--for nameGeneration
+			end--for nameGeneration
+		end
 
 		--[[ :SortBeforeRename
 		for _, watcherIdent in ipairs(declIdentWatchers[declIdent]) do
@@ -4793,7 +4941,7 @@ do
 	local writeNode
 	local writeStatements
 
-	-- lastOutput = "alpha"|"alphanum"|""
+	-- lastOutput = "" | "alphanum" | "number" | "-"
 
 	local function isNumberInRange(n, min, max)
 		return n ~= nil and n >= min and n <= max
@@ -4832,14 +4980,14 @@ do
 	end
 
 	-- Returns nil and a message or error.
-	local function writeCommaSeparatedList(buffer, pretty, indent, lastOutput, expressions, writeAttributes)
+	local function writeCommaSeparatedList(buffer, pretty, indent, lastOutput, expressions, writeAttributes, nodeCb)
 		for i, expr in ipairs(expressions) do
 			if i > 1 then
 				lastOutput = writeLua(buffer, ",", "")
 				if pretty then  lastOutput = writeLua(buffer, " ", "")  end
 			end
 
-			local ok;ok, lastOutput = writeNode(buffer, pretty, indent, lastOutput, expr, true)
+			local ok;ok, lastOutput = writeNode(buffer, pretty, indent, lastOutput, expr, true, nodeCb)
 			if not ok then  return nil, lastOutput  end
 
 			if writeAttributes and expr.type == "identifier" and expr.attribute ~= "" then
@@ -4869,16 +5017,19 @@ do
 	end
 
 	-- Returns nil and a message or error.
-	local function writeFunctionParametersAndBody(buffer, pretty, indent, lastOutput, func, explicitParams)
+	local function writeFunctionParametersAndBody(buffer, pretty, indent, lastOutput, func, explicitParams, selfParam, nodeCb)
 		lastOutput = writeLua(buffer, "(", "")
 
-		local ok;ok, lastOutput = writeCommaSeparatedList(buffer, pretty, indent, lastOutput, explicitParams, false)
+		if selfParam and nodeCb then  nodeCb(selfParam, buffer)  end
+
+		local ok;ok, lastOutput = writeCommaSeparatedList(buffer, pretty, indent, lastOutput, explicitParams, false, nodeCb)
 		if not ok then  return nil, lastOutput  end
 
 		lastOutput = writeLua(buffer, ")", "")
+		if nodeCb then  nodeCb(func.body, buffer)  end
 		if pretty then  lastOutput = writeLua(buffer, "\n", "")  end
 
-		local ok;ok, lastOutput = writeStatements(buffer, pretty, indent+1, lastOutput, func.body.statements)
+		local ok;ok, lastOutput = writeStatements(buffer, pretty, indent+1, lastOutput, func.body.statements, nodeCb)
 		if not ok then  return nil, lastOutput  end
 
 		lastOutput = writeIndentationIfPretty(buffer, pretty, indent, lastOutput)
@@ -4888,7 +5039,7 @@ do
 	end
 
 	-- Returns nil and a message or error.
-	function writeStatements(buffer, pretty, indent, lastOutput, statements)
+	function writeStatements(buffer, pretty, indent, lastOutput, statements, nodeCb)
 		local skipNext = false
 
 		for i, statement in ipairs(statements) do
@@ -4900,22 +5051,31 @@ do
 				lastOutput          = writeIndentationIfPretty(buffer, pretty, indent, lastOutput)
 
 				if statementNext and isStatementFunctionDeclaration(statement, statementNext) then
+					local decl       = statement
 					local assignment = statementNext
 					local func       = assignment.values[1]
+
+					if nodeCb then
+						nodeCb(decl,       buffer)
+						nodeCb(assignment, buffer)
+						nodeCb(func,       buffer)
+					end
 
 					lastOutput = writeAlphanum(buffer, pretty, "local function", lastOutput)
 					lastOutput = writeLua(buffer, " ", "")
 
-					local ok;ok, lastOutput = writeNode(buffer, pretty, indent, lastOutput, assignment.targets[1], true)
+					if nodeCb then  nodeCb(decl.names[1], buffer)  end
+
+					local ok;ok, lastOutput = writeNode(buffer, pretty, indent, lastOutput, assignment.targets[1], true, nodeCb)
 					if not ok then  return nil, lastOutput  end
 
-					local ok;ok, lastOutput = writeFunctionParametersAndBody(buffer, pretty, indent, lastOutput, func, func.parameters)
+					local ok;ok, lastOutput = writeFunctionParametersAndBody(buffer, pretty, indent, lastOutput, func, func.parameters, nil, nodeCb)
 					if not ok then  return nil, lastOutput  end
 
 					skipNext = true
 
 				else
-					local ok;ok, lastOutput = writeNode(buffer, pretty, indent, lastOutput, statement, true)
+					local ok;ok, lastOutput = writeNode(buffer, pretty, indent, lastOutput, statement, true, nodeCb)
 					if not ok then  return nil, lastOutput  end
 
 					if statement.type == "call" then
@@ -4930,19 +5090,28 @@ do
 		return true, lastOutput
 	end
 
-	-- Returns nil and a message or error.
-	local function writeLookup(buffer, pretty, indent, lastOutput, lookup, forMethodCall)
-		local objIsLiteral = (lookup.object.type == "literal")
-		if objIsLiteral then  lastOutput = writeLua(buffer, "(", "")  end
+	local function doesExpressionNeedParenthesisIfOnTheLeftSide(expr)
+		local nodeType = expr.type
+		-- Some things, like "binary" or "vararg", are not here because those expressions add their own parentheses.
+		return nodeType == "literal" or nodeType == "table" or nodeType == "function"
+	end
 
-		local ok;ok, lastOutput = writeNode(buffer, pretty, indent, lastOutput, lookup.object, false)
+	-- Returns nil and a message or error.
+	local function writeLookup(buffer, pretty, indent, lastOutput, lookup, forMethodCall, nodeCb)
+		local objNeedParens = doesExpressionNeedParenthesisIfOnTheLeftSide(lookup.object)
+		if objNeedParens then  lastOutput = writeLua(buffer, "(", "")  end
+
+		local ok;ok, lastOutput = writeNode(buffer, pretty, indent, lastOutput, lookup.object, false, nodeCb)
 		if not ok then  return nil, lastOutput  end
 
-		if objIsLiteral then  lastOutput = writeLua(buffer, ")", "")  end
+		if objNeedParens then  lastOutput = writeLua(buffer, ")", "")  end
 
 		if canNodeBeName(lookup.member) then
 			lastOutput = writeLua(buffer, (forMethodCall and ":" or "."), "")
+			if nodeCb               then  nodeCb(lookup.member, buffer)              end
+			if lookup.member.prefix then  tableInsert(buffer, lookup.member.prefix)  end
 			lastOutput = writeAlphanum(buffer, pretty, lookup.member.value, lastOutput)
+			if lookup.member.suffix then  tableInsert(buffer, lookup.member.suffix)  end
 
 		elseif forMethodCall then
 			return nil, "Error: AST: Callee for method call is not a lookup."
@@ -4950,7 +5119,7 @@ do
 		else
 			lastOutput = writeLua(buffer, "[", "")
 
-			local ok;ok, lastOutput = writeNode(buffer, pretty, indent, lastOutput, lookup.member, true)
+			local ok;ok, lastOutput = writeNode(buffer, pretty, indent, lastOutput, lookup.member, true, nodeCb)
 			if not ok then  return nil, lastOutput  end
 
 			lastOutput = writeLua(buffer, "]", "")
@@ -4976,15 +5145,16 @@ do
 	end
 
 	-- Returns nil and a message or error.
-	local function writeBinaryOperatorChain(buffer, pretty, indent, lastOutput, binary)
+	local function writeBinaryOperatorChain(buffer, pretty, indent, lastOutput, binary, nodeCb)
 		local l = binary.left
 		local r = binary.right
 
 		if l.type == "binary" and l.operator == binary.operator then
-			local ok;ok, lastOutput = writeBinaryOperatorChain(buffer, pretty, indent, lastOutput, l)
+			if nodeCb then  nodeCb(l, buffer)  end
+			local ok;ok, lastOutput = writeBinaryOperatorChain(buffer, pretty, indent, lastOutput, l, nodeCb)
 			if not ok then  return nil, lastOutput  end
 		else
-			local ok;ok, lastOutput = writeNode(buffer, pretty, indent, lastOutput, l, false)
+			local ok;ok, lastOutput = writeNode(buffer, pretty, indent, lastOutput, l, false, nodeCb)
 			if not ok then  return nil, lastOutput  end
 		end
 
@@ -4999,21 +5169,25 @@ do
 		if pretty then  lastOutput = writeLua(buffer, " ", "")  end
 
 		if r.type == "binary" and r.operator == binary.operator then
-			local ok;ok, lastOutput = writeBinaryOperatorChain(buffer, pretty, indent, lastOutput, r)
+			if nodeCb then  nodeCb(r, buffer)  end
+			local ok;ok, lastOutput = writeBinaryOperatorChain(buffer, pretty, indent, lastOutput, r, nodeCb)
 			if not ok then  return nil, lastOutput  end
 		else
-			local ok;ok, lastOutput = writeNode(buffer, pretty, indent, lastOutput, r, false)
+			local ok;ok, lastOutput = writeNode(buffer, pretty, indent, lastOutput, r, false, nodeCb)
 			if not ok then  return nil, lastOutput  end
 		end
 
 		return true, lastOutput
 	end
 
-	-- success, lastOutput = writeNode( buffer, pretty, indent, lastOutput, node, maySafelyOmitParens )
-	-- lastOutput          = "" | "alphanum" | "number" | "-"
+	-- success, lastOutput = writeNode( buffer, pretty, indent, lastOutput, node, maySafelyOmitParens, nodeCallback )
 	-- Returns nil and a message or error.
-	function writeNode(buffer, pretty, indent, lastOutput, node, maySafelyOmitParens)
+	function writeNode(buffer, pretty, indent, lastOutput, node, maySafelyOmitParens, nodeCb)
+		if nodeCb             then  nodeCb(node, buffer)  end
+		if node.pretty ~= nil then  pretty = node.pretty  end -- @Incomplete: Do this everywhere.
 		local nodeType = node.type
+
+		if node.prefix then  tableInsert(buffer, node.prefix)  end -- @Incomplete: Do this everywhere.
 
 		-- Expressions:
 
@@ -5049,11 +5223,14 @@ do
 				lastOutput = writeNumber(buffer, pretty, literal.value, lastOutput)
 
 			elseif type(literal.value) == "string" then
-				local R         = isNumberInRange
-				local s         = literal.value
-				local quote     = stringFind(s, '"', 1, true) and not stringFind(s, "'", 1, true) and "'" or '"'
-				local quoteByte = stringByte(quote)
-				local pos       = 1
+				-- @Speed: Cache!
+				local R           = isNumberInRange
+				local s           = literal.value
+				local doubleCount = countString(s, '"', true)
+				local singleCount = countString(s, "'", true)
+				local quote       = singleCount < doubleCount and "'" or '"'
+				local quoteByte   = stringByte(quote)
+				local pos         = 1
 
 				lastOutput = writeLua(buffer, quote, "")
 
@@ -5108,14 +5285,18 @@ do
 					if pretty then  lastOutput = writeLua(buffer, " ", "")  end
 				end
 
-				if not tableField.generatedKey then
+				if tableField.generatedKey then
+					if nodeCb and tableField.key then  nodeCb(tableField.key, buffer)  end
+
+				else
 					if canNodeBeName(tableField.key) then
+						if nodeCb then  nodeCb(tableField.key, buffer)  end
 						lastOutput = writeLua(buffer, tableField.key.value, "alphanum")
 
 					else
 						lastOutput = writeLua(buffer, "[", "")
 
-						local ok;ok, lastOutput = writeNode(buffer, pretty, indent, lastOutput, tableField.key, true)
+						local ok;ok, lastOutput = writeNode(buffer, pretty, indent, lastOutput, tableField.key, true, nodeCb)
 						if not ok then  return nil, lastOutput  end
 
 						lastOutput = writeLua(buffer, "]", "")
@@ -5124,7 +5305,7 @@ do
 					lastOutput = writeLua(buffer, "=", "")
 				end
 
-				local ok;ok, lastOutput = writeNode(buffer, pretty, indent, lastOutput, tableField.value, (not pretty))
+				local ok;ok, lastOutput = writeNode(buffer, pretty, indent, lastOutput, tableField.value, (not pretty), nodeCb)
 				if not ok then  return nil, lastOutput  end
 			end
 
@@ -5132,7 +5313,7 @@ do
 
 		elseif nodeType == "lookup" then
 			local lookup            = node
-			local ok;ok, lastOutput = writeLookup(buffer, pretty, indent, lastOutput, lookup, false)
+			local ok;ok, lastOutput = writeLookup(buffer, pretty, indent, lastOutput, lookup, false, nodeCb)
 			if not ok then  return nil, lastOutput  end
 
 		elseif nodeType == "unary" then
@@ -5149,34 +5330,35 @@ do
 
 			if prettyAndAlphanum then  lastOutput = writeLua(buffer, " ", "")  end
 
-			local ok;ok, lastOutput = writeNode(buffer, pretty, indent, lastOutput, unary.expression, false)
+			local ok;ok, lastOutput = writeNode(buffer, pretty, indent, lastOutput, unary.expression, false, nodeCb)
 			if not ok then  return nil, lastOutput  end
 
 			if prettyAndAlphanum and not maySafelyOmitParens then  lastOutput = writeLua(buffer, ")", "")  end
 
 		elseif nodeType == "binary" then
 			local binary = node
+			local op     = binary.operator
 
 			if not maySafelyOmitParens then  lastOutput = writeLua(buffer, "(", "")  end -- @Polish: Only output parentheses around child unaries/binaries if associativity requires it.
 
-			if binary.operator == ".." or binary.operator == "and" or binary.operator == "or" then
-				local ok;ok, lastOutput = writeBinaryOperatorChain(buffer, pretty, indent, lastOutput, binary)
+			if op == ".." or op == "and" or op == "or" or op == "+" or op == "*" or op == "&" or op == "|" then
+				local ok;ok, lastOutput = writeBinaryOperatorChain(buffer, pretty, indent, lastOutput, binary, nodeCb)
 				if not ok then  return nil, lastOutput  end
 
 			else
-				local ok;ok, lastOutput = writeNode(buffer, pretty, indent, lastOutput, binary.left, false)
+				local ok;ok, lastOutput = writeNode(buffer, pretty, indent, lastOutput, binary.left, false, nodeCb)
 				if not ok then  return nil, lastOutput  end
 
-				local operatorOutput = ((binary.operator == "-" and "-") or (stringFind(binary.operator, "%w") and "alphanum") or (""))
+				local operatorOutput = ((op == "-" and "-") or (stringFind(op, "%w") and "alphanum") or (""))
 
 				if pretty then  lastOutput = writeLua(buffer, " ", "")  end
 
 				if operatorOutput ~= "" then  ensureSpaceIfNotPretty(buffer, pretty, lastOutput, operatorOutput)  end
-				lastOutput = writeLua(buffer, binary.operator, operatorOutput)
+				lastOutput = writeLua(buffer, op, operatorOutput)
 
 				if pretty then  lastOutput = writeLua(buffer, " ", "")  end
 
-				local ok;ok, lastOutput = writeNode(buffer, pretty, indent, lastOutput, binary.right, false)
+				local ok;ok, lastOutput = writeNode(buffer, pretty, indent, lastOutput, binary.right, false, nodeCb)
 				if not ok then  return nil, lastOutput  end
 			end
 
@@ -5194,17 +5376,24 @@ do
 					return nil, "Error: AST: Callee for method call is not a lookup."
 				end
 
-				local ok;ok, lastOutput = writeLookup(buffer, pretty, indent, lastOutput, lookup, true)
+				if nodeCb then  nodeCb(lookup, buffer)  end
+
+				local ok;ok, lastOutput = writeLookup(buffer, pretty, indent, lastOutput, lookup, true, nodeCb)
 				if not ok then  return nil, lastOutput  end
 
 			else
-				local ok;ok, lastOutput = writeNode(buffer, pretty, indent, lastOutput, call.callee, false)
+				local needParens = doesExpressionNeedParenthesisIfOnTheLeftSide(call.callee)
+				if needParens then  lastOutput = writeLua(buffer, "(", "")  end
+
+				local ok;ok, lastOutput = writeNode(buffer, pretty, indent, lastOutput, call.callee, false, nodeCb)
 				if not ok then  return nil, lastOutput  end
+
+				if needParens then  lastOutput = writeLua(buffer, ")", "")  end
 			end
 
 			lastOutput = writeLua(buffer, "(", "")
 
-			local ok;ok, lastOutput = writeCommaSeparatedList(buffer, pretty, indent, lastOutput, call.arguments, false)
+			local ok;ok, lastOutput = writeCommaSeparatedList(buffer, pretty, indent, lastOutput, call.arguments, false, nodeCb)
 			if not ok then  return nil, lastOutput  end
 
 			lastOutput = writeLua(buffer, ")", "")
@@ -5214,7 +5403,7 @@ do
 			local func = node
 			lastOutput = writeAlphanum(buffer, pretty, "function", lastOutput)
 
-			local ok;ok, lastOutput = writeFunctionParametersAndBody(buffer, pretty, indent, lastOutput, func, func.parameters)
+			local ok;ok, lastOutput = writeFunctionParametersAndBody(buffer, pretty, indent, lastOutput, func, func.parameters, nil, nodeCb)
 			if not ok then  return nil, lastOutput  end
 
 		-- Statements:
@@ -5230,7 +5419,7 @@ do
 			if returnNode.values[1] then
 				if pretty then  lastOutput = writeLua(buffer, " ", "")  end
 
-				local ok;ok, lastOutput = writeCommaSeparatedList(buffer, pretty, indent, lastOutput, returnNode.values, false)
+				local ok;ok, lastOutput = writeCommaSeparatedList(buffer, pretty, indent, lastOutput, returnNode.values, false, nodeCb)
 				if not ok then  return nil, lastOutput  end
 			end
 
@@ -5263,7 +5452,7 @@ do
 			lastOutput  = writeAlphanum(buffer, pretty, "do", lastOutput)
 			if pretty then  lastOutput = writeLua(buffer, "\n", "")  end
 
-			local ok;ok, lastOutput = writeStatements(buffer, pretty, indent+1, lastOutput, block.statements)
+			local ok;ok, lastOutput = writeStatements(buffer, pretty, indent+1, lastOutput, block.statements, nodeCb)
 			if not ok then  return nil, lastOutput  end
 
 			lastOutput = writeIndentationIfPretty(buffer, pretty, indent, lastOutput)
@@ -5276,7 +5465,7 @@ do
 
 			if not decl.names[1] then  return nil, "Error: AST: Missing name(s) for declaration."  end
 
-			local ok;ok, lastOutput = writeCommaSeparatedList(buffer, pretty, indent, lastOutput, decl.names, true)
+			local ok;ok, lastOutput = writeCommaSeparatedList(buffer, pretty, indent, lastOutput, decl.names, true, nodeCb)
 			if not ok then  return nil, lastOutput  end
 
 			if decl.values[1] then
@@ -5284,7 +5473,7 @@ do
 				lastOutput = writeLua(buffer, "=", "")
 				if pretty then  lastOutput = writeLua(buffer, " ", "")  end
 
-				local ok;ok, lastOutput = writeCommaSeparatedList(buffer, pretty, indent, lastOutput, decl.values, false)
+				local ok;ok, lastOutput = writeCommaSeparatedList(buffer, pretty, indent, lastOutput, decl.values, false, nodeCb)
 				if not ok then  return nil, lastOutput  end
 			end
 
@@ -5297,6 +5486,8 @@ do
 
 			if isAssignmentFunctionAssignment(assignment) then
 				local func = assignment.values[1]
+				if nodeCb then  nodeCb(func, buffer)  end
+
 				lastOutput = writeAlphanum(buffer, pretty, "function", lastOutput)
 				lastOutput = writeLua(buffer, " ", "")
 
@@ -5308,28 +5499,34 @@ do
 				)
 
 				if implicitSelfParam then
-					local ok;ok, lastOutput = writeLookup(buffer, pretty, indent, lastOutput, assignment.targets[1], true)
+					if nodeCb then  nodeCb(assignment.targets[1], buffer)  end
+					local ok;ok, lastOutput = writeLookup(buffer, pretty, indent, lastOutput, assignment.targets[1], true, nodeCb)
 					if not ok then  return nil, lastOutput  end
 				else
-					local ok;ok, lastOutput = writeNode(buffer, pretty, indent, lastOutput, assignment.targets[1], false)
+					local ok;ok, lastOutput = writeNode(buffer, pretty, indent, lastOutput, assignment.targets[1], false, nodeCb)
 					if not ok then  return nil, lastOutput  end
 				end
 
+				local selfParam      = nil
 				local explicitParams = func.parameters
-				if implicitSelfParam then  explicitParams = {tableUnpack(explicitParams, 2)}  end
 
-				local ok;ok, lastOutput = writeFunctionParametersAndBody(buffer, pretty, indent, lastOutput, func, explicitParams)
+				if implicitSelfParam then
+					selfParam      = explicitParams[1]
+					explicitParams = {tableUnpack(explicitParams, 2)}
+				end
+
+				local ok;ok, lastOutput = writeFunctionParametersAndBody(buffer, pretty, indent, lastOutput, func, explicitParams, selfParam, nodeCb)
 				if not ok then  return nil, lastOutput  end
 
 			else
-				local ok;ok, lastOutput = writeCommaSeparatedList(buffer, pretty, indent, lastOutput, assignment.targets, false)
+				local ok;ok, lastOutput = writeCommaSeparatedList(buffer, pretty, indent, lastOutput, assignment.targets, false, nodeCb)
 				if not ok then  return nil, lastOutput  end
 
 				if pretty then  lastOutput = writeLua(buffer, " ", "")  end
 				lastOutput = writeLua(buffer, "=", "")
 				if pretty then  lastOutput = writeLua(buffer, " ", "")  end
 
-				local ok;ok, lastOutput = writeCommaSeparatedList(buffer, pretty, indent, lastOutput, assignment.values, false)
+				local ok;ok, lastOutput = writeCommaSeparatedList(buffer, pretty, indent, lastOutput, assignment.values, false, nodeCb)
 				if not ok then  return nil, lastOutput  end
 
 				lastOutput = writeLua(buffer, ";", "")
@@ -5340,41 +5537,47 @@ do
 			lastOutput   = writeAlphanum(buffer, pretty, "if", lastOutput)
 			if pretty then  lastOutput = writeLua(buffer, " ", "")  end
 
-			local ok;ok, lastOutput = writeNode(buffer, pretty, indent, lastOutput, ifNode.condition, true)
+			local ok;ok, lastOutput = writeNode(buffer, pretty, indent, lastOutput, ifNode.condition, true, nodeCb)
 			if not ok then  return nil, lastOutput  end
 
 			if pretty then  lastOutput = writeLua(buffer, " ", "")  end
 			lastOutput = writeAlphanum(buffer, pretty, "then", lastOutput)
+			if nodeCb then  nodeCb(ifNode.bodyTrue, buffer)  end
 			if pretty then  lastOutput = writeLua(buffer, "\n", "")  end
 
-			local ok;ok, lastOutput = writeStatements(buffer, pretty, indent+1, lastOutput, ifNode.bodyTrue.statements)
+			local ok;ok, lastOutput = writeStatements(buffer, pretty, indent+1, lastOutput, ifNode.bodyTrue.statements, nodeCb)
 			if not ok then  return nil, lastOutput  end
 
 			while ifNode.bodyFalse do
 				-- Automatically detect what looks like 'elseif'.
 				if #ifNode.bodyFalse.statements == 1 and ifNode.bodyFalse.statements[1].type == "if" then
-					ifNode = ifNode.bodyFalse.statements[1]
-
 					lastOutput = writeIndentationIfPretty(buffer, pretty, indent, lastOutput)
+
+					if nodeCb then  nodeCb(ifNode.bodyFalse, buffer)  end
+					ifNode = ifNode.bodyFalse.statements[1]
+					if nodeCb then  nodeCb(ifNode, buffer)  end
+
 					lastOutput = writeAlphanum(buffer, pretty, "elseif", lastOutput)
 					if pretty then  lastOutput = writeLua(buffer, " ", "")  end
 
-					local ok;ok, lastOutput = writeNode(buffer, pretty, indent, lastOutput, ifNode.condition, true)
+					local ok;ok, lastOutput = writeNode(buffer, pretty, indent, lastOutput, ifNode.condition, true, nodeCb)
 					if not ok then  return nil, lastOutput  end
 
 					if pretty then  lastOutput = writeLua(buffer, " ", "")  end
 					lastOutput = writeAlphanum(buffer, pretty, "then", lastOutput)
+					if nodeCb then  nodeCb(ifNode.bodyTrue, buffer)  end
 					if pretty then  lastOutput = writeLua(buffer, "\n", "")  end
 
-					local ok;ok, lastOutput = writeStatements(buffer, pretty, indent+1, lastOutput, ifNode.bodyTrue.statements)
+					local ok;ok, lastOutput = writeStatements(buffer, pretty, indent+1, lastOutput, ifNode.bodyTrue.statements, nodeCb)
 					if not ok then  return nil, lastOutput  end
 
 				else
 					lastOutput = writeIndentationIfPretty(buffer, pretty, indent, lastOutput)
 					lastOutput = writeAlphanum(buffer, pretty, "else", lastOutput)
+					if nodeCb then  nodeCb(ifNode.bodyFalse, buffer)  end
 					if pretty then  lastOutput = writeLua(buffer, "\n", "")  end
 
-					local ok;ok, lastOutput = writeStatements(buffer, pretty, indent+1, lastOutput, ifNode.bodyFalse.statements)
+					local ok;ok, lastOutput = writeStatements(buffer, pretty, indent+1, lastOutput, ifNode.bodyFalse.statements, nodeCb)
 					if not ok then  return nil, lastOutput  end
 
 					break
@@ -5389,14 +5592,15 @@ do
 			lastOutput      = writeAlphanum(buffer, pretty, "while", lastOutput)
 			if pretty then  lastOutput = writeLua(buffer, " ", "")  end
 
-			local ok;ok, lastOutput = writeNode(buffer, pretty, indent, lastOutput, whileLoop.condition, true)
+			local ok;ok, lastOutput = writeNode(buffer, pretty, indent, lastOutput, whileLoop.condition, true, nodeCb)
 			if not ok then  return nil, lastOutput  end
 
 			if pretty then  lastOutput = writeLua(buffer, " ", "")  end
 			lastOutput = writeAlphanum(buffer, pretty, "do", lastOutput)
+			if nodeCb then  nodeCb(whileLoop.body, buffer)  end
 			if pretty then  lastOutput = writeLua(buffer, "\n", "")  end
 
-			local ok;ok, lastOutput = writeStatements(buffer, pretty, indent+1, lastOutput, whileLoop.body.statements)
+			local ok;ok, lastOutput = writeStatements(buffer, pretty, indent+1, lastOutput, whileLoop.body.statements, nodeCb)
 			if not ok then  return nil, lastOutput  end
 
 			lastOutput = writeIndentationIfPretty(buffer, pretty, indent, lastOutput)
@@ -5405,16 +5609,17 @@ do
 		elseif nodeType == "repeat" then
 			local repeatLoop = node
 			lastOutput       = writeAlphanum(buffer, pretty, "repeat", lastOutput)
+			if nodeCb then  nodeCb(repeatLoop.body, buffer)  end
 			if pretty then  lastOutput = writeLua(buffer, "\n", "")  end
 
-			local ok;ok, lastOutput = writeStatements(buffer, pretty, indent+1, lastOutput, repeatLoop.body.statements)
+			local ok;ok, lastOutput = writeStatements(buffer, pretty, indent+1, lastOutput, repeatLoop.body.statements, nodeCb)
 			if not ok then  return nil, lastOutput  end
 
 			lastOutput = writeIndentationIfPretty(buffer, pretty, indent, lastOutput)
 			lastOutput = writeAlphanum(buffer, pretty, "until", lastOutput)
 			if pretty then  lastOutput = writeLua(buffer, " ", "")  end
 
-			local ok;ok, lastOutput = writeNode(buffer, pretty, indent, lastOutput, repeatLoop.condition, true)
+			local ok;ok, lastOutput = writeNode(buffer, pretty, indent, lastOutput, repeatLoop.condition, true, nodeCb)
 			if not ok then  return nil, lastOutput  end
 
 		elseif nodeType == "for" then
@@ -5425,7 +5630,7 @@ do
 			lastOutput = writeAlphanum(buffer, pretty, "for", lastOutput)
 			lastOutput = writeLua(buffer, " ", "")
 
-			local ok;ok, lastOutput = writeCommaSeparatedList(buffer, pretty, indent, lastOutput, forLoop.names, false)
+			local ok;ok, lastOutput = writeCommaSeparatedList(buffer, pretty, indent, lastOutput, forLoop.names, false, nodeCb)
 			if not ok then  return nil, lastOutput  end
 
 			if pretty then  lastOutput = writeLua(buffer, " ", "")  end
@@ -5440,14 +5645,15 @@ do
 
 			if pretty then  lastOutput = writeLua(buffer, " ", "")  end
 
-			local ok;ok, lastOutput = writeCommaSeparatedList(buffer, pretty, indent, lastOutput, forLoop.values, false)
+			local ok;ok, lastOutput = writeCommaSeparatedList(buffer, pretty, indent, lastOutput, forLoop.values, false, nodeCb)
 			if not ok then  return nil, lastOutput  end
 
 			if pretty then  lastOutput = writeLua(buffer, " ", "")  end
 			lastOutput = writeAlphanum(buffer, pretty, "do", lastOutput)
+			if nodeCb then  nodeCb(forLoop.body, buffer)  end
 			if pretty then  lastOutput = writeLua(buffer, "\n", "")  end
 
-			local ok;ok, lastOutput = writeStatements(buffer, pretty, indent+1, lastOutput, forLoop.body.statements)
+			local ok;ok, lastOutput = writeStatements(buffer, pretty, indent+1, lastOutput, forLoop.body.statements, nodeCb)
 			if not ok then  return nil, lastOutput  end
 
 			lastOutput = writeIndentationIfPretty(buffer, pretty, indent, lastOutput)
@@ -5456,21 +5662,27 @@ do
 		else
 			return false, F("Error: Unknown node type '%s'.", tostring(nodeType))
 		end
+
+		if node.suffix then  tableInsert(buffer, node.suffix)  end -- @Incomplete: Do this everywhere.
+
 		return true, lastOutput
 	end
 
-	-- lua = toLua( astNode [, prettyOuput=false ] )
+	-- luaString    = toLua( astNode [, prettyOuput=false, nodeCallback ] )
+	-- nodeCallback = function( node, outputBuffer )
 	-- Returns nil and a message on error.
-	function toLua(node, pretty)
+	function toLua(node, pretty, nodeCb)
 		assertArg1("toLua", 1, node, "table")
 
 		local buffer = {}
 
 		local ok, err
 		if node.type == "block" then -- @Robustness: This exception isn't great. Should there be a file scope node?
-			ok, err = writeStatements(buffer, pretty, 0, "", node.statements)
+			if nodeCb             then  nodeCb(node, buffer)  end
+			if node.pretty ~= nil then  pretty = node.pretty  end
+			ok, err = writeStatements(buffer, pretty, 0, "", node.statements, nodeCb)
 		else
-			ok, err = writeNode(buffer, pretty, 0, "", node, true)
+			ok, err = writeNode(buffer, pretty, 0, "", node, true, nodeCb)
 		end
 
 		if ok then
@@ -5531,6 +5743,8 @@ end
 
 
 function formatNumber(n)
+	-- @Speed: Cache!
+
 	-- 64-bit int in LuaJIT (is what we assume, anyway).
 	if jit and type(n) == "cdata" then
 		local nStr = tostring(n)
@@ -5745,6 +5959,365 @@ end
 
 
 
+do
+	local function addValidationError(path, errors, s, ...)
+		tableInsert(errors, F("%s: "..s, tableConcat(path, " > "), ...))
+	end
+
+	local function validateNode(node, path, errors, prefix)
+		local nodeType = node.type
+
+		tableInsert(path,
+			(prefix and prefix.."."..nodeType or nodeType)
+			.. (parser.printIds and "#"..node.id or "")
+		)
+
+		if nodeType == "identifier" then
+			local ident = node
+			if not stringFind(ident.name, "^[%a_][%w_]*$") then
+				addValidationError(path, errors, "Invalid identifier name: Bad format: %s", ident.name)
+			elseif KEYWORDS[ident.name] then
+				addValidationError(path, errors, "Invalid identifier name: Name is a keyword: %s", ident.name)
+			end
+			if not (ident.attribute == "" or ident.attribute == "close" or ident.attribute == "const") then
+				addValidationError(path, errors, "Invalid identifier attribute '%s'.", ident.attribute)
+			end
+
+		elseif nodeType == "vararg" then
+			-- void
+
+		elseif nodeType == "literal" then
+			local literal = node
+			local vType   = type(literal.value)
+			if not (vType == "number" or vType == "string" or vType == "boolean" or vType == "nil") then
+				addValidationError(path, errors, "Invalid literal value type '%s'.", vType)
+			end
+
+		elseif nodeType == "break" then
+			-- void
+
+		elseif nodeType == "label" then
+			local label = node
+			if not stringFind(label.name, "^[%a_][%w_]*$") then
+				addValidationError(path, errors, "Invalid label name: Bad format: %s", label.name)
+			elseif KEYWORDS[label.name] then
+				addValidationError(path, errors, "Invalid label name: Name is a keyword: %s", label.name)
+			end
+
+		elseif nodeType == "goto" then
+			local gotoNode = node
+			if not stringFind(gotoNode.name, "^[%a_][%w_]*$") then
+				addValidationError(path, errors, "Invalid label name: Bad format: %s", gotoNode.name)
+			elseif KEYWORDS[gotoNode.name] then
+				addValidationError(path, errors, "Invalid label name: Name is a keyword: %s", gotoNode.name)
+			end
+
+		elseif nodeType == "lookup" then
+			-- @Incomplete: Should we detect nil literal objects? :DetectRuntimeErrors
+			local lookup = node
+			if not lookup.object then
+				addValidationError(path, errors, "Missing 'object' field.")
+			elseif not EXPRESSION_NODES[lookup.object.type] then
+				addValidationError(path, errors, "The object is not an expression. (It is '%s'.)", lookup.object.type)
+			else
+				validateNode(lookup.object, path, errors, "object")
+			end
+			if not lookup.member then
+				addValidationError(path, errors, "Missing 'member' field.")
+			elseif not EXPRESSION_NODES[lookup.member.type] then
+				addValidationError(path, errors, "The member is not an expression. (It is '%s'.)", lookup.member.type)
+			else
+				validateNode(lookup.member, path, errors, "member")
+			end
+
+		elseif nodeType == "unary" then
+			local unary = node
+			if not OPERATORS_UNARY[unary.operator] then
+				addValidationError(path, errors, "Invalid unary operator '%s'.", unary.operator)
+			end
+			if not unary.expression then
+				addValidationError(path, errors, "Missing 'expression' field.")
+			elseif not EXPRESSION_NODES[unary.expression.type] then
+				addValidationError(path, errors, "The 'expression' field does not contain an expression. (It is '%s'.)", unary.expression.type)
+			else
+				validateNode(unary.expression, path, errors, nil)
+			end
+
+		elseif nodeType == "binary" then
+			local binary = node
+			if not OPERATORS_BINARY[binary.operator] then
+				addValidationError(path, errors, "Invalid binary operator '%s'.", binary.operator)
+			end
+			if not binary.left then
+				addValidationError(path, errors, "Missing 'left' field.")
+			elseif not EXPRESSION_NODES[binary.left.type] then
+				addValidationError(path, errors, "The left side is not an expression. (It is '%s'.)", binary.left.type)
+			else
+				validateNode(binary.left, path, errors, "left")
+			end
+			if not binary.right then
+				addValidationError(path, errors, "Missing 'right' field.")
+			elseif not EXPRESSION_NODES[binary.right.type] then
+				addValidationError(path, errors, "The right side is not an expression. (It is '%s'.)", binary.right.type)
+			else
+				validateNode(binary.right, path, errors, "right")
+			end
+
+		elseif nodeType == "call" then
+			local call = node
+			if not call.callee then
+				addValidationError(path, errors, "Missing 'callee' field.")
+			elseif not EXPRESSION_NODES[call.callee.type] then
+				addValidationError(path, errors, "Callee is not an expression. (It is '%s'.)", call.callee.type)
+			-- elseif call.callee.type == "literal" or call.callee.type == "table" then -- @Incomplete: Do this kind of check? Or maybe we should stick to strictly validating the AST even if the resulting Lua code would raise a runtime error. :DetectRuntimeErrors
+			-- 	addValidationError(path, errors, "Callee is uncallable.")
+			elseif call.method and not (
+				call.callee.type == "lookup"
+				and call.callee.member
+				and call.callee.member.type == "literal"
+				and type(call.callee.member.value) == "string"
+				and stringFind(call.callee.member.value, "^[%a_][%w_]*$")
+				and not KEYWORDS[call.callee.member.value]
+			) then
+				addValidationError(path, errors, "Callee is unsuitable for method call.")
+			else
+				validateNode(call.callee, path, errors, "callee")
+			end
+			for i, expr in ipairs(call.arguments) do
+				if not EXPRESSION_NODES[expr.type] then
+					addValidationError(path, errors, "Argument %d is not an expression. (It is '%s')", i, expr.type)
+				else
+					validateNode(expr, path, errors, "arg"..i)
+				end
+			end
+
+		elseif nodeType == "function" then
+			local func = node
+			for i, ident in ipairs(func.parameters) do
+				if not (ident.type == "identifier" or (ident.type == "vararg" and i == #func.parameters)) then
+					addValidationError(path, errors, "Parameter %d is not an identifier%s. (It is '%s')", i, (i == #func.parameters and " or vararg" or ""), ident.type)
+				else
+					validateNode(ident, path, errors, "param"..i)
+				end
+			end
+			if not func.body then
+				addValidationError(path, errors, "Missing 'body' field.")
+			elseif func.body.type ~= "block" then
+				addValidationError(path, errors, "Body is not a block.")
+			else
+				validateNode(func.body, path, errors, "body")
+			end
+
+		elseif nodeType == "return" then
+			local returnNode = node
+			for i, expr in ipairs(returnNode.values) do
+				if not EXPRESSION_NODES[expr.type] then
+					addValidationError(path, errors, "Value %d is not an expression. (It is '%s')", i, expr.type)
+				else
+					validateNode(expr, path, errors, i)
+				end
+			end
+
+		elseif nodeType == "block" then
+			local block = node
+			for i, statement in ipairs(block.statements) do
+				if not STATEMENT_NODES[statement.type] then
+					addValidationError(path, errors, "Child node %d is not a statement. (It is '%s'.)", i, statement.type)
+				else
+					validateNode(statement, path, errors, i)
+				end
+			end
+
+		elseif nodeType == "declaration" then
+			local decl = node
+			if not decl.names[1] then
+				addValidationError(path, errors, "Missing name(s).")
+			end
+			for i, ident in ipairs(decl.names) do
+				if ident.type ~= "identifier" then
+					addValidationError(path, errors, "Name %d is not an identifier. (It is '%s')", i, ident.type)
+				else
+					validateNode(ident, path, errors, "name"..i)
+				end
+			end
+			for i, expr in ipairs(decl.values) do
+				if not EXPRESSION_NODES[expr.type] then
+					addValidationError(path, errors, "Value %d is not an expression. (It is '%s')", i, expr.type)
+				else
+					validateNode(expr, path, errors, "value"..i)
+				end
+			end
+
+		elseif nodeType == "assignment" then
+			local assignment = node
+			if not assignment.targets[1] then
+				addValidationError(path, errors, "Missing target expression(s).")
+			end
+			for i, expr in ipairs(assignment.targets) do
+				if not (expr.type == "identifier" or expr.type == "lookup") then
+					addValidationError(path, errors, "Target %d is not an identifier or lookup. (It is '%s')", i, expr.type)
+				else
+					validateNode(expr, path, errors, "target"..i)
+				end
+			end
+			if not assignment.values[1] then
+				addValidationError(path, errors, "Missing value(s).")
+			end
+			for i, expr in ipairs(assignment.values) do
+				if not EXPRESSION_NODES[expr.type] then
+					addValidationError(path, errors, "Value %d is not an expression. (It is '%s')", i, expr.type)
+				else
+					validateNode(expr, path, errors, "value"..i)
+				end
+			end
+
+		elseif nodeType == "if" then
+			local ifNode = node
+			if not ifNode.condition then
+				addValidationError(path, errors, "Missing 'condition' field.")
+			elseif not EXPRESSION_NODES[ifNode.condition.type] then
+				addValidationError(path, errors, "The condition is not an expression. (It is '%s'.)", ifNode.condition.type)
+			else
+				validateNode(ifNode.condition, path, errors, "condition")
+			end
+			if not ifNode.bodyTrue then
+				addValidationError(path, errors, "Missing 'bodyTrue' field.")
+			elseif ifNode.bodyTrue.type ~= "block" then
+				addValidationError(path, errors, "Body for true branch is not a block.")
+			else
+				validateNode(ifNode.bodyTrue, path, errors, "true")
+			end
+			if not ifNode.bodyFalse then
+				-- void
+			elseif ifNode.bodyFalse.type ~= "block" then
+				addValidationError(path, errors, "Body for false branch is not a block.")
+			else
+				validateNode(ifNode.bodyFalse, path, errors, "false")
+			end
+
+		elseif nodeType == "while" then
+			local whileLoop = node
+			if not whileLoop.condition then
+				addValidationError(path, errors, "Missing 'condition' field.")
+			elseif not EXPRESSION_NODES[whileLoop.condition.type] then
+				addValidationError(path, errors, "The condition is not an expression. (It is '%s'.)", whileLoop.condition.type)
+			else
+				validateNode(whileLoop.condition, path, errors, "condition")
+			end
+			if not whileLoop.body then
+				addValidationError(path, errors, "Missing 'body' field.")
+			elseif whileLoop.body.type ~= "block" then
+				addValidationError(path, errors, "Body is not a block.")
+			else
+				validateNode(whileLoop.body, path, errors, "true")
+			end
+
+		elseif nodeType == "repeat" then
+			local repeatLoop = node
+			if not repeatLoop.body then
+				addValidationError(path, errors, "Missing 'body' field.")
+			elseif repeatLoop.body.type ~= "block" then
+				addValidationError(path, errors, "Body is not a block.")
+			else
+				validateNode(repeatLoop.body, path, errors, "true")
+			end
+			if not repeatLoop.condition then
+				addValidationError(path, errors, "Missing 'condition' field.")
+			elseif not EXPRESSION_NODES[repeatLoop.condition.type] then
+				addValidationError(path, errors, "The condition is not an expression. (It is '%s'.)", repeatLoop.condition.type)
+			else
+				validateNode(repeatLoop.condition, path, errors, "condition")
+			end
+
+		elseif nodeType == "for" then
+			local forLoop = node
+			if not (forLoop.kind == "numeric" or forLoop.kind == "generic") then
+				addValidationError(path, errors, "Invalid for loop kind '%s'.", forLoop.kind)
+			end
+			if not forLoop.names[1] then
+				addValidationError(path, errors, "Missing name(s).")
+			elseif forLoop.kind == "numeric" and forLoop.names[2] then
+				addValidationError(path, errors, "Too many names for numeric loop. (Got %d)", #forLoop.names)
+			end
+			for i, ident in ipairs(forLoop.names) do
+				if ident.type ~= "identifier" then
+					addValidationError(path, errors, "Name %d is not an identifier. (It is '%s')", i, ident.type)
+				else
+					validateNode(ident, path, errors, "name"..i)
+				end
+			end
+			if not forLoop.values[1] then
+				addValidationError(path, errors, "Missing value(s).")
+			elseif forLoop.kind == "numeric" and not forLoop.values[2] then
+				addValidationError(path, errors, "Too few values for numeric loop. (Got %d)", #forLoop.values)
+			elseif forLoop.kind == "numeric" and forLoop.values[4] then
+				addValidationError(path, errors, "Too many values for numeric loop. (Got %d)", #forLoop.values)
+			end
+			for i, expr in ipairs(forLoop.values) do
+				if not EXPRESSION_NODES[expr.type] then
+					addValidationError(path, errors, "Value %d is not an expression. (It is '%s')", i, expr.type)
+				else
+					validateNode(expr, path, errors, "value"..i)
+				end
+			end
+			if not forLoop.body then
+				addValidationError(path, errors, "Missing 'body' field.")
+			elseif forLoop.body.type ~= "block" then
+				addValidationError(path, errors, "Body is not a block.")
+			else
+				validateNode(forLoop.body, path, errors, "body")
+			end
+
+		elseif nodeType == "table" then
+			local tableNode = node
+			for i, tableField in ipairs(tableNode.fields) do
+				-- @Incomplete: Should we detect nil literal keys? :DetectRuntimeErrors
+				if not tableField.key then
+					if not tableField.generatedKey then
+						addValidationError(path, errors, "Missing 'key' field for table field %d.", i)
+					end
+				elseif not EXPRESSION_NODES[tableField.key.type] then
+					addValidationError(path, errors, "The key for table field %d is not an expression. (It is '%s'.)", i, tableField.key.type)
+				elseif tableField.generatedKey and tableField.key.type ~= "literal" then
+					addValidationError(path, errors, "The generated key for table field %d is not a numeral. (It is '%s'.)", i, tableField.key.type)
+				elseif tableField.generatedKey and type(tableField.key.value) ~= "number" then
+					addValidationError(path, errors, "The generated key for table field %d is not a number. (It's a '%s' literal.)", i, type(tableField.key.value))
+				else
+					validateNode(tableField.key, path, errors, "key")
+				end
+				if not tableField.value then
+					addValidationError(path, errors, "Missing 'value' field for table field %d.", i)
+				elseif not EXPRESSION_NODES[tableField.value.type] then
+					addValidationError(path, errors, "The value for table field %d is not an expression. (It is '%s'.)", i, tableField.value.type)
+				else
+					validateNode(tableField.value, path, errors, "value")
+				end
+			end
+
+		else
+			errorf("Invalid node type '%s'.", tostring(nodeType)) -- We don't call addValidationError() for this - it's just an assertion.
+		end
+
+		path[#path] = nil
+	end
+
+	-- isValid, errors = validateTree( astNode )
+	function validateTree(node)
+		local path   = {}
+		local errors = {}
+
+		validateNode(node, path, errors, nil)
+
+		if errors[1] then
+			return false, tableConcat(errors, "\n")
+		else
+			return true
+		end
+	end
+end
+
+
+
 parser = {
 	-- Constants.
 	VERSION             = PARSER_VERSION,
@@ -5761,15 +6334,19 @@ parser = {
 	concatTokens        = concatTokens,
 
 	parse               = parse,
+	parseExpression     = parseExpression,
 	parseFile           = parseFile,
 
 	newNode             = newNode,
+	newNodeFast         = newNodeFast,
 	cloneNode           = cloneNode,
 	cloneTree           = cloneTree,
 	getChild            = getChild,
 	setChild            = setChild,
 	addChild            = addChild,
 	removeChild         = removeChild,
+
+	validateTree        = validateTree,
 
 	traverseTree        = traverseTree,
 	traverseTreeReverse = traverseTreeReverse,

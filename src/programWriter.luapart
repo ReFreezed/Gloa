@@ -9,12 +9,12 @@
 --=
 --==============================================================
 
+	createLuaOutput
 	doesTypeHaveAnyDefaultValue
 	formatInfoComment
-	shouldOperationHaveSurroundingParentheses
 	unicodeToLuaIdentifier
 	validateForeignSource
-	writeProgram, write*
+	writeProgram, writeLuaPreloads, writeCompilerSymbols, writeForeignImports, writeConstantObjectsAndForwardDeclarations, writeTopScopeDeclarations
 
 ----------------------------------------------------------------
 
@@ -33,6 +33,7 @@
 
 	@Incomplete:
 	- Handle the limited amount of locals Lua allows (200).
+	- Handle the limited amount of upvalues Lua allows (200?).
 
 --============================================================]]
 !recordLineNumber(@file, @line)
@@ -160,7 +161,15 @@ local COMPILER_SYMBOL_PAIRS = {
 		end)()
 	`,
 }
-local COMPILER_SYMBOL_COUNT = #COMPILER_SYMBOL_PAIRS/2
+local COMPILER_SYMBOL_COUNT = #COMPILER_SYMBOL_PAIRS / 2
+
+local function INSERT_TABLE_FIELD(luaTableFieldsCode, keyLiteralCode, valueCode)
+	if keyLiteralCode ~= "nil" then
+		return F("table.insert(%s, {key=%s, value=%s})", luaTableFieldsCode, LUA_EXPRESSION(keyLiteralCode), valueCode)
+	else
+		return F("table.insert(%s, {generatedKey=true, value=%s})", luaTableFieldsCode, valueCode)
+	end
+end
 )
 
 local foreignApiCompilerSymbols = {
@@ -259,7 +268,7 @@ end
 local LUA_KEYWORDS = !(Set{"and","break","do","else","elseif","end","false","for","function","goto","if","in","local","nil","not","or","repeat","return","then","true","until","while"})
 
 _G.!struct"WriterState"{
-	{`file`,              nil}, -- Real or virtual file.
+	{`luaMainChunkBody`,  nil}, -- LuaAstBlock
 	{`outputRuntime`,     false},
 
 	{`foreignN`,          0},
@@ -269,12 +278,10 @@ _G.!struct"WriterState"{
 	{`loopDepth`,         0},
 	{`loopStack`,         {}},  -- [](AstFor|AstWhile)  Only used for loops with named jumps inside.
 	{`continueDepth`,     0},
-	{`skipOneJumpCheck`,  false},
 	{`deferStack`,        {}},  -- []AstDefer
 	{`loopDeferIndices`,  {}},
 	{`argumentN`,         1},
 
-	{`currentOutputLine`, 1},
 	{`lineMappingFiles`,  {}},
 	{`lineMappingLines`,  {}},
 
@@ -283,30 +290,12 @@ _G.!struct"WriterState"{
 
 
 
-local function addLineMapping(state, writer, sourceNode)
-	local ln = writer.currentOutputLine
-	if (writer.lineMappingLines[ln] or 0) > 0 then  return  end
-	writer.lineMappingFiles[ln] = sourceNode.source.path
-	writer.lineMappingLines[ln] = sourceNode.line
-end
--- addLineMappingDummy( state, writer [, path ] )
-local function addLineMappingDummy(state, writer, path)
-	local ln = writer.currentOutputLine
-	if writer.lineMappingLines[ln] then  return  end
-	writer.lineMappingFiles[ln] = path or state.pathToFirstFile
-	writer.lineMappingLines[ln] = 0
-end
+local writeBlock, writeExpression, writeFunction, writeDefaultValueForType, writeConstantValueOrReference
 
-local function writeEol(state, writer)
-	writer.file:write("\n")
-	writer.currentOutputLine = writer.currentOutputLine+1
-end
-
-function _G.writeIdentifierName(state, writer, ident)
+-- writtenName = writeIdentifierName( state, writer, identifier ) -- @Cleanup: Return a LuaIdentifier instead of the name.
+local function writeIdentifierName(state, writer, ident)
 	local decl = ident.declaration
 	local name = decl.topScopeName
-
-	addLineMapping(state, writer, ident)
 
 	if name == "" then  name = decl.localName  end
 
@@ -314,116 +303,88 @@ function _G.writeIdentifierName(state, writer, ident)
 		nodeError(state, ident, "ProgramWriter", "Internal compiler error: Missing name to write for '%s'.", ident.name)
 	end
 
-	writer.file:write(name)
+	return name
 end
 
-local serializedStringCache = {}
+-- luaBinary = writeBinaryOperatorChain( state, writer, nextLocalN, localsStack, left:AstNode|string, right:AstNode|string, binaryOperation, sourceNode )
+local function writeBinaryOperatorChain(state, writer, nextLocalN, localsStack, left, right, binOp, sourceNode)
+	local luaBinary      = luaParser.newNodeFast("binary", binOp)
+	luaBinary.sourceNode = sourceNode
 
-function _G.writeStringLiteral(writer, s)
-	local lua = serializedStringCache[s] or storeInCache(serializedStringCache, s, F("%q", s):gsub("\\\n", "\\n"))
-	writer.file:write(lua)
-end
-
--- writeBinaryOperatorChain( state, writer, indent, nextLocalN, localsStack, left:AstNode|string, right:AstNode|string, binaryOperation )
-function _G.writeBinaryOperatorChain(state, writer, indent, nextLocalN, localsStack, left, right, binOp)
 	if type(left) == "string" then
-		writer.file:write(left)
+		luaBinary.left            = assert(luaParser.parseExpression(left))
+		luaBinary.left.sourceNode = sourceNode
 	elseif left.nodeType == !(AST_BINARY) and left.operation == binOp then
-		writeBinaryOperatorChain(state, writer, indent, nextLocalN, localsStack, left.left, left.right, binOp)
+		luaBinary.left = writeBinaryOperatorChain(state, writer, nextLocalN, localsStack, left.left, left.right, binOp, left)
 	else
-		writeExpression(state, writer, indent, nextLocalN, localsStack, left)
+		luaBinary.left = writeExpression(state, writer, nextLocalN, localsStack, left)
 	end
-
-	writer.file:write(" ", binOp, " ")
 
 	if type(right) == "string" then
-		writer.file:write(right)
+		luaBinary.right            = assert(luaParser.parseExpression(right))
+		luaBinary.right.sourceNode = sourceNode
 	elseif right.nodeType == !(AST_BINARY) and right.operation == binOp then
-		writeBinaryOperatorChain(state, writer, indent, nextLocalN, localsStack, right.left, right.right, binOp)
+		luaBinary.right = writeBinaryOperatorChain(state, writer, nextLocalN, localsStack, right.left, right.right, binOp, right)
 	else
-		writeExpression(state, writer, indent, nextLocalN, localsStack, right)
+		luaBinary.right = writeExpression(state, writer, nextLocalN, localsStack, right)
 	end
-end
 
-function _G.shouldOperationHaveSurroundingParentheses(node)
-	local parent         = node.parent
-	local parentNodeType = parent.nodeType
-	return not (
-		!!(CONST_SET{
-			AST_CAST, -- Casts should always add their own parentheses.
-			AST_CALL, -- Both callee and arguments.
-			AST_RETURN,
-			AST_IF,
-			AST_FOR,
-			AST_WHILE
-		})[parentNodeType]
-		or parentNodeType == !(AST_ASSIGNMENT) and not (parent.binaryOperation ~= "" and node.queued.container == parent.values)
-		or parentNodeType == !(AST_ACCESS) and node == parent.member -- The member should be inside [].
-	)
+	return luaBinary
 end
 
 -- writeBinaryOperation(
---   state, writer, indent, nextLocalN, localsStack,
+--   state, writer, nextLocalN, localsStack,
 --   left:AstNode|string, right:AstNode|string,
 --   binaryOperation,
 --   leftType, rightType, resultingType,
---   sourceNode, binary=nil
+--   sourceNode
 -- )
-function _G.writeBinaryOperation(state, writer, indent, nextLocalN, localsStack, l, r, binOp, lType, rType, resultingType, sourceNode, binary)
+local function writeBinaryOperation(state, writer, nextLocalN, localsStack, l, r, binOp, lType, rType, resultingType, sourceNode)
 	!(
-	local function WRITE_OPERAND(sideCode)
+	local function WRITE_OPERAND(sideCode, luaSideCode)
 		__LUA(templateToLua(
 			trimTemplate`
-				if type($sideCode) == "string" then
-					file:write($sideCode)
+				if type($side) == "string" then
+					$luaSide = assert(luaParser.parseExpression($side))
 				else
-					writeExpression(state, writer, indent, nextLocalN, localsStack, $sideCode)
+					$luaSide = writeExpression(state, writer, nextLocalN, localsStack, $side)
 				end
 			`,
-			{sideCode=sideCode}
+			{side=sideCode, luaSide=luaSideCode}
 		))
 	end
 	)
 
-	local file      = writer.file
-	local addParens = binary and shouldOperationHaveSurroundingParentheses(binary)
-
-	addLineMapping(state, writer, sourceNode)
+	local luaExpr
 
 	if !!(CONST_SET{"..","and","or"})[binOp] then
 		-- @Polish: For the logical operators there is probably more we can do, but we may have to dive deeper in the sub-trees to make some predictions or something...
-		if addParens then  file:write("(")  end
-		writeBinaryOperatorChain(state, writer, indent, nextLocalN, localsStack, l, r, binOp) -- This makes sure e.g. consecutive string concatenations appear as one operation without any parentheses.
-		if addParens then  file:write(")")  end
+		luaExpr = writeBinaryOperatorChain(state, writer, nextLocalN, localsStack, l, r, binOp, sourceNode) -- This makes sure e.g. consecutive string concatenations appear as one operation without any parentheses.
 
 	elseif binOp == "//" then
-		file:write("_FLOOR(")
-		!WRITE_OPERAND `l`
-		file:write(" / ")
-		!WRITE_OPERAND `r`
-		file:write(")")
+		luaExpr            = !!(LUA_EXPRESSION([[ _FLOOR(l/r) ]], function(luaCall)luaCall.arguments[1].left=nil;luaCall.arguments[1].right=nil;end))
+		luaExpr.sourceNode = sourceNode
+		!WRITE_OPERAND(`l`, `luaExpr.arguments[1].left`)
+		!WRITE_OPERAND(`r`, `luaExpr.arguments[1].right`)
 
 	elseif binOp == "*" and resultingType.tag == !(TYPE_STRING) then
 		-- Just a quick note:
 		--   str *= 3  -- OK
 		--   num *= "" -- Illegal (as the result is a string, which is a type mismatch with 'num')
-		if lType.tag == !(TYPE_STRING) then
-			file:write("_REP(")
-		else
-			file:write("_REP2(")
-		end
-		!WRITE_OPERAND `l`
-		file:write(", ")
-		!WRITE_OPERAND `r`
-		file:write(")")
+		luaExpr            = !!(LUA_EXPRESSION[[ _REP() ]])
+		luaExpr.sourceNode = sourceNode
+		if lType.tag ~= !(TYPE_STRING) then  luaExpr.callee.name = "_REP2"  end
+		!WRITE_OPERAND(`l`, `luaExpr.arguments[1]`)
+		!WRITE_OPERAND(`r`, `luaExpr.arguments[2]`)
 
 	else
-		if addParens then  file:write("(")  end
-		!WRITE_OPERAND `l`
-		file:write(" ", binOp, " ")
-		!WRITE_OPERAND `r`
-		if addParens then  file:write(")")  end
+		luaExpr            = luaParser.newNodeFast("binary", binOp)
+		luaExpr.sourceNode = sourceNode
+		!WRITE_OPERAND(`l`, `luaExpr.left`)
+		!WRITE_OPERAND(`r`, `luaExpr.right`)
 	end
+
+	return luaExpr
 end
 
 local function isExpressionLiteralStringAndValidLuaIdentifier(expr)
@@ -434,31 +395,27 @@ local function isExpressionLiteralStringAndValidLuaIdentifier(expr)
 		and not LUA_KEYWORDS[expr.value]
 end
 
-local function writeAccessMemberPart(state, writer, indent, nextLocalN, localsStack, accessMember)
-	if isExpressionLiteralStringAndValidLuaIdentifier(accessMember) then
-		local stringLiteral = accessMember
-		writer.file:write(".", stringLiteral.value)
-	else
-		writer.file:write("[")
-		writeExpression(state, writer, indent, nextLocalN, localsStack, accessMember)
-		writer.file:write("]")
-	end
-end
+-- luaExpr = writeAccess( state, writer, nextLocalN, localsStack, access )
+local function writeAccess(state, writer, nextLocalN, localsStack, access)
+	local luaExpr
 
-function _G.writeAccess(state, writer, indent, nextLocalN, localsStack, access)
 	if access.XXX_AWBO_HACK then -- @Hack
 		-- :AbcCheck
+		luaExpr            = luaParser.newNodeFast("lookup")
+		luaExpr.sourceNode = access
+
 		if type(access.object) == "string" then
-			writer.file:write(access.object)
+			luaExpr.object = assert(luaParser.parseExpression(access.object))
 		else
-			writeExpression(state, writer, indent, nextLocalN, localsStack, access.object)
+			luaExpr.object = writeExpression(state, writer, nextLocalN, localsStack, access.object)
 		end
 		if type(access.member) == "string" then
-			writer.file:write("[", access.member, "]")
+			luaExpr.member = assert(luaParser.parseExpression(access.member))
 		else
-			writeAccessMemberPart(state, writer, indent, nextLocalN, localsStack, access.member)
+			luaExpr.member = writeExpression(state, writer, nextLocalN, localsStack, access.member)
 		end
-		return
+
+		return luaExpr
 	end
 
 	local objType = access.object.inferredType
@@ -468,7 +425,9 @@ function _G.writeAccess(state, writer, indent, nextLocalN, localsStack, access)
 
 	if isTypeTableLike(objType) then
 		-- @Incomplete: Compiler setting for runtime checks of array bounds. :AbcCheck
-		writeExpression(state, writer, indent, nextLocalN, localsStack, access.object)
+		luaExpr            = luaParser.newNodeFast("lookup")
+		luaExpr.sourceNode = access
+		luaExpr.object     = writeExpression(state, writer, nextLocalN, localsStack, access.object)
 
 		if access.parent.nodeType == !(AST_CALL) and access.parent.isMethod then
 			local stringLiteral = access.member
@@ -482,23 +441,22 @@ function _G.writeAccess(state, writer, indent, nextLocalN, localsStack, access)
 				errorInternal("@Incomplete: Support method calls using names that are keywords in Lua.")
 			end
 
-			writer.file:write(":", stringValue)
+			luaExpr.member = luaParser.newNodeFast("literal", stringValue)
 
 		else
-			writeAccessMemberPart(state, writer, indent, nextLocalN, localsStack, access.member)
+			luaExpr.member = writeExpression(state, writer, nextLocalN, localsStack, access.member)
 		end
 
 	elseif objType.tag == !(TYPE_STRING) then
-		writer.file:write("_BYTE(")
-		writeExpression(state, writer, indent, nextLocalN, localsStack, access.object)
-		writer.file:write(", ")
-		writeExpression(state, writer, indent, nextLocalN, localsStack, access.member)
-		writer.file:write(")")
+		luaExpr              = !!(LUA_EXPRESSION[[ _BYTE() ]])
+		luaExpr.sourceNode   = access
+		luaExpr.arguments[1] = writeExpression(state, writer, nextLocalN, localsStack, access.object)
+		luaExpr.arguments[2] = writeExpression(state, writer, nextLocalN, localsStack, access.member)
 
 	elseif objType.tag == !(TYPE_VARARG) then
-		writer.file:write("(_SELECT(")
-		writeExpression(state, writer, indent, nextLocalN, localsStack, access.member)
-		writer.file:write(", ...))")
+		luaExpr              = !!(LUA_EXPRESSION([[ (_SELECT(x, ...)) ]], function(luaCall)luaCall.arguments[1]=nil;end))
+		luaExpr.sourceNode   = access
+		luaExpr.arguments[1] = writeExpression(state, writer, nextLocalN, localsStack, access.member)
 
 	elseif objType.tag == !(TYPE_ENUM) then
 		errorInternal(state, access) -- Enum accesses should have been simplified away.
@@ -506,117 +464,119 @@ function _G.writeAccess(state, writer, indent, nextLocalN, localsStack, access)
 	else
 		errorUnhandledType(state, access.object, objType)
 	end
+
+	return luaExpr
 end
 
--- writeCast( state, writer, indent, nextLocalN, localsStack, cast [, nameToCast ] )
+-- luaExpression = writeCast( state, writer, nextLocalN, localsStack, cast, nameToCast=nil )
 -- nameToCast is only used by AstConditional.
-function _G.writeCast(state, writer, indent, nextLocalN, localsStack, cast, nameToCast)
-	!local WRITE_EXPRESSION = trimTemplate`
-		if nameToCast then
-			writer.file:write(nameToCast)
-		else
-			writeExpression(state, writer, indent, nextLocalN, localsStack, cast.expression)
-		end
-	`
-
+local function writeCast(state, writer, nextLocalN, localsStack, cast, nameToCast)
 	local typeInfoSource = adjustTypeToOne(state, cast.expression, cast.expression.inferredType, true)
 	local typeInfoTarget = cast.inferredType
 
-	addLineMapping(state, writer, cast)
-
-	writer.file:write("(") -- In case the written expression is a list of some kind.
+	local luaExpr
+	if nameToCast then
+		luaExpr            = luaParser.newNodeFast("identifier", nameToCast)
+		luaExpr.sourceNode = cast.expression
+	else
+		luaExpr = writeExpression(state, writer, nextLocalN, localsStack, cast.expression)
+	end
 
 	if
 		typeInfoSource == typeInfoTarget
 		or typeInfoSource.tag == !(TYPE_COMPOUND)
 		or typeInfoTarget.tag == !(TYPE_COMPOUND)
 	then
-		!!(WRITE_EXPRESSION)
+		-- void
 
 	-- int -> float
 	elseif typeInfoSource.tag == !(TYPE_INT) and typeInfoTarget.tag == !(TYPE_FLOAT) then
-		!!(WRITE_EXPRESSION)
+		-- void
 	-- float -> int
 	elseif typeInfoSource.tag == !(TYPE_FLOAT) and typeInfoTarget.tag == !(TYPE_INT) then
-		writer.file:write("_MODF(") -- Note: math.modf() returns two values. (Should we actually floor the value instead? I think that might be more "the Lua way".)
-		!!(WRITE_EXPRESSION)
-		writer.file:write(")")
+		local luaCall        = !!(LUA_EXPRESSION[[ (_MODF()) ]]) -- Note: math.modf() returns two values. (Should we actually floor the value instead? I think that might be more "the Lua way".)
+		luaCall.sourceNode   = cast
+		luaCall.arguments[1] = luaExpr
+		luaExpr              = luaCall
 
 	-- (numeric) -> bool
 	elseif isTypeNumeric(typeInfoSource) and typeInfoTarget.tag == !(TYPE_BOOL) then
-		!!(WRITE_EXPRESSION)
-		writer.file:write(" ~= 0")
+		local luaBinary      = !!(LUA_EXPRESSION([[ x ~= 0 ]], function(luaBinary)luaBinary.left=nil;end))
+		luaBinary.sourceNode = cast
+		luaBinary.left       = luaExpr
+		luaExpr              = luaBinary
 	-- string -> bool
 	elseif typeInfoSource.tag == !(TYPE_STRING) and typeInfoTarget.tag == !(TYPE_BOOL) then
-		!!(WRITE_EXPRESSION)
-		writer.file:write(' ~= ""')
+		local luaBinary      = !!(LUA_EXPRESSION([[ x ~= "" ]], function(luaBinary)luaBinary.left=nil;end))
+		luaBinary.sourceNode = cast
+		luaBinary.left       = luaExpr
+		luaExpr              = luaBinary
 	-- array -> bool
 	elseif typeInfoSource.tag == !(TYPE_ARRAY) and typeInfoTarget.tag == !(TYPE_BOOL) then
-		!!(WRITE_EXPRESSION)
-		writer.file:write("[1] ~= nil")
+		local luaBinary       = !!(LUA_EXPRESSION([[ x[1] ~= nil ]], function(luaBinary)luaBinary.left.object=nil;end))
+		luaBinary.sourceNode  = cast
+		luaBinary.left.object = luaExpr
+		luaExpr               = luaBinary
 	-- (array-like struct) -> bool
 	elseif typeInfoSource.tag == !(TYPE_STRUCT) and typeInfoSource.kind == !(STRUCT_KIND_ARRAY) and typeInfoTarget.tag == !(TYPE_BOOL) then
-		!!(WRITE_EXPRESSION)
-		writer.file:write("[1] ~= nil")
+		local luaBinary       = !!(LUA_EXPRESSION([[ x[1] ~= nil ]], function(luaBinary)luaBinary.left.object=nil;end))
+		luaBinary.sourceNode  = cast
+		luaBinary.left.object = luaExpr
+		luaExpr               = luaBinary
 
 	-- enum -> (real enum member type)
 	elseif typeInfoSource.tag == !(TYPE_ENUM) and typeInfoTarget == typeInfoSource.memberTypeInfo then
-		!!(WRITE_EXPRESSION)
+		-- void
 	-- (real enum member type) -> enum
 	elseif typeInfoTarget.tag == !(TYPE_ENUM) and typeInfoSource == typeInfoTarget.memberTypeInfo then
-		!!(WRITE_EXPRESSION)
+		-- void
 
 	-- (base struct) -> (substruct)
 	elseif typeInfoSource.tag == !(TYPE_STRUCT) and typeInfoTarget.tag == !(TYPE_STRUCT) then
-		!!(WRITE_EXPRESSION)
+		-- void
 	-- (table-like) -> table
 	elseif isTypeTableLike(typeInfoSource) and typeInfoTarget.tag == !(TYPE_TABLE) then
-		!!(WRITE_EXPRESSION)
+		-- void
 	-- (array-like struct) -> array
 	elseif typeInfoSource.tag == !(TYPE_STRUCT) and typeInfoSource.kind == !(STRUCT_KIND_ARRAY) and typeInfoTarget.tag == !(TYPE_ARRAY) then
-		!!(WRITE_EXPRESSION)
+		-- void
 
 	-- (whatever) -> any
 	-- any -> (whatever)
 	elseif typeInfoSource.tag == !(TYPE_ANY) or typeInfoTarget.tag == !(TYPE_ANY) then
-		-- The user better know what they're doing!
+		-- void  The user better know what they're doing!
 		-- @Incomplete: Compiler setting for runtime checks of 'any' and 'compound' casts.
-		!!(WRITE_EXPRESSION)
 
 	else
 		errorInternal(state, cast, "Incomplete: Handle casting from %s to %s.", getFriendlyTypeInfoName(typeInfoSource), getFriendlyTypeInfoName(typeInfoTarget))
 	end
 
-	writer.file:write(")")
+	if luaExpr.adjustToOne == false then
+		-- In case the written expression is a list of some kind.
+		-- Not sure if we actually ever get here, but just to be safe. 2021-08-19
+		luaExpr.adjustToOne = true
+	end
+
+	return luaExpr
 end
 
-function _G.writeTableConstructorKeyName(writer, name)
-	if name:find"^[%a_][%w_]*$" and not LUA_KEYWORDS[name] then
-		writer.file:write(name)
-	else
-		writer.file:write("[")
-		writeStringLiteral(writer, name) -- @Incomplete: Use writeConstantValueOrReference() in case the string is large.
-		writer.file:write("]")
-	end
-end
-function _G.writeTableConstructorKey(state, writer, indent, nextLocalN, localsStack, keyExpr)
-	if keyExpr.nodeType == !(AST_LITERAL) and keyExpr.literalType == !(LITERAL_STRING) then
-		local stringLiteral = keyExpr
-		writeTableConstructorKeyName(writer, stringLiteral.value)
-	else
-		writer.file:write("[")
-		writeExpression(state, writer, indent, nextLocalN, localsStack, keyExpr)
-		writer.file:write("]")
-	end
+-- luaExpression = writeTableConstructorKeyName( writer, name, sourceNode ) -- @Cleanup: We maybe don't really need this function.
+local function writeTableConstructorKeyName(writer, name, sourceNode)
+	local luaLiteral      = luaParser.newNodeFast("literal", name) -- @Incomplete: Use writeConstantValueOrReference() in case the string is large.
+	luaLiteral.sourceNode = sourceNode
+	return luaLiteral
 end
 
-function _G.writeDefaultValueForStructMember(state, writer, indent, nextLocalN, localsStack, structInfo, member, nodeForError)
+-- luaExpression = writeDefaultValueForStructMember( state, writer, nextLocalN, localsStack, structInfo, member, nodeForError )
+local function writeDefaultValueForStructMember(state, writer, nextLocalN, localsStack, structInfo, member, nodeForError)
 	local decl = findDynamicMemberDeclaration(state, structInfo.astNode, member.name) or errorInternal(state, structInfo.astNode, "Did not find member '%s'.", member.name)
+	local luaExpr
 	if decl.value then
-		writeExpression(state, writer, indent, nextLocalN, localsStack, decl.value)
+		luaExpr = writeExpression(state, writer, nextLocalN, localsStack, decl.value)
 	else
-		writeDefaultValueForType(state, writer, indent, nextLocalN, localsStack, member.typeInfo, nodeForError)
+		luaExpr = writeDefaultValueForType(state, writer, nextLocalN, localsStack, member.typeInfo, nodeForError)
 	end
+	return luaExpr
 end
 
 local function findTableFieldByNameInStructConstructor(state, tableNode, memberName)
@@ -720,14 +680,13 @@ local function allocateArgumentName(state, writer, localsStack, name, n)
 	return allocateName(state, writer, localsStack, name, n, "A", "_A")
 end
 
-local function writeNormalCall(state, writer, indent, nextLocalN, localsStack, call)
-	local file                 = writer.file
+-- luaCall = writeNormalCall( state, writer, nextLocalN, localsStack, call )
+local function writeNormalCall(state, writer, nextLocalN, localsStack, call)
 	local callee               = call.callee
 	local callingForeignMethod = false
-
-	addLineMapping(state, writer, call)
-
-	if call.surroundedByParentheses then  file:write("(")  end
+	local luaCall              = luaParser.newNodeFast("call")
+	luaCall.sourceNode         = call
+	luaCall.adjustToOne        = call.surroundedByParentheses
 
 	-- Write callee and handle method calls.
 	if callee.nodeType == !(AST_IDENTIFIER) and isDeclarationConstant(callee.declaration) then
@@ -745,50 +704,29 @@ local function writeNormalCall(state, writer, indent, nextLocalN, localsStack, c
 		if const.valueType.tag == !(TYPE_FUNCTION) and const.value.bodyIsForeign and const.value.foreignSource == "method" then
 			callingForeignMethod = true
 			local argExpr        = call.arguments[1] or errorInternal(state, call)
+			luaCall.method       = true
+			luaCall.callee       = luaParser.newNodeFast("lookup")
+			luaCall.callee.object = writeExpression(state, writer, nextLocalN, localsStack, argExpr)
 
-			if argExpr.nodeType == !(AST_IDENTIFIER) then
-				-- Note: It doesn't matter if argExpr a reference to a constant or not since it's be an object reference
-				-- either way (unless the type inference borked and argExpr somehow isn't a struct instance).
-				writeExpression(state, writer, indent, nextLocalN, localsStack, argExpr)
+			local lambda          = const.value
+			luaCall.callee.member = luaParser.newNodeFast("literal", lambda.foreignSourceName.value)
 
-			elseif argExpr.nodeType == !(AST_ACCESS) then
-				-- Table lookups have precedence over method calls in Lua.
-				writeExpression(state, writer, indent, nextLocalN, localsStack, argExpr)
-
-			else
-				-- I think the parenthesis here is needed since argExpr (or shouldOperationHaveSurroundingParentheses())
-				-- will think it's part of a comma-separated list between the parenthesis of the call.
-				file:write("(")
-				writeExpression(state, writer, indent, nextLocalN, localsStack, argExpr)
-				file:write(")")
-			end
-
-			local lambda = const.value
-			file:write(":", lambda.foreignSourceName.value)
 			if outputDebugInfo and lambda.foreignSourceName.value ~= ident.name then
-				file:write(formatInfoComment(ident.name)) -- Not sure this is that helpful...
+				luaCall.callee.member.suffix = formatInfoComment(ident.name) -- Not sure this is that helpful...
 			end
 
 		else
-			writeConstantValueOrReference(state, writer, const, ident)
+			luaCall.callee = writeConstantValueOrReference(state, writer, const, ident)
 		end
 
 	else
-		writeExpression(state, writer, indent, nextLocalN, localsStack, callee)
+		luaCall.callee = writeExpression(state, writer, nextLocalN, localsStack, callee)
 	end
 
-	file:write("(")
-	local first = true
-
 	-- Write given sequential arguments.
-	!local MAYBE_WRITE_COMMA = trimTemplate`
-		if not first then  file:write(", ")  end
-		first = false
-	`
-
 	for i = (callingForeignMethod and 2 or 1), #call.arguments do
-		!!(MAYBE_WRITE_COMMA)
-		writeExpression(state, writer, indent, nextLocalN, localsStack, call.arguments[i])
+		local luaArg = writeExpression(state, writer, nextLocalN, localsStack, call.arguments[i])
+		table.insert(luaCall.arguments, luaArg)
 	end
 
 	-- Write given named arguments and handle default values.
@@ -845,8 +783,8 @@ local function writeNormalCall(state, writer, indent, nextLocalN, localsStack, c
 				break
 
 			elseif argNamed then
-				!!(MAYBE_WRITE_COMMA)
-				writeExpression(state, writer, indent, nextLocalN, localsStack, valueExpr)
+				local luaArg = writeExpression(state, writer, nextLocalN, localsStack, valueExpr)
+				table.insert(luaCall.arguments, luaArg)
 
 			elseif lambda.bodyIsForeign then
 				-- Don't write default values for foreign functions. This gives the foreign site control over
@@ -855,33 +793,23 @@ local function writeNormalCall(state, writer, indent, nextLocalN, localsStack, c
 
 			elseif valueExpr.nodeType == !(AST_LOCATION) and valueExpr.ofCaller then
 				local const = call.locationConstant or errorInternal(state, call, "Missing caller location data.")
-				!!(MAYBE_WRITE_COMMA)
-				writeConstantValueOrReference(state, writer, const, valueExpr)
+				local luaArg = writeConstantValueOrReference(state, writer, const, valueExpr)
+				table.insert(luaCall.arguments, luaArg)
 
 			else
-				!!(MAYBE_WRITE_COMMA)
-				writeExpression(state, writer, indent, nextLocalN, localsStack, valueExpr)
+				local luaArg = writeExpression(state, writer, nextLocalN, localsStack, valueExpr)
+				table.insert(luaCall.arguments, luaArg)
 			end
 		end
 	end
 
-	file:write(")")
-
-	if call.surroundedByParentheses then  file:write(")")  end
+	return luaCall
 end
 
-local function writeInlineCallStatement(state, writer, indent, nextLocalN, localsStack, call)
+local function writeInlineCallStatement(state, writer, nextLocalN, localsStack, call, luaBlock)
+	errorInternal(state, call, "@Incomplete: Function inlining.")
+
 	-- @Incomplete: Detect recursion!
-	if call.isMethod then  errorInternal(state, call, "@Incomplete: Inline method calls.")  end
-
-	if call.parent.nodeType ~= !(AST_BLOCK) then
-		-- @UX: It would be good to detect this error earlier.
-		nodeError(state, call, "ProgramWriter", "Inline calls only supported at statement level.") -- :InlineCallsInMorePlaces
-	end
-	if lambda.argumentsOut then
-		errorInternal(state, call, "@Incomplete: Handle return values when inlining.")
-	end
-
 	--[[
 		-- Example...
 
@@ -903,17 +831,26 @@ local function writeInlineCallStatement(state, writer, indent, nextLocalN, local
 		end
 	]]
 
-	local file      = writer.file
-	local lambda    = call.callee.declaration.valueConstant.value
-	local indentStr = ("\t"):rep(indent)
+	if call.isMethod then  errorInternal(state, call, "@Incomplete: Inline method calls.")  end
+
+	if call.parent.nodeType ~= !(AST_BLOCK) then
+		-- @UX: Detect this error earlier.
+		nodeError(state, call, "ProgramWriter", "Inline calls only supported at statement level.") -- :InlineCallsInMorePlaces
+	end
+
+	local lambda = call.callee.declaration.valueConstant.value
+	if lambda.argumentsOut then
+		errorInternal(state, call, "@Incomplete: Handle return values when inlining.")
+	end
+
+	local file      = nil--writer.file
+	local indentStr = ("\t"):rep(0--[[indent]])
 
 	file:write(indentStr, "do")
-	writeEol(state, writer)
 
 	-- Write arguments.
 	if lambda.argumentsIn then
 		-- @Incomplete: Push localsStack here? It'd be nice to share push with the writeBlock() below.
-		addLineMapping(state, writer, call)
 		file:write(indentStr, "\tlocal ")
 
 		for i, arg in ipairs(lambda.argumentsIn.arguments) do
@@ -935,145 +872,144 @@ local function writeInlineCallStatement(state, writer, indent, nextLocalN, local
 		-- @Incomplete: Optional arguments.
 		for i, argExpr in ipairs(call.arguments) do
 			if i > 1 then  file:write(", ")  end
-			writeExpression(state, writer, indent, nextLocalN, localsStack, argExpr)
+			writeExpression(state, writer, nextLocalN, localsStack, argExpr)
 		end
 
 		file:write(";") -- This removes ambiguity is some cases.
-		writeEol(state, writer)
 	end
 
-	addLineMapping(state, writer, call)
-	writeBlock(state, writer, indent+1, nextLocalN, localsStack, lambda.body, false)
+	writeBlock(state, writer, nextLocalN, localsStack, lambda.body, false, luaBlock)
 
 	file:write(indentStr, "end")
-	writeEol(state, writer)
 end
 
-function _G.writeExpression(state, writer, indent, nextLocalN, localsStack, expr)
+-- luaExpr = writeExpression( state, writer, nextLocalN, localsStack, expression )
+--[[local ]]function writeExpression(state, writer, nextLocalN, localsStack, expr)
 	!ASSERT(`expr.inferredType`, nil, `expr`)
-	local file = writer.file
+	local nodeType = expr.nodeType
+	local luaExpr
 
-	if expr.nodeType == !(AST_CALL) then
+	if nodeType == !(AST_CALL) then
 		local call = expr
 		assert(call.inline ~= !(INLINE_YES)) -- :InlineCallsInMorePlaces
-		writeNormalCall(state, writer, indent, nextLocalN, localsStack, call)
+		luaExpr = writeNormalCall(state, writer, nextLocalN, localsStack, call)
 
-	elseif expr.nodeType == !(AST_UNARY) then
+	elseif nodeType == !(AST_UNARY) then
 		local unary = expr
-		addLineMapping(state, writer, unary)
 
 		-- Lua doesn't have unary '+'.
 		if unary.operation == "+" then
-			writeExpression(state, writer, indent, nextLocalN, localsStack, unary.expression)
+			luaExpr = writeExpression(state, writer, nextLocalN, localsStack, unary.expression)
 
 		-- Length of vararg.
 		elseif unary.operation == "#" and unary.expression.nodeType == !(AST_VARARG) then
-			file:write('_SELECT("#", ...)')
+			luaExpr            = !!(LUA_EXPRESSION[[ _SELECT("#", ...) ]])
+			luaExpr.sourceNode = unary
 
 		-- For 'if not n', output 'if n==0' instead of 'if not(n~=0)'.
 		elseif unary.operation == "not" and unary.expression.nodeType == !(AST_CAST) and !!(CONST_SET{ TYPE_STRING, TYPE_INT, TYPE_FLOAT })[unary.expression.expression.inferredType.tag] then
 			local cast = unary.expression
+			local expr = cast.expression
 
-			addLineMapping(state, writer, cast)
-			addLineMapping(state, writer, cast.expression)
+			luaExpr            = luaParser.newNodeFast("binary", "==")
+			luaExpr.sourceNode = unary
+			luaExpr.left       = writeExpression(state, writer, nextLocalN, localsStack, expr)
 
-			file:write("(")
-			writeExpression(state, writer, indent, nextLocalN, localsStack, cast.expression)
-			file:write(" == ")
-			if cast.expression.inferredType.tag == !(TYPE_STRING) then
-				file:write('""')
+			if expr.inferredType.tag == !(TYPE_STRING) then
+				luaExpr.right = !!(LUA_EXPRESSION[[ "" ]])
 			else
-				file:write("0")
+				luaExpr.right = !!(LUA_EXPRESSION[[ 0 ]])
 			end
-			file:write(")")
 
 		-- Other operations.
 		else
-			local addParens = shouldOperationHaveSurroundingParentheses(unary)
-
-			if addParens then  file:write("(")  end
-			file:write(unary.operation)
-			if unary.operation:find"%w" then  file:write(" ")  end
-			writeExpression(state, writer, indent, nextLocalN, localsStack, unary.expression)
-			if addParens then  file:write(")")  end
+			luaExpr            = luaParser.newNodeFast("unary", unary.operation)
+			luaExpr.sourceNode = unary
+			luaExpr.expression = writeExpression(state, writer, nextLocalN, localsStack, unary.expression)
 		end
 
-	elseif expr.nodeType == !(AST_BINARY) then
+	elseif nodeType == !(AST_BINARY) then
 		local binary = expr
-		writeBinaryOperation(
-			state, writer, indent, nextLocalN, localsStack,
+		luaExpr = writeBinaryOperation(
+			state, writer, nextLocalN, localsStack,
 			binary.left, binary.right,
 			binary.operation,
 			binary.left.inferredType, binary.right.inferredType, binary.inferredType,
-			binary, binary
+			binary
 		)
 
-	elseif expr.nodeType == !(AST_LITERAL) then
+	elseif nodeType == !(AST_LITERAL) then
 		local literal = expr
 		!ASSERT(`literal.valueConstant`, nil, `literal`)
-		writeConstantValueOrReference(state, writer, literal.valueConstant, literal)
+		luaExpr = writeConstantValueOrReference(state, writer, literal.valueConstant, literal)
 
-	elseif expr.nodeType == !(AST_IDENTIFIER) then
+	elseif nodeType == !(AST_IDENTIFIER) then
 		local ident = expr
 		local decl  = ident.declaration
 		!ASSERT `ident.inferredType`
 		!ASSERT `decl`
 
 		if isDeclarationConstant(decl) then
-			writeConstantValueOrReference(state, writer, decl.valueConstant, ident)
+			luaExpr = writeConstantValueOrReference(state, writer, decl.valueConstant, ident)
 		else
-			writeIdentifierName(state, writer, ident)
+			local name         = writeIdentifierName(state, writer, ident)
+			luaExpr            = luaParser.newNodeFast("identifier", name)
+			luaExpr.sourceNode = ident
 		end
 
-	elseif expr.nodeType == !(AST_VARARG) then
-		local vararg = expr
-		file:write(vararg.surroundedByParentheses and "(...)" or "...")
+	elseif nodeType == !(AST_VARARG) then
+		local vararg        = expr
+		luaExpr             = !!(LUA_EXPRESSION[[ ... ]])
+		luaExpr.sourceNode  = vararg
+		luaExpr.adjustToOne = vararg.surroundedByParentheses
 
-	elseif expr.nodeType == !(AST_BLANK) then
-		file:write("_")
+	elseif nodeType == !(AST_BLANK) then
+		luaExpr            = !!(LUA_EXPRESSION[[ _ ]])
+		luaExpr.sourceNode = expr
 
-	elseif expr.nodeType == !(AST_TYPE) then
+	elseif nodeType == !(AST_TYPE) then
 		local typeNode = expr
-		file:write(F("%d", typeNode.representedType.id)) -- @Cleanup: We probably have a constant for the type ID to use with writeConstantValue() here, but whatever!
+
+		-- @Cleanup: We probably have a constant for the type ID to use with writeConstantValue() here, but whatever!
+		luaExpr            = luaParser.newNodeFast("literal", typeNode.representedType.id)
+		luaExpr.sourceNode = typeNode
+
 		if outputDebugInfo then
-			file:write(formatInfoComment(getFriendlyTypeInfoName(typeNode.representedType)))
+			luaExpr.suffix = formatInfoComment(getFriendlyTypeInfoName(typeNode.representedType))
 		end
 
-	elseif expr.nodeType == !(AST_LAMBDA) then
+	elseif nodeType == !(AST_LAMBDA) then
 		local lambda = expr
 		if lambda.captures or lambda.captureAll then
-			writeFunction(state, writer, indent, nextLocalN, localsStack, lambda)
+			luaExpr     = writeFunction(state, writer, nextLocalN, localsStack, lambda)
 		else
 			local const = lambda.valueConstant or errorInternal(state, lambda)
-			writeConstantValueOrReference(state, writer, const, lambda)
+			luaExpr     = writeConstantValueOrReference(state, writer, const, lambda)
 		end
 
-	elseif expr.nodeType == !(AST_ACCESS) then
+	elseif nodeType == !(AST_ACCESS) then
 		local access = expr
-		writeAccess(state, writer, indent, nextLocalN, localsStack, access)
+		luaExpr      = writeAccess(state, writer, nextLocalN, localsStack, access)
 
-	elseif expr.nodeType == !(AST_CAST) then
+	elseif nodeType == !(AST_CAST) then
 		local cast = expr
-		writeCast(state, writer, indent, nextLocalN, localsStack, cast)
+		luaExpr    = writeCast(state, writer, nextLocalN, localsStack, cast, nil)
 
-	elseif expr.nodeType == !(AST_TABLE) then
-		!local WRAP     = 10 -- We're trying to wrap very long lines. This solution ain't perfect but it's better than nothing!
-		local tableNode = expr
-		local indentStr = ("\t"):rep(indent)
-		local count     = 0
-		file:write("{")
+	elseif nodeType == !(AST_TABLE) then
+		local tableNode      = expr
+		luaExpr              = !!(LUA_EXPRESSION[[ {} ]])
+		luaExpr.sourceNode   = tableNode
+		local luaTableFields = luaExpr.fields
 
 		if tableNode.inferredType.tag == !(TYPE_TABLE) then
 			for _, tableField in ipairs(tableNode.fields) do
 				if not (isExpressionNil(tableField.value) and isExpressionConstant(state, tableField.key, true)) then
-					count = count + 1
-					if count % !(WRAP) == 0 then  file:write(",") ; writeEol(state, writer) ; file:write(indentStr, "\t")
-					elseif       count >  1 then  file:write(", ")  end
-
 					-- @Polish: Output sequence values without key in generic table constructors.
-					writeTableConstructorKey(state, writer, indent, nextLocalN, localsStack, tableField.key)
-					file:write("=")
-					writeExpression(state, writer, indent, nextLocalN, localsStack, tableField.value)
+					local luaTableField = {
+						key   = writeExpression(state, writer, nextLocalN, localsStack, tableField.key),
+						value = writeExpression(state, writer, nextLocalN, localsStack, tableField.value),
+					}
+					table.insert(luaTableFields, luaTableField)
 				end
 			end
 
@@ -1081,15 +1017,15 @@ function _G.writeExpression(state, writer, indent, nextLocalN, localsStack, expr
 			for _, tableField in ipairs(tableNode.fields) do
 				!ASSERT("tableField.key.nodeType == "..AST_LITERAL) -- :VariableArrayIndices
 
-				count = count + 1
-				if count % !(WRAP) == 0 then  file:write(",") ; writeEol(state, writer) ; file:write(indentStr, "\t")
-				elseif       count >  1 then  file:write(", ")  end
+				local luaTableField = {key=nil, value=nil}
+				table.insert(luaTableFields, luaTableField)
 
-				if not tableField.keyIsGenerated then
-					writeTableConstructorKey(state, writer, indent, nextLocalN, localsStack, tableField.key)
-					file:write("=")
+				if tableField.keyIsGenerated then
+					luaTableField.generatedKey = true
+				else
+					luaTableField.key = writeExpression(state, writer, nextLocalN, localsStack, tableField.key)
 				end
-				writeExpression(state, writer, indent, nextLocalN, localsStack, tableField.value)
+				luaTableField.value = writeExpression(state, writer, nextLocalN, localsStack, tableField.value)
 			end
 
 		elseif tableNode.inferredType.tag == !(TYPE_STRUCT) then
@@ -1100,27 +1036,25 @@ function _G.writeExpression(state, writer, indent, nextLocalN, localsStack, expr
 				local tableField = findTableFieldByNameInStructConstructor(state, tableNode, member.name)
 
 				if not (tableField or isStructMemberDefaultValueNil(state, structInfo.astNode, member.name, tableNode)) then
-					count = count + 1
-					if count % !(WRAP) == 0 then  file:write(",") ; writeEol(state, writer) ; file:write(indentStr, "\t")
-					elseif       count >  1 then  file:write(", ")  end
-
-					writeTableConstructorKeyName(writer, member.name)
-					file:write("=")
-					writeDefaultValueForStructMember(state, writer, indent, nextLocalN, localsStack, structInfo, member, tableNode) -- @UX: Maybe use a better nodeForError.
+					local luaTableField = {
+						key   = writeTableConstructorKeyName(writer, member.name, tableNode), -- @Polish: Better source node (if needed here).
+						value = writeDefaultValueForStructMember(state, writer, nextLocalN, localsStack, structInfo, member, tableNode), -- @UX: Maybe use a better nodeForError.
+					}
+					table.insert(luaTableFields, luaTableField)
 				end
 			end
 
 			for _, tableField in ipairs(tableNode.fields) do
 				if tableField.keyIsGenerated or not isExpressionNil(tableField.value) then
-					count = count + 1
-					if count % !(WRAP) == 0 then  file:write(",") ; writeEol(state, writer) ; file:write(indentStr, "\t")
-					elseif       count >  1 then  file:write(", ")  end
+					local luaTableField = {key=nil, value=nil}
+					table.insert(luaTableFields, luaTableField)
 
-					if not tableField.keyIsGenerated then
-						writeTableConstructorKey(state, writer, indent, nextLocalN, localsStack, tableField.key)
-						file:write("=")
+					if tableField.keyIsGenerated then
+						luaTableField.generatedKey = true
+					else
+						luaTableField.key = writeExpression(state, writer, nextLocalN, localsStack, tableField.key)
 					end
-					writeExpression(state, writer, indent, nextLocalN, localsStack, tableField.value)
+					luaTableField.value = writeExpression(state, writer, nextLocalN, localsStack, tableField.value)
 				end
 			end
 
@@ -1129,28 +1063,26 @@ function _G.writeExpression(state, writer, indent, nextLocalN, localsStack, expr
 		end
 
 		if tableNode.trailingExpression then
-			count = count + 1
-			if count % !(WRAP) == 0 then  file:write(",") ; writeEol(state, writer) ; file:write(indentStr, "\t")
-			elseif       count >  1 then  file:write(", ")  end
-
-			writeExpression(state, writer, indent, nextLocalN, localsStack, tableNode.trailingExpression)
+			local luaTableField = {
+				generatedKey = true,
+				value        = writeExpression(state, writer, nextLocalN, localsStack, tableNode.trailingExpression),
+			}
+			table.insert(luaTableFields, luaTableField)
 		end
 
-		file:write("}")
-
-	elseif expr.nodeType == !(AST_FOREIGN) then
+	elseif nodeType == !(AST_FOREIGN) then
 		local foreign = expr
-		writeConstantValueOrReference(state, writer, foreign.valueConstant, foreign)
+		luaExpr       = writeConstantValueOrReference(state, writer, foreign.valueConstant, foreign)
 
-	elseif expr.nodeType == !(AST_TYPE_INFO) then
+	elseif nodeType == !(AST_TYPE_INFO) then
 		local typeInfoNode = expr
-		writeConstantValueOrReference(state, writer, typeInfoNode.valueConstant, typeInfoNode)
+		luaExpr            = writeConstantValueOrReference(state, writer, typeInfoNode.valueConstant, typeInfoNode)
 
-	elseif expr.nodeType == !(AST_LOCATION) then
+	elseif nodeType == !(AST_LOCATION) then
 		local loc = expr
-		writeConstantValueOrReference(state, writer, loc.valueConstant, loc)
+		luaExpr   = writeConstantValueOrReference(state, writer, loc.valueConstant, loc)
 
-	elseif expr.nodeType == !(AST_CONDITIONAL) then
+	elseif nodeType == !(AST_CONDITIONAL) then
 		local conditional = expr
 		local hasVararg   = false
 
@@ -1167,25 +1099,42 @@ function _G.writeExpression(state, writer, indent, nextLocalN, localsStack, expr
 		if not conditional.conditionAndBranchTrue then
 			if doesTypeContainBoolOrNone(adjustTypeToOne(state, conditional.branchTrue, conditional.branchTrue.inferredType, true)) then
 				-- (function(x) if x then return a else return b end end)(x)
-				file:write("(function(_CONDITION")
-				if hasVararg then  file:write(", ...")  end
-				file:write(") if _CONDITION then return ")
-				writeExpression(state, writer, indent, nextLocalN, localsStack, conditional.branchTrue)
-				file:write(" else return ")
-				writeExpression(state, writer, indent, nextLocalN, localsStack, conditional.branchFalse)
-				file:write(" end end)(")
-				writeExpression(state, writer, indent, nextLocalN, localsStack, conditional.condition)
-				if hasVararg then  file:write(", ...")  end
-				file:write(")")
+				luaExpr = !!(LUA_EXPRESSION[=[
+					(function(_CONDITION--[[x]])
+						if _CONDITION--[[x]] then
+							return -- a
+						else
+							return -- b
+						end
+					end)(--[[x]])
+				]=])
+				luaExpr.sourceNode = conditional
+				local luaFunc      = luaExpr.callee
+				local luaIfNode    = luaFunc.body.statements[1]
+
+				if hasVararg then  luaFunc.parameters[2] = !!(LUA_EXPRESSION[[ ... ]])  end
+				luaIfNode.bodyTrue .statements[1].values[1] = writeExpression(state, writer, nextLocalN, localsStack, conditional.branchTrue)
+				luaIfNode.bodyFalse.statements[1].values[1] = writeExpression(state, writer, nextLocalN, localsStack, conditional.branchFalse)
+				luaExpr.arguments[1]                        = writeExpression(state, writer, nextLocalN, localsStack, conditional.condition)
+				if hasVararg then  luaFunc.parameters[2] = !!(LUA_EXPRESSION[[ ... ]])  end
+
 			else
 				-- x and a or b
-				file:write("(")
-				writeExpression(state, writer, indent, nextLocalN, localsStack, conditional.condition)
-				file:write(" and ")
-				writeExpression(state, writer, indent, nextLocalN, localsStack, conditional.branchTrue)
-				file:write(" or ")
-				writeExpression(state, writer, indent, nextLocalN, localsStack, conditional.branchFalse)
-				file:write(")")
+				luaExpr = !!(LUA_EXPRESSION(
+					[=[
+						(x and a) or b
+					]=],
+					function(luaBinary)
+						luaBinary.left.left  = nil
+						luaBinary.left.right = nil
+						luaBinary.right      = nil
+					end
+				))
+				luaExpr.sourceNode = conditional
+
+				luaExpr.left.left  = writeExpression(state, writer, nextLocalN, localsStack, conditional.condition)
+				luaExpr.left.right = writeExpression(state, writer, nextLocalN, localsStack, conditional.branchTrue)
+				luaExpr.right      = writeExpression(state, writer, nextLocalN, localsStack, conditional.branchFalse)
 			end
 
 		-- Binary (with implicit cast).
@@ -1197,59 +1146,84 @@ function _G.writeExpression(state, writer, indent, nextLocalN, localsStack, expr
 			assert(cast.expression == conditional.conditionAndBranchTrue)
 			assert(cast.isImplicit)
 
-			file:write("(function(_CONDITION")
-			if hasVararg then  file:write(", ...")  end
-			file:write(") if ")
-			writeCast(state, writer, indent, nextLocalN, localsStack, cast, "_CONDITION")
-			file:write(" then return _CONDITION else return ")
-			writeExpression(state, writer, indent, nextLocalN, localsStack, conditional.branchFalse)
-			file:write(" end end)(")
-			writeExpression(state, writer, indent, nextLocalN, localsStack, cast.expression)
-			if hasVararg then  file:write(", ...")  end
-			file:write(")")
+			luaExpr = !!(LUA_EXPRESSION(
+				[=[
+					(function(_CONDITION--[[x]])
+						if x then
+							return _CONDITION -- x
+						else
+							return -- y
+						end
+					end)(--[[x]])
+				]=],
+				function(luaCall)
+					luaCall.callee.body.statements[1].condition = nil
+				end
+			))
+			luaExpr.sourceNode = conditional
+			local luaFunc      = luaExpr.callee
+			local luaIfNode    = luaFunc.body.statements[1]
+
+			if hasVararg then  luaFunc.parameters[2] = !!(LUA_EXPRESSION[[ ... ]])  end
+			luaIfNode.condition                         = writeCast      (state, writer, nextLocalN, localsStack, cast, "_CONDITION")
+			luaIfNode.bodyFalse.statements[1].values[1] = writeExpression(state, writer, nextLocalN, localsStack, conditional.branchFalse)
+			luaExpr.arguments[1]                        = writeExpression(state, writer, nextLocalN, localsStack, cast.expression)
+			if hasVararg then  luaExpr.arguments[2] = !!(LUA_EXPRESSION[[ ... ]])  end
 
 		-- Binary (without implicit cast).
 		-- @Optimize: Output 'a or b' whenever possible.
 		else
 			-- (function(x) if x then return x else return y end end)(x)
-			file:write("(function(_CONDITION")
-			if hasVararg then  file:write(", ...")  end
-			file:write(") if _CONDITION then return _CONDITION else return ")
-			writeExpression(state, writer, indent, nextLocalN, localsStack, conditional.branchFalse)
-			file:write(" end end)(")
-			writeExpression(state, writer, indent, nextLocalN, localsStack, conditional.condition)
-			if hasVararg then  file:write(", ...")  end
-			file:write(")")
+			luaExpr = !!(LUA_EXPRESSION[=[
+				(function(_CONDITION--[[x]])
+					if _CONDITION--[[x]] then
+						return _CONDITION -- x
+					else
+						return -- y
+					end
+				end)(--[[x]])
+			]=])
+			luaExpr.sourceNode = conditional
+			local luaFunc      = luaExpr.callee
+			local luaIfNode    = luaFunc.body.statements[1]
+
+			if hasVararg then  luaFunc.parameters[2] = !!(LUA_EXPRESSION[[ ... ]])  end
+			luaIfNode.bodyFalse.statements[1].values[1] = writeExpression(state, writer, nextLocalN, localsStack, conditional.branchFalse)
+			luaExpr.arguments[1]                        = writeExpression(state, writer, nextLocalN, localsStack, conditional.condition)
+			if hasVararg then  luaExpr.arguments[2] = !!(LUA_EXPRESSION[[ ... ]])  end
 		end
 
-	elseif expr.nodeType == !(AST_NULL) then
-		file:write("nil")
+	elseif nodeType == !(AST_NULL) then
+		luaExpr            = !!(LUA_EXPRESSION[[ nil ]])
+		luaExpr.sourceNode = expr
 
 	elseif expr.inferredType.tag == !(TYPE_NAMESPACE) then
 		nodeError(state, expr, "ProgramWriter", "Invalid place for a namespace.")
 	else
 		errorUnhandledNodeType(state, expr)
 	end
+
+	if not luaExpr then
+		errorInternal(state, expr)
+	end
+
+	return luaExpr
 end
 
-function _G.writeDefaultValueForType(state, writer, indent, nextLocalN, localsStack, typeInfo, nodeForError)
-	local file = writer.file
-	local tag  = typeInfo.tag
+-- luaExpression = writeDefaultValueForType( state, writer, nextLocalN, localsStack, typeInfo, nodeForError )
+--[[local ]]function writeDefaultValueForType(state, writer, nextLocalN, localsStack, typeInfo, nodeForError)
+	local tag = typeInfo.tag
+	local luaExpr
 
-	if tag == !(TYPE_ANY) then
-		file:write("nil")
-	elseif tag == !(TYPE_BOOL) then
-		file:write("false")
-	elseif tag == !(TYPE_INT) then
-		file:write("0")
-	elseif tag == !(TYPE_NONE) then
-		file:write("nil")
-	elseif tag == !(TYPE_FLOAT) then
-		file:write("0.0")
-	elseif tag == !(TYPE_STRING) then
-		file:write('""')
+	if     tag == !(TYPE_ANY)    then  luaExpr = !!(LUA_EXPRESSION[[ nil ]])
+	elseif tag == !(TYPE_BOOL)   then  luaExpr = !!(LUA_EXPRESSION[[ false ]])
+	elseif tag == !(TYPE_INT)    then  luaExpr = !!(LUA_EXPRESSION[[ 0 ]])
+	elseif tag == !(TYPE_NONE)   then  luaExpr = !!(LUA_EXPRESSION[[ nil ]])
+	elseif tag == !(TYPE_FLOAT)  then  luaExpr = !!(LUA_EXPRESSION[[ 0.0 ]])
+	elseif tag == !(TYPE_STRING) then  luaExpr = !!(LUA_EXPRESSION[[ "" ]])
+
 	elseif tag == !(TYPE_ARRAY) or tag == !(TYPE_TABLE) then
-		file:write("{}")
+		luaExpr = !!(LUA_EXPRESSION[[ {} ]])
 
 	elseif tag == !(TYPE_STRUCT) then
 		local structInfo = typeInfo
@@ -1266,33 +1240,33 @@ function _G.writeDefaultValueForType(state, writer, indent, nextLocalN, localsSt
 			exitFailure()
 		end
 
-		local first = true
-		file:write("{")
+		luaExpr              = !!(LUA_EXPRESSION[[ {} ]])
+		local luaTableFields = luaExpr.fields
 
 		for i, member in ipairs(structInfo.members) do
-			if not first then  file:write(", ")  end
-			first = false
-
 			-- if not (default_value_for_struct_member is AstNull) then -- @Incomplete
-				writeTableConstructorKeyName(writer, member.name)
-				file:write("=")
-				writeDefaultValueForStructMember(state, writer, indent, nextLocalN, localsStack, structInfo, member, nodeForError)
+				local luaTableField = {
+					key   = writeTableConstructorKeyName(writer, member.name, nodeForError), -- @Polish: Better source node?
+					value = writeDefaultValueForStructMember(state, writer, nextLocalN, localsStack, structInfo, member, nodeForError),
+				}
+				table.insert(luaTableFields, luaTableField)
 			-- end
 		end
 
-		file:write("}")
-
-	elseif doesTypeHaveAnyDefaultValue(typeInfo) then
-		errorInternal("Incomplete: Write default value for type group '%s'.", TYPE_NAMES[typeInfo.tag])
 	else
-		nodeError(state, nodeForError, "ProgramWriter", "There is no default value for %s.", getFriendlyTypeInfoName(typeInfo))
+		if doesTypeHaveAnyDefaultValue(typeInfo) then
+			errorInternal("Incomplete: Write default value for type group '%s'.", TYPE_NAMES[typeInfo.tag])
+		else
+			nodeError(state, nodeForError, "ProgramWriter", "There is no default value for %s.", getFriendlyTypeInfoName(typeInfo))
+		end
 	end
+
+	luaExpr.sourceNode = nodeForError -- @Polish: Better source node?
+	return luaExpr
 end
 
-local function writeDefers(state, writer, indent, nextLocalN, localsStack, indentStr, defers)
+local function writeDefers(state, writer, nextLocalN, localsStack, defers, luaBlock)
 	if not defers[1] then  return  end
-
-	!ifDEBUG `writer.file:write(indentStr, "-- defers") ; writeEol(state, writer)`
 
 	for i = #defers, 1, -1 do
 		local block = defers[i].body
@@ -1300,31 +1274,25 @@ local function writeDefers(state, writer, indent, nextLocalN, localsStack, inden
 			itemWith1(block.declarations, `kind`, !(DECL_KIND_LOCAL_VAR))
 			-- or itemWith1(block.declarations, `kind`, !(DECL_KIND_READ_ONLY))
 		then
-			writer.file:write(indentStr, "do")
-			writeEol(state, writer)
-			writeBlock(state, writer, indent+1, nextLocalN, localsStack, block, false)
-			writer.file:write(indentStr, "end")
-			writeEol(state, writer)
+			local luaInnerBlock      = !!(LUA_STATEMENT[[ do end ]]) ; table.insert(luaBlock.statements, luaInnerBlock)
+			luaInnerBlock.sourceNode = defers[i]
+			writeBlock(state, writer, nextLocalN, localsStack, block, false, luaInnerBlock)
 		else
-			writeBlock(state, writer, indent, nextLocalN, localsStack, block, false)
+			writeBlock(state, writer, nextLocalN, localsStack, block, false, luaBlock)
 		end
 	end
-
-	!ifDEBUG `writer.file:write(indentStr, "-- /defers") ; writeEol(state, writer)`
 end
 
-local function handleContinueAfterBlock(state, writer, parentContinueDepth, prevContinueDepth, siblings, siblingIndex, indent, indentStr)
-	-- if writer.continueDepth <= parentContinueDepth then  return indent, indentStr  end
-	if writer.continueDepth == 0 then  return indent, indentStr  end
+-- luaBlock = handleContinueAfterBlock( state, writer, parentContinueDepth, prevContinueDepth, siblings, siblingIndex, luaBlock )
+local function handleContinueAfterBlock(state, writer, parentContinueDepth, prevContinueDepth, siblings, siblingIndex, luaBlock)
+	-- if writer.continueDepth <= parentContinueDepth then  return luaBlock  end
+	if writer.continueDepth == 0 then  return luaBlock  end
 
 	if writer.continueDepth == prevContinueDepth then
-		writer.continueDepth = writer.continueDepth+1
+		writer.continueDepth = writer.continueDepth + 1
 	end
 
-	if not siblings[siblingIndex+1] then
-		writer.skipOneJumpCheck = true -- @Cleanup: Kind of ugly flag...
-		return indent, indentStr
-	end
+	if not siblings[siblingIndex+1] then  return luaBlock  end
 
 	if not (writer.continueDepth == 1 and !!(CONST_SET{ AST_FOR, AST_WHILE })[siblings[1].parent.parent.nodeType] and siblings[1].parent.parent.hasContinues) then
 		local hasContinue = false
@@ -1346,77 +1314,67 @@ local function handleContinueAfterBlock(state, writer, parentContinueDepth, prev
 			if hasContinue then  break  end
 		end
 
-		if not hasContinue then
-			writer.file:write(indentStr, "do") ; writeEol(state, writer) -- @Cleanup: Don't write this unnecessary 'do'.
-
-			indent    = indent+1
-			indentStr = indentStr .. "\t"
-
-			return indent, indentStr
-		end
+		if not hasContinue then  return luaBlock  end
 	end
 
 	-- @Cleanup @Speed: Make 'if _JUMP>0 then...end if _JUMP==0' into 'if _JUMP>0 then...else'.
-	writer.file:write(indentStr, "if _JUMP == 0 then") ; writeEol(state, writer)
+	local luaIfNode = !!(LUA_STATEMENT[[ if _JUMP == 0 then end ]]) ; table.insert(luaBlock.statements, luaIfNode)
+	luaBlock        = luaIfNode.bodyTrue -- Put the rest of the parent block inside this new trailing/indented block.
 
-	indent    = indent+1
-	indentStr = indentStr .. "\t"
-
-	return indent, indentStr
+	return luaBlock
 end
 
-local function writeLoopBodyAndFooter(state, writer, loop, indent, nextLocalN, localsStack, deferStartIndex, siblings, siblingIndex, parentContinueDepth)
-	local file      = writer.file
+-- luaBlock = writeLoopBodyAndFooter( state, writer, loop, nextLocalN, localsStack, deferStartIndex, siblings, siblingIndex, parentContinueDepth, luaUnindentedBlock, luaLoopBody, luaBlock )
+local function writeLoopBodyAndFooter(state, writer, loop, nextLocalN, localsStack, deferStartIndex, siblings, siblingIndex, parentContinueDepth, luaUnindentedBlock, luaLoopBody, luaBlock)
 	local loopStack = writer.loopStack
-	local indentStr = ("\t"):rep(indent)
 
-	writer.loopDepth                          = writer.loopDepth+1
-	writer.loopDeferIndices[writer.loopDepth] = #writer.deferStack+1
+	writer.loopDepth                          = writer.loopDepth   + 1
+	writer.loopDeferIndices[writer.loopDepth] = #writer.deferStack + 1
 
+	-- No named jump involved.
 	if not (loop.hasNamedJumps or loopStack[1]) then
-		writeBlock(state, writer, indent+1, nextLocalN, localsStack, loop.body, false)
-		file:write(indentStr, "end") ; writeEol(state, writer)
+		writeBlock(state, writer, nextLocalN, localsStack, loop.body, false, luaLoopBody)
 
 		writer.loopDeferIndices[writer.loopDepth] = nil
-		writer.loopDepth                          = writer.loopDepth-1
-		return indent, indentStr
+		writer.loopDepth                          = writer.loopDepth - 1
+
+		return luaBlock
 	end
 
+	-- Named jumps are involved.
+
 	if loopStack[1] then
-		file:write(indentStr, "\t_JUMP = 0") ; writeEol(state, writer)
+		table.insert(luaUnindentedBlock.statements, !!(LUA_STATEMENT[[ _JUMP = 0 ]]))
 	else
-		file:write(indentStr, "\tlocal _JUMP, _BREAK = 0, false") ; writeEol(state, writer)
+		table.insert(luaUnindentedBlock.statements, !!(LUA_STATEMENT[[ local _JUMP, _BREAK = 0, false ]]))
 	end
 
 	table.insert(loopStack, loop)
 
 	local prevContinueDepth = writer.continueDepth
-	writeBlock(state, writer, indent+1, nextLocalN, localsStack, loop.body, false)
-
-	file:write(indentStr, "end") ; writeEol(state, writer)
+	writeBlock(state, writer, nextLocalN, localsStack, loop.body, false, luaLoopBody)
 
 	table.remove(loopStack)
 
 	if loopStack[1] then
 		local deferStartIndexJump = writer.loopDeferIndices[writer.loopDepth-1] or deferStartIndex
 		local defers              = writer.deferStack[deferStartIndexJump] and {unpack(writer.deferStack, deferStartIndexJump)} or EMPTY_TABLE
+		local luaIfNode           = !!(LUA_STATEMENT[[ if _JUMP > 0 then end ]]) ; table.insert(luaBlock.statements, luaIfNode)
 
-		file:write(indentStr, "if _JUMP > 0 then") ; writeEol(state, writer)
-			writeDefers(state, writer, indent+1, nextLocalN, localsStack, indentStr.."\t", defers)
+		writeDefers(state, writer, nextLocalN, localsStack, defers, luaIfNode.bodyTrue)
 
-			if loopStack[2] then
-				file:write(indentStr, "\tif _BREAK or _JUMP > 1 then  _JUMP = _JUMP-1 ; break  end") ; writeEol(state, writer)
-			else
-				file:write(indentStr, "\tif _BREAK or _JUMP > 1 then  break  end") ; writeEol(state, writer)
-			end
-		file:write(indentStr, "end") ; writeEol(state, writer)
+		if loopStack[2] then
+			table.insert(luaIfNode.bodyTrue.statements, !!(LUA_STATEMENT[[ if _BREAK or _JUMP > 1 then  _JUMP = _JUMP-1 ; break  end ]]))
+		else
+			table.insert(luaIfNode.bodyTrue.statements, !!(LUA_STATEMENT[[ if _BREAK or _JUMP > 1 then  break  end ]]))
+		end
 	end
 
 	writer.loopDeferIndices[writer.loopDepth] = nil
-	writer.loopDepth                          = writer.loopDepth-1
+	writer.loopDepth                          = writer.loopDepth - 1
 
-	indent, indentStr = handleContinueAfterBlock(state, writer, parentContinueDepth, prevContinueDepth, siblings, siblingIndex, indent, indentStr)
-	return indent, indentStr
+	luaBlock = handleContinueAfterBlock(state, writer, parentContinueDepth, prevContinueDepth, siblings, siblingIndex, luaBlock)
+	return luaBlock
 end
 
 local function doesContinueCrossNode(state, node)
@@ -1429,28 +1387,26 @@ local function doesContinueCrossNode(state, node)
 	end
 end
 
-function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, isElseif)
+--[[local ]]function writeBlock(state, writer, nextLocalN, localsStack, block, isElseif, luaBlock0)
 	!ASSERT `not block[1]`
+	if not block.statementsDynamic[1] then  return  end
 
-	local file      = writer.file
-	local indentStr = ("\t"):rep(indent)
-
-	if not block.statementsDynamic[1] then
-		if outputDebugInfo then
-			file:write(indentStr, "-- Empty block.")
-			writeEol(state, writer)
-		end
-		return
-	end
-
-	local deferStartIndex     = #writer.deferStack+1
+	local deferStartIndex     = #writer.deferStack + 1
 	local parentContinueDepth = writer.continueDepth
 	local gotContinue         = false
 
-	localsStack  = {{}, unpack(localsStack)} -- @Speed: We can probably handle locals like defers.
-	local inDecl = false
+	localsStack    = {{}, unpack(localsStack)} -- @Speed: We can probably handle locals like defers.
+	local inDecl   = false
+	local luaBlock = luaBlock0
 
 	for statementIndex, statement in ipairs(block.statementsDynamic) do
+		!local ASSERT_STATEMENT = DEBUG and 1==0
+		!if ASSERT_STATEMENT then
+			!ASSERT(`luaBlock`,                 nil,             `statement`)
+			!ASSERT(`luaBlock.type == "block"`, `luaBlock.type`, `statement`)
+			!ASSERT(`luaBlock.statements`,      nil,             `statement`)
+		!end
+
 		local nodeType = statement.nodeType
 
 		----------------------------------------------------------------
@@ -1466,14 +1422,15 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 				inDecl = true
 
 			else
-				file:write(indentStr, "local ", decl.localName, " = ")
+				local luaDecl         = !!(LUA_STATEMENT[[ local x ]]) ; table.insert(luaBlock.statements, luaDecl)
+				luaDecl.sourceNode    = decl
+				luaDecl.names[1].name = decl.localName
+
 				if decl.value then
-					writeExpression(state, writer, indent, nextLocalN, localsStack, decl.value)
+					luaDecl.values[1] = writeExpression(state, writer, nextLocalN, localsStack, decl.value)
 				else
-					writeDefaultValueForType(state, writer, indent, nextLocalN, localsStack, decl.inferredType, decl.name)
+					luaDecl.values[1] = writeDefaultValueForType(state, writer, nextLocalN, localsStack, decl.inferredType, decl.name)
 				end
-				file:write(";")
-				writeEol(state, writer)
 			end
 
 		----------------------------------------------------------------
@@ -1485,6 +1442,7 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 				-- @Optimize: Output '_ = func()' as 'func()'.
 				-- @Optimize: Output 'x, _ = func()' as 'x = func()'.
 				local hasBlank = false
+				local luaDeclOrAssignment
 
 				if inDecl then
 					local hasGaps = false
@@ -1497,50 +1455,47 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 					end
 
 					if hasGaps then
-						file:write(indentStr)
-						file:write("local ")
+						-- @Robustness: Does this work for e.g. `local ^x, y = y, 0 !shadow`? The name generation hopefully makes the new 'y' not be a shadow.
+						local luaDecl = luaParser.newNodeFast("declaration") ; table.insert(luaBlock.statements, luaDecl)
 
-						local first = true
 						for i, ident in ipairs(assignment.targets) do
 							if ident.nodeType ~= !(AST_BLANK) and assignment.declarations[i] then
 								!ASSERT("ident.nodeType == "..AST_IDENTIFIER)
 
-								if not first then  file:write(",")  end
-								first = false
-
-								writeIdentifierName(state, writer, ident)
+								local name = writeIdentifierName(state, writer, ident)
+								table.insert(luaDecl.names, luaParser.newNodeFast("identifier", name))
 							end
 						end
 
-						file:write("; ")
+						luaDeclOrAssignment            = luaParser.newNodeFast("assignment")
+						luaDeclOrAssignment.sourceNode = assignment
 
 					else
-						file:write(indentStr)
-						file:write("local ")
+						luaDeclOrAssignment            = luaParser.newNodeFast("declaration")
+						luaDeclOrAssignment.sourceNode = assignment
 					end
 
-				else
-					file:write(indentStr)
+				else--if not inDecl then
+					luaDeclOrAssignment            = luaParser.newNodeFast("assignment")
+					luaDeclOrAssignment.sourceNode = assignment
 				end
+
+				table.insert(luaBlock.statements, luaDeclOrAssignment)
+				local luaTargets = luaDeclOrAssignment.names or luaDeclOrAssignment.targets
 
 				for i, targetExpr in ipairs(assignment.targets) do
-					if i > 1 then  file:write(", ")  end
-					writeExpression(state, writer, indent, nextLocalN, localsStack, targetExpr)
-					hasBlank = (hasBlank or targetExpr.nodeType == !(AST_BLANK))
+					luaTargets[i] = writeExpression(state, writer, nextLocalN, localsStack, targetExpr)
+					hasBlank      = hasBlank or targetExpr.nodeType == !(AST_BLANK)
 				end
-
-				file:write(" = ")
 
 				for i, valueExpr in ipairs(assignment.values) do
-					if i > 1 then  file:write(", ")  end
-					writeExpression(state, writer, indent, nextLocalN, localsStack, valueExpr)
+					luaDeclOrAssignment.values[i] = writeExpression(state, writer, nextLocalN, localsStack, valueExpr)
 				end
 
-				file:write(";") -- This removes ambiguity is some cases.
 				if hasBlank and not isNameAllocated(state, writer, localsStack, "_") then
-					file:write(" _=nil;") -- We don't want to accidentally store an object that is subject to garbage collection as a global.
+					-- We don't want to accidentally store an object that is subject to garbage collection as a global.
+					table.insert(luaBlock.statements, !!(LUA_STATEMENT[[ _ = nil ]]))
 				end
-				writeEol(state, writer)
 
 			-- Assignment with binary operation (AWBO).
 			else
@@ -1575,7 +1530,6 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 						if not (access.object.nodeType == !(AST_IDENTIFIER) or isExpressionConstant(state, access.object, true)) then
 							fetchObj[i] = true
 						end
-
 						if not (access.member.nodeType == !(AST_IDENTIFIER) or isExpressionConstant(state, access.member, true)) then
 							fetchKey[i] = true
 						end
@@ -1589,117 +1543,89 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 					end
 				end
 
-				local fetchingAnything = (next(fetchObj) or next(fetchKey) or next(fetchVal)) ~= nil
+				local fetchingAnything   = (next(fetchObj) or next(fetchKey) or next(fetchVal)) ~= nil
+				local luaAssignmentBlock = luaBlock
 
 				if fetchingAnything then
-					file:write(indentStr, "do")
-					writeEol(state, writer)
-
-					indent    = indent + 1
-					indentStr = indentStr .. "\t"
+					luaAssignmentBlock = !!(LUA_STATEMENT[[ do end ]]) ; table.insert(luaBlock.statements, luaAssignmentBlock)
 
 					-- Fetch objects and keys.
 					if next(fetchObj) or next(fetchKey) then
-						file:write(indentStr, "local ")
+						local luaDecl      = luaParser.newNodeFast("declaration") ; table.insert(luaAssignmentBlock.statements, luaDecl)
+						luaDecl.sourceNode = assignment
 
-						local first = true
 						for i, targetExpr in ipairs(assignment.targets) do
 							if fetchObj[i] then
-								if not first then  file:write(", ")  end
-								first = false
-
-								file:write("_AWBO_OBJ", i)
+								table.insert(luaDecl.names, luaParser.newNodeFast("identifier", "_AWBO_OBJ"..i))
 							end
-
 							if fetchKey[i] then
-								if not first then  file:write(", ")  end
-								first = false
-
-								file:write("_AWBO_KEY", i)
+								table.insert(luaDecl.names, luaParser.newNodeFast("identifier", "_AWBO_KEY"..i))
 							end
 						end
 
-						file:write(" = ")
-
-						local first = true
 						for i, targetExpr in ipairs(assignment.targets) do
 							if fetchObj[i] then
-								local access = targetExpr
-
-								if not first then  file:write(", ")  end
-								first = false
-
-								writeExpression(state, writer, indent, nextLocalN, localsStack, access.object)
+								local access  = targetExpr
+								local luaExpr = writeExpression(state, writer, nextLocalN, localsStack, access.object)
+								table.insert(luaDecl.values, luaExpr)
 							end
-
 							if fetchKey[i] then
-								local access = targetExpr
-
-								if not first then  file:write(", ")  end
-								first = false
-
-								writeExpression(state, writer, indent, nextLocalN, localsStack, access.member)
+								local access  = targetExpr
+								local luaExpr = writeExpression(state, writer, nextLocalN, localsStack, access.member)
+								table.insert(luaDecl.values, luaExpr)
 							end
 						end
-
-						writeEol(state, writer)
 					end
 
 					-- Fetch values.
 					if next(fetchVal) then
-						file:write(indentStr, "local ")
+						local luaDecl      = luaParser.newNodeFast("declaration") ; table.insert(luaAssignmentBlock.statements, luaDecl)
+						luaDecl.sourceNode = assignment
 
-						local first = true
 						for i, targetExpr in ipairs(assignment.targets) do
 							if fetchVal[i] then
-								if not first then  file:write(", ")  end
-								first = false
-
-								file:write("_AWBO_VAL", i)
+								table.insert(luaDecl.names, luaParser.newNodeFast("identifier", "_AWBO_VAL"..i))
 							end
 						end
 
-						file:write(" = ")
-
-						local first = true
 						for i, valueExpr in ipairs(assignment.values) do
 							if fetchVal[i] then
-								if not first then  file:write(", ")  end
-								first = false
-
-								writeExpression(state, writer, indent, nextLocalN, localsStack, valueExpr)
+								local luaExpr = writeExpression(state, writer, nextLocalN, localsStack, valueExpr)
+								table.insert(luaDecl.values, luaExpr)
 							end
 						end
-
-						writeEol(state, writer)
 					end
 				end--if fetchingAnything
 
 				-- Assignment targets.
-				file:write(indentStr)
+				local luaAssignment      = luaParser.newNodeFast("assignment") ; table.insert(luaAssignmentBlock.statements, luaAssignment)
+				luaAssignment.sourceNode = assignment
 
-				local first = true
 				for i, targetExpr in ipairs(assignment.targets) do
-					if not first then  file:write(", ")  end
-					first = false
-
 					if fetchObj[i] or fetchKey[i] then
-						local access = targetExpr
-						if fetchObj[i] then  file:write( "_AWBO_OBJ", i     )  else  writeExpression      (state, writer, indent, nextLocalN, localsStack, access.object)  end
-						if fetchKey[i] then  file:write("[_AWBO_KEY", i, "]")  else  writeAccessMemberPart(state, writer, indent, nextLocalN, localsStack, access.member)  end
+						local access             = targetExpr
+						local luaLookup          = luaParser.newNodeFast("lookup")
+						luaLookup.sourceNode     = access
+						luaAssignment.targets[i] = luaLookup
+
+						if fetchObj[i] then
+							luaLookup.object = luaParser.newNodeFast("identifier", "_AWBO_OBJ"..i)
+						else
+							luaLookup.object = writeExpression(state, writer, nextLocalN, localsStack, access.object)
+						end
+						if fetchKey[i] then
+							luaLookup.member = luaParser.newNodeFast("identifier", "_AWBO_KEY"..i)
+						else
+							luaLookup.member = writeExpression(state, writer, nextLocalN, localsStack, access.member)
+						end
+
 					else
-						writeExpression(state, writer, indent, nextLocalN, localsStack, targetExpr)
+						luaAssignment.targets[i] = writeExpression(state, writer, nextLocalN, localsStack, targetExpr)
 					end
 				end
 
 				-- Assignment values.
-				file:write(" = ")
-
-				local first = true
 				for i, targetExpr in ipairs(assignment.targets) do
-					if not first then  file:write(", ")  end
-					first = false
-
 					if fetchObj[i] or fetchKey[i] then
 						local access              = targetExpr
 						local accessDummy         = astNewNode(AstAccess, access, access.parent)
@@ -1713,23 +1639,13 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 					local _, valueType = getAssignmentValue(state, targetExpr, assignment.values, i, nil, nil, nil, false)
 					!ASSERT(`valueType`, `tostring(i)`, `assignment.values[i] or assignment`)
 
-					writeBinaryOperation(
-						state, writer, indent, nextLocalN, localsStack,
+					luaAssignment.values[i] = writeBinaryOperation(
+						state, writer, nextLocalN, localsStack,
 						targetExpr, (fetchVal[i] and "_AWBO_VAL"..i or assignment.values[i]),
 						assignment.binaryOperation,
 						targetExpr.inferredType, valueType, targetExpr.inferredType,
-						targetExpr, nil
+						targetExpr
 					)
-				end
-
-				writeEol(state, writer)
-
-				if fetchingAnything then
-					indent    = indent-1
-					indentStr = indentStr:sub(2)
-
-					file:write(indentStr, "end")
-					writeEol(state, writer)
 				end
 			end
 
@@ -1740,51 +1656,41 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 			local returnNode = statement
 
 			-- @Incomplete: Evaluate return values before running defers (right?).
-			writeDefers(state, writer, indent, nextLocalN, localsStack, indentStr, writer.deferStack)
+			writeDefers(state, writer, nextLocalN, localsStack, writer.deferStack, luaBlock)
 
 			if block.parent.nodeType == !(AST_LAMBDA) and not returnNode.values[1] then
-				if outputDebugInfo then
-					file:write(indentStr, "-- return")
-					writeEol(state, writer)
-				end
+				-- void  Note: This can only be the last statement in the lambda.
 
 			else
-				file:write(indentStr, "return")
+				local luaReturnNode      = !!(LUA_STATEMENT[[ return ]]) ; table.insert(luaBlock.statements, luaReturnNode)
+				luaReturnNode.sourceNode = returnNode
+
 				for i, expr in ipairs(returnNode.values) do
-					if i > 1 then  file:write(",")  end
-					file:write(" ")
-					writeExpression(state, writer, indent, nextLocalN, localsStack, expr)
+					luaReturnNode.values[i] = writeExpression(state, writer, nextLocalN, localsStack, expr)
 				end
-				writeEol(state, writer)
 			end
 
 		----------------------------------------------------------------
 		elseif nodeType == !(AST_BLOCK) then
-			local innerBlock = statement
-
-			file:write(indentStr, "do")
-			writeEol(state, writer)
+			local innerBlock         = statement
+			local luaInnerBlock      = !!(LUA_STATEMENT[[ do end ]]) ; table.insert(luaBlock.statements, luaInnerBlock)
+			luaInnerBlock.sourceNode = innerBlock
 
 			local prevContinueDepth = writer.continueDepth
-			writeBlock(state, writer, indent+1, nextLocalN, localsStack, innerBlock, false)
+			writeBlock(state, writer, nextLocalN, localsStack, innerBlock, false, luaInnerBlock)
 
-			file:write(indentStr, "end") ; writeEol(state, writer)
-			indent, indentStr = handleContinueAfterBlock(state, writer, parentContinueDepth, prevContinueDepth, block.statementsDynamic, statementIndex, indent, indentStr)
+			luaBlock = handleContinueAfterBlock(state, writer, parentContinueDepth, prevContinueDepth, block.statementsDynamic, statementIndex, luaBlock)
 
 		----------------------------------------------------------------
 		elseif nodeType == !(AST_IF) then
 			-- @Optimize: Don't output empty branches.
-			local ifBranch = statement
-
-			if not isElseif then  file:write(indentStr)  end
-
-			file:write("if ")
-			writeExpression(state, writer, indent, nextLocalN, localsStack, ifBranch.condition)
-			file:write(" then")
-			writeEol(state, writer)
+			local ifBranch       = statement
+			local luaIfNode      = !!(LUA_STATEMENT([[ if x then end ]], function(luaIfNode)luaIfNode.condition=nil;end)) ; table.insert(luaBlock.statements, luaIfNode)
+			luaIfNode.sourceNode = ifBranch
+			luaIfNode.condition  = writeExpression(state, writer, nextLocalN, localsStack, ifBranch.condition)
 
 			local prevContinueDepth = writer.continueDepth
-			writeBlock(state, writer, indent+1, nextLocalN, localsStack, ifBranch.branchTrue, false)
+			writeBlock(state, writer, nextLocalN, localsStack, ifBranch.branchTrue, false, luaIfNode.bodyTrue)
 
 			local maxContinue1   = writer.continueDepth
 			writer.continueDepth = prevContinueDepth
@@ -1793,114 +1699,107 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 				-- void
 
 			elseif not ifBranch.branchFalse.statementsDynamic[2] and ifBranch.branchFalse.statementsDynamic[1].nodeType == !(AST_IF) and not doesContinueCrossNode(state, ifBranch) then
-				file:write(indentStr, "else") -- This will be followed by "if"
-				writeBlock(state, writer, indent, nextLocalN, localsStack, ifBranch.branchFalse, true)
+				luaIfNode.bodyFalse = !!(LUA_STATEMENT[[ do end ]])
+				writeBlock(state, writer, nextLocalN, localsStack, ifBranch.branchFalse, true, luaIfNode.bodyFalse)
 
 			else
-				file:write(indentStr, "else")
-				writeEol(state, writer)
-				writeBlock(state, writer, indent+1, nextLocalN, localsStack, ifBranch.branchFalse, false)
+				luaIfNode.bodyFalse = !!(LUA_STATEMENT[[ do end ]])
+				writeBlock(state, writer, nextLocalN, localsStack, ifBranch.branchFalse, false, luaIfNode.bodyFalse)
 			end
 
 			writer.continueDepth = math.max(maxContinue1, writer.continueDepth)
 
 			if not isElseif then
-				file:write(indentStr, "end") ; writeEol(state, writer)
-				indent, indentStr = handleContinueAfterBlock(state, writer, parentContinueDepth, prevContinueDepth, block.statementsDynamic, statementIndex, indent, indentStr)
+				luaBlock = handleContinueAfterBlock(state, writer, parentContinueDepth, prevContinueDepth, block.statementsDynamic, statementIndex, luaBlock)
 			end
 
 		----------------------------------------------------------------
 		elseif nodeType == !(AST_WHILE) then
 			-- @Optimize: Don't output an empty body.
-			local whileLoop = statement
+			local whileLoop         = statement
+			local luaWhileLoop      = !!(LUA_STATEMENT([[ while x do end ]], function(luaWhileLoop)luaWhileLoop.condition=nil;end)) ; table.insert(luaBlock.statements, luaWhileLoop)
+			luaWhileLoop.sourceNode = whileLoop
+			luaWhileLoop.condition  = writeExpression(state, writer, nextLocalN, localsStack, whileLoop.condition)
 
-			file:write(indentStr, "while ")
-			writeExpression(state, writer, indent, nextLocalN, localsStack, whileLoop.condition)
-			file:write(" do")
-			writeEol(state, writer)
-
-			indent, indentStr = writeLoopBodyAndFooter(state, writer, whileLoop, indent, nextLocalN, localsStack, deferStartIndex, block.statementsDynamic, statementIndex, parentContinueDepth)
+			luaBlock = writeLoopBodyAndFooter(state, writer, whileLoop, nextLocalN, localsStack, deferStartIndex, block.statementsDynamic, statementIndex, parentContinueDepth, luaBlock0, luaWhileLoop.body, luaBlock)
 
 		----------------------------------------------------------------
 		elseif nodeType == !(AST_FOR) then
 			-- @Optimize: Don't output an empty body.
-			local forLoop     = statement
-			local localsStack = {{}, unpack(localsStack)}
+			local forLoop         = statement
+			local luaForLoop      = luaParser.newNodeFast("for", "numeric") ; table.insert(luaBlock.statements, luaForLoop)
+			luaForLoop.sourceNode = forLoop
+			luaForLoop.body       = !!(LUA_STATEMENT[[ do end ]])
+			local localsStack     = {{}, unpack(localsStack)}
 
 			for _, decl in ipairs(forLoop.declarations) do
 				decl.localName, nextLocalN = allocateLocalName(state, writer, localsStack, decl.name.name, nextLocalN)
 			end
 
+			-- for i = x, y
 			if forLoop.forType == !(FOR_NUMERIC) then
-				local decl   = forLoop.declarations[1]
-				local values = forLoop.expressions
+				luaForLoop.kind = "numeric"
+				local decl      = forLoop.declarations[1]
+				local values    = forLoop.expressions
 
-				file:write(indentStr, "for ")
-				writeIdentifierName(state, writer, decl.name)
-				file:write(" = ")
-				writeExpression(state, writer, indent, nextLocalN, localsStack, values[1])
-				file:write(", ")
-				writeExpression(state, writer, indent, nextLocalN, localsStack, values[2])
-				if values[3] then
-					file:write(", ")
-					writeExpression(state, writer, indent, nextLocalN, localsStack, values[3])
+				do
+					luaForLoop.names[1]  = luaParser.newNodeFast("identifier", writeIdentifierName(state, writer, decl.name))
+					luaForLoop.values[1] = writeExpression(state, writer, nextLocalN, localsStack, values[1])
+					luaForLoop.values[2] = writeExpression(state, writer, nextLocalN, localsStack, values[2])
 				end
-				file:write(" do")
-				writeEol(state, writer)
+				if values[3] then
+					luaForLoop.values[3] = writeExpression(state, writer, nextLocalN, localsStack, values[3])
+				end
 
-				indent, indentStr = writeLoopBodyAndFooter(state, writer, forLoop, indent, nextLocalN, localsStack, deferStartIndex, block.statementsDynamic, statementIndex, parentContinueDepth)
+				luaBlock = writeLoopBodyAndFooter(state, writer, forLoop, nextLocalN, localsStack, deferStartIndex, block.statementsDynamic, statementIndex, parentContinueDepth, luaBlock0, luaForLoop.body, luaBlock)
 
+			-- for expression
 			elseif forLoop.forType == !(FOR_SHORT) then
 				local objExpr = forLoop.expressions[1]
 				local objType = objExpr.inferredType
 
-				file:write(indentStr, "for ")
-
+				-- for ...
 				if objType.tag == !(TYPE_VARARG) then
+					luaForLoop.kind = "numeric"
 					!ASSERT("objExpr.nodeType == "..AST_VARARG)
 
-					addLineMapping(state, writer, objExpr)
-					writeIdentifierName(state, writer, forLoop.declarations[1].name)
-					file:write(" = ")
+					local name          = writeIdentifierName(state, writer, forLoop.declarations[1].name)
+					luaForLoop.names[1] = luaParser.newNodeFast("identifier", name)
 
 					if forLoop.reverse then
-						file:write('_SELECT("#", ...), 1, -1')
+						luaForLoop.values[1] = !!(LUA_EXPRESSION[[ _SELECT("#", ...) ]])
+						luaForLoop.values[2] = !!(LUA_EXPRESSION[[ 1  ]])
+						luaForLoop.values[3] = !!(LUA_EXPRESSION[[ -1 ]])
 					else
-						file:write('1, _SELECT("#", ...)')
+						luaForLoop.values[1] = !!(LUA_EXPRESSION[[ 1 ]])
+						luaForLoop.values[2] = !!(LUA_EXPRESSION[[ _SELECT("#", ...) ]])
 					end
 
-					file:write(" do")
-					writeEol(state, writer)
+					local luaDecl                       = !!(LUA_STATEMENT[[ local x = _SELECT(x, ...) ]]) ; table.insert(luaForLoop.body.statements, luaDecl)
+					luaDecl.names[1].name               = writeIdentifierName(state, writer, forLoop.declarations[2].name)
+					luaDecl.values[1].arguments[1].name = writeIdentifierName(state, writer, forLoop.declarations[1].name)
 
-					file:write(indentStr, "\tlocal ")
-					writeIdentifierName(state, writer, forLoop.declarations[2].name)
-					file:write(" = _SELECT(")
-					writeIdentifierName(state, writer, forLoop.declarations[1].name)
-					file:write(", ...);")
-					writeEol(state, writer)
-
+				-- for object
 				else
-					objType = adjustTypeToOne(state, objExpr, objType, true)
+					luaForLoop.kind = "generic"
+					objType         = adjustTypeToOne(state, objExpr, objType, true)
 
 					for i, decl in ipairs(forLoop.declarations) do
-						if i > 1 then  file:write(", ")  end
-						writeIdentifierName(state, writer, decl.name)
+						luaForLoop.names[i] = luaParser.newNodeFast("identifier", writeIdentifierName(state, writer, decl.name))
 					end
 
-					file:write(" in ")
+					local luaCall
 
 					if objType.tag == !(TYPE_ARRAY) or (objType.tag == !(TYPE_STRUCT) and objType.kind == !(STRUCT_KIND_ARRAY)) then
-						addLineMapping(state, writer, objExpr)
-						if forLoop.reverse then
-							file:write("_IPAIRSR")
-						else
-							file:write("_IPAIRS")
-						end
+						luaCall = (
+							forLoop.reverse
+							and !!(LUA_EXPRESSION[[ _IPAIRSR() ]])
+							or  !!(LUA_EXPRESSION[[ _IPAIRS() ]])
+						)
 
 					elseif objType.tag == !(TYPE_TABLE) then
 						assert(not forLoop.reverse)
-						addLineMapping(state, writer, objExpr)
-						file:write("_PAIRS")
+						luaCall = !!(LUA_EXPRESSION[[ _PAIRS() ]])
 
 					elseif objType.tag == !(TYPE_STRUCT) then
 						assert(not forLoop.reverse)
@@ -1912,30 +1811,24 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 						errorInternal(state, objExpr)
 					end
 
-					file:write("(")
-					writeExpression(state, writer, indent, nextLocalN, localsStack, objExpr)
-					file:write(") do")
-					writeEol(state, writer)
+					luaForLoop.values[1] = luaCall
+					luaCall.arguments[1] = writeExpression(state, writer, nextLocalN, localsStack, objExpr)
 				end
 
-				indent, indentStr = writeLoopBodyAndFooter(state, writer, forLoop, indent, nextLocalN, localsStack, deferStartIndex, block.statementsDynamic, statementIndex, parentContinueDepth)
+				luaBlock = writeLoopBodyAndFooter(state, writer, forLoop, nextLocalN, localsStack, deferStartIndex, block.statementsDynamic, statementIndex, parentContinueDepth, luaBlock0, luaForLoop.body, luaBlock)
 
+			-- for x in expression
 			else--if forLoop.forType == !(FOR_ITERATOR) then
-				file:write(indentStr, "for ")
+				luaForLoop.kind = "generic"
 
 				for i, decl in ipairs(forLoop.declarations) do
-					if i > 1 then  file:write(", ")  end
-					writeIdentifierName(state, writer, decl.name)
+					luaForLoop.names[i] = luaParser.newNodeFast("identifier", writeIdentifierName(state, writer, decl.name))
 				end
-				file:write(" in ")
 				for i, valueExpr in ipairs(forLoop.expressions) do
-					if i > 1 then  file:write(", ")  end
-					writeExpression(state, writer, indent, nextLocalN, localsStack, valueExpr)
+					luaForLoop.values[i] = writeExpression(state, writer, nextLocalN, localsStack, valueExpr)
 				end
-				file:write(" do")
-				writeEol(state, writer)
 
-				indent, indentStr = writeLoopBodyAndFooter(state, writer, forLoop, indent, nextLocalN, localsStack, deferStartIndex, block.statementsDynamic, statementIndex, parentContinueDepth)
+				luaBlock = writeLoopBodyAndFooter(state, writer, forLoop, nextLocalN, localsStack, deferStartIndex, block.statementsDynamic, statementIndex, parentContinueDepth, luaBlock0, luaForLoop.body, luaBlock)
 			end
 
 		----------------------------------------------------------------
@@ -1944,16 +1837,18 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 
 			local deferStartIndexJump = writer.loopDeferIndices[writer.loopDepth] or errorInternal()
 			local defers              = writer.deferStack[deferStartIndexJump] and {unpack(writer.deferStack, deferStartIndexJump)} or EMPTY_TABLE
-			writeDefers(state, writer, indent, nextLocalN, localsStack, indentStr, defers)
+			writeDefers(state, writer, nextLocalN, localsStack, defers, luaBlock)
 
 			if breakNode.loop then
 				local i                = indexOf(writer.loopStack, breakNode.loop) or errorInternal(state, breakNode)
-				local outerLoopsToJump = #writer.loopStack-i
-				file:write(indentStr, "_JUMP, _BREAK = ",outerLoopsToJump,", true ; break")
-			else
-				file:write(indentStr, "break")
+				local outerLoopsToJump = #writer.loopStack - i
+
+				local luaAssignment           = !!(LUA_STATEMENT[[ _JUMP, _BREAK = 0, true ]])
+				luaAssignment.values[1].value = outerLoopsToJump
+				table.insert(luaBlock.statements, luaAssignment)
 			end
-			writeEol(state, writer)
+
+			table.insert(luaBlock.statements, !!(LUA_STATEMENT[[ break ]]))
 
 		----------------------------------------------------------------
 		elseif nodeType == !(AST_CONTINUE) then
@@ -1961,17 +1856,22 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 
 			local deferStartIndexJump = writer.loopDeferIndices[writer.loopDepth] or errorInternal()
 			local defers              = writer.deferStack[deferStartIndexJump] and {unpack(writer.deferStack, deferStartIndexJump)} or EMPTY_TABLE
-			writeDefers(state, writer, indent, nextLocalN, localsStack, indentStr, defers)
+			writeDefers(state, writer, nextLocalN, localsStack, defers, luaBlock)
 
 			local i                = indexOf(writer.loopStack, continue.loop) or errorInternal(state, continue)
-			local outerLoopsToJump = #writer.loopStack-i
+			local outerLoopsToJump = #writer.loopStack - i
+			local luaAssignment    = !!(LUA_STATEMENT[[ _JUMP = 0 ]])
 
 			if outerLoopsToJump > 0 then
-				file:write(indentStr, "_JUMP = ",outerLoopsToJump," ; break") -- Leave _BREAK false.
+				luaAssignment.values[1].value = outerLoopsToJump
+				table.insert(luaBlock.statements, luaAssignment)
+				table.insert(luaBlock.statements, !!(LUA_STATEMENT[[ break ]]))
+				-- Leave _BREAK false.
 			else
-				file:write(indentStr, "_JUMP = ",outerLoopsToJump+1) -- Leave _BREAK false.
+				luaAssignment.values[1].value = outerLoopsToJump + 1
+				table.insert(luaBlock.statements, luaAssignment)
+				-- Leave _BREAK false.
 			end
-			writeEol(state, writer)
 
 			gotContinue = true
 
@@ -1984,71 +1884,125 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 		elseif nodeType == !(AST_SWITCH) then
 			local switch = statement
 
-			file:write(indentStr, "local _SWITCH = ")
-			writeExpression(state, writer, indent, nextLocalN, localsStack, switch.value)
-			writeEol(state, writer)
+			-- @Incomplete: Wrap all this in do...end so _SWITCH doesn't live for too long.
+			local luaDecl     = !!(LUA_STATEMENT[[ local _SWITCH ]]) ; table.insert(luaBlock.statements, luaDecl)
+			luaDecl.values[1] = writeExpression(state, writer, nextLocalN, localsStack, switch.value)
 
 			if switch.cases[1] then
-				local fallingThrough    = false
-				local prevContinueDepth = writer.continueDepth
-				local maxContinueDepth  = prevContinueDepth
+				local fallingThrough     = false
+				local prevContinueDepth  = writer.continueDepth
+				local maxContinueDepth   = prevContinueDepth
+				local luaCurrentIfNode   = nil
+				local luaCurrentBinaryEq = nil
+				local luaCurrentBinaryOr = nil
+				local luaCurrentBlock    = luaBlock
 
 				for i, case in ipairs(switch.cases) do
+					--
+					-- Write pre-condition-code followed by condition.
+					--
 					if fallingThrough then
 						if case.fallThrough or case.value then
-							file:write(" or")
+							-- Add 'or'.
+
+							-- if  x==1 then  ->  if (x==1) or (x==2) then
+							if not luaCurrentBinaryOr then
+								luaCurrentBinaryOr         = luaParser.newNodeFast("binary", "or")
+								luaCurrentBinaryOr.left    = luaCurrentBinaryEq
+								luaCurrentBinaryOr.right   = !!(LUA_EXPRESSION([[ _SWITCH == x ]], function(luaBinary)luaBinary.right=nil;end))
+								luaCurrentBinaryEq         = luaCurrentBinaryOr.right
+								luaCurrentIfNode.condition = luaCurrentBinaryOr
+							-- if (x==1) or (x==2) then  ->  if (x==1) or ((x==2) or (x==3)) then
+							else
+								local luaBinaryOr        = luaParser.newNodeFast("binary", "or")
+								luaBinaryOr.left         = luaCurrentBinaryOr.right
+								luaBinaryOr.right        = !!(LUA_EXPRESSION([[ _SWITCH == x ]], function(luaBinary)luaBinary.right=nil;end))
+								luaCurrentBinaryEq       = luaBinaryOr.right
+								luaCurrentBinaryOr.right = luaBinaryOr
+							end
+
+						elseif not case.value then
+							if luaCurrentBinaryEq then
+								luaCurrentIfNode.condition = !!(LUA_EXPRESSION[[ true ]]) -- @Cleanup: Unpack bodyTrue of 'if true'. (Will get solved if/when we use luaParser.optimize().)
+							end
 						end
+
 					elseif not case.value then
-						-- void
+						-- Make sure we don't write the case body into luaBlock.
+						if luaCurrentBlock == luaBlock then
+							luaCurrentBlock = !!(LUA_STATEMENT[[ do end ]]) ; table.insert(luaBlock.statements, luaCurrentBlock)
+						end
+
 					elseif i == 1 then
-						file:write(indentStr, "if")
+						-- Add 'if'.
+						luaCurrentIfNode   = !!(LUA_STATEMENT([[ if _SWITCH == x then end ]], function(luaIfNode)luaIfNode.condition.right=nil;end)) ; table.insert(luaCurrentBlock.statements, luaCurrentIfNode)
+						luaCurrentBinaryEq = luaCurrentIfNode.condition
+						luaCurrentBinaryOr = nil
+						luaCurrentBlock    = luaCurrentIfNode.bodyTrue
+
 					else
-						file:write(indentStr, "elseif")
+						-- Add 'elseif'.
+						luaCurrentBlock            = !!(LUA_STATEMENT[[ do end ]])
+						luaCurrentIfNode.bodyFalse = luaCurrentBlock
+						luaCurrentIfNode           = !!(LUA_STATEMENT([[ if _SWITCH == x then end ]], function(luaIfNode)luaIfNode.condition.right=nil;end)) ; table.insert(luaCurrentBlock.statements, luaCurrentIfNode)
+						luaCurrentBinaryEq         = luaCurrentIfNode.condition
+						luaCurrentBinaryOr         = nil
+						luaCurrentBlock            = luaCurrentIfNode.bodyTrue
 					end
 
 					if case.value then
-						file:write(" _SWITCH == ")
-						writeExpression(state, writer, indent, nextLocalN, localsStack, case.value)
+						luaCurrentBinaryEq.right = writeExpression(state, writer, nextLocalN, localsStack, case.value)
 					end
 
+					--
+					-- Write body.
+					--
 					if not case.fallThrough then
 						if case.value or fallingThrough then
-							file:write(" then")
+							-- 'then'
 						elseif i == 1 then
-							file:write(indentStr, "do")
+							-- 'do'
 						else
-							file:write(indentStr, "else")
+							-- 'else'
+							luaCurrentBlock            = !!(LUA_STATEMENT[[ do end ]])
+							luaCurrentIfNode.bodyFalse = luaCurrentBlock
 						end
-						writeEol(state, writer)
-						writeBlock(state, writer, indent+1, nextLocalN, localsStack, case.body, false)
+
+						!ASSERT(`luaCurrentBlock`, nil, `case.value or case.body or switch`)
+						writeBlock(state, writer, nextLocalN, localsStack, case.body, false, luaCurrentBlock)
 
 						maxContinueDepth     = math.max(maxContinueDepth, writer.continueDepth)
 						writer.continueDepth = prevContinueDepth
+
+						luaCurrentBinaryEq = nil
+						luaCurrentBinaryOr = nil
 					end
 
 					fallingThrough = case.fallThrough
 				end
 
-				writer.continueDepth = maxContinueDepth
+				writer.continueDepth = maxContinueDepth -- @Robustness: Clarify what's happening here. 2021-08-23
 
-				file:write(indentStr, "end") ; writeEol(state, writer)
-				indent, indentStr = handleContinueAfterBlock(state, writer, parentContinueDepth, prevContinueDepth, block.statementsDynamic, statementIndex, indent, indentStr)
+				luaBlock = handleContinueAfterBlock(state, writer, parentContinueDepth, prevContinueDepth, block.statementsDynamic, statementIndex, luaBlock)
 			end
 
 		----------------------------------------------------------------
 		elseif nodeType == !(AST_CALL) and statement.inline == !(INLINE_YES) then -- @Incomplete: Handle INLINE_MAY in some intelligent way.
 			local call = statement
-			writeInlineCallStatement(state, writer, indent, nextLocalN, localsStack, call)
+			writeInlineCallStatement(state, writer, nextLocalN, localsStack, call, luaBlock)
 
 		----------------------------------------------------------------
 		else
 			-- Assume the statement is an expression at this point and let writeExpression() deal with any errors.
-			file:write(indentStr)
-			writeExpression(state, writer, indent, nextLocalN, localsStack, statement)
-			file:write(";") -- This removes ambiguity is some cases.
-			writeEol(state, writer)
+			local luaStatement = writeExpression(state, writer, nextLocalN, localsStack, statement) ; table.insert(luaBlock.statements, luaStatement)
 		end
 		----------------------------------------------------------------
+
+		!if ASSERT_STATEMENT then
+			!ASSERT(`luaBlock`,                 nil,             `statement`)
+			!ASSERT(`luaBlock.type == "block"`, `luaBlock.type`, `statement`)
+			!ASSERT(`luaBlock.statements`,      nil,             `statement`)
+		!end
 	end
 
 	local doWriteDefers = (
@@ -2064,11 +2018,11 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 	for i = deferStartIndex, #writer.deferStack do
 		writer.deferStack[i] = nil
 	end
-	writeDefers(state, writer, indent, nextLocalN, localsStack, indentStr, defers)
+	writeDefers(state, writer, nextLocalN, localsStack, defers, luaBlock)
 
 	if writer.continueDepth > parentContinueDepth then
 		--[[
-			-- Implicit 'if not continue' blocks example:
+			-- Implicit 'if not continue then' blocks (the inside being called trailing/indented) example:
 			for {
 				do continue -- DEPTH=1
 				>>>>
@@ -2089,23 +2043,16 @@ function _G.writeBlock(state, writer, indent, nextLocalN, localsStack, block, is
 				<<<<
 			}
 		]]
-		for i = writer.continueDepth, parentContinueDepth+1+(writer.skipOneJumpCheck and 1 or 0), -1 do
-			indentStr = indentStr:sub(2)
-			file:write(indentStr, "end")
-			!ifDEBUG `file:write("--continue")`
-			writeEol(state, writer)
-		end
-		writer.continueDepth    = parentContinueDepth
-		writer.skipOneJumpCheck = false
+		writer.continueDepth = parentContinueDepth
 	end
 
 	if gotContinue then
-		writer.continueDepth = writer.continueDepth+1 -- This signals to the parent block that we got a continue.
+		writer.continueDepth = writer.continueDepth + 1 -- This signals to the parent block that we got a continue.
 	end
 end
 
--- writeForeignReference( state, writer, foreignSourceId, nodeForError=nil )
-function _G.writeForeignReference(state, writer, foreignSourceId, nodeForError)
+-- luaExpr = writeForeignReference( state, writer, foreignSourceId, nodeForError=nil )
+local function writeForeignReference(state, writer, foreignSourceId, nodeForError)
 	if writer.foreignOnlyAvailableDuringCompilation[foreignSourceId] and writer.outputRuntime and not keepDeadCode then
 		if nodeForError then
 			nodeError(state, nodeForError, "ProgramWriter", "Trying to write runtime reference to compile-time-only symbol.")
@@ -2114,68 +2061,55 @@ function _G.writeForeignReference(state, writer, foreignSourceId, nodeForError)
 		end
 	end
 
-	local foreignRef = writer.foreignReferences[foreignSourceId]
-	writer.file:write(foreignRef)
+	local foreignRef   = writer.foreignReferences[foreignSourceId]
+	local luaExpr      = assert(luaParser.parseExpression(foreignRef)) -- @Speed: Do we need to parse here?
+	luaExpr.sourceNode = nodeForError -- May be nil. @Incomplete: Ensure we have a node here.
 
-	if outputDebugInfo and foreignRef:find"\n" then
-		local _, nlCount         = foreignRef:gsub("\n", "%0")
-		writer.currentOutputLine = writer.currentOutputLine + nlCount -- @Incomplete: Call addLineMapping() for every line here.
-	end
+	return luaExpr
 end
 
-function _G.writeFunction(state, writer, indent, nextLocalN, localsStack, lambda)
+-- luaFunction|luaIdentifier = writeFunction( state, writer, nextLocalN, localsStack, lambda )
+--[[local ]]function writeFunction(state, writer, nextLocalN, localsStack, lambda)
 	!ASSERT `not lambda.body[1]` -- Statements should be in lambda.body.statements*!
 	!ASSERT `not lambda.polymorphs`
 
-	local file = writer.file
-
-	addLineMapping(state, writer, lambda)
-
 	if lambda.bodyIsForeign then
-		writeForeignReference(state, writer, lambda.foreignSourceId, lambda.foreignSourceName)
-		return
+		local luaIdent = writeForeignReference(state, writer, lambda.foreignSourceId, lambda.foreignSourceName)
+		return luaIdent
 	end
 
 	local argumentN = writer.argumentN
 
-	local indentStr = ("\t"):rep(indent)
 	table.insert(localsStack, {})
 
-	file:write("function(")
+	local luaFunc      = !!(LUA_EXPRESSION[[ function()end ]])
+	luaFunc.sourceNode = lambda
 
 	if lambda.argumentsIn then
 		for i, arg in ipairs(lambda.argumentsIn.arguments) do
-			if i > 1 then  file:write(", ")  end
-
 			local decl = arg.declaration
 
 			if decl.name.nodeType == !(AST_VARARG) then
-				decl.localName = "..."
+				decl.localName        = "..."
+				luaFunc.parameters[i] = !!(LUA_EXPRESSION[[ ... ]])
 			else
 				decl.localName, writer.argumentN = allocateArgumentName(state, writer, localsStack, decl.name.name, writer.argumentN)
+				luaFunc.parameters[i]            = luaParser.newNodeFast("identifier", decl.localName)
 			end
-
-			file:write(decl.localName)
 		end
 	end
 
-	file:write(")")
-	writeEol(state, writer)
-
 	if lambda.body.statementsDynamic[1] then
-		writeBlock(state, writer, indent+1, nextLocalN, localsStack, lambda.body, false)
-	elseif outputDebugInfo then
-		file:write(indentStr, "\t-- Empty function.")
-		writeEol(state, writer)
+		writeBlock(state, writer, nextLocalN, localsStack, lambda.body, false, luaFunc.body)
 	end
 
-	file:write(indentStr, "end")
 	table.remove(localsStack)
 
 	writer.argumentN = argumentN
+	return luaFunc
 end
 
-function _G.writeForeignImportIfNew(state, writer, typeInfo, foreignSource, foreignSourceName, foreignSourceId, sourceNode, asGlobal)
+local function writeForeignImportIfNew(state, writer, typeInfo, foreignSource, foreignSourceName, foreignSourceId, sourceNode, asGlobal, luaBlock)
 	assert(foreignSourceId ~= "")
 
 	if writer.foreignReferences[foreignSourceId] then  return  end
@@ -2184,40 +2118,30 @@ function _G.writeForeignImportIfNew(state, writer, typeInfo, foreignSource, fore
 	-- @Incomplete: Compiler setting for runtime checks of anything originating from foreign sources.
 	-- (We can probably wrap the importing code in something here using typeInfo.)
 
-	local file = writer.file
-
-	local foreignN  = writer.foreignN+1
+	local foreignN  = writer.foreignN + 1
 	writer.foreignN = foreignN
 
 	if foreignN == 1 then
-		file:write("\t")
-		if not asGlobal then  file:write("local ")  end
-		file:write("_FOREIGN = {}")
-		writeEol(state, writer)
+		table.insert(luaBlock.statements, (
+			asGlobal
+			and !!(LUA_STATEMENT[[       _FOREIGN = {} ]])
+			or  !!(LUA_STATEMENT[[ local _FOREIGN = {} ]])
+		))
 	end
 
-	addLineMapping(state, writer, sourceNode) -- Must happen after _FOREIGN is declared.
+	local lua
 
 	if foreignSource == "lua" then
+		lua = foreignSourceName
+
 		if outputDebugInfo then
 			writer.foreignReferences[foreignSourceId] = F("_FOREIGN[%d%s]", foreignN, formatInfoComment(foreignSourceId))
-			file:write("\t_FOREIGN[", F("%d", foreignN), "]")
 		else
-			local foreignRef                         = F("_FOREIGN[%d]", foreignN)
-			writer.foreignReferences[foreignSourceId] = foreignRef
-			file:write("\t", foreignRef)
-		end
-
-		file:write(" = (", foreignSourceName, ")") -- @Robustness: Is this too straightforward?
-		writeEol(state, writer)
-
-		if foreignSourceName:find"\n" then
-			local _, nlCount         = foreignSourceName:gsub("\n", "%0")
-			writer.currentOutputLine = writer.currentOutputLine + nlCount -- @Incomplete: Call addLineMapping() for every line here.
+			writer.foreignReferences[foreignSourceId] = F("_FOREIGN[%d]", foreignN)
 		end
 
 	elseif foreignSource == "compiler" then
-		local lua = nil
+		lua = nil
 
 		if not writer.outputRuntime then
 			lua = foreignApiCompilerSymbolsDuringCompilation[foreignSourceName]
@@ -2228,252 +2152,239 @@ function _G.writeForeignImportIfNew(state, writer, typeInfo, foreignSource, fore
 			lua = foreignApiCompilerSymbols[foreignSourceName] or errorInternal("%s", foreignSourceName)
 		end
 
-		if outputDebugInfo then
-			writer.foreignReferences[foreignSourceId] = F("_FOREIGN[%d--[[%s]]]", foreignN, foreignSourceId)
-			file:write("\t_FOREIGN[", F("%d", foreignN), "]")
-		else
-			local foreignRef                          = F("_FOREIGN[%d]", foreignN)
-			writer.foreignReferences[foreignSourceId] = foreignRef
-			file:write("\t", foreignRef)
-		end
-
-		file:write(" = ", lua)
-		writeEol(state, writer)
-
-		if lua:find"\n" then
-			local _, nlCount         = lua:gsub("\n", "%0")
-			writer.currentOutputLine = writer.currentOutputLine + nlCount -- @Incomplete: Call addLineMapping() for every line here.
-		end
+		writer.foreignReferences[foreignSourceId] = F("_FOREIGN[%d]", foreignN)
 
 	else
 		errorInternal("Incomplete: Handle foreignSource=%s", foreignSource)
 	end
+	!ASSERT `lua`
+
+	local luaAssignment                   = !!(LUA_STATEMENT([[ _FOREIGN[1] = x ]], function(luaAssignment)luaAssignment.values[1]=nil;end))
+	luaAssignment.sourceNode              = sourceNode -- @Incomplete: Line numbers for the contents of 'lua'.
+	luaAssignment.targets[1].member.value = foreignN
+	luaAssignment.values[1]               = assert(luaParser.parseExpression(lua)) -- @Incomplete: Maybe actually output foreigns as-is instead of part of the Lua AST. Or would that be too straightforward?
+	table.insert(luaBlock.statements, luaAssignment)
 end
 
-local serializedIntCache   = {}
-local serializedFloatCache = {}
+local serializedIntCache = {}
 
--- writeNormalSimpleConstant( state, writer, tag, v, isEnum, nodeForError=nil )
+-- luaExpr = writeNormalSimpleConstant( state, writer, tag, v, isEnum, nodeForError=nil )
 local function writeNormalSimpleConstant(state, writer, tag, v, isEnum, nodeForError)
-	local file = writer.file
+	local luaExpr
 
 	if tag == !(TYPE_BOOL) then
-		file:write(v and "true" or "false")
+		luaExpr = (
+			v
+			and !!(LUA_EXPRESSION[[ true  ]])
+			or  !!(LUA_EXPRESSION[[ false ]])
+		)
 
 	elseif tag == !(TYPE_INT) then
 		validateIntegerRange(state, v, nodeForError)
 		if v == 0 then
-			file:write("0") -- Avoid writing '-0'.
+			-- void
 		else
 			local nStr = serializedIntCache[v]
 			if not nStr then
 				nStr = F("%.0f", v)
 				if not nStr:find"^%-?%d+$" then
+					-- @Robustness: Ensure luaParser follows this rule. (May be enough to call luaParser.toLua().)
 					errorLine("ProgramWriter", "Cannot write value as integer: %s (formatted as '%s')", tostring(v), nStr)
 				end
 				serializedIntCache[v] = nStr
 			end
-			if nStr:byte(1) == @@BYTE"-" then -- @Incomplete: Use shouldOperationHaveSurroundingParentheses().
-				file:write("(", nStr, ")")
-			else
-				file:write(nStr)
-			end
 		end
+		luaExpr = luaParser.newNodeFast("literal", v)
 
 	elseif tag == !(TYPE_FLOAT) then
-		-- @Incomplete: Use shouldOperationHaveSurroundingParentheses().
-		if v == 0 then
-			file:write("0.0") -- Avoid writing '-0.0'.
-		elseif v == 1/0 then
-			file:write("(1/0)")
-		elseif v == -1/0 then
-			file:write("(-1/0)")
-		elseif v ~= v then
-			file:write("(0/0)")
-		else
-			local floatStr = serializedFloatCache[v]
-			if not floatStr then
-				floatStr = tostring(v)
-				if not floatStr:find"[.Ee]" then
-					floatStr = floatStr:gsub("^%d+", "%0.0")
-				end
-				serializedFloatCache[v] = floatStr
-			end
-			if floatStr:byte(1) == @@BYTE"-" then
-				file:write("(", floatStr, ")")
-			else
-				file:write(floatStr)
-			end
-		end
+		-- @Polish: Make luaParser always output a decimal point for floats.
+		luaExpr = luaParser.newNodeFast("literal", v)
 
 	elseif tag == !(TYPE_NONE) then
-		file:write("nil")
+		luaExpr = !!(LUA_EXPRESSION[[ nil ]])
 
 	elseif tag == !(TYPE_STRING) then
-		writeStringLiteral(writer, v)
+		luaExpr = luaParser.newNodeFast("literal", v)
 
 	elseif tag == !(TYPE_TYPE) then
 		local typeInfo = v
-		file:write(F("%d", typeInfo.id))
+		luaExpr        = luaParser.newNodeFast("literal", typeInfo.id)
 
 		if outputDebugInfo and not isEnum then
-			file:write(formatInfoComment(getFriendlyTypeInfoName(typeInfo)))
+			luaExpr.suffix = formatInfoComment(getFriendlyTypeInfoName(typeInfo))
 		end
 
-	elseif nodeForError then
-		errorInternal(state, nodeForError, "Incomplete: Handle constant value of type '%s'.", (TYPE_NAMES[tag] or "?"))
 	else
-		errorInternal("Incomplete: Handle constant value of type '%s'.", (TYPE_NAMES[tag] or "?"))
+		errorInternal(state, nodeForError, "Incomplete: Handle constant value of type '%s'.", (TYPE_NAMES[tag] or "?"))
 	end
+
+	luaExpr.sourceNode = nodeForError -- May be nil.
+	return luaExpr
 end
 
-local TYPE_NAMES_UPPER = {}
+local typeInfoCommentCache = {}
 
+-- luaTypeInfoTable = writeTypeInfo( state, writer, typeInfo )
 local function writeTypeInfo(state, writer, typeInfo)
-	local file = writer.file
+	local tag                    = typeInfo.tag
+	local luaTypeInfoTable       = !!(LUA_EXPRESSION[[ {} ]])
+	local luaTypeInfoTableFields = luaTypeInfoTable.fields
 
 	!(
 	local function END_OF_TYPE_INFO(typeInfoStructName)
 		-- @Robustness: Get the name in the comment from the correct TypeInfo* struct declaration.
 		return templateToLua(
 			trimTemplate`
-				file:write("}")
-				if outputDebugInfo then  file:write("--[[$typeInfoStructName]]")  end
+				if outputDebugInfo then
+					luaTypeInfoTable.suffix = formatInfoComment($typeInfoStructName)
+				end
 			`,
 			{typeInfoStructName=typeInfoStructName}
 		)
 	end
 	)
 
-	local tag = typeInfo.tag
-
 	-- Note: This table's fields must be synced with preload and messenger!
-	file:write("{tag=", tag)
+	local luaTagLiteral = luaParser.newNodeFast("literal", tag)
+	@@INSERT_TABLE_FIELD(luaTypeInfoTableFields, "tag", luaTagLiteral)
 	if outputDebugInfo then
-		TYPE_NAMES_UPPER[tag] = TYPE_NAMES_UPPER[tag] or TYPE_NAMES[tag]:upper()
-		file:write("--[[TypeTag.", TYPE_NAMES_UPPER[tag], "]]")
+		typeInfoCommentCache[tag] = typeInfoCommentCache[tag] or formatInfoComment("TypeTag."..TYPE_NAMES[tag]:upper())
+		luaTagLiteral.suffix      = typeInfoCommentCache[tag]
 	end
-	file:write(",id=")
-	writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), typeInfo, false, nil)
+
+	local luaExpr = writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), typeInfo, false, nil)
+	@@INSERT_TABLE_FIELD(luaTypeInfoTableFields, "id", luaExpr)
 
 	if tag == !(TYPE_ARRAY) then
 		local arraySig = typeInfo
-
-		file:write(",itemType=")
-		writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), arraySig.itemType, false, nil)
+		local luaExpr  = writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), arraySig.itemType, false, nil)
+		@@INSERT_TABLE_FIELD(luaTypeInfoTableFields, "itemType", luaExpr)
 
 		!!(END_OF_TYPE_INFO"TypeInfoArray")
 
 	elseif tag == !(TYPE_VARARG) then
 		local varargSig = typeInfo
-
-		file:write(",itemType=")
-		writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), varargSig.itemType, false, nil)
+		local luaExpr   = writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), varargSig.itemType, false, nil)
+		@@INSERT_TABLE_FIELD(luaTypeInfoTableFields, "itemType", luaExpr)
 
 		!!(END_OF_TYPE_INFO"TypeInfoVararg")
 
 	elseif tag == !(TYPE_FUNCTION) then
 		local funcSig = typeInfo
 
-		file:write(",argumentsIn={")
-		for i, typeInfo in ipairs(funcSig.argumentTypesIn) do
-			if i > 1 then  file:write(",")  end
-			file:write("{argumentType=")
-			writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), typeInfo, false, nil)
-			file:write("}")
-		end
-		file:write("}")
+		local luaArgArray       = !!(LUA_EXPRESSION[[ {} ]])
+		local luaArgArrayFields = luaArgArray.fields
+		@@INSERT_TABLE_FIELD(luaTypeInfoTableFields, "argumentsIn", luaArgArray)
 
-		file:write(",argumentsOut={")
-		for i, typeInfo in ipairs(funcSig.argumentTypesOut) do
-			if i > 1 then  file:write(",")  end
-			file:write("{argumentType=")
-			writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), typeInfo, false, nil)
-			file:write("}")
+		for _, typeInfo in ipairs(funcSig.argumentTypesIn) do
+			local luaArgTable       = !!(LUA_EXPRESSION[[ {} ]])
+			local luaArgTableFields = luaArgTable.fields
+			@@INSERT_TABLE_FIELD(luaArgArrayFields, nil, luaArgTable)
+
+			local luaExpr = writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), typeInfo, false, nil)
+			@@INSERT_TABLE_FIELD(luaArgTableFields, "argumentType", luaExpr)
 		end
-		file:write("}")
+
+		local luaArgArray       = !!(LUA_EXPRESSION[[ {} ]])
+		local luaArgArrayFields = luaArgArray.fields
+		@@INSERT_TABLE_FIELD(luaTypeInfoTableFields, "argumentsOut", luaArgArray)
+
+		for _, typeInfo in ipairs(funcSig.argumentTypesOut) do
+			local luaArgTable       = !!(LUA_EXPRESSION[[ {} ]])
+			local luaArgTableFields = luaArgTable.fields
+			@@INSERT_TABLE_FIELD(luaArgArrayFields, nil, luaArgTable)
+
+			local luaExpr = writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), typeInfo, false, nil)
+			@@INSERT_TABLE_FIELD(luaArgTableFields, "argumentType", luaExpr)
+		end
 
 		!!(END_OF_TYPE_INFO"TypeInfoFunction")
 
 	elseif tag == !(TYPE_STRUCT) then
 		local structInfo = typeInfo
 
-		file:write(",name=")
-		writeStringLiteral(writer, structInfo.name)
+		@@INSERT_TABLE_FIELD(luaTypeInfoTableFields, "name", luaParser.newNodeFast("literal", structInfo.name))
 
-		file:write(",kind=", structInfo.kind)
+		@@INSERT_TABLE_FIELD(luaTypeInfoTableFields, "kind", luaParser.newNodeFast("literal", structInfo.kind))
 
-		file:write(",valueType=")
-		writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), (structInfo.valueType or state.builtinTypeInfos.void), false, nil)
+		local luaExpr = writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), (structInfo.valueType or state.builtinTypeInfos.void), false, nil)
+		@@INSERT_TABLE_FIELD(luaTypeInfoTableFields, "valueType", luaExpr)
 
-		file:write(",keyType=")
-		writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), (structInfo.keyType or state.builtinTypeInfos.void), false, nil)
+		local luaExpr = writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), (structInfo.keyType or state.builtinTypeInfos.void), false, nil)
+		@@INSERT_TABLE_FIELD(luaTypeInfoTableFields, "keyType", luaExpr)
 
-		file:write(",members={")
-		for i, member in ipairs(structInfo.members) do
-			if i > 1 then  file:write(",")  end
+		local luaMemberArray       = !!(LUA_EXPRESSION[[ {} ]])
+		local luaMemberArrayFields = luaMemberArray.fields
+		@@INSERT_TABLE_FIELD(luaTypeInfoTableFields, "members", luaMemberArray)
 
-			file:write("{name=")
-			writeStringLiteral(writer, member.name)
+		for _, member in ipairs(structInfo.members) do
+			local luaMemberTable       = !!(LUA_EXPRESSION[[ {} ]])
+			local luaMemberTableFields = luaMemberTable.fields
+			@@INSERT_TABLE_FIELD(luaMemberArrayFields, nil, luaMemberTable)
 
-			file:write(",memberType=")
-			writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), member.typeInfo, false, nil)
+			@@INSERT_TABLE_FIELD(luaMemberTableFields, "name", luaParser.newNodeFast("literal", member.name))
 
-			local decl = findMemberDeclaration(state, structInfo.astNode, member.name) or errorInternal(state, structInfo.astNode, "%s", member.name)
-			file:write(",notes={")
-			for i, note in ipairs(decl.notes or EMPTY_TABLE) do
-				if i > 1 then  file:write(",")  end
+			local luaExpr = writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), member.typeInfo, false, nil)
+			@@INSERT_TABLE_FIELD(luaMemberTableFields, "memberType", luaExpr)
+
+			local decl               = findMemberDeclaration(state, structInfo.astNode, member.name) or errorInternal(state, structInfo.astNode, "%s", member.name)
+			local luaNoteArray       = !!(LUA_EXPRESSION[[ {} ]])
+			local luaNoteArrayFields = luaNoteArray.fields
+			@@INSERT_TABLE_FIELD(luaMemberTableFields, "notes", luaNoteArray)
+
+			for _, note in ipairs(decl.notes or EMPTY_TABLE) do
 				local typeInfo = requireTypeRepresentedByExpression(state, note)
-				writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), typeInfo, false, nil)
+				local luaExpr  = writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), typeInfo, false, nil)
+				@@INSERT_TABLE_FIELD(luaNoteArrayFields, nil, luaExpr)
 			end
-			file:write("}")
-
-			file:write("}")
 		end
-		file:write("}")
 
 		!!(END_OF_TYPE_INFO"TypeInfoStruct")
 
 	elseif tag == !(TYPE_ENUM) then
 		local enumInfo = typeInfo
 
-		file:write(",name=")
-		writeStringLiteral(writer, enumInfo.name)
+		@@INSERT_TABLE_FIELD(luaTypeInfoTableFields, "name", luaParser.newNodeFast("literal", enumInfo.name))
 
-		file:write(",memberType=")
-		writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), enumInfo.memberTypeInfo, false, nil)
+		local luaExpr = writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), enumInfo.memberTypeInfo, false, nil)
+		@@INSERT_TABLE_FIELD(luaTypeInfoTableFields, "memberType", luaExpr)
 
-		file:write(",members={")
-		for i, member in ipairs(enumInfo.members) do
-			if i > 1 then  file:write(",")  end
+		local luaMemberArray       = !!(LUA_EXPRESSION[[ {} ]])
+		local luaMemberArrayFields = luaMemberArray.fields
+		@@INSERT_TABLE_FIELD(luaTypeInfoTableFields, "members", luaMemberArray)
 
-			file:write("{name=")
-			writeStringLiteral(writer, member.name)
+		for _, member in ipairs(enumInfo.members) do
+			local luaMemberTable       = !!(LUA_EXPRESSION[[ {} ]])
+			local luaMemberTableFields = luaMemberTable.fields
+			@@INSERT_TABLE_FIELD(luaMemberArrayFields, nil, luaMemberTable)
 
-			local decl = findMemberDeclaration(state, enumInfo.astNode, member.name) or errorInternal(state, enumInfo.astNode, "%s", member.name)
-			file:write(",notes={")
-			for i, note in ipairs(decl.notes or EMPTY_TABLE) do
-				if i > 1 then  file:write(",")  end
+			@@INSERT_TABLE_FIELD(luaMemberTableFields, "name", luaParser.newNodeFast("literal", member.name))
+
+			local decl               = findMemberDeclaration(state, enumInfo.astNode, member.name) or errorInternal(state, enumInfo.astNode, "%s", member.name)
+			local luaNoteArray       = !!(LUA_EXPRESSION[[ {} ]])
+			local luaNoteArrayFields = luaNoteArray.fields
+			@@INSERT_TABLE_FIELD(luaMemberTableFields, "notes", luaNoteArray)
+
+			for _, note in ipairs(decl.notes or EMPTY_TABLE) do
 				local typeInfo = requireTypeRepresentedByExpression(state, note)
-				writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), typeInfo, false, nil)
+				local luaExpr  = writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), typeInfo, false, nil)
+				@@INSERT_TABLE_FIELD(luaNoteArrayFields, nil, luaExpr)
 			end
-			file:write("}")
-
-			file:write("}")
 		end
-		file:write("}")
 
 		!!(END_OF_TYPE_INFO"TypeInfoEnum")
 
 	elseif tag == !(TYPE_COMPOUND) then
 		local compound = typeInfo
 
-		file:write(",types={")
-		for i, compoundItem in ipairs(compound) do
-			if i > 1 then  file:write(",")  end
-			writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), compoundItem, false, nil)
+		local luaTypeArray       = !!(LUA_EXPRESSION[[ {} ]])
+		local luaTypeArrayFields = luaTypeArray.fields
+		@@INSERT_TABLE_FIELD(luaTypeInfoTableFields, "types", luaTypeArray)
+
+		for _, compoundItem in ipairs(compound) do
+			local luaExpr = writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), compoundItem, false, nil)
+			@@INSERT_TABLE_FIELD(luaTypeArrayFields, nil, luaExpr)
 		end
-		file:write("}")
 
 		!!(END_OF_TYPE_INFO"TypeInfoCompound")
 
@@ -2495,50 +2406,53 @@ local function writeTypeInfo(state, writer, typeInfo)
 	else
 		errorInternal("Incomplete: %s", getFriendlyTypeInfoName(typeInfo))
 	end
+
+	return luaTypeInfoTable
 end
 
--- writeConstantValue( state, writer, const, nodeForError=nil )
-function _G.writeConstantValue(state, writer, const, nodeForError)
-	local file = writer.file
-	local tag  = const.valueType.tag
+-- luaExpr = writeConstantValue( state, writer, const, nodeForError=nil )
+local function writeConstantValue(state, writer, const, nodeForError)
+	local tag = const.valueType.tag
+	local luaExpr
 
 	if const.kind == !(CONST_KIND_FOREIGN) then
 		local foreign = const.value
-		writeForeignReference(state, writer, foreign.foreignSourceId, nodeForError)
+		luaExpr       = writeForeignReference(state, writer, foreign.foreignSourceId, nodeForError)
 
 	elseif const.kind == !(CONST_KIND_TYPE_INFO) then
-		local typeInfo = const.value
-		file:write("_TYPE_INFO[", typeInfo.id, "]")
+		local typeInfo       = const.value
+		luaExpr              = !!(LUA_EXPRESSION[[ _TYPE_INFO[0] ]])
+		luaExpr.sourceNode   = nodeForError -- May be nil.
+		luaExpr.member.value = typeInfo.id
 
 	elseif const.kind == !(CONST_KIND_LOCATION) then
 		local target = const.value
 
 		-- Note: This table's fields must be synced with the preload module!
-		file:write("{filePath=")
-		writeStringLiteral(writer, target.source.path)
-		file:write(", lineNumber=", target.line, ", position=", target.position, "}")
+		luaExpr                       = !!(LUA_EXPRESSION[[ {filePath="", lineNumber=0, position=0} ]])
+		luaExpr.sourceNode            = nodeForError -- May be nil.
+		luaExpr.fields[1].value.value = target.source.path
+		luaExpr.fields[2].value.value = target.line
+		luaExpr.fields[3].value.value = target.position
 
 	elseif const.kind == !(CONST_KIND_NULL) then
-		file:write("nil")
+		luaExpr            = !!(LUA_EXPRESSION[[ nil ]])
+		luaExpr.sourceNode = nodeForError -- May be nil.
 
 	elseif const.kind == !(CONST_KIND_VIEW) then
 		-- Note: The constants must be written in the same order as they were allocated for these
 		-- views to work (which is what should happen naturally because of how dependencies work).
-		writeAccess(state, writer, 1, 1, {}, const.value)
+		luaExpr = writeAccess(state, writer, 1, {}, const.value)
 
 	--------------------------------
 
 	elseif const.kind ~= !(CONST_KIND_NORMAL) then
-		if nodeForError then
-			errorInternal(state, nodeForError, "Incomplete: Handle constant kind '%s'.", (CONST_KIND_TITLES[const.kind] or "?"))
-		else
-			errorInternal("Incomplete: Handle constant kind '%s'.", (CONST_KIND_TITLES[const.kind] or "?"))
-		end
+		errorInternal(state, nodeForError, "Incomplete: Handle constant kind '%s'.", (CONST_KIND_TITLES[const.kind] or "?"))
 
 	elseif not const.isObject then
 		if tag ~= !(TYPE_ENUM) then
-			writeNormalSimpleConstant(state, writer, tag, const.value, false, nodeForError)
-			return
+			luaExpr = writeNormalSimpleConstant(state, writer, tag, const.value, false, nodeForError)
+			return luaExpr
 		end
 
 		local enumInfo   = const.valueType
@@ -2556,53 +2470,50 @@ function _G.writeConstantValue(state, writer, const, nodeForError)
 			end
 		end
 
-		local valueExpr  = decl.value
+		local valueExpr = decl.value
 
 		if enumInfo.memberTypeInfo.tag == !(TYPE_TYPE) then
 			local typeNode = valueExpr
 			!ASSERT("typeNode.nodeType == "..AST_TYPE)
-			writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), typeNode.representedType, true, nodeForError)
+			luaExpr = writeNormalSimpleConstant(state, writer, !(TYPE_TYPE), typeNode.representedType, true, nodeForError)
 		else
 			local literal = valueExpr
 			!ASSERT("literal.nodeType == "..AST_LITERAL)
-			writeNormalSimpleConstant(state, writer, enumInfo.memberTypeInfo.tag, literal.value, true, nodeForError)
+			luaExpr = writeNormalSimpleConstant(state, writer, enumInfo.memberTypeInfo.tag, literal.value, true, nodeForError)
 		end
 
 		if outputDebugInfo then
-			file:write("--[[", enumInfo.name, ".", memberName, "]]")
+			luaExpr.suffix = formatInfoComment(enumInfo.name.."."..memberName) -- @Speed: Cache!
 		end
 
 	elseif tag == !(TYPE_FUNCTION) then
 		local lambda = const.value
-		writeFunction(state, writer, 1, 1, {}, lambda)
+		luaExpr      = writeFunction(state, writer, {}, lambda)
 
 	elseif !!(CONST_SET{ TYPE_TABLE, TYPE_ARRAY, TYPE_STRUCT })[tag] then
 		local tableNode = const.value
-		writeExpression(state, writer, 1, 1, {}, tableNode)
+		luaExpr         = writeExpression(state, writer, 1, {}, tableNode)
 
 	elseif tag == !(TYPE_STRING) then -- Large string.
-		local s = const.value
-		writeStringLiteral(writer, s)
+		local s            = const.value
+		luaExpr            = luaParser.newNodeFast("literal", s)
+		luaExpr.sourceNode = nodeForError -- May be nil.
 
-	elseif !!(CONST_SET{ TYPE_ANY, TYPE_NAMESPACE, TYPE_COMPOUND, TYPE_LIST })[tag] then
-		if nodeForError then
+	else
+		if !!(CONST_SET{ TYPE_ANY, TYPE_NAMESPACE, TYPE_COMPOUND, TYPE_LIST })[tag] then
 			errorInternal(state, nodeForError, "Cannot write invalid value type '%s'.", TYPE_NAMES[tag])
 		else
-			errorInternal("Cannot write invalid value type '%s'.", TYPE_NAMES[tag])
-		end
-	else
-		if nodeForError then
 			errorInternal(state, nodeForError, "Incomplete: Handle constant value of type '%s'.", (TYPE_NAMES[tag] or "?"))
-		else
-			errorInternal("Incomplete: Handle constant value of type '%s'.", (TYPE_NAMES[tag] or "?"))
 		end
 	end
+
+	return luaExpr
 end
 
-function _G.writeConstantValueOrReference(state, writer, const, nodeForError)
+-- luaExpr = writeConstantValueOrReference( state, writer, constant, nodeForError )
+--[[local ]]function writeConstantValueOrReference(state, writer, const, nodeForError)
 	if not const.isObject then
-		writeConstantValue(state, writer, const, nodeForError)
-		return
+		return (writeConstantValue(state, writer, const, nodeForError))
 	end
 
 	if const.valueType.tag == !(TYPE_FUNCTION) then
@@ -2619,42 +2530,30 @@ function _G.writeConstantValueOrReference(state, writer, const, nodeForError)
 		end
 	end
 
-	writer.file:write(const.name)
+	local luaIdent      = luaParser.newNodeFast("identifier", const.name)
+	luaIdent.sourceNode = nodeForError
+	return luaIdent
 end
 
 
 
-function _G.writeLuaPreloads(state, writer, luaPreloads, fromIndex)
-	local file = writer.file
-
+function _G.writeLuaPreloads(state, writer, luaPreloads, fromIndex, luaBlock)
 	for i = fromIndex, #luaPreloads do
-		local luaPreload = luaPreloads[i]
-
-		file:write("do\n", luaPreload.lua, "\nend\n")
-
-		local _, nlCount     = luaPreload.lua:gsub("\n", "%0") -- @Speed
-		local stringTokenLn  = luaPreload.line + luaPreload.lineOffset - 2 + (luaPreload.trimmedInitialNewline and 1 or 0)
-		local outputOffsetLn = writer.currentOutputLine - 1
-
-		for ln = 2, nlCount+2 do
-			writer.lineMappingFiles[outputOffsetLn+ln] = luaPreload.path
-			writer.lineMappingLines[outputOffsetLn+ln] = stringTokenLn + ln
-		end
-
-		writer.currentOutputLine = writer.currentOutputLine+nlCount+3
+		-- @Incomplete: Line numbers for preloads.
+		local luaInnerBlock = assert(luaParser.parse(luaPreloads[i].lua)) -- @Incomplete: Maybe actually output preloads as-is instead of part of the Lua AST.
+		table.insert(luaBlock.statements, luaInnerBlock)
 	end
 end
 
--- writeCompilerSymbols( state, writer, relevantObjects=nil )
-function _G.writeCompilerSymbols(state, writer, relevantObjects)
-	local file          = writer.file
+-- writeCompilerSymbols( state, writer, luaBlock, relevantObjects=nil )
+function _G.writeCompilerSymbols(state, writer, luaBlock, relevantObjects)
 	local outputRuntime = writer.outputRuntime
 
 	if outputRuntime then
-		file:write("local lineMappings      = {paths={},files={},lines={}}") ; writeEol(state, writer)
-		file:write("local programArguments  = arg") ; writeEol(state, writer)
-		file:write("local luaArguments      = arg") ; writeEol(state, writer)
-		file:write!("local gloaErrorHandler = "..ERROR_HANDLER) ; writeEol(state, writer)
+		table.insert(luaBlock.statements, !!(LUA_STATEMENT([[ local lineMappings     = {paths={},files={},lines={}} ]])))
+		table.insert(luaBlock.statements, !!(LUA_STATEMENT([[ local programArguments = arg ]])))
+		table.insert(luaBlock.statements, !!(LUA_STATEMENT([[ local luaArguments     = arg ]])))
+		table.insert(luaBlock.statements, !!(LUA_STATEMENT([[ local gloaErrorHandler = ]]..ERROR_HANDLER, function(luaDecl)luaDecl.values[1].pretty=false;end)))
 
 		local writeAllTypes = not relevantObjects or relevantObjects.allTypeInfos
 
@@ -2674,19 +2573,16 @@ function _G.writeCompilerSymbols(state, writer, relevantObjects)
 			end
 
 			-- Write list of types.
-			file:write("local _TYPES = {")
+			local luaDecl            = !!(LUA_STATEMENT([[ local _TYPES = {} ]], function(luaDecl)luaDecl.values[1].pretty=false;end))
+			local luaTypeArray       = luaDecl.values[1]
+			local luaTypeArrayFields = luaTypeArray.fields
+			table.insert(luaBlock.statements, luaDecl)
 
-			local first = true
 			for typeId = 1, toWriteLastTypeId do
 				if toWriteTypeIdSet[typeId] then
-					if not first then  file:write(",")  end
-					first = false
-
-					file:write(typeId)
+					@@INSERT_TABLE_FIELD(luaTypeArrayFields, nil, luaParser.newNodeFast("literal", typeId))
 				end
 			end
-
-			file:write("}") ; writeEol(state, writer)
 
 			-- Write type table.
 			local sequenceGap       = 0
@@ -2694,57 +2590,64 @@ function _G.writeCompilerSymbols(state, writer, relevantObjects)
 			local _outputDebugInfo  = outputDebugInfo
 			_G.outputDebugInfo      = false -- The type table is big enough already! Let's try making it a bit smaller. (This saves ~50% of the space.)
 
-			file:write("local _ = nil") ; writeEol(state, writer)
-			file:write("local _TYPE_INFO = {")
+			table.insert(luaBlock.statements, !!(LUA_STATEMENT[[ local _ = nil ]])) -- '_' is shorter than 'nil'.
 
-			local first = true
+			local luaDecl                = !!(LUA_STATEMENT[[ local _TYPE_INFO = {} ]])
+			local luaTypeInfoArray       = luaDecl.values[1]
+			luaTypeInfoArray.pretty      = false
+			local luaTypeInfoArrayFields = luaTypeInfoArray.fields
+			table.insert(luaBlock.statements, luaDecl)
+
 			for typeId = 1, toWriteLastTypeId do
 				if toWriteTypeIdSet[typeId] then
-					if not first then  file:write(",")  end
-					first = false
+					local luaTypeArrayField = {generatedKey=true, value=nil}
 
 					-- Note: Type index and type ID are the same.
 					if sequenceGap == 0 then
 						-- void
 					elseif sequenceGap < sequenceGapToFill then
-						file:write(("_,"):rep(sequenceGap))
-						sequenceGap = 0
+						while sequenceGap > 0 do
+							sequenceGap = sequenceGap - 1
+							@@INSERT_TABLE_FIELD(luaTypeInfoArrayFields, nil, !!(LUA_EXPRESSION[[ _ ]]))
+						end
 					else
-						file:write("[", typeId, "]=")
+						luaTypeArrayField.generatedKey = false
+						luaTypeArrayField.key          = luaParser.newNodeFast("literal", typeId)
 					end
 
-					writeTypeInfo(state, writer, state.allTypeInfos[typeId])
+					luaTypeArrayField.value = writeTypeInfo(state, writer, state.allTypeInfos[typeId])
+					table.insert(luaTypeInfoArrayFields, luaTypeArrayField)
 
 				else
-					sequenceGap = sequenceGap+1
+					sequenceGap = sequenceGap + 1
 				end
 			end
-
-			file:write("}") ; writeEol(state, writer)
 
 			_G.outputDebugInfo = _outputDebugInfo
 		end
 
 	else
 		-- Note: lineMappings is not used in metaprograms because gloaErrorHandler() is different.
-		file:write("programArguments = metaprogramArguments") ; writeEol(state, writer)
-		file:write("luaArguments     = compilerLuaArguments") ; writeEol(state, writer)
-		file:write("gloaErrorHandler = compilerErrorHandler") ; writeEol(state, writer)
+		table.insert(luaBlock.statements, !!(LUA_STATEMENT[[ programArguments = metaprogramArguments ]]))
+		table.insert(luaBlock.statements, !!(LUA_STATEMENT[[ luaArguments     = compilerLuaArguments ]]))
+		table.insert(luaBlock.statements, !!(LUA_STATEMENT[[ gloaErrorHandler = compilerErrorHandler ]]))
 
-		file:write("_TYPES     = metaprogramTypeIds")   ; writeEol(state, writer)
-		file:write("_TYPE_INFO = metaprogramTypeTable") ; writeEol(state, writer)
+		table.insert(luaBlock.statements, !!(LUA_STATEMENT[[ _TYPES     = metaprogramTypeIds ]]))
+		table.insert(luaBlock.statements, !!(LUA_STATEMENT[[ _TYPE_INFO = metaprogramTypeTable ]]))
 	end
 
 	-- @Polish: Only output symbols actually used in the program.
 	!for i = 1, #COMPILER_SYMBOL_PAIRS, 2 do
-		if outputRuntime then  file:write("local ")  end
-		file:write!(COMPILER_SYMBOL_PAIRS[i].." = "..COMPILER_SYMBOL_PAIRS[i+1])
-		writeEol(state, writer)
+		table.insert(luaBlock.statements, (
+			outputRuntime
+			and !!(LUA_STATEMENT("local "..COMPILER_SYMBOL_PAIRS[i].." = "..COMPILER_SYMBOL_PAIRS[i+1], function(luaStatement)luaStatement.values[1].pretty=false;end))
+			or  !!(LUA_STATEMENT(          COMPILER_SYMBOL_PAIRS[i].." = "..COMPILER_SYMBOL_PAIRS[i+1], function(luaStatement)luaStatement.values[1].pretty=false;end))
+		))
 	!end
 end
 
--- writeForeignImports(state, writer, constants, asGlobals [, relevantObjects=all ] )
-function _G.writeForeignImports(state, writer, constants, asGlobals, relevantObjects)
+-- writeForeignImports( state, writer, constants, asGlobals, luaBlock, relevantObjects=all )
+function _G.writeForeignImports(state, writer, constants, asGlobals, luaBlock, relevantObjects)
 	for _, const in ipairs(constants) do
 		if relevantObjects and not relevantObjects[const] then
 			-- void
@@ -2752,21 +2655,20 @@ function _G.writeForeignImports(state, writer, constants, asGlobals, relevantObj
 		elseif const.kind == !(CONST_KIND_NORMAL) and const.valueType.tag == !(TYPE_FUNCTION) and const.value.bodyIsForeign then
 			-- @Polish: Treat function constants pointing to the same foreign function as the same constant.
 			local lambda = const.value
-			writeForeignImportIfNew(state, writer, const.valueType, lambda.foreignSource, lambda.foreignSourceName.value, lambda.foreignSourceId, lambda, asGlobals)
+			writeForeignImportIfNew(state, writer, const.valueType, lambda.foreignSource, lambda.foreignSourceName.value, lambda.foreignSourceId, lambda, asGlobals, luaBlock)
 
 		elseif const.kind == !(CONST_KIND_FOREIGN) then
 			local foreign = const.value
-			writeForeignImportIfNew(state, writer, foreign.inferredType, foreign.foreignSource, foreign.foreignSourceName.value, foreign.foreignSourceId, foreign, asGlobals)
+			writeForeignImportIfNew(state, writer, foreign.inferredType, foreign.foreignSource, foreign.foreignSourceName.value, foreign.foreignSourceId, foreign, asGlobals, luaBlock)
 		end
 	end
 end
 
--- writeConstantObjectsAndForwardDeclarations( state, writer, constants, topScopeNames [, relevantObjects=all ] )
-function _G.writeConstantObjectsAndForwardDeclarations(state, writer, constants, topScopeNames, relevantObjects)
+-- writeConstantObjectsAndForwardDeclarations( state, writer, constants, topScopeNames, luaBlock, relevantObjects=all )
+function _G.writeConstantObjectsAndForwardDeclarations(state, writer, constants, topScopeNames, luaBlock, relevantObjects)
 	local constantNamesToWrite = {}
 	local constantFunctions    = {}
 	local constantNonFunctions = {}
-	local file                 = writer.file
 
 	for _, const in ipairs(constants) do
 		if not const.isObject or (relevantObjects and not relevantObjects[const]) then
@@ -2790,24 +2692,18 @@ function _G.writeConstantObjectsAndForwardDeclarations(state, writer, constants,
 	if not (constantNamesToWrite[1] or topScopeNames[1]) then  return  end
 
 	if writer.remainingUpvalues > 0 then
-		local first = true
-		file:write("\tlocal ")
+		local luaDecl = !!(LUA_STATEMENT([[ local x ]], function(luaDecl)luaDecl.names[1]=nil;end))
+		table.insert(luaBlock.statements, luaDecl)
 
 		for i = 1, math.min(writer.remainingUpvalues, #constantNamesToWrite) do
-			if not first then  file:write(", ")  end
-			first = false
-			file:write(constantNamesToWrite[i])
+			table.insert(luaDecl.names, luaParser.newNodeFast("identifier", constantNamesToWrite[i]))
 		end
 		writer.remainingUpvalues = writer.remainingUpvalues - #constantNamesToWrite
 
 		for i = 1, math.min(writer.remainingUpvalues, #topScopeNames) do
-			if not first then  file:write(", ")  end
-			first = false
-			file:write(topScopeNames[i])
+			table.insert(luaDecl.names, luaParser.newNodeFast("identifier", topScopeNames[i]))
 		end
 		writer.remainingUpvalues = writer.remainingUpvalues - #topScopeNames
-
-		writeEol(state, writer)
 	end
 
 	table.sort(constantFunctions, function(a, b)
@@ -2820,46 +2716,51 @@ function _G.writeConstantObjectsAndForwardDeclarations(state, writer, constants,
 	end)
 
 	for _, const in ipairs(constantFunctions) do
-		local lambda = const.value
-		file:write("\t")
-		file:write(const.name, " = ")
-		writeFunction(state, writer, 1, 1, {}, lambda)
-		writeEol(state, writer)
+		local lambda             = const.value
+		local luaAssignment      = luaParser.newNodeFast("assignment")
+		luaAssignment.sourceNode = lambda
+		luaAssignment.targets[1] = luaParser.newNodeFast("identifier", const.name)
+		luaAssignment.values[1]  = writeFunction(state, writer, 1, {}, lambda)
+		table.insert(luaBlock.statements, luaAssignment)
 	end
 
 	for _, const in ipairs(constantNonFunctions) do
-		local nodeForError = (type(const.value) == "table" and const.value.nodeType and const.value.s and const.value or nil) -- @Hack @Robustness
-		file:write("\t")
-		file:write(const.name, " = ")
-		writeConstantValue(state, writer, const, nodeForError)
-		writeEol(state, writer)
+		local nodeForError       = (type(const.value) == "table" and const.value.nodeType and const.value.s and const.value or nil) -- @Hack @Robustness!!!
+		local luaAssignment      = luaParser.newNodeFast("assignment")
+		luaAssignment.targets[1] = luaParser.newNodeFast("identifier", const.name)
+		luaAssignment.values[1]  = writeConstantValue(state, writer, const, nodeForError)
+		table.insert(luaBlock.statements, luaAssignment)
 	end
 end
 
--- writeTopScopeDeclarations( state, writer, declarations [, relevantObjects=all ] )
-function _G.writeTopScopeDeclarations(state, writer, declarations, relevantObjects)
-	local file = writer.file
-
+-- writeTopScopeDeclarations( state, writer, declarations, luaBlock, relevantObjects=all )
+function _G.writeTopScopeDeclarations(state, writer, declarations, luaBlock, relevantObjects)
 	for _, decl in ipairs(declarations) do
 		if relevantObjects and not relevantObjects[decl] then
 			-- void
 
 		elseif decl.topScopeName ~= "" then -- Constant declarations of non-objects (e.g. ints) should have an empty topScopeName.
-			file:write("\t", decl.topScopeName, " = ")
+			local luaExpr
 			if decl.valueConstant then
-				writeConstantValueOrReference(state, writer, decl.valueConstant, decl.name)
+				luaExpr = writeConstantValueOrReference(state, writer, decl.valueConstant, decl.name)
 			else
 				-- We should have a declared struct instance or something similar here (I think) that doesn't have a specified initial value.
-				writeDefaultValueForType(state, writer, 1, 1, {}, decl.inferredType, decl.name)
+				luaExpr = writeDefaultValueForType(state, writer, 1, {}, decl.inferredType, decl.name)
 			end
-			writeEol(state, writer)
+
+			local luaAssignment      = luaParser.newNodeFast("assignment")
+			luaAssignment.sourceNode = decl
+			luaAssignment.targets[1] = luaParser.newNodeFast("identifier", decl.topScopeName)
+			luaAssignment.values[1]  = luaExpr
+			table.insert(luaBlock.statements, luaAssignment)
 		end
 	end
 end
 
 function _G.writeProgram(state, writer)
-
+	--
 	-- Gather info.
+	--
 	local globalScope          = state.globalScope
 	local topScopeDeclarations = copyArray(globalScope.declarations)
 
@@ -2980,51 +2881,58 @@ function _G.writeProgram(state, writer)
 	--
 	-- Write program.
 	--
-	local file  = assert(io.open(state.settings.outputFilePath, "w"))
-	writer.file = file
+	writer.luaMainChunkBody = !!(LUA_STATEMENT[[ do end ]])
 
-	!ASSERT `writer.currentOutputLine == 1`
-
-	if outputType == !(OUTPUT_TYPE_LUA_APP) then
-		-- @Incomplete: Setting to specify the prefix for the written file (shebang and maybe a comment with copyright info, library documentation etc.).
-		file:write('#!/bin/sh\n_=[[\nexec lua "$0" "$@"\n]] and nil\n')
-		writer.currentOutputLine = 5
-	end
-
-	writeLuaPreloads(state, writer, state.luaPreloads,        1)
-	writeLuaPreloads(state, writer, state.luaPreloadsRuntime, 1)
-	writeCompilerSymbols(state, writer, relevantObjects)
+	writeLuaPreloads    (state, writer, state.luaPreloads,        1, writer.luaMainChunkBody)
+	writeLuaPreloads    (state, writer, state.luaPreloadsRuntime, 1, writer.luaMainChunkBody)
+	writeCompilerSymbols(state, writer, writer.luaMainChunkBody,     relevantObjects)
 
 	-- Start of user code.
-	addLineMappingDummy(state, writer)
-	file:write("local function runProgram()") ; writeEol(state, writer)
+	local luaProgramBody
+	do
+		local luaDecl      = !!(LUA_STATEMENT[[ local runProgram = function() end ]])
+		luaDecl.sourceNode = mainFuncDecl -- Is nil for Lua modules, which is probably OK.
+		luaProgramBody     = luaDecl.values[1].body
+		table.insert(writer.luaMainChunkBody.statements, luaDecl)
+	end
 
-	writeForeignImports(state, writer, state.constants, false, relevantObjects)
+	writeForeignImports(state, writer, state.constants, false, luaProgramBody, relevantObjects)
 
-	!local MAX_UPVALUES = 60
+	!local MAX_UPVALUES      = 60
 	writer.remainingUpvalues = !(MAX_UPVALUES - COMPILER_SYMBOL_COUNT) -- @Incomplete: This system for solving the upvalue limit in Lua can be improved. A lot!
-	writeConstantObjectsAndForwardDeclarations(state, writer, state.constants, state.topScopeNames, relevantObjects)
-	writeTopScopeDeclarations(state, writer, topScopeDeclarations, relevantObjects)
+	writeConstantObjectsAndForwardDeclarations(state, writer, state.constants, state.topScopeNames, luaProgramBody, relevantObjects)
+	writeTopScopeDeclarations                 (state, writer, topScopeDeclarations,                 luaProgramBody, relevantObjects)
 
 	-- Write program entry point.
-
 	if outputType == !(OUTPUT_TYPE_LUA_APP) then
-		addLineMappingDummy(state, writer)
-		file:write("\t", mainFuncDecl.valueConstant.name, "()")
-		writeEol(state, writer)
+		local luaCall       = !!(LUA_STATEMENT[[ main() ]])
+		luaCall.sourceNode  = mainFuncDecl.name
+		luaCall.callee.name = mainFuncDecl.valueConstant.name
+		table.insert(luaProgramBody.statements, luaCall)
 
 	elseif outputType == !(OUTPUT_TYPE_LUA_MODULE) then
-		addLineMappingDummy(state, writer)
-		file:write("\treturn ")
-		writeExpression(state, writer, 2, 1, {}, globalScope.fileScopeWithValueToExport.valueToExport)
-		writeEol(state, writer)
+		local luaModuleNode     = globalScope.fileScopeWithValueToExport.valueToExport
+		local luaExpr           = writeExpression(state, writer, 1, {}, luaModuleNode)
+		local luaReturnNode     = !!(LUA_STATEMENT[[ return ]])
+		luaReturnNode.values[1] = luaExpr
+		table.insert(luaProgramBody.statements, luaReturnNode)
 
 	else
 		errorInternal("outputType==%d", outputType)
 	end
 
-	-- End of user code.
-	file:write("end") ; writeEol(state, writer)
+	-- End of user code - start writing to output.
+	!local DEFAULT_HEADER       = '#!/bin/sh\n_=[[\nexec lua "$0" "$@"\n]] and nil'
+	!local DEFAULT_HEADER_LINES = 1 + countString(DEFAULT_HEADER, "\n", true)
+
+	local lua, luaLastLn, luaLastLnRegistered = createLuaOutput(writer, !(DEFAULT_HEADER_LINES+1))
+
+	local file = assert(io.open(state.settings.outputFilePath, "w"))
+
+	if outputType == !(OUTPUT_TYPE_LUA_APP) then
+		file:write!(DEFAULT_HEADER.."\n") -- @Incomplete: Setting to specify the prefix for the written file (shebang and maybe a comment with copyright info, library documentation etc.).
+	end
+	file:write(lua)
 
 	if outputDebugInfo then
 		!(
@@ -3034,22 +2942,10 @@ function _G.writeProgram(state, writer)
 		--     files  1700  3500
 		--     lines  2400  4300
 		--
-		local USE_PADDING = true -- Enabling this seem better.
+		local USE_PADDING = 1==1 -- Enabling this seem better.
 		)
 
-		!local WRAP                     = 50
-		local lastOutputLineForMappings = writer.currentOutputLine
-		local lineCountForMappings      = math.floor(1 + lastOutputLineForMappings / !(WRAP))
-
-		writer.currentOutputLine = (writer.currentOutputLine
-			+ 1                    -- local _
-			+ 1                    -- lineMappings.paths
-			+ lineCountForMappings -- lineMappings.files
-			+ lineCountForMappings -- lineMappings.lines
-			+ 1                    -- xpcall (for which we add a mapping on the next line)
-		)
-		addLineMappingDummy(state, writer)
-
+		!local WRAP             = 50
 		local MODULE_DIR_PREFIX = (COMPILER_DIRECTORY.."/modules/"):gsub("^%./", "")
 
 		local pathIndices = {}
@@ -3059,19 +2955,19 @@ function _G.writeProgram(state, writer)
 		file:write("local _ = nil\n") -- Takes up less space than 'nil'.
 
 		file:write("lineMappings.paths = {")
-		for ln = 1, writer.currentOutputLine do
+		for ln = 1, luaLastLnRegistered do
 			local path = writer.lineMappingFiles[ln]
 
 			if writer.lineMappingLines[ln] and not pathIndices[path] then
 				count = count + 1
 				if count > 1 then  file:write(",")  end -- We don't care about WRAP here as this array will be relatively short.
 
-				pathIndex         = pathIndex+1
+				pathIndex         = pathIndex + 1
 				pathIndices[path] = pathIndex
 
 				path = path:gsub("^%./", "")
 				!if not DEBUG then
-					if path:sub(1, #MODULE_DIR_PREFIX) == MODULE_DIR_PREFIX then
+					if path:find(MODULE_DIR_PREFIX, 1, true) == 1 then
 						path = "module:"..path:sub(#MODULE_DIR_PREFIX+1):gsub("%.gloa$", "")
 					end
 				!end
@@ -3083,19 +2979,19 @@ function _G.writeProgram(state, writer)
 
 		file:write("lineMappings.files = {")
 		!if USE_PADDING then
-			for ln = 1, writer.currentOutputLine do
-				if ln % !(WRAP) == 0 and ln <= lastOutputLineForMappings then  file:write(",") ; writeEol(state, writer) ; file:write("\t")
+			for ln = 1, luaLastLnRegistered do
+				if ln % !(WRAP) == 0 then  file:write(",\n")
 				elseif ln       >  1 then  file:write(",")  end
 				file:write(pathIndices[writer.lineMappingFiles[ln]] or "_")
 			end
 		!else
 			count = 0
-			for ln = 1, writer.currentOutputLine do
+			for ln = 1, luaLastLnRegistered do
 				if writer.lineMappingLines[ln] then
 					count = count + 1
-					if count % !(WRAP) == 0 and count <= lastOutputLineForMappings then  file:write(",") ; writeEol(state, writer) ; file:write("\t")
+					if count % !(WRAP) == 0 then  file:write(",\n")
 					elseif count       >  1 then  file:write(",")  end
-					file:write(F("[%d]=%d", ln, pathIndices[writer.lineMappingFiles[ln]]))
+					file:write("[", ln, "]=", pathIndices[writer.lineMappingFiles[ln]])
 				end
 			end
 		!end
@@ -3103,19 +2999,19 @@ function _G.writeProgram(state, writer)
 
 		file:write("lineMappings.lines = {")
 		!if USE_PADDING then
-			for ln = 1, writer.currentOutputLine do
-				if ln % !(WRAP) == 0 and ln <= lastOutputLineForMappings then  file:write(",") ; writeEol(state, writer) ; file:write("\t")
+			for ln = 1, luaLastLnRegistered do
+				if ln % !(WRAP) == 0 then  file:write(",\n")
 				elseif ln       >  1 then  file:write(",")  end
 				file:write(writer.lineMappingLines[ln] or "_")
 			end
 		!else
 			count = 0
-			for ln = 1, writer.currentOutputLine do
+			for ln = 1, luaLastLnRegistered do
 				if writer.lineMappingLines[ln] then
 					count = count + 1
-					if count % !(WRAP) == 0 and count <= lastOutputLineForMappings then  file:write(",") ; writeEol(state, writer) ; file:write("\t")
+					if count % !(WRAP) == 0 then  file:write(",\n")
 					elseif count       >  1 then  file:write(",")  end
-					file:write(F("[%d]=%d", ln, writer.lineMappingLines[ln]))
+					file:write("[", ln, "]=", writer.lineMappingLines[ln])
 				end
 			end
 		!end
@@ -3133,6 +3029,8 @@ function _G.writeProgram(state, writer)
 
 	file:close()
 
+	-- luaParser.printTree(writer.luaMainChunkBody)
+
 	-- Validate output.
 	local chunk, err = loadfile(state.settings.outputFilePath)
 	if not chunk then
@@ -3140,9 +3038,82 @@ function _G.writeProgram(state, writer)
 	end
 end
 
+-- lua, lastLineNumber, lastRegisteredLineNumber = createLuaOutput( writer, startingLineNumber )
+function _G.createLuaOutput(writer, ln)
+	!ifDEBUG `do
+		local ok, errs = luaParser.validateTree(writer.luaMainChunkBody)
+		if not ok then
+			luaParser.printTree(writer.luaMainChunkBody)
+			print(errs)
+			errorInternal()
+		end
+	end`
+
+	luaParser.traverseTree(writer.luaMainChunkBody, function(luaNode, parent, container, key)
+		luaNode.parent     = parent
+		luaNode.container  = container
+		luaNode.key        = key
+		luaNode.sourceNode = luaNode.sourceNode or (parent and parent.sourceNode)
+	end)
+
+	!ifDEBUG`
+	local nodeCount     = 0`
+	local lnBufferIndex = 0
+
+	local lua = assert(luaParser.toLua(writer.luaMainChunkBody, true, function(luaNode, buffer)
+		!ifDEBUG `nodeCount = nodeCount + 1`
+
+		while lnBufferIndex < #buffer do
+			lnBufferIndex = lnBufferIndex + 1
+			ln            = ln + countString(buffer[lnBufferIndex], "\n", true)
+		end
+
+		-- [[ Break long lines. @Speed
+		-- if luaNode.parent and luaNode.parent.type == "table" then
+			local col = 1
+
+			for i = #buffer, 1, -1 do
+				local s   = buffer[i]
+				local pos = s:find"\n[^\n]*$"
+				col       = col + #s
+
+				if pos then
+					col = col - pos
+					if col > 200 then
+						lnBufferIndex         = lnBufferIndex + 1
+						buffer[lnBufferIndex] = "\n"
+						ln                    = ln + 1
+					end
+					break
+				end
+			end
+		-- end
+		--]]
+
+		if outputDebugInfo then
+			local sourceNode = luaNode.sourceNode
+
+			if sourceNode and not writer.lineMappingLines[ln] then
+				writer.lineMappingFiles[ln] = sourceNode.source.path
+				writer.lineMappingLines[ln] = sourceNode.line
+			end
+		end
+	end))
+	-- !ifDEBUG `printf("nodeCount=%d ln=%d bufferIndex=%d", nodeCount, ln, lnBufferIndex)`
+	-- !ifDEBUG `os.exit(2)`
+
+	local lnRegistered = ln
+
+	while not writer.lineMappingFiles[lnRegistered] and lnRegistered > 1 do
+		lnRegistered = lnRegistered - 1
+	end
+
+	return lua, ln, lnRegistered
+end
 
 
-local UNICODE_TO_ASCII = @insert "unicodeConversions.luapart"
+
+local UNICODE_TO_ASCII = @insert "src/unicodeConversions.luapart"
 !recordLineNumber(@file, @line)
 
 function _G.unicodeToLuaIdentifier(name)
