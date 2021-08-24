@@ -15,6 +15,7 @@
 	unicodeToLuaIdentifier
 	validateForeignSource
 	writeProgram, writeLuaPreloads, writeCompilerSymbols, writeForeignImports, writeConstantObjectsAndForwardDeclarations, writeTopScopeDeclarations
+	writerError
 
 ----------------------------------------------------------------
 
@@ -281,6 +282,8 @@ _G.!struct"WriterState"{
 	{`deferStack`,        {}},  -- []AstDefer
 	{`loopDeferIndices`,  {}},
 	{`argumentN`,         1},
+	{`inlineDepth`,       0},
+	{`inlineFunctions`,   {--[[ [lambda1]=firstCall, ... ]]}},
 
 	{`lineMappingFiles`,  {}},
 	{`lineMappingLines`,  {}},
@@ -300,7 +303,7 @@ local function writeIdentifierName(state, writer, ident)
 	if name == "" then  name = decl.localName  end
 
 	if name == "" then
-		nodeError(state, ident, "ProgramWriter", "Internal compiler error: Missing name to write for '%s'.", ident.name)
+		writerError(state, ident, "Internal compiler error: Missing name to write for '%s'.", ident.name)
 	end
 
 	return name
@@ -767,7 +770,7 @@ local function writeNormalCall(state, writer, nextLocalN, localsStack, call)
 
 			if not isVararg and not lastNonVarargType.isRequired --[[and lastNonVarargIndex > #call.arguments-1+lastValueListSize]] then
 				-- :DisallowListAsLastValueToFunctionWithOptionalArguments
-				nodeError(state, call, "ProgramWriter", "@Incomplete: Handle optional arguments if the last argument in a call is a list of values.")
+				writerError(state, call, "@Incomplete: Handle optional arguments if the last argument in a call is a list of values.")
 			end
 		end
 
@@ -807,51 +810,57 @@ local function writeNormalCall(state, writer, nextLocalN, localsStack, call)
 end
 
 local function writeInlineCallStatement(state, writer, nextLocalN, localsStack, call, luaBlock)
-	errorInternal(state, call, "@Incomplete: Function inlining.")
-
-	-- @Incomplete: Detect recursion!
 	--[[
 		-- Example...
 
 		-- In:
-		local func :: inline (x,y:int) -> int {
+		local func :: inline (x,y:int) -> int, string {
 			x *= 2
-			return x + y
+			return x + y, ""
 		}
-		local x = 99
-		local y = func(x+1, 6)
+		local x    = 99
+		local y, s = func(x+1, 6)
 
 		-- Out:
 		local x = 99
-		local y
+		local y, s
 		do
 			local x2, y2 = x+1, 6
-			x2 = x2 * 2
-			y  = x2 + y2
+			x2   = x2 * 2
+			y, s = x2 + y2, ""
 		end
 	]]
 
-	if call.isMethod then  errorInternal(state, call, "@Incomplete: Inline method calls.")  end
+	if call.isMethod then  errorInternal(state, call, "@Incomplete: Inline method calls.")  end -- Isn't this for just foreign functions? In that case inlining is not possible.
 
 	if call.parent.nodeType ~= !(AST_BLOCK) then
 		-- @UX: Detect this error earlier.
-		nodeError(state, call, "ProgramWriter", "Inline calls only supported at statement level.") -- :InlineCallsInMorePlaces
+		writerError(state, call, "Inline calls only supported at statement level.") -- :InlineCallsInMorePlaces
 	end
 
 	local lambda = call.callee.declaration.valueConstant.value
+
+	if writer.inlineFunctions[lambda] then
+		writerError(state, call.callee, "Function is trying to inline itself, directly or indirectly.")
+	elseif writer.inlineDepth > 100 then -- @Hardcoded
+		writerError(state, call.callee, "Too many recursive function inlines.")
+	end
+	writer.inlineDepth             = writer.inlineDepth + 1
+	writer.inlineFunctions[lambda] = call
+
+	if lambda.argumentsIn or doesImperativeBlockHaveVariableDeclarations(lambda.body) then
+		local luaInnerBlock      = !!(LUA_STATEMENT[[ do end ]]) ; table.insert(luaBlock.statements, luaInnerBlock)
+		luaInnerBlock.sourceNode = call
+		luaBlock                 = luaInnerBlock
+	end
 	if lambda.argumentsOut then
 		errorInternal(state, call, "@Incomplete: Handle return values when inlining.")
 	end
 
-	local file      = nil--writer.file
-	local indentStr = ("\t"):rep(0--[[indent]])
-
-	file:write(indentStr, "do")
-
 	-- Write arguments.
 	if lambda.argumentsIn then
 		-- @Incomplete: Push localsStack here? It'd be nice to share push with the writeBlock() below.
-		file:write(indentStr, "\tlocal ")
+		local luaDecl = luaParser.newNodeFast("declaration") ; table.insert(luaBlock.statements, luaDecl)
 
 		for i, arg in ipairs(lambda.argumentsIn.arguments) do
 			local decl                 = arg.declaration
@@ -861,26 +870,22 @@ local function writeInlineCallStatement(state, writer, nextLocalN, localsStack, 
 				errorInternal(state, call, "@Incomplete: Inline vararg.")
 			end
 
-			if i > 1 then  file:write(", ")  end
+			decl.localName, nextLocalN = allocateLocalName(state, writer, localsStack, decl.name.name, nextLocalN) -- May overwrite old localName. I think that's OK.
 
-			decl.localName, nextLocalN = allocateLocalName(state, writer, localsStack, decl.name.name, nextLocalN) -- May overwrite old localName. I think that's fine.
-			writeIdentifierName(state, writer, identOrVarargOrBlank)
+			local name       = writeIdentifierName(state, writer, identOrVarargOrBlank)
+			luaDecl.names[i] = luaParser.newNodeFast("identifier", name)
 		end
-
-		file:write(" = ")
 
 		-- @Incomplete: Optional arguments.
 		for i, argExpr in ipairs(call.arguments) do
-			if i > 1 then  file:write(", ")  end
-			writeExpression(state, writer, nextLocalN, localsStack, argExpr)
+			luaDecl.values[i] = writeExpression(state, writer, nextLocalN, localsStack, argExpr)
 		end
-
-		file:write(";") -- This removes ambiguity is some cases.
 	end
 
 	writeBlock(state, writer, nextLocalN, localsStack, lambda.body, false, luaBlock)
 
-	file:write(indentStr, "end")
+	writer.inlineDepth             = writer.inlineDepth - 1
+	writer.inlineFunctions[lambda] = nil
 end
 
 -- luaExpr = writeExpression( state, writer, nextLocalN, localsStack, expression )
@@ -1198,7 +1203,7 @@ end
 		luaExpr.sourceNode = expr
 
 	elseif expr.inferredType.tag == !(TYPE_NAMESPACE) then
-		nodeError(state, expr, "ProgramWriter", "Invalid place for a namespace.")
+		writerError(state, expr, "Invalid place for a namespace.")
 	else
 		errorUnhandledNodeType(state, expr)
 	end
@@ -1259,7 +1264,7 @@ end
 		if doesTypeHaveAnyDefaultValue(typeInfo) then
 			errorInternal("Incomplete: Write default value for type group '%s'.", TYPE_NAMES[typeInfo.tag])
 		else
-			nodeError(state, nodeForError, "ProgramWriter", "There is no default value for %s.", getFriendlyTypeInfoName(typeInfo))
+			writerError(state, nodeForError, "There is no default value for %s.", getFriendlyTypeInfoName(typeInfo))
 		end
 	end
 
@@ -1272,10 +1277,8 @@ local function writeDefers(state, writer, nextLocalN, localsStack, defers, luaBl
 
 	for i = #defers, 1, -1 do
 		local block = defers[i].body
-		if
-			itemWith1(block.declarations, `kind`, !(DECL_KIND_LOCAL_VAR))
-			-- or itemWith1(block.declarations, `kind`, !(DECL_KIND_READ_ONLY))
-		then
+
+		if doesImperativeBlockHaveVariableDeclarations(block) then
 			local luaInnerBlock      = !!(LUA_STATEMENT[[ do end ]]) ; table.insert(luaBlock.statements, luaInnerBlock)
 			luaInnerBlock.sourceNode = defers[i]
 			writeBlock(state, writer, nextLocalN, localsStack, block, false, luaInnerBlock)
@@ -2057,7 +2060,7 @@ end
 local function writeForeignReference(state, writer, foreignSourceId, nodeForError)
 	if writer.foreignOnlyAvailableDuringCompilation[foreignSourceId] and writer.outputRuntime and not keepDeadCode then
 		if nodeForError then
-			nodeError(state, nodeForError, "ProgramWriter", "Trying to write runtime reference to compile-time-only symbol.")
+			writerError(state, nodeForError, "Trying to write runtime reference to compile-time-only symbol.")
 		else
 			errorLine("ProgramWriter", "Trying to write runtime reference to compile-time-only symbol.")
 		end
@@ -2080,8 +2083,7 @@ end
 		return luaIdent
 	end
 
-	local argumentN = writer.argumentN
-
+	local argumentN = writer.argumentN -- Note: argumentN must be stored on the writer because there may be recursive arguments with shadowing names.
 	table.insert(localsStack, {})
 
 	local luaFunc      = !!(LUA_EXPRESSION[[ function()end ]])
@@ -2105,9 +2107,9 @@ end
 		writeBlock(state, writer, nextLocalN, localsStack, lambda.body, false, luaFunc.body)
 	end
 
+	writer.argumentN = argumentN
 	table.remove(localsStack)
 
-	writer.argumentN = argumentN
 	return luaFunc
 end
 
@@ -2808,14 +2810,14 @@ function _G.writeProgram(state, writer)
 			)
 
 		elseif not isDeclarationConstant(mainFuncDecl) then
-			nodeError(state, mainFuncDecl.name, "ProgramWriter", "Declared name '%s' must be a constant.", entryPointName)
+			writerError(state, mainFuncDecl.name, "Declared name '%s' must be a constant.", entryPointName)
 		end
 
 		mainLambda = mainFuncDecl.valueConstant.value
 
 		if mainLambda.inferredType.tag ~= !(TYPE_FUNCTION) then
-			nodeError(
-				state, mainFuncDecl.value, "ProgramWriter",
+			writerError(
+				state, mainFuncDecl.value,
 				"Declared name '%s' must be a function to represent the entry point of the program.",
 				entryPointName
 			)
@@ -2823,11 +2825,11 @@ function _G.writeProgram(state, writer)
 		!ASSERT("mainLambda.nodeType == "..AST_LAMBDA)
 
 		if mainFuncDecl.overloadOf then
-			nodeError(state, mainFuncDecl.name, "ProgramWriter", "Program entry point name must not be overloaded.")
+			writerError(state, mainFuncDecl.name, "Program entry point name must not be overloaded.")
 		elseif mainLambda.inferredType.argumentTypesIn[1] then
-			nodeError(state, mainLambda.argumentsIn, "ProgramWriter", "Program entry point function must not take any arguments.")
+			writerError(state, mainLambda.argumentsIn, "Program entry point function must not take any arguments.")
 		elseif mainLambda.inferredType.argumentTypesOut[1] then
-			nodeError(state, mainLambda.argumentsOut, "ProgramWriter", "Program entry point function must not return any values.")
+			writerError(state, mainLambda.argumentsOut, "Program entry point function must not return any values.")
 		end
 	end
 
@@ -3072,7 +3074,8 @@ function _G.createLuaOutput(writer, ln)
 
 		-- [[ Break long lines. @Speed
 		-- if luaNode.parent and luaNode.parent.type == "table" then
-			local col = 1
+			!local MAX_COLUMNS = 200 -- (Not exact.)
+			local col          = 1
 
 			for i = #buffer, 1, -1 do
 				local s   = buffer[i]
@@ -3081,7 +3084,8 @@ function _G.createLuaOutput(writer, ln)
 
 				if pos then
 					col = col - pos
-					if col > 200 then
+
+					if col > !(MAX_COLUMNS) then
 						lnBufferIndex         = lnBufferIndex + 1
 						buffer[lnBufferIndex] = "\n"
 						ln                    = ln + 1
@@ -3181,6 +3185,12 @@ end
 
 function _G.formatInfoComment(info)
 	return "--[[" .. info:gsub("[%[%]]", "%0 ") .. "]]"
+end
+
+
+
+function _G.writerError(state, node, s, ...)
+	nodeError(state, node, "ProgramWriter", s, ...)
 end
 
 
