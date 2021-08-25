@@ -605,7 +605,7 @@ local function doesTypeContainBoolOrNone(typeInfo)
 	return false
 end
 
--- lambda = getDataForHandlingMissingArguments( state, callee )
+-- lambda = getDataForHandlingMissingArguments( state, callee ) -- @Cleanup: Better function name.
 local function getDataForHandlingMissingArguments(state, callee)
 	if callee.nodeType ~= !(AST_IDENTIFIER) then  return nil  end
 
@@ -683,6 +683,46 @@ local function allocateArgumentName(state, writer, localsStack, name, n)
 	return allocateName(state, writer, localsStack, name, n, "A", "_A")
 end
 
+local function checkForDisallowedSituationOfListAsLastValueToFunctionWithOptionalArguments(state, call, lambda)
+	local lastValue = getLast(call.arguments)
+
+	local lastValueIsList = (lastValue ~= nil and (
+		(
+			lastValue.inferredType.tag == !(TYPE_VARARG)
+			and not lastValue.surroundedByParentheses
+		)
+		or (
+			lastValue.inferredType.tag == !(TYPE_LIST)
+			and not lastValue.surroundedByParentheses
+			and lastValue.inferredType[2] ~= nil
+		)
+	))
+
+	if lastValueIsList then
+		local argTypesIn         = lambda.inferredType.argumentTypesIn
+		local isVararg           = getLast(argTypesIn).tag == !(TYPE_VARARG)
+		local lastNonVarargIndex = #argTypesIn - (isVararg and 1 or 0)
+		local lastNonVarargType  = argTypesIn[lastNonVarargIndex]
+
+		--[[
+		local lastValueListSize = 0
+		if not lastValueIsList then
+			-- void
+		elseif lastValue.inferredType.tag == !(TYPE_VARARG) then
+			lastValueListSize    = 1/0
+		else
+			local lastArgOutType = getLast(lastValue.inferredType) or errorInternal(state, lastValue)
+			lastValueListSize    = lastArgOutType.tag == !(TYPE_VARARG) and 1/0 or #lastValue.inferredType
+		end
+		--]]
+
+		if not isVararg and not lastNonVarargType.isRequired --[[and lastNonVarargIndex > #call.arguments-1+lastValueListSize]] then
+			-- :DisallowListAsLastValueToFunctionWithOptionalArguments
+			writerError(state, call, "@Incomplete: Handle optional arguments if the last argument in a call is a list of values.")
+		end
+	end
+end
+
 -- luaCall = writeNormalCall( state, writer, nextLocalN, localsStack, call )
 local function writeNormalCall(state, writer, nextLocalN, localsStack, call)
 	local callee               = call.callee
@@ -728,51 +768,15 @@ local function writeNormalCall(state, writer, nextLocalN, localsStack, call)
 
 	-- Write given sequential arguments.
 	for i = (callingForeignMethod and 2 or 1), #call.arguments do
-		local luaArg = writeExpression(state, writer, nextLocalN, localsStack, call.arguments[i])
-		table.insert(luaCall.arguments, luaArg)
+		local luaExpr = writeExpression(state, writer, nextLocalN, localsStack, call.arguments[i])
+		table.insert(luaCall.arguments, luaExpr)
 	end
 
 	-- Write given named arguments and handle default values.
 	local lambda = getDataForHandlingMissingArguments(state, callee)
 
 	if lambda then
-		local lastValue = getLast(call.arguments)
-
-		local lastValueIsList = (lastValue ~= nil and (
-			(
-				lastValue.inferredType.tag == !(TYPE_VARARG)
-				and not lastValue.surroundedByParentheses
-			)
-			or (
-				lastValue.inferredType.tag == !(TYPE_LIST)
-				and not lastValue.surroundedByParentheses
-				and lastValue.inferredType[2] ~= nil
-			)
-		))
-
-		if lastValueIsList then
-			local argTypesIn         = lambda.inferredType.argumentTypesIn
-			local isVararg           = getLast(argTypesIn).tag == !(TYPE_VARARG)
-			local lastNonVarargIndex = #argTypesIn - (isVararg and 1 or 0)
-			local lastNonVarargType  = argTypesIn[lastNonVarargIndex]
-
-			--[[
-			local lastValueListSize = 0
-			if not lastValueIsList then
-				-- void
-			elseif lastValue.inferredType.tag == !(TYPE_VARARG) then
-				lastValueListSize    = 1/0
-			else
-				local lastArgOutType = getLast(lastValue.inferredType) or errorInternal(state, lastValue)
-				lastValueListSize    = lastArgOutType.tag == !(TYPE_VARARG) and 1/0 or #lastValue.inferredType
-			end
-			--]]
-
-			if not isVararg and not lastNonVarargType.isRequired --[[and lastNonVarargIndex > #call.arguments-1+lastValueListSize]] then
-				-- :DisallowListAsLastValueToFunctionWithOptionalArguments
-				writerError(state, call, "@Incomplete: Handle optional arguments if the last argument in a call is a list of values.")
-			end
-		end
+		checkForDisallowedSituationOfListAsLastValueToFunctionWithOptionalArguments(state, call, lambda)
 
 		local argsIn = lambda.argumentsIn.arguments
 
@@ -786,8 +790,8 @@ local function writeNormalCall(state, writer, nextLocalN, localsStack, call)
 				break
 
 			elseif argNamed then
-				local luaArg = writeExpression(state, writer, nextLocalN, localsStack, valueExpr)
-				table.insert(luaCall.arguments, luaArg)
+				local luaExpr = writeExpression(state, writer, nextLocalN, localsStack, valueExpr)
+				table.insert(luaCall.arguments, luaExpr)
 
 			elseif lambda.bodyIsForeign then
 				-- Don't write default values for foreign functions. This gives the foreign site control over
@@ -795,13 +799,13 @@ local function writeNormalCall(state, writer, nextLocalN, localsStack, call)
 				break
 
 			elseif valueExpr.nodeType == !(AST_LOCATION) and valueExpr.ofCaller then
-				local const = call.locationConstant or errorInternal(state, call, "Missing caller location data.")
-				local luaArg = writeConstantValueOrReference(state, writer, const, valueExpr)
-				table.insert(luaCall.arguments, luaArg)
+				local const   = call.locationConstant or errorInternal(state, call, "Missing caller location data.")
+				local luaExpr = writeConstantValueOrReference(state, writer, const, valueExpr)
+				table.insert(luaCall.arguments, luaExpr)
 
 			else
-				local luaArg = writeExpression(state, writer, nextLocalN, localsStack, valueExpr)
-				table.insert(luaCall.arguments, luaArg)
+				local luaExpr = writeExpression(state, writer, nextLocalN, localsStack, valueExpr)
+				table.insert(luaCall.arguments, luaExpr)
 			end
 		end
 	end
@@ -831,6 +835,8 @@ local function writeInlineCallStatement(state, writer, nextLocalN, localsStack, 
 		end
 	]]
 
+	local callee = call.callee
+
 	if call.isMethod then  errorInternal(state, call, "@Incomplete: Inline method calls.")  end -- Isn't this for just foreign functions? In that case inlining is not possible.
 
 	if call.parent.nodeType ~= !(AST_BLOCK) then
@@ -838,12 +844,13 @@ local function writeInlineCallStatement(state, writer, nextLocalN, localsStack, 
 		writerError(state, call, "Inline calls only supported at statement level.") -- :InlineCallsInMorePlaces
 	end
 
-	local lambda = call.callee.declaration.valueConstant.value
+	!local MAX_INLINE_DEPTH = 100
+	local lambda            = callee.declaration.valueConstant.value
 
 	if writer.inlineFunctions[lambda] then
-		writerError(state, call.callee, "Function is trying to inline itself, directly or indirectly.")
-	elseif writer.inlineDepth > 100 then -- @Hardcoded
-		writerError(state, call.callee, "Too many recursive function inlines.")
+		writerError(state, callee, "Function is trying to inline itself, directly or indirectly.") -- @UX: Show all involved inline calls.
+	elseif writer.inlineDepth > !(MAX_INLINE_DEPTH) then -- @Hardcoded
+		writerError(state, callee, !("Too many recursive function inlines ("..MAX_INLINE_DEPTH..")."))
 	end
 	writer.inlineDepth             = writer.inlineDepth + 1
 	writer.inlineFunctions[lambda] = call
@@ -859,8 +866,10 @@ local function writeInlineCallStatement(state, writer, nextLocalN, localsStack, 
 
 	-- Write arguments.
 	if lambda.argumentsIn then
-		-- @Incomplete: Push localsStack here? It'd be nice to share push with the writeBlock() below.
+		localsStack   = {{}, unpack(localsStack)} -- @Speed: Share push with the writeBlock() below.
 		local luaDecl = luaParser.newNodeFast("declaration") ; table.insert(luaBlock.statements, luaDecl)
+
+		-- Lots of @Copypaste from writeNormalCall().
 
 		for i, arg in ipairs(lambda.argumentsIn.arguments) do
 			local decl                 = arg.declaration
@@ -876,13 +885,52 @@ local function writeInlineCallStatement(state, writer, nextLocalN, localsStack, 
 			luaDecl.names[i] = luaParser.newNodeFast("identifier", name)
 		end
 
-		-- @Incomplete: Optional arguments.
+		-- Write given sequential arguments.
 		for i, argExpr in ipairs(call.arguments) do
 			luaDecl.values[i] = writeExpression(state, writer, nextLocalN, localsStack, argExpr)
+		end
+
+		-- Write given named arguments and handle default values.
+		!ASSERT(`getDataForHandlingMissingArguments(state, callee) == lambda`, nil, `call`) -- @Cleanup
+		checkForDisallowedSituationOfListAsLastValueToFunctionWithOptionalArguments(state, call, lambda)
+
+		local argsIn = lambda.argumentsIn.arguments
+
+		for argIndex = #call.arguments+1, #argsIn do
+			local argNamed  = itemWith1(call.argumentsNamed, "argumentIndex", argIndex)
+			local valueExpr = argNamed and argNamed.value or argsIn[argIndex].declaration.value
+
+			if not valueExpr then
+				-- Varargs are optional but have no default value (or zero default values since it's technically a list).
+				-- !ASSERT(`not argsIn[argIndex+1]`, nil, `call`) -- This assert is not correct if the last call argument is another call that returns values before the vararg.
+				break
+
+			elseif argNamed then
+				local luaExpr = writeExpression(state, writer, nextLocalN, localsStack, valueExpr)
+				table.insert(luaDecl.values, luaExpr)
+
+			elseif lambda.bodyIsForeign then
+				-- Don't write default values for foreign functions. This gives the foreign site control over
+				-- what the actual default values should be no matter what the local !foreign declaration says.
+				break
+
+			elseif valueExpr.nodeType == !(AST_LOCATION) and valueExpr.ofCaller then
+				local const   = call.locationConstant or errorInternal(state, call, "Missing caller location data.")
+				local luaExpr = writeConstantValueOrReference(state, writer, const, valueExpr)
+				table.insert(luaDecl.values, luaExpr)
+
+			else
+				local luaExpr = writeExpression(state, writer, nextLocalN, localsStack, valueExpr)
+				table.insert(luaDecl.values, luaExpr)
+			end
 		end
 	end
 
 	writeBlock(state, writer, nextLocalN, localsStack, lambda.body, false, luaBlock)
+
+	if lambda.argumentsIn then
+		table.remove(localsStack)
+	end
 
 	writer.inlineDepth             = writer.inlineDepth - 1
 	writer.inlineFunctions[lambda] = nil
