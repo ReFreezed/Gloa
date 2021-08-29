@@ -359,6 +359,8 @@ local function writeBinaryOperation(state, writer, nextLocalN, localsStack, l, r
 		))
 	end
 	)
+	!ASSERT(`l`, `"No 'l'."`, `sourceNode`)
+	!ASSERT(`r`, `"No 'r'."`, `sourceNode`)
 
 	local luaExpr
 
@@ -688,16 +690,14 @@ local function allocateArgumentName(state, writer, localsStack, name, n)
 	return allocateName(state, writer, localsStack, name, n, "A", "_A")
 end
 
--- fetchObj|nil, fetchKey|nil, fetchVal|nil = getAssignmentPrefetchInfo( assignment, careAboutValues )
--- careAboutValues should be set for AWBOs.
-local function getAssignmentPrefetchInfo(assignment, careAboutValues)
+-- fetchObj|nil, fetchKey|nil = getAssignmentPrefetchInfoForLvalues( targets )
+local function getAssignmentPrefetchInfoForLvalues(targets)
 	--
-	-- To make expressions evaluate the expected way (left to
-	-- right with no hidden duplicate evaluations) we prefetch
-	-- some values before we start doing operations (and
-	-- eventually the assignment).
+	-- To make expressions evaluate the expected way (left to right with no
+	-- hidden duplicate evaluations) we prefetch some values before we start
+	-- doing operations (and eventually the assignment).
 	--
-	-- Constants and right-hand-side values are never prefetched.
+	-- Constants and identifiers are never prefetched.
 	-- These rules apply otherwise:
 	--
 	--   x        += 1   -- Don't prefetch x.
@@ -710,43 +710,57 @@ local function getAssignmentPrefetchInfo(assignment, careAboutValues)
 	--
 	local fetchObj = nil
 	local fetchKey = nil
-	local fetchVal = nil
 
 	-- Figure out what to prefetch.
-	for i, targetExpr in ipairs(assignment.targets) do
+	for i, targetExpr in ipairs(targets) do
 		if targetExpr.nodeType == !(AST_ACCESS) then
 			local access = targetExpr
 
-			if not (access.object.nodeType == !(AST_IDENTIFIER) or isExpressionConstant(state, access.object, true)) then
+			if not (access.object.nodeType == !(AST_IDENTIFIER) or isExpressionConstant(state, access.object, true)) then -- @Incomplete: Never count identifiers as dynamic.
 				fetchObj    = fetchObj or {}
 				fetchObj[i] = true
 			end
-			if not (access.member.nodeType == !(AST_IDENTIFIER) or isExpressionConstant(state, access.member, true)) then
+			if not (access.member.nodeType == !(AST_IDENTIFIER) or isExpressionConstant(state, access.member, true)) then -- @Incomplete: Never count identifiers as dynamic.
 				fetchKey    = fetchKey or {}
 				fetchKey[i] = true
 			end
 		end
 	end
 
-	if careAboutValues and not assignment.values[#assignment.targets] then
-		-- The last value ought to be a call! (Note: It shouldn't be vararg as that would've been a type error.)
-		-- (Don't we need to prefetch everything but constants (and identifiers?) to ensure expected evaluation order here? E.g. calls that aren't the last value.)
-		for i = #assignment.values, #assignment.targets do
+	return fetchObj, fetchKey
+end
+
+-- fetchVal|nil = getAssignmentPrefetchInfoForValues( targets, values )
+local function getAssignmentPrefetchInfoForValues(targets, values)
+	--
+	-- The last value ought to be a call if there are more targets than values!
+	-- (Note: It shouldn't be vararg as that would've been a type error when the
+	-- compound type was adjusted to one.)
+	--
+	-- Note: We need to prefetch everything but constants at this point to
+	-- ensure expected evaluation order.
+	--
+	local fetchVal = nil -- @Cleanup: Rename this to something better, because we include extra "hidden" values from any trailing call if there are more targets than values.
+
+	for i = 1, math.max(#targets, #values) do
+		if not (values[i] and (
+			values[i].nodeType == !(AST_IDENTIFIER) or isExpressionConstant(state, values[i], true) -- @Incomplete: Never count identifiers as dynamic.
+		)) then
 			fetchVal    = fetchVal or {}
 			fetchVal[i] = true
 		end
 	end
 
-	return fetchObj, fetchKey, fetchVal
+	return fetchVal
 end
 
-local function writeAssignmentPrefetch(state, writer, nextLocalN, localsStack, assignment, fetchObj,fetchKey,fetchVal, luaBlock)
+local function writeAssignmentPrefetch(state, writer, nextLocalN, localsStack, targets,values, sourceNode, fetchObj,fetchKey,fetchVal, luaBlock)
 	-- Fetch objects and keys.
 	if fetchObj or fetchKey then
 		local luaDecl      = luaParser.newNodeFast("declaration") ; table.insert(luaBlock.statements, luaDecl)
-		luaDecl.sourceNode = assignment
+		luaDecl.sourceNode = sourceNode
 
-		for i, targetExpr in ipairs(assignment.targets) do
+		for i, targetExpr in ipairs(targets) do
 			if fetchObj and fetchObj[i] then
 				table.insert(luaDecl.names, luaParser.newNodeFast("identifier", "_FETCH_OBJ"..i))
 			end
@@ -755,7 +769,7 @@ local function writeAssignmentPrefetch(state, writer, nextLocalN, localsStack, a
 			end
 		end
 
-		for i, targetExpr in ipairs(assignment.targets) do
+		for i, targetExpr in ipairs(targets) do
 			if fetchObj and fetchObj[i] then
 				local access  = targetExpr
 				local luaExpr = writeExpression(state, writer, nextLocalN, localsStack, access.object)
@@ -772,15 +786,15 @@ local function writeAssignmentPrefetch(state, writer, nextLocalN, localsStack, a
 	-- Fetch values.
 	if fetchVal then
 		local luaDecl      = luaParser.newNodeFast("declaration") ; table.insert(luaBlock.statements, luaDecl)
-		luaDecl.sourceNode = assignment
+		luaDecl.sourceNode = sourceNode
 
-		for i, targetExpr in ipairs(assignment.targets) do
+		for i, targetExpr in ipairs(targets) do
 			if fetchVal[i] then
 				table.insert(luaDecl.names, luaParser.newNodeFast("identifier", "_FETCH_VAL"..i))
 			end
 		end
 
-		for i, valueExpr in ipairs(assignment.values) do
+		for i, valueExpr in ipairs(values) do
 			if fetchVal[i] then
 				local luaExpr = writeExpression(state, writer, nextLocalN, localsStack, valueExpr)
 				table.insert(luaDecl.values, luaExpr)
@@ -789,8 +803,8 @@ local function writeAssignmentPrefetch(state, writer, nextLocalN, localsStack, a
 	end
 end
 
-local function writeAssignmentTargetsMaybeWithSomePrefetch(state, writer, nextLocalN, localsStack, assignment, fetchObj,fetchKey, luaAssignment)
-	for i, targetExpr in ipairs(assignment.targets) do
+local function writeAssignmentTargetsMaybeWithSomePrefetch(state, writer, nextLocalN, localsStack, targets, fetchObj,fetchKey, luaAssignment)
+	for i, targetExpr in ipairs(targets) do
 		if (fetchObj and fetchObj[i]) or (fetchKey and fetchKey[i]) then
 			local access             = targetExpr
 			local luaLookup          = luaParser.newNodeFast("lookup")
@@ -1000,9 +1014,13 @@ local function writeInlineCallStatement(state, writer, nextLocalN, localsStack, 
 		end)
 	end
 
+	--
+	-- Lots of @Copypaste from other places from now on.
+	--
+
 	-- Prepare assignment and any declarations.
-	local luaBlock                     = luaBlock0
-	local fetchObj, fetchKey, fetchVal = nil
+	local luaBlock           = luaBlock0
+	local fetchObj, fetchKey = nil
 
 	if assignment then
 		if assignment.declarations then
@@ -1024,12 +1042,12 @@ local function writeInlineCallStatement(state, writer, nextLocalN, localsStack, 
 			end
 		end
 
-		fetchObj, fetchKey, fetchVal = getAssignmentPrefetchInfo(assignment, false)
+		fetchObj, fetchKey = getAssignmentPrefetchInfoForLvalues(assignment.targets, nil)
 
-		if fetchObj or fetchKey or fetchVal then
+		if fetchObj or fetchKey then
 			local luaInnerBlock = !!(LUA_STATEMENT[[ do end ]]) ; table.insert(luaBlock.statements, luaInnerBlock)
 			luaBlock            = luaInnerBlock
-			writeAssignmentPrefetch(state, writer, nextLocalN, localsStack, assignment, fetchObj,fetchKey,fetchVal, luaBlock)
+			writeAssignmentPrefetch(state, writer, nextLocalN, localsStack, assignment.targets,assignment.values, assignment, fetchObj,fetchKey,nil, luaBlock)
 		end
 	end
 
@@ -1106,24 +1124,40 @@ local function writeInlineCallStatement(state, writer, nextLocalN, localsStack, 
 	writeBlock(state, writer, nextLocalN, localsStack, lambda.body, false, luaBlock)
 
 	-- Inline output.
+	local luaStatements = luaBlock.statements
+
 	if lambda.argumentsOut then
 		-- Change e.g. `return x,f()` into `a,b,c = x,f()`.
 		-- In the case of the empty vararg, we change `return void` into `a,b,c = nil`.
-		local iLast         = #luaBlock.statements
-		local luaReturnNode = luaBlock.statements[iLast]
+		local iLast         = #luaStatements
+		local luaReturnNode = luaStatements[iLast]
 		assert(luaReturnNode and luaReturnNode.type == "return") -- :InlineReturnsAnywhere
 
 		if assignment then
-			local luaAssignment        = luaParser.newNodeFast("assignment")
-			luaAssignment.sourceNode   = luaReturnNode.sourceNode
-			luaAssignment.values       = luaReturnNode.values
-			luaAssignment.values[1]    = luaAssignment.values[1] or !!(LUA_EXPRESSION[[ nil ]])
-			luaBlock.statements[iLast] = luaAssignment
+			-- Assign the returned values.
+			local returnNode = luaReturnNode.sourceNode
+			!ASSERT `luaReturnNode and luaReturnNode.type == "return"`
 
-			writeAssignmentTargetsMaybeWithSomePrefetch(state, writer, nextLocalN, localsStack, assignment, fetchObj,fetchKey, luaAssignment)
+			local luaAssignment      = luaParser.newNodeFast("assignment")
+			luaAssignment.sourceNode = returnNode
+			luaAssignment.values     = luaReturnNode.values
+			luaAssignment.values[1]  = luaAssignment.values[1] or !!(LUA_EXPRESSION[[ nil ]])
+			luaStatements[iLast]     = luaAssignment
+
+			writeAssignmentTargetsMaybeWithSomePrefetch(state, writer, nextLocalN, localsStack, assignment.targets, fetchObj,fetchKey, luaAssignment)
 
 			if assignment.binaryOperation ~= "" then
 				-- Change e.g. `x = y` into `x = x+y`.
+				-- Note that we may have to prefetch values in the previously-return statement (as opposed to the AWBO).
+				local fetchVal = getAssignmentPrefetchInfoForValues(assignment.targets, returnNode.values)
+
+				if fetchVal then
+					-- Insert the prefetch before the assignment we just created.
+					writeAssignmentPrefetch(state, writer, nextLocalN, localsStack, assignment.targets,returnNode.values, assignment, nil,nil,fetchVal, luaBlock)
+					!ASSERT `#luaStatements == iLast+1`
+					luaStatements[iLast], luaStatements[iLast+1] = luaStatements[iLast+1], luaStatements[iLast]
+				end
+
 				for i, targetExpr in ipairs(assignment.targets) do
 					if (fetchObj and fetchObj[i]) or (fetchKey and fetchKey[i]) then
 						local access               = targetExpr
@@ -1149,13 +1183,15 @@ local function writeInlineCallStatement(state, writer, nextLocalN, localsStack, 
 			end
 
 		elseif luaReturnNode.values[1] then
-			local luaDecl              = !!(LUA_STATEMENT[[ local _ ]])
-			luaDecl.sourceNode         = luaReturnNode.sourceNode
-			luaDecl.values             = luaReturnNode.values
-			luaBlock.statements[iLast] = luaDecl
+			-- Throw away the returned values.
+			local luaDecl        = !!(LUA_STATEMENT[[ local _ ]])
+			luaDecl.sourceNode   = luaReturnNode.sourceNode
+			luaDecl.values       = luaReturnNode.values
+			luaStatements[iLast] = luaDecl
 
 		else
-			luaBlock.statements[iLast] = nil -- Remove the return statement.
+			-- Remove the empty return statement.
+			luaStatements[iLast] = nil
 		end
 	end
 
@@ -1793,19 +1829,20 @@ end
 			else
 				!ASSERT `not inDecl`
 
-				local fetchObj, fetchKey, fetchVal = getAssignmentPrefetchInfo(assignment, true)
-				local luaAssignmentBlock           = luaBlock
+				local fetchObj, fetchKey = getAssignmentPrefetchInfoForLvalues(assignment.targets)
+				local fetchVal           = getAssignmentPrefetchInfoForValues(assignment.targets, assignment.values)
+				local luaAssignmentBlock = luaBlock
 
 				if fetchObj or fetchKey or fetchVal then
 					luaAssignmentBlock = !!(LUA_STATEMENT[[ do end ]]) ; table.insert(luaBlock.statements, luaAssignmentBlock)
-					writeAssignmentPrefetch(state, writer, nextLocalN, localsStack, assignment, fetchObj,fetchKey,fetchVal, luaAssignmentBlock)
+					writeAssignmentPrefetch(state, writer, nextLocalN, localsStack, assignment.targets,assignment.values, assignment, fetchObj,fetchKey,fetchVal, luaAssignmentBlock)
 				end
 
 				-- Assignment targets.
 				local luaAssignment      = luaParser.newNodeFast("assignment") ; table.insert(luaAssignmentBlock.statements, luaAssignment)
 				luaAssignment.sourceNode = assignment
 
-				writeAssignmentTargetsMaybeWithSomePrefetch(state, writer, nextLocalN, localsStack, assignment, fetchObj,fetchKey, luaAssignment)
+				writeAssignmentTargetsMaybeWithSomePrefetch(state, writer, nextLocalN, localsStack, assignment.targets, fetchObj,fetchKey, luaAssignment)
 
 				-- Assignment values.
 				for i, targetExpr in ipairs(assignment.targets) do

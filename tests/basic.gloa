@@ -2414,9 +2414,12 @@ local testInlining :: () {
 		local f :: (i:int, s="") {
 			print(i, s)
 		}
+
 		inline f(1, "foo")
 		inline f(2)
 		inline f(s="bar", i=3)
+
+		print()
 	}
 
 	-- Declarations and assignments.
@@ -2448,15 +2451,59 @@ local testInlining :: () {
 		outer2.inner.n  = inline quadruple(1)
 		outer2.inner.n += inline quadruple(1)
 	}
+	do {
+		local f :: (expected:int) -> int, int {
+			static counter = 0 ; counter += 1
+			print("counter", counter, "expected", expected)
+			assert(counter == expected)
+			return 1, 2
+		}
+		local x, y, z: int
+
+		x, y, z += f(1), f(2)
+		assert(x == 1)
+		assert(y == 1)
+		assert(z == 2)
+
+		x, y += inline f(3)
+		assert(x == 2)
+		assert(y == 3)
+	}
+	do {
+		local get12 :: () -> int, int {
+			return 1, 2
+		}
+		local f :: (expected:int) -> int, int {
+			static counter = 0 ; counter += 1
+			print("counter", counter, "expected", expected)
+			assert(counter == expected)
+			return get12()
+		}
+		local x, y, z: int
+
+		x, y, z += f(1), f(2)
+		assert(x == 1)
+		assert(y == 1)
+		assert(z == 2)
+
+		x, y += inline f(3)
+		assert(x == 2)
+		assert(y == 3)
+	}
+	print()
 
 	-- no_inline in dynamic contexts is currently not an error, but its useless. 2021-08-10
 	do {
 		local fVar = no_inline     () { print("fVar") }
 		local fCap = no_inline [*] () { print("fCap") }
+
 		fVar()
 		fCap()
+
 		no_inline fVar()
 		no_inline fCap()
+
+		print()
 	}
 
 	-- Accesses.
