@@ -3862,8 +3862,14 @@ do
 		local tok = peekNextTok(state, 1)
 
 		if !!(IS_TOK(TOKEN_IDENTIFIER)) then
-			!SET_OR_RETURN_NIL `local call = parseCallChain(state, parent, nil, false)`
-			call.inline                    = !(INLINE_YES)
+			local prevOpPrecedence         = !(math.min(OPERATOR_PRECEDENCE.call, OPERATOR_PRECEDENCE.access)-1)
+			!SET_OR_RETURN_NIL `local call = parseExpression(state, parent, prevOpPrecedence)`
+
+			if call.nodeType ~= !(AST_CALL) then
+				!ERROR_OR_RETURN_NIL `errorParsing(state, tok, "Expected a call after 'inline'. (Got '%s' node.)", AST_NAMES[call.nodeType])`
+			end
+
+			call.inline = !(INLINE_YES)
 			return call
 
 		elseif !!(IS_TOK(TOKEN_PUNCTUATION, "(","[")) then
@@ -3872,15 +3878,21 @@ do
 			return lambda
 
 		else
-			!ERROR_OR_RETURN_NIL `errorParsingNext(state, "Expected an identifier or a function after 'inline'.")`
+			!ERROR_OR_RETURN_NIL `errorParsingNext(state, "Expected a call or a function after 'inline'.")`
 		end
 	end
 	expressionParserByKeySymbol["no_inline"] = function(state, exprStartTok, parent)
 		local tok = peekNextTok(state, 1)
 
 		if !!(IS_TOK(TOKEN_IDENTIFIER)) then
-			!SET_OR_RETURN_NIL `local call = parseCallChain(state, parent, nil, false)`
-			call.inline                    = !(INLINE_NO)
+			local prevOpPrecedence         = !(math.min(OPERATOR_PRECEDENCE.call, OPERATOR_PRECEDENCE.access)-1)
+			!SET_OR_RETURN_NIL `local call = parseExpression(state, parent, prevOpPrecedence)`
+
+			if call.nodeType ~= !(AST_CALL) then
+				!ERROR_OR_RETURN_NIL `errorParsing(state, tok, "Expected a call after 'no_inline'. (Got '%s' node.)", AST_NAMES[call.nodeType])`
+			end
+
+			call.inline = !(INLINE_NO)
 			return call
 
 		elseif !!(IS_TOK(TOKEN_PUNCTUATION, "(","[")) then
@@ -3889,7 +3901,7 @@ do
 			return lambda
 
 		else
-			!ERROR_OR_RETURN_NIL `errorParsingNext(state, "Expected an identifier or a function after 'inline'.")`
+			!ERROR_OR_RETURN_NIL `errorParsingNext(state, "Expected a call or a function after 'no_inline'.")`
 		end
 	end
 end
