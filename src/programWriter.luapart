@@ -15,7 +15,7 @@
 	unicodeToLuaIdentifier
 	validateForeignSource
 	writeProgram, writeLuaPreloads, writeCompilerSymbols, writeForeignImports, writeConstantObjectsAndForwardDeclarations, writeTopScopeDeclarations
-	writerError
+	writerError, writerError2
 
 ----------------------------------------------------------------
 
@@ -337,7 +337,7 @@ end
 
 -- writeBinaryOperation(
 --   state, writer, nextLocalN, localsStack,
---   left:AstNode|string, right:AstNode|string,
+--   left:AstNode|name|LuaAstNode, right:AstNode|name|LuaAstNode,
 --   binaryOperation,
 --   leftType, rightType, resultingType,
 --   sourceNode
@@ -348,9 +348,11 @@ local function writeBinaryOperation(state, writer, nextLocalN, localsStack, l, r
 		__LUA(templateToLua(
 			trimTemplate`
 				if type($side) == "string" then
-					$luaSide = assert(luaParser.parseExpression($side))
-				else
+					$luaSide = luaParser.newNodeFast("identifier", $side)
+				elseif $side.nodeType then
 					$luaSide = writeExpression(state, writer, nextLocalN, localsStack, $side)
+				else
+					$luaSide = $side
 				end
 			`,
 			{side=sideCode, luaSide=luaSideCode}
@@ -402,18 +404,21 @@ end
 local function writeAccess(state, writer, nextLocalN, localsStack, access)
 	local luaExpr
 
-	if access.XXX_AWBO_HACK then -- @Hack
+	if access.XXX_FETCH_HACK then -- @Hack
+		-- Ignore types - just write the lookup components as-is.
+		-- access.object and/or access.member may be names instead of AST nodes.
+
 		-- :AbcCheck
 		luaExpr            = luaParser.newNodeFast("lookup")
 		luaExpr.sourceNode = access
 
 		if type(access.object) == "string" then
-			luaExpr.object = assert(luaParser.parseExpression(access.object))
+			luaExpr.object = luaParser.newNodeFast("identifier", access.object)
 		else
 			luaExpr.object = writeExpression(state, writer, nextLocalN, localsStack, access.object)
 		end
 		if type(access.member) == "string" then
-			luaExpr.member = assert(luaParser.parseExpression(access.member))
+			luaExpr.member = luaParser.newNodeFast("identifier", access.member)
 		else
 			luaExpr.member = writeExpression(state, writer, nextLocalN, localsStack, access.member)
 		end
@@ -653,7 +658,7 @@ local function isNameAllocated(state, writer, localsStack, localName)
 		if locals[localName] then  return true  end
 	end
 
-	if localName:find"^_AWBO_" then  return true  end -- Assignment with binary operation.
+	if localName:find"^_FETCH_" then  return true  end -- E.g. assignment with binary operation.
 
 	return false
 end
@@ -681,6 +686,132 @@ local function allocateLocalName(state, writer, localsStack, name, n)
 end
 local function allocateArgumentName(state, writer, localsStack, name, n)
 	return allocateName(state, writer, localsStack, name, n, "A", "_A")
+end
+
+-- fetchObj|nil, fetchKey|nil, fetchVal|nil = getAssignmentPrefetchInfo( assignment, careAboutValues )
+-- careAboutValues should be set for AWBOs.
+local function getAssignmentPrefetchInfo(assignment, careAboutValues)
+	--
+	-- To make expressions evaluate the expected way (left to
+	-- right with no hidden duplicate evaluations) we prefetch
+	-- some values before we start doing operations (and
+	-- eventually the assignment).
+	--
+	-- Constants and right-hand-side values are never prefetched.
+	-- These rules apply otherwise:
+	--
+	--   x        += 1   -- Don't prefetch x.
+	--   t.k      += 1   -- Don't prefetch t. Don't prefetch k.
+	--   o.t[k]   += 1   -- Prefetch o.t.     Don't prefetch k.
+	--   o.t[t.k] += 1   -- Prefetch o.t.     Fetch t.k.
+	--
+	-- More info:
+	--   x, y += 1, z   -- No fetching or preparations needed as all targets are simple variables/identifiers.
+	--
+	local fetchObj = nil
+	local fetchKey = nil
+	local fetchVal = nil
+
+	-- Figure out what to prefetch.
+	for i, targetExpr in ipairs(assignment.targets) do
+		if targetExpr.nodeType == !(AST_ACCESS) then
+			local access = targetExpr
+
+			if not (access.object.nodeType == !(AST_IDENTIFIER) or isExpressionConstant(state, access.object, true)) then
+				fetchObj    = fetchObj or {}
+				fetchObj[i] = true
+			end
+			if not (access.member.nodeType == !(AST_IDENTIFIER) or isExpressionConstant(state, access.member, true)) then
+				fetchKey    = fetchKey or {}
+				fetchKey[i] = true
+			end
+		end
+	end
+
+	if careAboutValues and not assignment.values[#assignment.targets] then
+		-- The last value ought to be a call! (Note: It shouldn't be vararg as that would've been a type error.)
+		-- (Don't we need to prefetch everything but constants (and identifiers?) to ensure expected evaluation order here? E.g. calls that aren't the last value.)
+		for i = #assignment.values, #assignment.targets do
+			fetchVal    = fetchVal or {}
+			fetchVal[i] = true
+		end
+	end
+
+	return fetchObj, fetchKey, fetchVal
+end
+
+local function writeAssignmentPrefetch(state, writer, nextLocalN, localsStack, assignment, fetchObj,fetchKey,fetchVal, luaBlock)
+	-- Fetch objects and keys.
+	if fetchObj or fetchKey then
+		local luaDecl      = luaParser.newNodeFast("declaration") ; table.insert(luaBlock.statements, luaDecl)
+		luaDecl.sourceNode = assignment
+
+		for i, targetExpr in ipairs(assignment.targets) do
+			if fetchObj and fetchObj[i] then
+				table.insert(luaDecl.names, luaParser.newNodeFast("identifier", "_FETCH_OBJ"..i))
+			end
+			if fetchKey and fetchKey[i] then
+				table.insert(luaDecl.names, luaParser.newNodeFast("identifier", "_FETCH_KEY"..i))
+			end
+		end
+
+		for i, targetExpr in ipairs(assignment.targets) do
+			if fetchObj and fetchObj[i] then
+				local access  = targetExpr
+				local luaExpr = writeExpression(state, writer, nextLocalN, localsStack, access.object)
+				table.insert(luaDecl.values, luaExpr)
+			end
+			if fetchKey and fetchKey[i] then
+				local access  = targetExpr
+				local luaExpr = writeExpression(state, writer, nextLocalN, localsStack, access.member)
+				table.insert(luaDecl.values, luaExpr)
+			end
+		end
+	end
+
+	-- Fetch values.
+	if fetchVal then
+		local luaDecl      = luaParser.newNodeFast("declaration") ; table.insert(luaBlock.statements, luaDecl)
+		luaDecl.sourceNode = assignment
+
+		for i, targetExpr in ipairs(assignment.targets) do
+			if fetchVal[i] then
+				table.insert(luaDecl.names, luaParser.newNodeFast("identifier", "_FETCH_VAL"..i))
+			end
+		end
+
+		for i, valueExpr in ipairs(assignment.values) do
+			if fetchVal[i] then
+				local luaExpr = writeExpression(state, writer, nextLocalN, localsStack, valueExpr)
+				table.insert(luaDecl.values, luaExpr)
+			end
+		end
+	end
+end
+
+local function writeAssignmentTargetsMaybeWithSomePrefetch(state, writer, nextLocalN, localsStack, assignment, fetchObj,fetchKey, luaAssignment)
+	for i, targetExpr in ipairs(assignment.targets) do
+		if (fetchObj and fetchObj[i]) or (fetchKey and fetchKey[i]) then
+			local access             = targetExpr
+			local luaLookup          = luaParser.newNodeFast("lookup")
+			luaLookup.sourceNode     = access
+			luaAssignment.targets[i] = luaLookup
+
+			if fetchObj and fetchObj[i] then
+				luaLookup.object = luaParser.newNodeFast("identifier", "_FETCH_OBJ"..i)
+			else
+				luaLookup.object = writeExpression(state, writer, nextLocalN, localsStack, access.object)
+			end
+			if fetchKey and fetchKey[i] then
+				luaLookup.member = luaParser.newNodeFast("identifier", "_FETCH_KEY"..i)
+			else
+				luaLookup.member = writeExpression(state, writer, nextLocalN, localsStack, access.member)
+			end
+
+		else
+			luaAssignment.targets[i] = writeExpression(state, writer, nextLocalN, localsStack, targetExpr)
+		end
+	end
 end
 
 local function checkForDisallowedSituationOfListAsLastValueToFunctionWithOptionalArguments(state, call, lambda)
@@ -813,17 +944,19 @@ local function writeNormalCall(state, writer, nextLocalN, localsStack, call)
 	return luaCall
 end
 
-local function writeInlineCallStatement(state, writer, nextLocalN, localsStack, call, luaBlock)
+-- writeInlineCallStatement( state, writer, nextLocalN, localsStack, call, luaBlock, assignment=nil )
+-- The assignment could be for a declaration.
+local function writeInlineCallStatement(state, writer, nextLocalN, localsStack, call, luaBlock0, assignment)
 	--[[
 		-- Example...
 
 		-- In:
-		local func :: inline (x,y:int) -> int, string {
+		local func :: (x,y:int) -> int, string {
 			x *= 2
 			return x + y, ""
 		}
 		local x    = 99
-		local y, s = func(x+1, 6)
+		local y, s = inline func(x+1, 6)
 
 		-- Out:
 		local x = 99
@@ -837,34 +970,80 @@ local function writeInlineCallStatement(state, writer, nextLocalN, localsStack, 
 
 	local callee = call.callee
 
-	if call.isMethod then  errorInternal(state, call, "@Incomplete: Inline method calls.")  end -- Isn't this for just foreign functions? In that case inlining is not possible.
-
-	if call.parent.nodeType ~= !(AST_BLOCK) then
-		-- @UX: Detect this error earlier.
-		writerError(state, call, "Inline calls only supported at statement level.") -- :InlineCallsInMorePlaces
+	if call.isMethod then
+		-- Isn't this for just foreign functions and dynamic members? In those cases inlining is not possible, and for the latter we shouldn't even get here (I think).
+		errorInternal(state, call, "@Incomplete: Inline method calls?")
 	end
 
-	!local MAX_INLINE_DEPTH = 100
+	if not (call.parent.nodeType == !(AST_BLOCK) or call.parent.nodeType == !(AST_ASSIGNMENT)) then
+		-- @UX: Detect this error earlier.
+		writerError(state, call, "Inline calls only supported at statement level or in assignments/declarations.") -- :InlineCallsInMorePlaces
+	end
+
+	!local MAX_INLINE_DEPTH = 100 -- @Hardcoded
 	local lambda            = callee.declaration.valueConstant.value
 
 	if writer.inlineFunctions[lambda] then
 		writerError(state, callee, "Function is trying to inline itself, directly or indirectly.") -- @UX: Show all involved inline calls.
-	elseif writer.inlineDepth > !(MAX_INLINE_DEPTH) then -- @Hardcoded
+	elseif writer.inlineDepth > !(MAX_INLINE_DEPTH) then
 		writerError(state, callee, !("Too many recursive function inlines ("..MAX_INLINE_DEPTH..")."))
 	end
 	writer.inlineDepth             = writer.inlineDepth + 1
 	writer.inlineFunctions[lambda] = call
 
-	if lambda.argumentsIn or doesImperativeBlockHaveVariableDeclarations(lambda.body) then
+	if lambda.argumentsOut then
+		-- @Incomplete: Inline calls to functions with return statements that aren't the last statement in the function body. :InlineReturnsAnywhere
+		astVisitAllNodesInUnit(lambda, false, function(node)
+			if node.nodeType == !(AST_RETURN) and node.parent.parent.nodeType ~= !(AST_LAMBDA) then
+				writerError2(state,
+					callee, F("Inline calls currently only support functions with a single return statement that is the last statement in the function body."),
+					node,   F("Here is the (first) problematic return statement.")
+				)
+			end
+		end)
+	end
+
+	-- Prepare assignment and any declarations.
+	local luaBlock                     = luaBlock0
+	local fetchObj, fetchKey, fetchVal = nil
+
+	if assignment then
+		if assignment.declarations then
+			local luaDecl = nil
+
+			for i, targetExpr in ipairs(assignment.targets) do
+				if targetExpr.nodeType == !(AST_IDENTIFIER) and assignment.declarations[i] then
+					local ident = targetExpr
+					!ASSERT("ident.nodeType == "..AST_IDENTIFIER)
+
+					local name = writeIdentifierName(state, writer, ident)
+					luaDecl    = luaDecl or luaParser.newNodeFast("declaration")
+					table.insert(luaDecl.names, luaParser.newNodeFast("identifier", name))
+				end
+			end
+
+			if luaDecl then
+				table.insert(luaBlock.statements, luaDecl)
+			end
+		end
+
+		fetchObj, fetchKey, fetchVal = getAssignmentPrefetchInfo(assignment, false)
+
+		if fetchObj or fetchKey or fetchVal then
+			local luaInnerBlock = !!(LUA_STATEMENT[[ do end ]]) ; table.insert(luaBlock.statements, luaInnerBlock)
+			luaBlock            = luaInnerBlock
+			writeAssignmentPrefetch(state, writer, nextLocalN, localsStack, assignment, fetchObj,fetchKey,fetchVal, luaBlock)
+		end
+	end
+
+	-- Prepare block to inline the function into (unless we already created a block).
+	if luaBlock == luaBlock0 and (lambda.argumentsIn or lambda.argumentsOut or doesImperativeBlockHaveVariableDeclarations(lambda.body)) then
 		local luaInnerBlock      = !!(LUA_STATEMENT[[ do end ]]) ; table.insert(luaBlock.statements, luaInnerBlock)
 		luaInnerBlock.sourceNode = call
 		luaBlock                 = luaInnerBlock
 	end
-	if lambda.argumentsOut then
-		errorInternal(state, call, "@Incomplete: Handle return values when inlining.")
-	end
 
-	-- Write arguments.
+	-- Inline input.
 	if lambda.argumentsIn then
 		localsStack   = {{}, unpack(localsStack)} -- @Speed: Share push with the writeBlock() below.
 		local luaDecl = luaParser.newNodeFast("declaration") ; table.insert(luaBlock.statements, luaDecl)
@@ -876,7 +1055,7 @@ local function writeInlineCallStatement(state, writer, nextLocalN, localsStack, 
 			local identOrVarargOrBlank = decl.name
 
 			if identOrVarargOrBlank.nodeType == !(AST_VARARG) then
-				errorInternal(state, call, "@Incomplete: Inline vararg.")
+				writerError(state, callee, "Vararg currently isn't supported when inlining calls.") -- @Incomplete
 			end
 
 			decl.localName, nextLocalN = allocateLocalName(state, writer, localsStack, decl.name.name, nextLocalN) -- May overwrite old localName. I think that's OK.
@@ -926,7 +1105,62 @@ local function writeInlineCallStatement(state, writer, nextLocalN, localsStack, 
 		end
 	end
 
+	-- Inline body.
 	writeBlock(state, writer, nextLocalN, localsStack, lambda.body, false, luaBlock)
+
+	-- Inline output.
+	if lambda.argumentsOut then
+		-- Change e.g. `return x,f()` into `a,b,c = x,f()`.
+		-- In the case of the empty vararg, we change `return void` into `a,b,c = nil`.
+		local iLast         = #luaBlock.statements
+		local luaReturnNode = luaBlock.statements[iLast]
+		assert(luaReturnNode and luaReturnNode.type == "return") -- :InlineReturnsAnywhere
+
+		if assignment then
+			local luaAssignment        = luaParser.newNodeFast("assignment")
+			luaAssignment.sourceNode   = luaReturnNode.sourceNode
+			luaAssignment.values       = luaReturnNode.values
+			luaAssignment.values[1]    = luaAssignment.values[1] or !!(LUA_EXPRESSION[[ nil ]])
+			luaBlock.statements[iLast] = luaAssignment
+
+			writeAssignmentTargetsMaybeWithSomePrefetch(state, writer, nextLocalN, localsStack, assignment, fetchObj,fetchKey, luaAssignment)
+
+			if assignment.binaryOperation ~= "" then
+				-- Change e.g. `x = y` into `x = x+y`.
+				for i, targetExpr in ipairs(assignment.targets) do
+					if (fetchObj and fetchObj[i]) or (fetchKey and fetchKey[i]) then
+						local access               = targetExpr
+						local accessDummy          = astNewNode(AstAccess, access, access.parent)
+						accessDummy.XXX_FETCH_HACK = true
+						accessDummy.object         = fetchObj and fetchObj[i] and "_FETCH_OBJ"..i or access.object -- @Hack!!!
+						accessDummy.member         = fetchKey and fetchKey[i] and "_FETCH_KEY"..i or access.member -- @Hack!!!
+						accessDummy.inferredType   = access.inferredType
+						targetExpr                 = accessDummy
+					end
+
+					local _, valueType = getAssignmentValue(state, targetExpr, assignment.values, i, nil, nil, nil, false)
+					!ASSERT(`valueType`, `tostring(i)`, `assignment.values[i] or assignment`)
+
+					luaAssignment.values[i] = writeBinaryOperation(
+						state, writer, nextLocalN, localsStack,
+						targetExpr, (fetchVal and fetchVal[i] and "_FETCH_VAL"..i or luaAssignment.values[i]),
+						assignment.binaryOperation,
+						targetExpr.inferredType, valueType, targetExpr.inferredType,
+						targetExpr
+					)
+				end
+			end
+
+		elseif luaReturnNode.values[1] then
+			local luaDecl              = !!(LUA_STATEMENT[[ local _ ]])
+			luaDecl.sourceNode         = luaReturnNode.sourceNode
+			luaDecl.values             = luaReturnNode.values
+			luaBlock.statements[iLast] = luaDecl
+
+		else
+			luaBlock.statements[iLast] = nil -- Remove the return statement.
+		end
+	end
 
 	if lambda.argumentsIn then
 		table.remove(localsStack)
@@ -944,7 +1178,9 @@ end
 
 	if nodeType == !(AST_CALL) then
 		local call = expr
-		assert(call.inline ~= !(INLINE_YES)) -- :InlineCallsInMorePlaces
+		if call.inline == !(INLINE_YES) then
+			writerError(state, call.callee, "Inline call is not supported here.") -- :InlineCallsInMorePlaces
+		end
 		luaExpr = writeNormalCall(state, writer, nextLocalN, localsStack, call)
 
 	elseif nodeType == !(AST_UNARY) then
@@ -1490,8 +1726,13 @@ end
 		elseif nodeType == !(AST_ASSIGNMENT) then
 			local assignment = statement
 
+			-- @Incomplete: Handle cast wrapping value.
+			if not assignment.values[2] and assignment.values[1].nodeType == !(AST_CALL) and assignment.values[1].inline == !(INLINE_YES) then -- @Incomplete: Handle INLINE_MAY in some intelligent way.
+				local call = assignment.values[1]
+				writeInlineCallStatement(state, writer, nextLocalN, localsStack, call, luaBlock, assignment)
+
 			-- Plain assignment.
-			if assignment.binaryOperation == "" then
+			elseif assignment.binaryOperation == "" then
 				-- @Optimize: Output '_ = func()' as 'func()'.
 				-- @Optimize: Output 'x, _ = func()' as 'x = func()'.
 				local hasBlank = false
@@ -1511,8 +1752,9 @@ end
 						-- @Robustness: Does this work for e.g. `local ^x, y = y, 0 !shadow`? The name generation hopefully makes the new 'y' not be a shadow.
 						local luaDecl = luaParser.newNodeFast("declaration") ; table.insert(luaBlock.statements, luaDecl)
 
-						for i, ident in ipairs(assignment.targets) do
-							if ident.nodeType ~= !(AST_BLANK) and assignment.declarations[i] then
+						for i, targetExpr in ipairs(assignment.targets) do
+							if targetExpr.nodeType ~= !(AST_BLANK) and assignment.declarations[i] then
+								local ident = targetExpr
 								!ASSERT("ident.nodeType == "..AST_IDENTIFIER)
 
 								local name = writeIdentifierName(state, writer, ident)
@@ -1554,139 +1796,30 @@ end
 			else
 				!ASSERT `not inDecl`
 
-				--
-				-- To make expressions evaluate the expected way (left to
-				-- right with no hidden duplicate evaluations) we prefetch
-				-- some values before we start doing operations (and
-				-- eventually the assignment).
-				--
-				-- Constants and right-hand-side values are never prefetched.
-				-- These rules apply otherwise:
-				--
-				--   x        += 1    -- Don't fetch x.
-				--   t.k      += 1    -- Don't fetch t. Don't fetch k.
-				--   o.t[k]   += 1    -- Fetch o.t.     Don't fetch k.
-				--   o.t[t.k] += 1    -- Fetch o.t.     Fetch t.k.
-				--
-				-- More info:
-				--   x, y += 1, z  -- No fetching or preparations needed as all targets are simple variables/identifiers.
-				--
-				local fetchObj = {}
-				local fetchKey = {}
-				local fetchVal = {}
+				local fetchObj, fetchKey, fetchVal = getAssignmentPrefetchInfo(assignment, true)
+				local luaAssignmentBlock           = luaBlock
 
-				-- Figure out what to fetch.
-				for i, targetExpr in ipairs(assignment.targets) do
-					if targetExpr.nodeType == !(AST_ACCESS) then
-						local access = targetExpr
-
-						if not (access.object.nodeType == !(AST_IDENTIFIER) or isExpressionConstant(state, access.object, true)) then
-							fetchObj[i] = true
-						end
-						if not (access.member.nodeType == !(AST_IDENTIFIER) or isExpressionConstant(state, access.member, true)) then
-							fetchKey[i] = true
-						end
-					end
-				end
-
-				if not assignment.values[#assignment.targets] then
-					-- The last value ought to be a call! (Note: It shouldn't be vararg as that would've been a type error.)
-					for i = #assignment.values, #assignment.targets do
-						fetchVal[i] = true
-					end
-				end
-
-				local fetchingAnything   = (next(fetchObj) or next(fetchKey) or next(fetchVal)) ~= nil
-				local luaAssignmentBlock = luaBlock
-
-				if fetchingAnything then
+				if fetchObj or fetchKey or fetchVal then
 					luaAssignmentBlock = !!(LUA_STATEMENT[[ do end ]]) ; table.insert(luaBlock.statements, luaAssignmentBlock)
-
-					-- Fetch objects and keys.
-					if next(fetchObj) or next(fetchKey) then
-						local luaDecl      = luaParser.newNodeFast("declaration") ; table.insert(luaAssignmentBlock.statements, luaDecl)
-						luaDecl.sourceNode = assignment
-
-						for i, targetExpr in ipairs(assignment.targets) do
-							if fetchObj[i] then
-								table.insert(luaDecl.names, luaParser.newNodeFast("identifier", "_AWBO_OBJ"..i))
-							end
-							if fetchKey[i] then
-								table.insert(luaDecl.names, luaParser.newNodeFast("identifier", "_AWBO_KEY"..i))
-							end
-						end
-
-						for i, targetExpr in ipairs(assignment.targets) do
-							if fetchObj[i] then
-								local access  = targetExpr
-								local luaExpr = writeExpression(state, writer, nextLocalN, localsStack, access.object)
-								table.insert(luaDecl.values, luaExpr)
-							end
-							if fetchKey[i] then
-								local access  = targetExpr
-								local luaExpr = writeExpression(state, writer, nextLocalN, localsStack, access.member)
-								table.insert(luaDecl.values, luaExpr)
-							end
-						end
-					end
-
-					-- Fetch values.
-					if next(fetchVal) then
-						local luaDecl      = luaParser.newNodeFast("declaration") ; table.insert(luaAssignmentBlock.statements, luaDecl)
-						luaDecl.sourceNode = assignment
-
-						for i, targetExpr in ipairs(assignment.targets) do
-							if fetchVal[i] then
-								table.insert(luaDecl.names, luaParser.newNodeFast("identifier", "_AWBO_VAL"..i))
-							end
-						end
-
-						for i, valueExpr in ipairs(assignment.values) do
-							if fetchVal[i] then
-								local luaExpr = writeExpression(state, writer, nextLocalN, localsStack, valueExpr)
-								table.insert(luaDecl.values, luaExpr)
-							end
-						end
-					end
-				end--if fetchingAnything
+					writeAssignmentPrefetch(state, writer, nextLocalN, localsStack, assignment, fetchObj,fetchKey,fetchVal, luaAssignmentBlock)
+				end
 
 				-- Assignment targets.
 				local luaAssignment      = luaParser.newNodeFast("assignment") ; table.insert(luaAssignmentBlock.statements, luaAssignment)
 				luaAssignment.sourceNode = assignment
 
-				for i, targetExpr in ipairs(assignment.targets) do
-					if fetchObj[i] or fetchKey[i] then
-						local access             = targetExpr
-						local luaLookup          = luaParser.newNodeFast("lookup")
-						luaLookup.sourceNode     = access
-						luaAssignment.targets[i] = luaLookup
-
-						if fetchObj[i] then
-							luaLookup.object = luaParser.newNodeFast("identifier", "_AWBO_OBJ"..i)
-						else
-							luaLookup.object = writeExpression(state, writer, nextLocalN, localsStack, access.object)
-						end
-						if fetchKey[i] then
-							luaLookup.member = luaParser.newNodeFast("identifier", "_AWBO_KEY"..i)
-						else
-							luaLookup.member = writeExpression(state, writer, nextLocalN, localsStack, access.member)
-						end
-
-					else
-						luaAssignment.targets[i] = writeExpression(state, writer, nextLocalN, localsStack, targetExpr)
-					end
-				end
+				writeAssignmentTargetsMaybeWithSomePrefetch(state, writer, nextLocalN, localsStack, assignment, fetchObj,fetchKey, luaAssignment)
 
 				-- Assignment values.
 				for i, targetExpr in ipairs(assignment.targets) do
-					if fetchObj[i] or fetchKey[i] then
-						local access              = targetExpr
-						local accessDummy         = astNewNode(AstAccess, access, access.parent)
-						accessDummy.XXX_AWBO_HACK = true
-						accessDummy.object        = fetchObj[i] and "_AWBO_OBJ"..i or access.object -- @Hack!!!
-						accessDummy.member        = fetchKey[i] and "_AWBO_KEY"..i or access.member -- @Hack!!!
-						accessDummy.inferredType  = access.inferredType
-						targetExpr                = accessDummy
+					if (fetchObj and fetchObj[i]) or (fetchKey and fetchKey[i]) then
+						local access               = targetExpr
+						local accessDummy          = astNewNode(AstAccess, access, access.parent)
+						accessDummy.XXX_FETCH_HACK = true
+						accessDummy.object         = fetchObj and fetchObj[i] and "_FETCH_OBJ"..i or access.object -- @Hack!!!
+						accessDummy.member         = fetchKey and fetchKey[i] and "_FETCH_KEY"..i or access.member -- @Hack!!!
+						accessDummy.inferredType   = access.inferredType
+						targetExpr                 = accessDummy
 					end
 
 					local _, valueType = getAssignmentValue(state, targetExpr, assignment.values, i, nil, nil, nil, false)
@@ -1694,7 +1827,7 @@ end
 
 					luaAssignment.values[i] = writeBinaryOperation(
 						state, writer, nextLocalN, localsStack,
-						targetExpr, (fetchVal[i] and "_AWBO_VAL"..i or assignment.values[i]),
+						targetExpr, (fetchVal and fetchVal[i] and "_FETCH_VAL"..i or assignment.values[i]),
 						assignment.binaryOperation,
 						targetExpr.inferredType, valueType, targetExpr.inferredType,
 						targetExpr
@@ -2042,7 +2175,7 @@ end
 		----------------------------------------------------------------
 		elseif nodeType == !(AST_CALL) and statement.inline == !(INLINE_YES) then -- @Incomplete: Handle INLINE_MAY in some intelligent way.
 			local call = statement
-			writeInlineCallStatement(state, writer, nextLocalN, localsStack, call, luaBlock)
+			writeInlineCallStatement(state, writer, nextLocalN, localsStack, call, luaBlock, nil)
 
 		----------------------------------------------------------------
 		else
@@ -3239,6 +3372,15 @@ end
 
 function _G.writerError(state, node, s, ...)
 	nodeError(state, node, "ProgramWriter", s, ...)
+end
+function _G.writerError2(state, node1,s1, node2,s2)
+	!TRACE(2)
+	printerr()
+	!ifDEBUG `astPrint(node1)`
+	nodeMessage(io.stderr, state, node1, "Error", "ProgramWriter", "%s", s1)
+	!ifDEBUG `astPrint(node2)`
+	nodeMessage(io.stderr, state, node2, "Info",  "ProgramWriter", "%s", s2)
+	exitFailure()
 end
 
 

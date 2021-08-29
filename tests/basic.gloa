@@ -970,6 +970,8 @@ local _main :: () -> void {
 		print("Line numbers:", loc.lineNumber, !location().lineNumber)
 	}
 
+	testInlining()
+
 	--]=]
 	do {
 		!import "basic"
@@ -2366,5 +2368,94 @@ local testLiteralToEnumCasts :: () {
 		local e = E.TWOHALF
 		f(cast(int)E.TWOHALF)
 		f(cast(int)e)
+	}
+}
+
+local testInlining :: () {
+	!import "basic"
+	print("\nDoing testInlining.\n")
+
+	-- Combinations.
+	do {
+		local fMay ::           (x:int) { print("fMay", x) }
+		local fYes :: inline    (x:int) { print("fYes", x) }
+		local fNo  :: no_inline (x:int) { print("fNo ", x) }
+		local x    := 99
+
+		print("Calls.")
+		fMay(x+1)
+		fYes(x+1)
+		fNo(x+1)
+
+		print("Inline calls.")
+		inline fMay(x+1)
+		inline fYes(x+1)
+		inline fNo(x+1)
+
+		print("No-inline calls.")
+		no_inline fMay(x+1)
+		no_inline fYes(x+1)
+		no_inline fNo(x+1)
+
+		print()
+	}
+
+	-- Local names and arguments.
+	do {
+		local f1 :: (i:int) {
+			local f2 = [*] (i:int!shadow)->int { return i }
+		}
+		inline f1(1)
+		inline f1(2)
+	}
+
+	-- Optional and named arguments.
+	do {
+		local f :: (i:int, s="") {
+			print(i, s)
+		}
+		inline f(1, "foo")
+		inline f(2)
+		inline f(s="bar", i=3)
+	}
+
+	-- Declarations and assignments.
+	do {
+		local quadruple :: (n,...:int) -> int {
+			n *= 2
+			return 2 * n
+		}
+
+		quadruple(1)
+		inline quadruple(1)
+
+		local x1 = quadruple(1)
+		x1       = quadruple(10)
+		x1      += quadruple(10)
+
+		local x2 = inline quadruple(1)
+		x2       = inline quadruple(10)
+		x2      += inline quadruple(10)
+
+		local Inner :: struct { n:int }
+		local Outer :: struct { inner:Inner }
+
+		local outer1: Outer
+		outer1.inner.n  = quadruple(1)
+		outer1.inner.n += quadruple(1)
+
+		local outer2: Outer
+		outer2.inner.n  = inline quadruple(1)
+		outer2.inner.n += inline quadruple(1)
+	}
+
+	-- no_inline in dynamic contexts is currently not an error, but its useless. 2021-08-10
+	do {
+		local fVar = no_inline     () { print("fVar") }
+		local fCap = no_inline [*] () { print("fCap") }
+		fVar()
+		fCap()
+		no_inline fVar()
+		no_inline fCap()
 	}
 }
