@@ -690,6 +690,66 @@ local function allocateArgumentName(state, writer, localsStack, name, n)
 	return allocateName(state, writer, localsStack, name, n, "A", "_A")
 end
 
+local NEVER_PREFETCH = !(Set{
+	AST_FOREIGN,
+	AST_IDENTIFIER, -- In theory, accessing Lua globals may cause a jump because they are lookups, but we don't worry about that in Gloa.
+	AST_LAMBDA,
+	AST_LITERAL, AST_NULL,
+	AST_LOCATION,
+	AST_STRUCT,  AST_ENUM,
+	AST_TYPE,    AST_TYPE_OF,
+	AST_TYPE_INFO,
+	AST_VARARG,
+})
+local ALWAYS_PREFETCH = !(Set{
+	AST_ACCESS,
+	AST_CALL,
+})
+
+local function shouldExpressionBePrefetched(state, expr)
+	-- @Incomplete: Distinguish between whether it's jumps we want to avoid,
+	-- or we just care about expression evaluation order. (Inlining vs. AWBOs.)
+	local nodeType = expr.nodeType
+
+	if NEVER_PREFETCH[nodeType] then
+		return false
+	elseif ALWAYS_PREFETCH[nodeType] then
+		return true
+
+	elseif nodeType == !(AST_CAST) or nodeType == !(AST_UNARY) then
+		local castOrUnary = expr
+		return shouldExpressionBePrefetched(state, castOrUnary.expression)
+
+	elseif nodeType == !(AST_BINARY) then
+		local binary = expr
+		return shouldExpressionBePrefetched(state, binary.left) or shouldExpressionBePrefetched(state, binary.right)
+
+	elseif nodeType == !(AST_CONDITIONAL) then
+		local conditional = expr
+		if not shouldExpressionBePrefetched(state, conditional.condition) then  return false  end
+
+		if conditional.branchTrue then
+			if not shouldExpressionBePrefetched(state, conditional.branchTrue) then  return false  end
+		end
+
+		return shouldExpressionBePrefetched(state, conditional.branchFalse)
+
+	elseif nodeType == !(AST_TABLE) then
+		local tableNode = expr
+		if tableNode.trailingExpression and shouldExpressionBePrefetched(state, tableNode.trailingExpression) then  return true  end
+
+		for _, tableField in ipairs(tableNode.fields) do
+			if shouldExpressionBePrefetched(state, tableField.key)   then  return true  end
+			if shouldExpressionBePrefetched(state, tableField.value) then  return true  end
+		end
+
+		return false
+
+	else
+		errorUnhandledNodeType(state, expr)
+	end
+end
+
 -- fetchObj|nil, fetchKey|nil = getAssignmentPrefetchInfoForLvalues( targets )
 local function getAssignmentPrefetchInfoForLvalues(targets)
 	--
@@ -716,11 +776,11 @@ local function getAssignmentPrefetchInfoForLvalues(targets)
 		if targetExpr.nodeType == !(AST_ACCESS) then
 			local access = targetExpr
 
-			if not (access.object.nodeType == !(AST_IDENTIFIER) or isExpressionConstant(state, access.object, true)) then -- @Incomplete: Never count identifiers as dynamic.
+			if shouldExpressionBePrefetched(state, access.object) then
 				fetchObj    = fetchObj or {}
 				fetchObj[i] = true
 			end
-			if not (access.member.nodeType == !(AST_IDENTIFIER) or isExpressionConstant(state, access.member, true)) then -- @Incomplete: Never count identifiers as dynamic.
+			if shouldExpressionBePrefetched(state, access.member) then
 				fetchKey    = fetchKey or {}
 				fetchKey[i] = true
 			end
@@ -740,12 +800,10 @@ local function getAssignmentPrefetchInfoForValues(targets, values)
 	-- Note: We need to prefetch everything but constants at this point to
 	-- ensure expected evaluation order.
 	--
-	local fetchVal = nil -- @Cleanup: Rename this to something better, because we include extra "hidden" values from any trailing call if there are more targets than values.
+	local fetchVal = nil -- Note: We include extra "hidden" values from any trailing call if there are more targets than values.
 
 	for i = 1, math.max(#targets, #values) do
-		if not (values[i] and (
-			values[i].nodeType == !(AST_IDENTIFIER) or isExpressionConstant(state, values[i], true) -- @Incomplete: Never count identifiers as dynamic.
-		)) then
+		if not values[i] or shouldExpressionBePrefetched(state, values[i]) then
 			fetchVal    = fetchVal or {}
 			fetchVal[i] = true
 		end
