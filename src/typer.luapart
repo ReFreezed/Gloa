@@ -6707,6 +6707,11 @@ function _G.crawl(state, unit, crawled, forMeta, cb)
 		end
 		)
 
+		-- @Speed: This check is probably useless in most cases, but we
+		-- currently need it for the call inlining not to choke when recursing
+		-- (which is an error detected later). :MessyCrawling
+		if crawled[node] then  return !(VISIT_IGNORE_CHILDREN)  end
+
 		local nodeType = node.nodeType
 
 		-- Also see visitNodesForRunning():
@@ -6777,10 +6782,15 @@ function _G.crawl(state, unit, crawled, forMeta, cb)
 			!MARK_CRAWLED(`lambda`, CRAWL_NODE)
 
 			if lambda.metaOnly and not forMeta then
+				if lambda.XXX_IGNORE_CONSTANT_ONCE_HACK then
+					lambda.XXX_IGNORE_CONSTANT_ONCE_HACK = nil
+				end
 				return !(VISIT_IGNORE_CHILDREN)
 			end
 
-			if lambda.valueConstant then -- @Robustness: When is this not set? Be more clear!
+			if lambda.XXX_IGNORE_CONSTANT_ONCE_HACK then
+				lambda.XXX_IGNORE_CONSTANT_ONCE_HACK = nil
+			elseif lambda.valueConstant then -- Functions with captures are not constants and do not have this set. (Are there more cases this isn't set?)
 				!MARK_CRAWLED_IF_NEW(`lambda.valueConstant`, CRAWL_CONSTANT)
 			end
 
@@ -6790,6 +6800,27 @@ function _G.crawl(state, unit, crawled, forMeta, cb)
 
 			if call.wantLocation then
 				!MARK_CRAWLED_IF_NEW(`call.locationConstant`, CRAWL_CONSTANT)
+			end
+
+			if call.inline == !(INLINE_YES) then
+				-- Crawl everything but the function constant.
+				-- @Cleanup: This feels pretty messy! (Like this whole function!)
+				for _, valueExpr in ipairs(call.arguments) do
+					crawl(state, valueExpr, crawled, forMeta, cb)
+				end
+				for _, argNamed in ipairs(call.argumentsNamed) do
+					crawl(state, argNamed.value, crawled, forMeta, cb)
+				end
+
+				local lambda = followIdentifiersToConstantValue(state, call.callee)
+				!ASSERT("lambda.nodeType == "..AST_LAMBDA)
+
+				lambda.XXX_IGNORE_CONSTANT_ONCE_HACK = true -- @Hack @Robustness
+				crawl(state, lambda, crawled, forMeta, cb)
+				-- !ASSERT `lambda.XXX_IGNORE_CONSTANT_ONCE_HACK == nil` -- This sometimes fails because of :MessyCrawling, so we instead unset it here below.
+				lambda.XXX_IGNORE_CONSTANT_ONCE_HACK = nil -- @Ugh
+
+				return !(VISIT_IGNORE_CHILDREN)
 			end
 
 		elseif nodeType == !(AST_BLOCK) then

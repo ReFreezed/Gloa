@@ -1228,7 +1228,7 @@ end
 
 -- success = parseNotes( state, declaration )
 local function parseNotes(state, decl)
-	local prevOpPrecedence = !(math.min(OPERATOR_PRECEDENCE.call, OPERATOR_PRECEDENCE.access)-1)
+	local prevOpPrecedence = !(math.min(OPERATOR_PRECEDENCE.call, OPERATOR_PRECEDENCE.access) - 1)
 	local tok              = peekNextTok(state, 1)
 
 	while !!(IS_TOK(TOKEN_PUNCTUATION, "@")) do
@@ -2456,7 +2456,8 @@ end
 		elseif exprTest.nodeType == !(AST_CALL) then
 			local call = exprTest
 			if call.surroundedByParentheses then
-				!ERROR_OR_RETURN_FALSE `errorParsing(state, statementStartToken, "Invalid parenthesis around call.")`
+				local token = (call.inline ~= !(INLINE_MAY)) and statementStartToken+1 or statementStartToken
+				!ERROR_OR_RETURN_FALSE `errorParsing(state, token, "Invalid parenthesis around call.")`
 			end
 			--[[ @Incomplete :ParenthesesAmbiguityError
 			if
@@ -3859,51 +3860,53 @@ do
 
 	-- Inline call or lambda.
 	expressionParserByKeySymbol["inline"] = function(state, exprStartTok, parent)
-		local tok = peekNextTok(state, 1)
+		local tok  = peekNextTok(state, 1)
+		local tok2 = peekNextTok(state, 2)
+		local tok3 = peekNextTok(state, 3)
 
-		if !!(IS_TOK(TOKEN_IDENTIFIER)) then
-			local prevOpPrecedence         = !(math.min(OPERATOR_PRECEDENCE.call, OPERATOR_PRECEDENCE.access)-1)
-			!SET_OR_RETURN_NIL `local call = parseExpression(state, parent, prevOpPrecedence)`
-
-			if call.nodeType ~= !(AST_CALL) then
-				!ERROR_OR_RETURN_NIL `errorParsing(state, tok, "Expected a call after 'inline'. (Got '%s' node.)", AST_NAMES[call.nodeType])`
-			end
-
-			call.inline = !(INLINE_YES)
-			return call
-
-		elseif !!(IS_TOK(TOKEN_PUNCTUATION, "(","[")) then
+		if
+			(
+				!!(IS_TOK(TOKEN_PUNCTUATION, "["))
+				and not !!(IS_TOK(2, TOKEN_PUNCTUATION, "]"))
+			)
+			or (
+				-- @Copypaste from expressionParserByKeySymbol["("]. @Cleanup
+				tok2
+				and !!(IS_TOK(TOKEN_PUNCTUATION, "("))
+				and (
+					!!(IS_EXISTING_TOK(2, TOKEN_PUNCTUATION, ")","$"))
+					or !!(IS_EXISTING_TOK(2, TOKEN_KEYWORD, "using","void"))
+					or (
+						tok3
+						and (
+							tok2.type == !(TOKEN_IDENTIFIER)
+							or !!(IS_EXISTING_TOK(2, TOKEN_PUNCTUATION, "...","_"))
+						)
+						and !!(IS_EXISTING_TOK(3, TOKEN_PUNCTUATION, ":",",","="))
+					)
+				)
+			)
+		then
 			!!(PUT_BACK_LAST_TOKEN)
 			!SET_OR_RETURN_NIL `local lambda = parseLambda(state, parent)`
 			return lambda
 
 		else
-			!ERROR_OR_RETURN_NIL `errorParsingNext(state, "Expected a call or a function after 'inline'.")`
-		end
-	end
-	expressionParserByKeySymbol["no_inline"] = function(state, exprStartTok, parent)
-		local tok = peekNextTok(state, 1)
-
-		if !!(IS_TOK(TOKEN_IDENTIFIER)) then
-			local prevOpPrecedence         = !(math.min(OPERATOR_PRECEDENCE.call, OPERATOR_PRECEDENCE.access)-1)
+			local inlineKeyword            = !!(PEEK_LAST_TOKEN).value
+			local prevOpPrecedence         = !(math.min(OPERATOR_PRECEDENCE.call, OPERATOR_PRECEDENCE.access) - 1)
 			!SET_OR_RETURN_NIL `local call = parseExpression(state, parent, prevOpPrecedence)`
 
 			if call.nodeType ~= !(AST_CALL) then
-				!ERROR_OR_RETURN_NIL `errorParsing(state, tok, "Expected a call after 'no_inline'. (Got '%s' node.)", AST_NAMES[call.nodeType])`
+				!ERROR_OR_RETURN_NIL `errorParsing(state, tok, "Expected a call after '%s'. (Got '%s' node.)", inlineKeyword, AST_NAMES[call.nodeType])`
+			elseif call.inline ~= !(INLINE_MAY) then
+				!ERROR_OR_RETURN_NIL `errorParsing(state, tok, "Expected a call after '%s'.", inlineKeyword)`
 			end
 
-			call.inline = !(INLINE_NO)
+			call.inline = (inlineKeyword == "inline") and !(INLINE_YES) or !(INLINE_NO)
 			return call
-
-		elseif !!(IS_TOK(TOKEN_PUNCTUATION, "(","[")) then
-			!!(PUT_BACK_LAST_TOKEN)
-			!SET_OR_RETURN_NIL `local lambda = parseLambda(state, parent)`
-			return lambda
-
-		else
-			!ERROR_OR_RETURN_NIL `errorParsingNext(state, "Expected a call or a function after 'no_inline'.")`
 		end
 	end
+	expressionParserByKeySymbol["no_inline"] = expressionParserByKeySymbol["inline"]
 end
 
 -- expression = parseExpression( compilationState, parent [, previousOperatorPrecedence, expectLvalue=false ] )
