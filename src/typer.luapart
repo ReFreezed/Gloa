@@ -5619,7 +5619,7 @@ end
 				end
 
 			-- The following is not needed anymore after adding the above, right? 2020-06-20
-			-- Note: .token is @Depricated. 2021-07-25
+			-- Note: .token is @Deprecated. 2021-07-25
 			-- elseif newlyDeclared[decl.name.name] and decl.token > staticIf.token and decl.queued.pipe > !(PIPE_INFER) then
 			-- 	-- @Robustness: Do we need to call ensureConstantIdentifierChainHasAllDeclarationsSet() here?
 			-- 	checkRedeclarationAndMaybeAddOverload(state, decl.name, decl, false, scope, nil)
@@ -7002,7 +7002,7 @@ local function createRunReplacementFromTypeAndLuaValue(state, runNode, parent, t
 		local theConst = nil
 
 		for _, const in ipairs(state.constants) do
-			if const.kind == !(CONST_KIND_NORMAL) and const.valueType.tag == !(TYPE_FUNCTION) and state.runnerEnvironment[const.name] == func then
+			if const.kind == !(CONST_KIND_NORMAL) and const.valueType.tag == !(TYPE_FUNCTION) and state.runnerEnvironment._META_ENV[const.name] == func then
 				theConst = const
 				break
 			end
@@ -7117,7 +7117,15 @@ function _G.prepareToRun(state, dependent, lambda)
 	state.runnerWrittenPreloads            = #state.luaPreloads
 	state.runnerWrittenPreloadsCompiletime = #state.luaPreloadsCompiletime
 
+	if not next(state.runnerEnvironment._META_ENV) then -- :MultipleMetaEnvironments
+		!for _, globalName in ipairs(GLOBAL_SYMBOL_NAMES) do
+			!local lua = ("_META_ENV.? = ?"):gsub("%?", globalName)
+			table.insert(writer.luaMainChunkBody.statements, !!(LUA_STATEMENT(lua)))
+		!end
+	end
+
 	writeForeignImports                       (state, writer, newConstants, true,        writer.luaMainChunkBody, nil)
+	table.insert(writer.luaMainChunkBody.statements, !!(LUA_STATEMENT[[ setfenv(1, _META_ENV) ]])) -- :SetMetaEnvironment
 	writeConstantObjectsAndForwardDeclarations(state, writer, newConstants, EMPTY_TABLE, writer.luaMainChunkBody, nil)
 	writeTopScopeDeclarations                 (state, writer, newTopScopeDeclarations,   writer.luaMainChunkBody, nil)
 
@@ -7126,7 +7134,7 @@ function _G.prepareToRun(state, dependent, lambda)
 	!ifDEBUG `profilerUnpause()`
 
 	local constName = lambda.valueConstant.name
-	local func      = state.runnerEnvironment[constName]
+	local func      = state.runnerEnvironment._META_ENV[constName]
 
 	if type(func) ~= "function" then
 		errorInternal(state, dependent, "Missing the compiled object to run for some reason. (Constant '%s')", constName)

@@ -139,7 +139,7 @@ local ERROR_HANDLER = templateToLua(
 	{ errorPrefix=toLua(RUNTIME_ERROR_PREFIX) }
 )
 
-local COMPILER_SYMBOL_PAIRS = {
+local COMPILER_SYMBOL_PAIRS = { -- Note: The names must be synced with GLOBAL_SYMBOL_NAMES! @Cleanup
 	`_MODF`,   `math.modf`,  -- Used when casting float to int.
 	`_FLOOR`,  `math.floor`, -- Used for integer division.
 	`_IPAIRS`, `ipairs`,     -- Used for short-form array loops.
@@ -288,7 +288,7 @@ _G.!struct"WriterState"{
 	{`lineMappingFiles`,  {}},
 	{`lineMappingLines`,  {}},
 
-	{`remainingUpvalues`, 0},
+	-- {`remainingUpvalues`, 0},
 }
 
 
@@ -2386,7 +2386,7 @@ end
 	return luaFunc
 end
 
-local function writeForeignImportIfNew(state, writer, typeInfo, foreignSource, foreignSourceName, foreignSourceId, sourceNode, asGlobal, luaBlock)
+local function writeForeignImportIfNew(state, writer, typeInfo, foreignSource, foreignSourceName, foreignSourceId, sourceNode, asGlobal, luaBlock) -- @Cleanup: asGlobal is unused (as of 2021-08-31).
 	assert(foreignSourceId ~= "")
 
 	if writer.foreignReferences[foreignSourceId] then  return  end
@@ -2398,12 +2398,8 @@ local function writeForeignImportIfNew(state, writer, typeInfo, foreignSource, f
 	local foreignN  = writer.foreignN + 1
 	writer.foreignN = foreignN
 
-	if foreignN == 1 then
-		table.insert(luaBlock.statements, (
-			asGlobal
-			and !!(LUA_STATEMENT[[       _FOREIGN = {} ]])
-			or  !!(LUA_STATEMENT[[ local _FOREIGN = {} ]])
-		))
+	if foreignN == 1 and writer.outputRuntime then
+		table.insert(luaBlock.statements, !!(LUA_STATEMENT[[ local _FOREIGN = {} ]]))
 	end
 
 	local lua
@@ -2911,6 +2907,7 @@ function _G.writeCompilerSymbols(state, writer, luaBlock, relevantObjects)
 
 		table.insert(luaBlock.statements, !!(LUA_STATEMENT[[ _TYPES     = metaprogramTypeIds ]]))
 		table.insert(luaBlock.statements, !!(LUA_STATEMENT[[ _TYPE_INFO = metaprogramTypeTable ]]))
+		table.insert(luaBlock.statements, !!(LUA_STATEMENT[[ _FOREIGN   = {} ]]))
 	end
 
 	-- @Polish: Only output symbols actually used in the program.
@@ -2924,7 +2921,7 @@ function _G.writeCompilerSymbols(state, writer, luaBlock, relevantObjects)
 end
 
 -- writeForeignImports( state, writer, constants, asGlobals, luaBlock, relevantObjects=all )
-function _G.writeForeignImports(state, writer, constants, asGlobals, luaBlock, relevantObjects)
+function _G.writeForeignImports(state, writer, constants, asGlobals, luaBlock, relevantObjects) -- @Cleanup: asGlobals is unused (as of 2021-08-31).
 	for _, const in ipairs(constants) do
 		if relevantObjects and not relevantObjects[const] then
 			-- void
@@ -2968,6 +2965,7 @@ function _G.writeConstantObjectsAndForwardDeclarations(state, writer, constants,
 
 	if not (constantNamesToWrite[1] or topScopeNames[1]) then  return  end
 
+	--[=[
 	if writer.remainingUpvalues > 0 then
 		local luaDecl = !!(LUA_STATEMENT([[ local x ]], function(luaDecl)luaDecl.names[1]=nil;end))
 		table.insert(luaBlock.statements, luaDecl)
@@ -2982,6 +2980,7 @@ function _G.writeConstantObjectsAndForwardDeclarations(state, writer, constants,
 		end
 		writer.remainingUpvalues = writer.remainingUpvalues - #topScopeNames
 	end
+	--]=]
 
 	table.sort(constantFunctions, function(a, b)
 		a = a.value
@@ -3173,10 +3172,10 @@ function _G.writeProgram(state, writer)
 		table.insert(writer.luaMainChunkBody.statements, luaDecl)
 	end
 
-	writeForeignImports(state, writer, state.constants, false, luaProgramBody, relevantObjects)
-
-	!local MAX_UPVALUES      = 60
-	writer.remainingUpvalues = !(MAX_UPVALUES - COMPILER_SYMBOL_COUNT) -- @Incomplete: This system for solving the upvalue limit in Lua can be improved. A lot!
+	writeForeignImports                       (state, writer, state.constants, false,               luaProgramBody, relevantObjects)
+	-- !local MAX_UPVALUES      = 60
+	-- writer.remainingUpvalues = !(MAX_UPVALUES - COMPILER_SYMBOL_COUNT) -- @Incomplete: This system for solving the upvalue limit in Lua can be improved. A lot!
+	table.insert(luaProgramBody.statements, !!(LUA_STATEMENT[[ setfenv(1, {}) ]])) -- :SetMetaEnvironment  @Incomplete: In Lua 5.2+ we'll declare `local _ENV` here.
 	writeConstantObjectsAndForwardDeclarations(state, writer, state.constants, state.topScopeNames, luaProgramBody, relevantObjects)
 	writeTopScopeDeclarations                 (state, writer, topScopeDeclarations,                 luaProgramBody, relevantObjects)
 

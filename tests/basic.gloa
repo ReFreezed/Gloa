@@ -972,6 +972,36 @@ local _main :: () -> void {
 
 	testInlining()
 
+	-- Make sure Gloa code doesn't affect Lua's global environment.
+	do {
+		local f :: () {
+			local declarations :: () !body_text {
+				!import "basic"
+				local body: []string
+
+				-- Make sure there are no locals for the user.
+				for 1, 260 {
+					insert(body, format("static foo%d = 1;", it))
+				}
+
+				insert(body, "static \\table = 1;")
+				insert(body, "\\table += 1;")
+
+				return concatenate(body)
+			}
+			inline declarations()
+
+			local fForeign :: () !foreign lua [[
+				function()
+					print(table.concat{ 111, 222 })
+				end
+			]]
+			fForeign()
+		}
+		f()
+		!run f()
+	}
+
 	--]=]
 	do {
 		!import "basic"
